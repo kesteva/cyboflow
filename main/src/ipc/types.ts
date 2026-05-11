@@ -3,7 +3,6 @@ import type { TaskQueue } from '../services/taskQueue';
 import type { SessionManager } from '../services/sessionManager';
 import type { ConfigManager } from '../services/configManager';
 import type { WorktreeManager } from '../services/worktreeManager';
-import type { WorktreeNameGenerator } from '../services/worktreeNameGenerator';
 import type { GitDiffManager } from '../services/gitDiffManager';
 import type { GitStatusManager } from '../services/gitStatusManager';
 import type { ExecutionTracker } from '../services/executionTracker';
@@ -30,7 +29,6 @@ export interface AppServices {
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
-  worktreeNameGenerator: WorktreeNameGenerator;
   runCommandManager: RunCommandManager;
   versionChecker: VersionChecker;
   stravuAuthManager: StravuAuthManager;

@@ -25,7 +25,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     worktreeManager,
     cliManagerFactory,
     claudeCodeManager, // For backward compatibility
-    worktreeNameGenerator,
     gitStatusManager,
     archiveProgressManager
   } = services;
@@ -1371,7 +1370,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('sessions:generate-name', async (_event, prompt: string) => {
     try {
-      const name = await worktreeNameGenerator.generateWorktreeName(prompt);
+      // Generate a deterministic slug from the prompt (no API call)
+      const words = prompt
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((word: string) => word.length > 2)
+        .slice(0, 3);
+      const name = words.join('-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 30) || 'new-task';
       return { success: true, data: name };
     } catch (error) {
       console.error('Failed to generate session name:', error);
