@@ -1,0 +1,9 @@
+{
+  "verification": {
+    "visual_mobile": false,
+    "visual_web": false
+  },
+  "git": {
+    "branch_per_run": "always"
+  }
+}
