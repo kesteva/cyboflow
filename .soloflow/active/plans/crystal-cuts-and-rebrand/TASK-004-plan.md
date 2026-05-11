@@ -1,8 +1,8 @@
 ---
 id: TASK-004
 idea: IDEA-001
-status: approved
-created: 2026-05-11T00:00:00Z
+status: ready
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/SessionView.tsx
   - frontend/src/hooks/useSessionView.ts
@@ -18,16 +18,16 @@ files_readonly:
   - frontend/src/components/Welcome.tsx
   - docs/cyboflow_system_design.md
 acceptance_criteria:
-  - criterion: "No rebase/squash/merge entries appear in the `branchActions` array constructed in `SessionView.tsx`"
+  - criterion: No rebase/squash/merge entries appear in the `branchActions` array constructed in `SessionView.tsx`
     verification: "`grep -nE \"id:\\s*['\\\"]rebase-from-main['\\\"]|id:\\s*['\\\"]rebase-to-main['\\\"]|id:\\s*['\\\"]squash\" frontend/src/components/SessionView.tsx` returns zero matches"
   - criterion: "`worktreeManager.ts` retains its rebase/squash/merge method implementations (NOT deleted) and they are marked with `@cyboflow-hidden` comment blocks"
     verification: "`grep -nE 'rebaseMainIntoWorktree|squashAndMergeWorktreeToMain|mergeWorktreeToMain|abortRebase' main/src/services/worktreeManager.ts` returns at least 4 matches (the method definitions). Additionally `grep -n '@cyboflow-hidden' main/src/services/worktreeManager.ts` returns at least 1 match indicating the class or method group is annotated."
-  - criterion: "Help dialog no longer documents rebase/squash UI as an active feature"
+  - criterion: Help dialog no longer documents rebase/squash UI as an active feature
     verification: "`grep -nE 'Rebase from main|Squash and rebase' frontend/src/components/Help.tsx` returns zero matches"
   - criterion: "`useSessionView` hook still exports `handleSquashAndRebaseToMain`, `performSquashWithCommitMessage`, etc. (the methods stay; only the UI entry points are removed)"
     verification: "`grep -n 'handleSquashAndRebaseToMain\\|performSquashWithCommitMessage' frontend/src/hooks/useSessionView.ts` returns at least 2 matches"
   - criterion: "App builds and typechecks: `pnpm run build:frontend && pnpm typecheck` exit 0"
-    verification: "Run both commands from repo root"
+    verification: Run both commands from repo root
   - criterion: "`CommitMessageDialog` is no longer reachable from `SessionView`: the `<CommitMessageDialog />` JSX usage in SessionView is removed or commented with `@cyboflow-hidden`"
     verification: "`grep -nE 'CommitMessageDialog' frontend/src/components/SessionView.tsx | grep -v '@cyboflow-hidden'` returns zero matches"
 depends_on: []
@@ -37,7 +37,6 @@ test_strategy:
   needed: false
   justification: "This task hides UI buttons but preserves underlying business logic. No new behavior is introduced. Existing Playwright tests do not appear to cover rebase/squash actions explicitly (Glob found no test files mentioning these IDs). The grep-based ACs are sufficient: they verify (a) the UI entry points are gone and (b) the worktree methods still exist with the hidden annotation."
 ---
-
 # Hide (Do Not Delete) Rebase/Squash UI Entry Points
 
 ## Objective

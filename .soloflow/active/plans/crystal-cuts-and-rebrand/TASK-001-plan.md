@@ -1,8 +1,8 @@
 ---
 id: TASK-001
 idea: IDEA-001
-status: approved
-created: 2026-05-11T00:00:00Z
+status: ready
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/ipc/codexPanel.ts
   - main/src/ipc/baseAIPanelHandler.ts
@@ -66,7 +66,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Codex backend code is fully removed: no `codex/` directory, no `codexPanel.ts`, no `CodexMessageTransformer.ts`, no `useCodexPanel.ts`"
     verification: "Run `test ! -d main/src/services/panels/codex && test ! -d frontend/src/components/panels/codex && test ! -f main/src/ipc/codexPanel.ts && test ! -f frontend/src/hooks/useCodexPanel.ts` — all five conditions return exit 0"
-  - criterion: "No live source code references the `codex` tool type after deletion"
+  - criterion: No live source code references the `codex` tool type after deletion
     verification: "`grep -rn --include='*.ts' --include='*.tsx' -E '[\"'\\''](codex)[\"'\\'']' main/src/ frontend/src/ shared/` returns zero matches (excluding `.backup` files, tests already deleted, comments documenting the removal)"
   - criterion: "`openai` package is removed from `package.json` dependencies"
     verification: "`node -e \"const p=require('./package.json'); process.exit(p.dependencies.openai === undefined ? 0 : 1)\"` returns exit 0"
@@ -74,22 +74,21 @@ acceptance_criteria:
     verification: "(Informational — actual removal verified by TASK-002.) `grep -n '@anthropic-ai/sdk' package.json` may still match — not a failure for THIS task."
   - criterion: "ToolPanelType union no longer contains `'codex'`"
     verification: "`grep -n \"ToolPanelType = \" shared/types/panels.ts` shows the union without `'codex'`"
-  - criterion: "Session creation tool selector defaults to Claude only with no Codex option visible"
+  - criterion: Session creation tool selector defaults to Claude only with no Codex option visible
     verification: "`grep -n 'codex:' frontend/src/components/CreateSessionDialog.tsx` returns zero matches"
-  - criterion: "Codex panel IPC handler is not registered"
+  - criterion: Codex panel IPC handler is not registered
     verification: "`grep -n 'registerCodexPanelHandlers\\|codexPanel' main/src/ipc/index.ts` returns zero matches"
   - criterion: "App still builds: `pnpm run build:main && pnpm run build:frontend` exits 0"
     verification: "Run `pnpm run build:main` and `pnpm run build:frontend` from repo root; both must complete with exit 0"
   - criterion: "App still typechecks: `pnpm typecheck` exits 0"
-    verification: "Run `pnpm typecheck` from repo root; exit code 0"
+    verification: Run `pnpm typecheck` from repo root; exit code 0
 depends_on: []
 estimated_complexity: high
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: false
-  justification: "This is a pure deletion task. The codebase has no tests for the deleted Codex paths (search confirmed `codexManager.test.ts` is the only Codex test file and it gets deleted with the rest). Existing Claude-path tests remain valid; the typecheck and build steps in acceptance criteria serve as the integration gate. Writing new tests would test removed code."
+  justification: This is a pure deletion task. The codebase has no tests for the deleted Codex paths (search confirmed `codexManager.test.ts` is the only Codex test file and it gets deleted with the rest). Existing Claude-path tests remain valid; the typecheck and build steps in acceptance criteria serve as the integration gate. Writing new tests would test removed code.
 ---
-
 # Delete Codex/OpenAI Backend
 
 ## Objective

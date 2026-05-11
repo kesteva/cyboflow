@@ -1,8 +1,8 @@
 ---
 id: TASK-005
 idea: IDEA-001
-status: approved
-created: 2026-05-11T00:00:00Z
+status: ready
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/PanelTabBar.tsx
   - frontend/src/components/SessionView.tsx
@@ -28,7 +28,7 @@ acceptance_criteria:
   - criterion: "`panelManager` service in main process is untouched"
     verification: "`test -f main/src/services/panelManager.ts` returns exit 0; file size matches pre-task"
   - criterion: "Build and typecheck succeed: `pnpm run build:frontend && pnpm typecheck` exit 0"
-    verification: "Run both commands from repo root"
+    verification: Run both commands from repo root
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
@@ -36,7 +36,6 @@ test_strategy:
   needed: false
   justification: "Pure UI surface removal. The data model (`tool_panels` table, `panelManager` service, `panels:create` IPC) is intentionally preserved so existing sessions with multiple panels still render. No new behavior is introduced. The build/typecheck gate catches type errors from the removed prop. A manual smoke test confirms no 'Add Tool' button is visible."
 ---
-
 # Delete Multi-Panel-Per-Session UI Surfaces
 
 ## Objective
