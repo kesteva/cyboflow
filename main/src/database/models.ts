@@ -61,7 +61,7 @@ export interface Session {
   display_order?: number;
   is_favorite?: boolean;
   auto_commit?: boolean;
-  tool_type?: 'claude' | 'codex' | 'none';
+  tool_type?: 'claude' | 'none';
   base_commit?: string;
   base_branch?: string;
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
@@ -98,7 +98,7 @@ export interface CreateSessionData {
   is_main_repo?: boolean;
   display_order?: number;
   auto_commit?: boolean;
-  tool_type?: 'claude' | 'codex' | 'none';
+  tool_type?: 'claude' | 'none';
   base_commit?: string;
   base_branch?: string;
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';

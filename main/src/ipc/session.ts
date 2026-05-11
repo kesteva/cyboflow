@@ -148,7 +148,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           request.toolType,
           request.commitMode,
           request.commitModeSettings,
-          request.codexConfig,
           request.claudeConfig,
           request.folderId
         );
@@ -168,7 +167,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType: request.toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          codexConfig: request.codexConfig,
           claudeConfig: request.claudeConfig
         });
 
@@ -393,71 +391,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (inputToolPanels.length === 0 && sessionToolType !== 'none') {
         console.log(`[IPC] No ${sessionToolType} panel found, creating one for session ${sessionId}`);
         try {
-          const panelTitle = sessionToolType === 'codex' ? 'Codex' : 'Claude';
           await panelManager.createPanel({
             sessionId: sessionId,
-            type: sessionToolType as 'claude' | 'codex',
-            title: panelTitle
+            type: 'claude',
+            title: 'Claude'
           });
-          console.log(`[IPC] Created ${sessionToolType} panel for session ${sessionId}`);
+          console.log(`[IPC] Created Claude panel for session ${sessionId}`);
         } catch (error) {
-          console.error(`[IPC] Failed to create ${sessionToolType} panel for session ${sessionId}:`, error);
+          console.error(`[IPC] Failed to create Claude panel for session ${sessionId}:`, error);
           // Continue without panel - fallback to session-level handling
         }
       } else if (sessionToolType !== 'none') {
         console.log(`[IPC] Found ${inputToolPanels.length} ${sessionToolType} panel(s) for session ${sessionId}`);
       }
 
-      // Handle based on tool type
-      if (sessionToolType === 'codex') {
-        // For Codex sessions, route through the Codex panel manager
-        console.log(`[IPC] Session ${sessionId} is a Codex session - routing to Codex panel`);
-        
-        // Get Codex panels for this session after potential creation
-        const postCreateCodexPanels = panelManager.getPanelsForSession(sessionId).filter(p => p.type === 'codex');
-        
-        if (postCreateCodexPanels.length === 0) {
-          console.error(`[IPC] No Codex panels found for session ${sessionId} after creation attempt`);
-          return { success: false, error: 'No Codex panels found for session' };
-        }
-        
-        // Use the first Codex panel
-        const codexPanel = postCreateCodexPanels[0];
-        console.log(`[IPC] Using Codex panel ${codexPanel.id} for input to session ${sessionId}`);
-        
-        // Get Codex manager instance
-        const { cliManagerFactory } = require('../services/cliManagerFactory');
-        const codexManager = cliManagerFactory.getCodexManager();
-        
-        if (!codexManager) {
-          console.error(`[IPC] Codex manager not available`);
-          return { success: false, error: 'Codex manager not available' };
-        }
-        
-        // Check if Codex is running for this panel
-        const isCodexRunning = codexManager.isPanelRunning(codexPanel.id);
-        
-        if (!isCodexRunning) {
-          console.log(`[IPC] Codex not running for panel ${codexPanel.id}, starting it now...`);
-          
-          // Start Codex via the panel with the input as the initial prompt (finalInput already includes structured commit enhancement)
-          await codexManager.startPanel(codexPanel.id, sessionId, session.worktreePath, finalInput);
-          
-          // Update session status to running
-          await sessionManager.updateSession(sessionId, { status: 'running' });
-        } else {
-          console.log(`[IPC] Codex already running for panel ${codexPanel.id}, continuing conversation...`);
-          
-          // Continue the Codex conversation with the new input (finalInput already includes structured commit enhancement)
-          await codexManager.continuePanel(codexPanel.id, sessionId, session.worktreePath, finalInput, []);
-          
-          // Update session status to running
-          await sessionManager.updateSession(sessionId, { status: 'running' });
-        }
-        
-        return { success: true };
-      }
-      
       if (sessionToolType === 'none') {
         console.log(`[IPC] Session ${sessionId} has no tool type - cannot send input`);
         return { success: false, error: 'Session has no tool configured' };
@@ -545,12 +492,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Determine tool type for this session
       const sessionToolType = session.toolType || 'claude'; // Default to claude for backward compatibility
-      
-      // For Codex sessions, continuing is not supported
-      if (sessionToolType === 'codex') {
-        console.log(`[IPC] Session ${sessionId} is a Codex session - continue not supported`);
-        return { success: false, error: 'Continue not supported for Codex sessions. Use the Codex panel interface.' };
-      }
       
       if (sessionToolType === 'none') {
         console.log(`[IPC] Session ${sessionId} has no tool type - cannot continue`);
@@ -1107,55 +1048,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Route to appropriate panel type handler
       switch (panel.type) {
-        case 'codex':
-          try {
-            const { codexPanelManager } = require('./codexPanel');
-            if (!codexPanelManager) {
-              return { success: false, error: 'Codex panel manager not available' };
-            }
-
-            // Get session to retrieve worktreePath
-            const session = await sessionManager.getSession(panel.sessionId);
-            if (!session) {
-              return { success: false, error: 'Session not found' };
-            }
-
-            // Save the user input as a conversation message
-            if (input) {
-              sessionManager.addPanelConversationMessage(panelId, 'user', input);
-            }
-
-            // Check if there's a Codex session ID for resumption
-            const isRunning = codexPanelManager.isPanelRunning(panelId);
-            const hasCodexSessionId = !!sessionManager.getPanelCodexSessionId(panelId);
-
-            if (!isRunning && !hasCodexSessionId) {
-              // No running process and no session ID, start fresh
-              console.log('[IPC] panels:continue starting fresh Codex session (no running process, no codex_session_id)');
-              // Model is stored in panel state for Codex panels
-              await codexPanelManager.startPanel(panelId, panel.sessionId, session.worktreePath, input || '');
-              return { success: true };
-            }
-
-            // Otherwise continue with resume
-            const conversationHistory = sessionManager.getPanelConversationMessages
-              ? await sessionManager.getPanelConversationMessages(panelId)
-              : [];
-              
-            console.log('[IPC] panels:continue resuming Codex conversation via continuePanel');
-            await codexPanelManager.continuePanel(
-              panelId,
-              panel.sessionId,  // Add the missing sessionId parameter
-              session.worktreePath,
-              input || '',
-              conversationHistory
-            );
-            return { success: true };
-          } catch (err) {
-            console.error('Failed to continue Codex panel:', err);
-            return { success: false, error: 'Failed to continue Codex panel' };
-          }
-          
         case 'claude':
           try {
             const { claudePanelManager } = require('./claudePanel');

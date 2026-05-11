@@ -149,7 +149,7 @@ export function findCliNodeScript(cliExecutablePath: string): string | null {
       return cliExecutablePath;
     }
 
-    // Get the command name from the path (e.g., 'claude', 'codex', 'aider')
+    // Get the command name from the path (e.g., 'claude', 'aider')
     const commandName = path.basename(cliExecutablePath).replace(/\.(exe|cmd|bat)$/i, '');
     
     // Check common locations relative to the executable for npm-installed tools
@@ -163,7 +163,6 @@ export function findCliNodeScript(cliExecutablePath: string): string | null {
       path.join(path.dirname(cliExecutablePath), '../lib/node_modules', commandName, 'bin', `${commandName}.js`),
       // Specific patterns for known tools
       path.join(path.dirname(cliExecutablePath), '../lib/node_modules/@anthropic-ai/claude-code/dist/index.js'),
-      path.join(path.dirname(cliExecutablePath), '../lib/node_modules/@openai/codex/dist/index.js'),
     ];
 
     for (const scriptPath of possibleScriptPaths) {
