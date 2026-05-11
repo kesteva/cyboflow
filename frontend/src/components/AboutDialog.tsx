@@ -115,9 +115,9 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-border-primary">
           <div className="flex items-center space-x-3">
-            <img 
-              src="/crystal-logo.svg" 
-              alt="Crystal" 
+            <img
+              src="/cyboflow-logo.svg"
+              alt="Cyboflow"
               className="w-8 h-8"
               onError={(e) => {
                 // Fallback if logo not found
@@ -125,7 +125,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               }}
             />
             <h2 className="text-xl font-semibold text-text-primary">
-              About Crystal
+              About Cyboflow
             </h2>
           </div>
           <button
@@ -141,21 +141,13 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           {/* App Info */}
           <div className="text-center space-y-2">
             <h3 className="text-lg font-medium text-text-primary">
-              Crystal
+              Cyboflow
             </h3>
             <p className="text-sm text-text-secondary">
-              Multi-Session Claude Code Manager
+              Multi-Session AI Code Assistant Manager
             </p>
             <p className="text-xs text-text-tertiary">
-              Created by{' '}
-              <a 
-                href="https://stravu.com/?utm_source=Crystal&utm_medium=OS&utm_campaign=Crystal&utm_id=1" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-interactive hover:underline"
-              >
-                Stravu
-              </a>
+              Built by Cyboflow
             </p>
           </div>
 
@@ -173,7 +165,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
             {versionInfo?.crystalDirectory && (
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-text-secondary">
-                  Crystal Directory
+                  Data Directory
                 </span>
                 <span className="text-sm text-text-primary font-mono truncate max-w-[200px]" title={versionInfo.crystalDirectory}>
                   {versionInfo.crystalDirectory.replace(/^\/Users\/[^/]+/, '~')}
@@ -317,7 +309,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           {/* Links */}
           <div className="space-y-2">
             <a
-              href="https://github.com/stravu/crystal"
+              href="https://github.com/cyboflow/cyboflow"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center justify-between w-full text-sm text-text-secondary hover:text-text-primary transition-colors">
@@ -337,8 +329,8 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           {/* Disclaimer */}
           <div className="pt-4 border-t border-border-primary">
             <p className="text-xs text-text-tertiary leading-relaxed">
-              Crystal is an independent project created by Stravu. Claude™ is a trademark of Anthropic, PBC. 
-              Crystal is not affiliated with, endorsed by, or sponsored by Anthropic.
+              Cyboflow is an independent project forked from Crystal (by Stravu). Claude™ is a trademark of Anthropic, PBC.
+              Cyboflow is not affiliated with, endorsed by, or sponsored by Anthropic.
             </p>
           </div>
         </div>

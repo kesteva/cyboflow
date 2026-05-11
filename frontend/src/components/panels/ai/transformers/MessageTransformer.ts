@@ -2,7 +2,6 @@
 export interface SessionInfoData {
   type?: string; // Make type optional for flexibility
   initialPrompt?: string;
-  codexCommand?: string;
   claudeCommand?: string;
   worktreePath?: string;
   model?: string;

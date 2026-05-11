@@ -31,36 +31,7 @@ export class ShellDetector {
   }
 
   private static detectShell(): ShellInfo {
-    const platform = process.platform;
-
-    if (platform === 'win32') {
-      return this.detectWindowsShell();
-    } else {
-      return this.detectUnixShell();
-    }
-  }
-
-  private static detectWindowsShell(): ShellInfo {
-    // Check for PowerShell Core first
-    const pwshPath = this.findExecutable('pwsh.exe');
-    if (pwshPath) {
-      return { path: pwshPath, name: 'pwsh' };
-    }
-
-    // Check for Windows PowerShell
-    const powershellPath = this.findExecutable('powershell.exe');
-    if (powershellPath) {
-      return { path: powershellPath, name: 'powershell' };
-    }
-
-    // Fall back to cmd.exe
-    const cmdPath = path.join(process.env.SYSTEMROOT || 'C:\\Windows', 'System32', 'cmd.exe');
-    if (fs.existsSync(cmdPath)) {
-      return { path: cmdPath, name: 'cmd' };
-    }
-
-    // Last resort
-    return { path: 'cmd.exe', name: 'cmd' };
+    return this.detectUnixShell();
   }
 
   private static detectUnixShell(): ShellInfo {
@@ -158,9 +129,6 @@ export class ShellDetector {
       case 'zsh':
       case 'fish':
         return ['-i']; // Interactive mode
-      case 'pwsh':
-      case 'powershell':
-        return ['-NoExit']; // Keep PowerShell open
       default:
         return [];
     }
@@ -173,17 +141,7 @@ export class ShellDetector {
    */
   static getShellCommandArgs(command: string): { shell: string; args: string[] } {
     const shellInfo = this.getDefaultShell();
-    
-    switch (shellInfo.name) {
-      case 'cmd':
-        return { shell: shellInfo.path, args: ['/c', command] };
-      case 'powershell':
-      case 'pwsh':
-        return { shell: shellInfo.path, args: ['-Command', command] };
-      default:
-        // Unix shells
-        return { shell: shellInfo.path, args: ['-c', command] };
-    }
+    return { shell: shellInfo.path, args: ['-c', command] };
   }
 
   /**

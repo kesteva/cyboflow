@@ -413,12 +413,7 @@ export function formatToolInteraction(
  * Enhanced JSON to output formatter that unifies tool calls and responses
  */
 export function formatJsonForOutputEnhanced(jsonMessage: Record<string, unknown>, gitRepoPath?: string): string {
-  // CODEX COMPATIBILITY: Unwrap old Codex format {"id":"0","msg":{...}}
-  let unwrappedMessage = jsonMessage;
-  if (jsonMessage.id !== undefined && jsonMessage.msg && typeof jsonMessage.msg === 'object') {
-    console.log('[Codex] Detected old Codex format, unwrapping msg property');
-    unwrappedMessage = { ...jsonMessage.msg as Record<string, unknown>, timestamp: jsonMessage.timestamp };
-  }
+  const unwrappedMessage = jsonMessage;
 
   // Ensure we have a valid timestamp
   let timestamp: string;
@@ -439,7 +434,6 @@ export function formatJsonForOutputEnhanced(jsonMessage: Record<string, unknown>
     timestamp = new Date().toISOString();
   }
 
-  // CODEX COMPATIBILITY: Handle new Codex protocol message types
   const messageType = unwrappedMessage.type as string;
 
   // Handle thread lifecycle messages
@@ -512,7 +506,6 @@ export function formatJsonForOutputEnhanced(jsonMessage: Record<string, unknown>
     }
   }
 
-  // Handle old Codex message types (after unwrapping)
   if (messageType === 'task_started') {
     return ''; // Silent, no output needed
   }

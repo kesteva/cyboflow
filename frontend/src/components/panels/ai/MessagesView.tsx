@@ -2,13 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { API } from '../../../utils/api';
 import { cn } from '../../../utils/cn';
 import { ChevronRight, ChevronDown, Copy, Check, Terminal, FileText } from 'lucide-react';
-import { SessionOutput } from '../../../types/session';
 
 interface MessagesViewProps {
   panelId: string;
-  agentType: 'claude' | 'codex' | 'generic-cli';
+  agentType: 'claude' | 'generic-cli';
   outputEventName: string;
-  getMessagesHandler?: string; // For IPC-based panels like Codex
 }
 
 interface JSONMessage {
@@ -21,7 +19,6 @@ interface SessionInfo {
   type: 'session_info';
   initial_prompt?: string;
   claude_command?: string;
-  codex_command?: string;
   worktree_path?: string;
   model?: string;
   permission_mode?: string;
@@ -29,11 +26,10 @@ interface SessionInfo {
   timestamp: string;
 }
 
-export const MessagesView: React.FC<MessagesViewProps> = ({ 
-  panelId, 
+export const MessagesView: React.FC<MessagesViewProps> = ({
+  panelId,
   agentType,
-  outputEventName,
-  getMessagesHandler
+  outputEventName
 }) => {
   const [messages, setMessages] = useState<JSONMessage[]>([]);
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -50,22 +46,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
       try {
         let response: { success: boolean; data?: JSONMessage[] };
         
-        // Use appropriate method based on agent type
-        if (getMessagesHandler && window.electron) {
-          // For Codex and other IPC-based panels
-          const outputs = await window.electron.invoke(getMessagesHandler, panelId);
-          const jsonMessages = outputs
-            .filter((output: SessionOutput) => output.type === 'json')
-            .map((output: SessionOutput) => ({
-              type: 'json' as const,
-              data: typeof output.data === 'object' ? JSON.stringify(output.data) : output.data,
-              timestamp: output.timestamp
-            }));
-          response = { success: true, data: jsonMessages };
-        } else {
-          // For Claude panels using API
-          response = await API.panels.getJsonMessages(panelId);
-        }
+        // Get JSON messages from API
+        response = await API.panels.getJsonMessages(panelId);
         
         if (response.success && response.data) {
           // Filter out session_info messages and handle them separately
@@ -96,15 +78,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
               // eslint-disable-next-line @typescript-eslint/no-explicit-any -- External protocol message with dynamic structure
               if (msgData && typeof msgData === 'object' && 'type' in msgData && (msgData as any).type === 'session_info') {
                 foundSessionInfo = msgData as SessionInfo;
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Codex protocol messages have varying nested structures
-              } else if (msgData && typeof msgData === 'object' && 'msg' in msgData && typeof (msgData as any).msg === 'object' && (msgData as any).msg !== null && 'type' in (msgData as any).msg && (msgData as any).msg.type === 'session_configured') {
-                // Handle Codex session configuration
-                foundSessionInfo = {
-                  type: 'session_info',
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Dynamic Codex protocol field
-                  model: (msgData as any).msg.model || 'default',
-                  timestamp: msg.timestamp || ''
-                };
               } else {
                 // Regular JSON message
                 regularMessages.push({
@@ -140,7 +113,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
     };
 
     loadMessages();
-  }, [panelId, getMessagesHandler]);
+  }, [panelId]);
 
   // Subscribe to new messages
   useEffect(() => {
@@ -172,15 +145,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- External protocol message with dynamic structure
           if (parsedData && typeof parsedData === 'object' && 'type' in parsedData && (parsedData as any).type === 'session_info') {
             setSessionInfo(parsedData as SessionInfo);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Codex protocol messages have varying nested structures
-          } else if (parsedData && typeof parsedData === 'object' && 'msg' in parsedData && typeof (parsedData as any).msg === 'object' && (parsedData as any).msg !== null && 'type' in (parsedData as any).msg && (parsedData as any).msg.type === 'session_configured') {
-            // Handle Codex session configuration
-            setSessionInfo({
-              type: 'session_info',
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Dynamic Codex protocol field
-              model: (parsedData as any).msg.model || 'default',
-              timestamp: detail.timestamp || ''
-            });
           } else {
             setMessages(prev => [...prev, {
               type: 'json',
@@ -207,20 +171,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
       }
     };
 
-    // Listen for the appropriate event based on the agent type
-    if (outputEventName.includes('codex')) {
-      // Only register Electron IPC listener for Codex - not both IPC and window
-      window.electron?.on(outputEventName, handleOutput);
-    } else {
-      window.electron?.on('session:output', handleOutput);
-    }
-    
+    // Listen for session output events
+    window.electron?.on('session:output', handleOutput);
+
     return () => {
-      if (outputEventName.includes('codex')) {
-        window.electron?.off(outputEventName, handleOutput);
-      } else {
-        window.electron?.off('session:output', handleOutput);
-      }
+      window.electron?.off('session:output', handleOutput);
     };
   }, [panelId, outputEventName]);
 
@@ -275,14 +230,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
     try {
       const parsed = JSON.parse(jsonString);
       
-      // Handle Codex protocol messages
-      if (parsed.op) {
-        return `Operation: ${parsed.op.type}`;
-      }
-      if (parsed.msg) {
-        return `Message: ${parsed.msg.type}`;
-      }
-      
       // Handle standard messages
       if (parsed.type) {
         return `${parsed.type}${parsed.role ? ` (${parsed.role})` : ''}`;
@@ -297,8 +244,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
     switch (agentType) {
       case 'claude':
         return 'Claude Code';
-      case 'codex':
-        return 'Codex';
       default:
         return 'CLI Tool';
     }
@@ -351,7 +296,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
                 onClick={(e) => {
                   e.stopPropagation();
                   const infoText = sessionInfo.initial_prompt ? 
-                    `You:\n${sessionInfo.initial_prompt}\n\nCommand:\n${sessionInfo.claude_command || sessionInfo.codex_command || ''}\n\nWorktree Path:\n${sessionInfo.worktree_path}\n\nModel: ${sessionInfo.model}` :
+                    `You:\n${sessionInfo.initial_prompt}\n\nCommand:\n${sessionInfo.claude_command || ''}\n\nWorktree Path:\n${sessionInfo.worktree_path}\n\nModel: ${sessionInfo.model}` :
                     `Model: ${sessionInfo.model || 'Unknown'}`;
                   copyToClipboard(infoText, -1);
                 }}
@@ -388,16 +333,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
                   )}
                   
                   {/* Command (if available) */}
-                  {(sessionInfo.claude_command || sessionInfo.codex_command) && (
+                  {sessionInfo.claude_command && (
                     <div>
                       <div className="flex items-center gap-2 text-text-secondary mb-1">
                         <Terminal className="w-3.5 h-3.5" />
                         <span className="text-xs font-semibold uppercase tracking-wider">
-                          {agentType === 'claude' ? 'Claude' : 'Codex'} Command
+                          Claude Command
                         </span>
                       </div>
                       <div className="bg-surface-primary rounded p-3 text-text-primary font-mono text-xs overflow-x-auto">
-                        {sessionInfo.claude_command || sessionInfo.codex_command}
+                        {sessionInfo.claude_command}
                       </div>
                     </div>
                   )}

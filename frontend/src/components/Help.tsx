@@ -48,7 +48,6 @@ export default function Help({ isOpen, onClose }: HelpProps) {
                       <ul className="list-disc list-inside ml-4 mt-1 text-sm">
                         <li>View changes in the Diff panel</li>
                         <li>Continue conversations to refine the solution</li>
-                        <li>Rebase back to your main branch when done</li>
                       </ul>
                     </li>
                   </ol>
@@ -106,8 +105,6 @@ export default function Help({ isOpen, onClose }: HelpProps) {
                 <div>
                   <h4 className="font-medium text-text-primary">Git Operations</h4>
                   <ul className="list-disc list-inside text-text-secondary mt-1 space-y-1">
-                    <li><strong>Rebase from main</strong> - Pull latest changes from main branch</li>
-                    <li><strong>Squash and rebase to main</strong> - Combine commits and rebase onto main</li>
                     <li>View diffs in the View Diff tab</li>
                     <li>Track changes per execution</li>
                   </ul>

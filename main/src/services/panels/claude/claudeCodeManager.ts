@@ -9,6 +9,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { testClaudeCodeAvailability, testClaudeCodeInDirectory } from '../../../utils/claudeCodeTest';
 import { findExecutableInPath } from '../../../utils/shellPath';
 import { PermissionManager } from '../../permissionManager';
+import { getCrystalDirectory } from '../../../utils/crystalDirectory';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
@@ -678,8 +679,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Use a directory without spaces for better compatibility
     let tempDir: string;
     try {
-      const homeDir = os.homedir();
-      tempDir = path.join(homeDir, '.crystal');
+      tempDir = getCrystalDirectory();
 
       // Ensure the directory exists
       if (!fs.existsSync(tempDir)) {
@@ -881,7 +881,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     // If there are servers from ~/.claude.json, create a temp config file
     if (Object.keys(baseProjectMcp.mcpServers).length > 0) {
-      const tempDir = path.join(os.homedir(), '.crystal');
+      const tempDir = getCrystalDirectory();
       if (!fs.existsSync(tempDir)) {
         fs.mkdirSync(tempDir, { recursive: true });
       }
