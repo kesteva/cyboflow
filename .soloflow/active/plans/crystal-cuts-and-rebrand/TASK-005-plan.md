@@ -1,12 +1,13 @@
 ---
 id: TASK-005
 idea: IDEA-001
-status: ready
+status: in-flight
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/PanelTabBar.tsx
   - frontend/src/components/SessionView.tsx
   - frontend/src/components/ProjectView.tsx
+  - frontend/src/types/panelComponents.ts
 files_readonly:
   - frontend/src/services/panelApi.ts
   - frontend/src/stores/panelStore.ts

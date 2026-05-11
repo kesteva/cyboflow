@@ -1,0 +1,15 @@
+{
+  "sprint": {
+    "id": "SPRINT-001",
+    "status": "complete",
+    "started": "2026-05-11T00:00:00.000Z",
+    "execution_mode": "parallel"
+  },
+  "tasks": {},
+  "run": {
+    "branch": "soloflow/run-20260511-135639-SPRINT-001",
+    "base_branch": "main",
+    "base_sha": "7b56dc1d0d5f5930c533130a3af4c0d3ce218381",
+    "created_at": "2026-05-11T13:56:39.000Z"
+  }
+}

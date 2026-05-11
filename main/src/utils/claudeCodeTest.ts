@@ -11,50 +11,25 @@ const execAsync = promisify(exec);
  * Get augmented PATH that includes common installation directories
  */
 export function getAugmentedPath(): string {
-  const platform = os.platform();
   const homeDir = os.homedir();
-  const pathSeparator = platform === 'win32' ? ';' : ':';
-  
+
   // Start with existing PATH
-  const paths = (process.env.PATH || '').split(pathSeparator);
-  
-  // Add common installation paths based on platform
-  const additionalPaths: string[] = [];
-  
-  if (platform === 'darwin') { // macOS
-    additionalPaths.push(
-      '/usr/local/bin',
-      '/opt/homebrew/bin',
-      '/opt/homebrew/sbin',
-      path.join(homeDir, '.local', 'bin'),
-      path.join(homeDir, 'bin'),
-      // npm/yarn global installs
-      '/usr/local/lib/node_modules/.bin',
-      path.join(homeDir, '.npm-global', 'bin'),
-      path.join(homeDir, '.yarn', 'bin'),
-      // nvm paths
-      path.join(homeDir, '.nvm', 'versions', 'node', '*', 'bin')
-    );
-  } else if (platform === 'linux') {
-    additionalPaths.push(
-      '/usr/local/bin',
-      path.join(homeDir, '.local', 'bin'),
-      path.join(homeDir, 'bin'),
-      '/snap/bin',
-      // npm/yarn global installs
-      '/usr/local/lib/node_modules/.bin',
-      path.join(homeDir, '.npm-global', 'bin'),
-      path.join(homeDir, '.yarn', 'bin')
-    );
-  } else if (platform === 'win32') {
-    additionalPaths.push(
-      'C:\\Program Files\\Claude',
-      'C:\\Program Files (x86)\\Claude',
-      path.join(homeDir, 'AppData', 'Local', 'Programs', 'Claude'),
-      path.join(homeDir, 'AppData', 'Roaming', 'npm'),
-      path.join(homeDir, '.yarn', 'bin')
-    );
-  }
+  const paths = (process.env.PATH || '').split(':');
+
+  // Add common macOS installation paths
+  const additionalPaths: string[] = [
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    path.join(homeDir, '.local', 'bin'),
+    path.join(homeDir, 'bin'),
+    // npm/yarn global installs
+    '/usr/local/lib/node_modules/.bin',
+    path.join(homeDir, '.npm-global', 'bin'),
+    path.join(homeDir, '.yarn', 'bin'),
+    // nvm paths
+    path.join(homeDir, '.nvm', 'versions', 'node', '*', 'bin')
+  ];
   
   // Add paths that exist and aren't already in PATH
   for (const additionalPath of additionalPaths) {
@@ -80,20 +55,18 @@ export function getAugmentedPath(): string {
     }
   }
   
-  return paths.join(pathSeparator);
+  return paths.join(':');
 }
 
 /**
  * Find the claude executable in common locations
  */
 export async function findClaudeExecutable(): Promise<string | null> {
-  const platform = os.platform();
-  const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
   const augmentedPath = getAugmentedPath();
-  const paths = augmentedPath.split(platform === 'win32' ? ';' : ':');
+  const paths = augmentedPath.split(':');
   
   for (const dir of paths) {
-    const claudePath = path.join(dir, executableName);
+    const claudePath = path.join(dir, 'claude');
     try {
       await fs.promises.access(claudePath, fs.constants.X_OK);
       return claudePath;
@@ -112,7 +85,7 @@ export async function testClaudeCodeAvailability(customClaudePath?: string): Pro
   try {
     // Get the user's shell PATH
     const shellPath = getShellPath();
-    console.log(`[ClaudeTest] Using shell PATH with ${shellPath.split(os.platform() === 'win32' ? ';' : ':').length} entries`);
+    console.log(`[ClaudeTest] Using shell PATH with ${shellPath.split(':').length} entries`);
     
     // Use custom path if provided, otherwise try to find claude in the shell PATH
     let claudePath: string | null = null;
@@ -157,7 +130,7 @@ export async function testClaudeCodeAvailability(customClaudePath?: string): Pro
     // Try to get version using the shell PATH
     try {
       const env = { ...process.env, PATH: shellPath };
-      const timeout = os.platform() === 'linux' ? 2000 : 5000;  // Shorter timeout for Linux
+      const timeout = 5000;
       console.log(`[ClaudeTest] Running '${claudePath} --version' with timeout ${timeout}ms...`);
       const { stdout } = await execAsync(`${claudePath} --version`, { timeout, env });
       const version = stdout.trim();
@@ -186,7 +159,7 @@ export async function testClaudeCodeInDirectory(directory: string, customClaudeP
     // Use the same enhanced shell PATH that build scripts use
     const shellPath = getShellPath();
     const env = { ...process.env, PATH: shellPath };
-    const timeout = os.platform() === 'linux' ? 3000 : 10000;  // Shorter timeout for Linux
+    const timeout = 10000;
     
     // Use custom path if provided, otherwise use 'claude' which will be found in PATH
     const claudeCommand = customClaudePath || 'claude';

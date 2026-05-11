@@ -42,7 +42,6 @@ interface PanelStateWithCustomData extends ToolPanelState {
 }
 import { addSessionLog, cleanupSessionLogs } from '../ipc/logs';
 import { withLock } from '../utils/mutex';
-import * as os from 'os';
 import { panelManager } from './panelManager';
 import type { AnalyticsManager } from './analyticsManager';
 
@@ -114,19 +113,6 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  // Panel-scoped Codex session ID for conversation continuation
-  getPanelCodexSessionId(panelId: string): string | undefined {
-    try {
-      const panel = this.db.getPanel(panelId);
-      // Check new agentSessionId first, then fall back to legacy codexSessionId
-      const panelState = panel?.state?.customState as BaseAIPanelState | undefined;
-      const codexSessionId = panelState?.agentSessionId || panelState?.codexSessionId;
-      return codexSessionId;
-    } catch (e) {
-      return undefined;
-    }
-  }
-
   beginAutoContextCapture(panelId: string): void {
     // Use synchronous operation - no race condition here as it's a simple set
     this.autoContextBuffers.set(panelId, []);
@@ -162,10 +148,8 @@ export class SessionManager extends EventEmitter {
     try {
       const panel = this.db.getPanel(panelId);
       const customState = panel?.state?.customState as BaseAIPanelState | undefined;
-      // Check new field first, then fall back to legacy fields based on panel type
-      const agentSessionId = customState?.agentSessionId || 
-                             customState?.claudeSessionId || 
-                             customState?.codexSessionId;
+      // Check new field first, then fall back to legacy claudeSessionId
+      const agentSessionId = customState?.agentSessionId || customState?.claudeSessionId;
       return agentSessionId;
     } catch (e) {
       return undefined;
@@ -198,12 +182,10 @@ export class SessionManager extends EventEmitter {
   }
 
   private convertDbSessionToSession(dbSession: DbSession): Session {
-    const toolTypeFromDb = (dbSession as DbSession & { tool_type?: string }).tool_type as 'claude' | 'codex' | 'none' | null | undefined;
-    const normalizedToolType: 'claude' | 'codex' | 'none' = toolTypeFromDb === 'codex'
-      ? 'codex'
-      : toolTypeFromDb === 'none'
-        ? 'none'
-        : 'claude';
+    const toolTypeFromDb = (dbSession as DbSession & { tool_type?: string }).tool_type as 'claude' | 'none' | null | undefined;
+    const normalizedToolType: 'claude' | 'none' = toolTypeFromDb === 'none'
+      ? 'none'
+      : 'claude';
 
     return {
       id: dbSession.id,
@@ -299,7 +281,7 @@ export class SessionManager extends EventEmitter {
     isMainRepo?: boolean,
     autoCommit?: boolean,
     folderId?: string,
-    toolType?: 'claude' | 'codex' | 'none',
+    toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
@@ -337,7 +319,7 @@ export class SessionManager extends EventEmitter {
     isMainRepo?: boolean,
     autoCommit?: boolean,
     folderId?: string,
-    toolType?: 'claude' | 'codex' | 'none',
+    toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
@@ -418,7 +400,6 @@ export class SessionManager extends EventEmitter {
         session_count: 1, // This is for a single session creation
         has_folder: !!folderId,
         used_claude_code: toolType === 'claude',
-        used_codex: toolType === 'codex',
         used_auto_name: false, // Will be updated by caller if auto-name was used
         auto_name_available: true, // Auto-naming is always available
         git_mode: isMainRepo ? 'main_repo' : commitMode || 'disabled',
@@ -757,7 +738,7 @@ export class SessionManager extends EventEmitter {
       throw new Error(`Session ${id} not found`);
     }
 
-    // Stop all AI panel processes (Claude, Codex, etc.) for this session
+    // Stop all AI panel processes for this session
     try {
       // Get all panels for this session
       const { panelManager } = require('./panelManager');
@@ -776,18 +757,6 @@ export class SessionManager extends EventEmitter {
         }
       }
       
-      // Stop Codex panels
-      const codexPanels = panels.filter(p => p.type === 'codex');
-      if (codexPanels.length > 0) {
-        try {
-          const { codexPanelManager } = require('../ipc/codexPanel');
-          for (const panel of codexPanels) {
-            await codexPanelManager.unregisterPanel(panel.id);
-          }
-        } catch (error) {
-          console.error(`[SessionManager] Failed to stop Codex panels for session ${id}:`, error);
-        }
-      }
     } catch (error) {
       console.error(`[SessionManager] Error stopping AI panels for session ${id}:`, error);
     }
@@ -918,14 +887,14 @@ export class SessionManager extends EventEmitter {
       }
     }
     
-    // Handle Codex session completion message to stop prompt timing
+    // Handle session completion message to stop prompt timing
     if (output.type === 'json' && (output.data as GenericMessageData).type === 'session' && (output.data as GenericMessageData).data?.status === 'completed') {
       // Add a completion message to trigger panel-response-added event which stops the timer
       const completionMessage = String((output.data as GenericMessageData).data?.message || 'Session completed');
       this.addPanelConversationMessage(panelId, 'assistant', completionMessage);
     }
     
-    // Handle Codex agent messages (similar to Claude's assistant messages)
+    // Handle agent messages
     if (output.type === 'json' && ((output.data as GenericMessageData).type === 'agent_message' || (output.data as GenericMessageData).type === 'agent_message_delta')) {
       const agentText = String((output.data as GenericMessageData).message || (output.data as GenericMessageData).delta || '');
       if (agentText && (output.data as GenericMessageData).type === 'agent_message') {
@@ -1375,38 +1344,22 @@ export class SessionManager extends EventEmitter {
    */
   private getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
-    const platform = os.platform();
-    
+
     try {
-      if (platform === 'win32') {
-        // On Windows, use wmic to get process tree
-        const output = execSync(`wmic process where (ParentProcessId=${parentPid}) get ProcessId`, { encoding: 'utf8' });
-        const lines = output.split('\n').filter(line => line.trim());
-        for (let i = 1; i < lines.length; i++) { // Skip header
-          const pid = parseInt(lines[i].trim());
-          if (!isNaN(pid)) {
-            descendants.push(pid);
-            // Recursively get children of this process
-            descendants.push(...this.getAllDescendantPids(pid));
-          }
-        }
-      } else {
-        // On Unix-like systems, use ps to get children
-        const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
-        const pids = output.split('\n')
-          .map(line => parseInt(line.trim()))
-          .filter(pid => !isNaN(pid));
-        
-        for (const pid of pids) {
-          descendants.push(pid);
-          // Recursively get children of this process
-          descendants.push(...this.getAllDescendantPids(pid));
-        }
+      // Use ps to get children on macOS/Unix
+      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
+      const pids = output.split('\n')
+        .map(line => parseInt(line.trim()))
+        .filter(pid => !isNaN(pid));
+
+      for (const pid of pids) {
+        descendants.push(pid);
+        descendants.push(...this.getAllDescendantPids(pid));
       }
     } catch (error) {
       // Command might fail if no children exist, which is fine
     }
-    
+
     return descendants;
   }
 
@@ -1446,143 +1399,92 @@ export class SessionManager extends EventEmitter {
           // Add a simple log entry for stopping the script
           addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
           
-          const platform = os.platform();
-          
-          if (platform === 'win32') {
-            // On Windows, use taskkill to terminate the process tree
-            addSessionLog(sessionId, 'info', `[Using taskkill to terminate process tree ${process.pid}]`, 'System');
-            
-            exec(`taskkill /F /T /PID ${process.pid}`, (error) => {
-              if (error) {
-                console.warn(`Error killing Windows process tree: ${error.message}`);
-                addSessionLog(sessionId, 'error', `[Error terminating process tree: ${error.message}]`, 'System');
-                
-                // Fallback: kill individual processes
-                try {
-                  process.kill('SIGKILL');
-                } catch (killError) {
-                  console.warn('Fallback kill failed:', killError);
-                }
-                
-                // Kill descendants individually
-                let killedCount = 0;
-                let processedCount = 0;
-                
-                if (descendantPids.length === 0) {
-                  // No descendants, we're done
-                  this.finishStopScript(sessionId);
-                  resolve();
-                  return;
-                }
-                
-                descendantPids.forEach(pid => {
-                  exec(`taskkill /F /PID ${pid}`, (err) => {
-                    if (!err) killedCount++;
-                    processedCount++;
-                    
-                    // Report after all attempts
-                    if (processedCount === descendantPids.length) {
-                      addSessionLog(sessionId, 'info', `[Terminated ${killedCount} processes using fallback method]`, 'System');
-                      this.finishStopScript(sessionId);
-                      resolve();
-                    }
-                  });
-                });
-              } else {
-                addSessionLog(sessionId, 'info', '[Successfully terminated process tree]', 'System');
-                this.finishStopScript(sessionId);
-                resolve();
-              }
-            });
-          } else {
-            // On Unix-like systems (macOS, Linux)
-            // First, try SIGTERM for graceful shutdown
-            addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${process.pid} and its group]`, 'System');
-            
-            try {
-              process.kill('SIGTERM');
-            } catch (error) {
-              console.warn('SIGTERM failed:', error);
-            }
-            
-            // Kill the entire process group using negative PID
-            exec(`kill -TERM -${process.pid}`, (error) => {
-              if (error) {
-                console.warn(`Error sending SIGTERM to process group: ${error.message}`);
-              }
-            });
-            
-            // Give processes a chance to clean up gracefully
-            addSessionLog(sessionId, 'info', '[Waiting 10 seconds for graceful shutdown...]', 'System');
-            
-            // Use a shorter timeout for faster cleanup
-            setTimeout(() => {
-              addSessionLog(sessionId, 'info', '\n[Grace period expired, using forceful termination]', 'System');
-              
-              // Now forcefully kill the main process
-              try {
-                process.kill('SIGKILL');
-                addSessionLog(sessionId, 'info', `[Sent SIGKILL to process ${process.pid}]`, 'System');
-              } catch (error) {
-                // Process might already be dead
-                addSessionLog(sessionId, 'info', `[Process ${process.pid} already terminated]`, 'System');
-              }
-              
-              // Kill the process group with SIGKILL
-              exec(`kill -9 -${process.pid}`, (error) => {
-                if (error) {
-                  console.warn(`Error sending SIGKILL to process group: ${error.message}`);
-                  addSessionLog(sessionId, 'warn', `[Warning: Could not kill process group: ${error.message}]`, 'System');
-                } else {
-                  addSessionLog(sessionId, 'info', `[Sent SIGKILL to process group ${process.pid}]`, 'System');
-                }
-              });
-              
-              // Kill all known descendants individually to be sure
-              let killedCount = 0;
-              let alreadyDeadCount = 0;
-              
-              descendantPids.forEach(pid => {
-                exec(`kill -9 ${pid}`, (error) => {
-                  if (error) {
-                    alreadyDeadCount++;
-                  } else {
-                    killedCount++;
-                  }
-                  
-                  // Report results after processing all descendants
-                  if (killedCount + alreadyDeadCount === descendantPids.length) {
-                    if (killedCount > 0) {
-                      addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
-                    }
-                    if (alreadyDeadCount > 0) {
-                      addSessionLog(sessionId, 'info', `[${alreadyDeadCount} process${alreadyDeadCount > 1 ? 'es' : ''} had already terminated gracefully]`, 'System');
-                    }
-                  }
-                });
-              });
-              
-              // Final cleanup attempt using pkill
-              exec(`pkill -9 -P ${process.pid}`, () => {
-                // Ignore errors - processes might already be dead
-              });
-              
-              // Check for zombie processes after a short delay
-              setTimeout(() => {
-                if (process.pid) {
-                  const remainingPids = this.getAllDescendantPids(process.pid);
-                  if (remainingPids.length > 0) {
-                    addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-                    addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
-                  } else {
-                    addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-                  }
-                }
-                this.finishStopScript(sessionId);
-                resolve();
-              }, 500);
-            }, 2000); // Reduced from 10 seconds to 2 seconds for faster cleanup
+          // macOS/Unix: First, try SIGTERM for graceful shutdown
+          addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${process.pid} and its group]`, 'System');
+
+          try {
+            process.kill('SIGTERM');
+          } catch (error) {
+            console.warn('SIGTERM failed:', error);
           }
+
+          // Kill the entire process group using negative PID
+          exec(`kill -TERM -${process.pid}`, (error) => {
+            if (error) {
+              console.warn(`Error sending SIGTERM to process group: ${error.message}`);
+            }
+          });
+
+          // Give processes a chance to clean up gracefully
+          addSessionLog(sessionId, 'info', '[Waiting 10 seconds for graceful shutdown...]', 'System');
+
+          // Use a shorter timeout for faster cleanup
+          setTimeout(() => {
+            addSessionLog(sessionId, 'info', '\n[Grace period expired, using forceful termination]', 'System');
+
+            // Now forcefully kill the main process
+            try {
+              process.kill('SIGKILL');
+              addSessionLog(sessionId, 'info', `[Sent SIGKILL to process ${process.pid}]`, 'System');
+            } catch (error) {
+              // Process might already be dead
+              addSessionLog(sessionId, 'info', `[Process ${process.pid} already terminated]`, 'System');
+            }
+
+            // Kill the process group with SIGKILL
+            exec(`kill -9 -${process.pid}`, (error) => {
+              if (error) {
+                console.warn(`Error sending SIGKILL to process group: ${error.message}`);
+                addSessionLog(sessionId, 'warn', `[Warning: Could not kill process group: ${error.message}]`, 'System');
+              } else {
+                addSessionLog(sessionId, 'info', `[Sent SIGKILL to process group ${process.pid}]`, 'System');
+              }
+            });
+
+            // Kill all known descendants individually to be sure
+            let killedCount = 0;
+            let alreadyDeadCount = 0;
+
+            descendantPids.forEach(pid => {
+              exec(`kill -9 ${pid}`, (error) => {
+                if (error) {
+                  alreadyDeadCount++;
+                } else {
+                  killedCount++;
+                }
+
+                // Report results after processing all descendants
+                if (killedCount + alreadyDeadCount === descendantPids.length) {
+                  if (killedCount > 0) {
+                    addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
+                  }
+                  if (alreadyDeadCount > 0) {
+                    addSessionLog(sessionId, 'info', `[${alreadyDeadCount} process${alreadyDeadCount > 1 ? 'es' : ''} had already terminated gracefully]`, 'System');
+                  }
+                }
+              });
+            });
+
+            // Final cleanup attempt using pkill
+            exec(`pkill -9 -P ${process.pid}`, () => {
+              // Ignore errors - processes might already be dead
+            });
+
+            // Check for zombie processes after a short delay
+            setTimeout(() => {
+              if (process.pid) {
+                const remainingPids = this.getAllDescendantPids(process.pid);
+                if (remainingPids.length > 0) {
+                  addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
+                  addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
+                } else {
+                  addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
+                }
+              }
+              this.finishStopScript(sessionId);
+              resolve();
+            }, 500);
+          }, 2000); // Reduced from 10 seconds to 2 seconds for faster cleanup
         } else {
           // No process PID
           this.finishStopScript(sessionId);
