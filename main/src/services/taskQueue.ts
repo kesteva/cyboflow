@@ -9,7 +9,6 @@ import type { ExecutionTracker } from './executionTracker';
 import { formatForDisplay } from '../utils/timestampUtils';
 import * as os from 'os';
 import { panelManager } from './panelManager';
-import { getCodexModelConfig } from '../../../shared/types/models';
 import type { Session } from '../types/session';
 import type { ToolPanel } from '../../../shared/types/panels';
 import type { DatabaseService } from '../database/database';
@@ -34,17 +33,9 @@ interface CreateSessionJob {
   folderId?: string;
   baseBranch?: string;
   autoCommit?: boolean;
-  toolType?: 'claude' | 'codex' | 'none';
+  toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
-  codexConfig?: {
-    model?: string;
-    modelProvider?: string;
-    approvalPolicy?: 'auto' | 'manual';
-    sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-    webSearch?: boolean;
-    thinkingLevel?: 'low' | 'medium' | 'high';
-  };
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
@@ -151,7 +142,7 @@ export class TaskQueue {
     const sessionConcurrency = isLinux ? 1 : 5;
     
     this.sessionQueue.process(sessionConcurrency, async (job) => {
-      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, autoCommit, toolType, codexConfig, claudeConfig } = job.data;
+      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, autoCommit, toolType, claudeConfig } = job.data;
       const { sessionManager, worktreeManager, claudeCodeManager } = this.options;
 
       // Processing session creation job - verbose debug logging removed
@@ -231,11 +222,6 @@ export class TaskQueue {
           job.data.commitModeSettings
         );
         
-        // Attach codexConfig to the session object for the panel creation in events.ts
-        if (codexConfig) {
-          (session as Session & { codexConfig?: typeof codexConfig }).codexConfig = codexConfig;
-        }
-        
         // Attach claudeConfig to the session object for the panel creation in events.ts
         if (claudeConfig) {
           (session as Session & { claudeConfig?: typeof claudeConfig }).claudeConfig = claudeConfig;
@@ -289,61 +275,9 @@ export class TaskQueue {
 
         // Only start an AI panel if there's a prompt
         if (prompt && prompt.trim().length > 0) {
-          const resolvedToolType: 'claude' | 'codex' | 'none' = toolType || 'claude';
+          const resolvedToolType: 'claude' | 'none' = toolType === 'none' ? 'none' : 'claude';
 
-          if (resolvedToolType === 'codex') {
-            // Update status message
-            sessionManager.updateSessionStatus(session.id, 'initializing', 'Starting Codex...');
-
-            // Wait for the Codex panel to be created by the session-created event handler in events.ts
-            let codexPanel = null;
-            let attempts = 0;
-            const maxAttempts = 15;
-
-            while (!codexPanel && attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 200));
-              const { panelManager } = require('./panelManager');
-              const existingPanels = panelManager.getPanelsForSession(session.id);
-              codexPanel = existingPanels.find((p: ToolPanel) => p.type === 'codex');
-              attempts++;
-            }
-
-            if (codexPanel) {
-              const { codexPanelManager } = require('../ipc/codexPanel');
-              if (codexPanelManager) {
-                try {
-                  // Record initial prompt in panel conversation history
-                  try {
-                    sessionManager.addPanelConversationMessage(codexPanel.id, 'user', prompt);
-                  } catch (e) {
-                    console.warn('[TaskQueue] Failed to add initial panel conversation message:', e);
-                  }
-
-                  await codexPanelManager.startPanel(
-                    codexPanel.id,
-                    session.worktreePath,
-                    prompt,
-                    codexConfig?.model,
-                    codexConfig?.modelProvider,
-                    codexConfig?.approvalPolicy,
-                    codexConfig?.sandboxMode,
-                    codexConfig?.webSearch,
-                    codexConfig?.thinkingLevel
-                  );
-                } catch (error) {
-                  console.error('[TaskQueue] Failed to start Codex via panel manager:', error);
-                  throw new Error(`Failed to start Codex panel: ${error}`);
-                }
-              } else {
-                console.error('[TaskQueue] CodexPanelManager not available, cannot start Codex');
-                throw new Error('Codex panel manager not available');
-              }
-            } else {
-              console.error(`[TaskQueue] No Codex panel found for session ${session.id} after ${maxAttempts} attempts`);
-              console.error('[TaskQueue] This indicates the panel creation failed in events.ts.');
-              throw new Error('No Codex panel found - cannot start Codex without a real panel ID');
-            }
-          } else if (resolvedToolType === 'claude') {
+          if (resolvedToolType === 'claude') {
             // Update status message
             sessionManager.updateSessionStatus(session.id, 'initializing', 'Starting Claude Code...');
 
@@ -407,7 +341,7 @@ export class TaskQueue {
           }
         } else {
           // No prompt provided - update session status to stopped if toolType is 'none'
-          const resolvedToolType: 'claude' | 'codex' | 'none' = toolType || 'claude';
+          const resolvedToolType: 'claude' | 'none' = toolType === 'none' ? 'none' : 'claude';
           if (resolvedToolType === 'none') {
             console.log(`[TaskQueue] Session ${session.id} has no prompt and no AI tool, marking as stopped`);
             await sessionManager.updateSession(session.id, { status: 'stopped', statusMessage: undefined });
@@ -490,17 +424,9 @@ export class TaskQueue {
     projectId?: number,
     baseBranch?: string,
     autoCommit?: boolean,
-    toolType?: 'claude' | 'codex' | 'none',
+    toolType?: 'claude' | 'none',
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
     commitModeSettings?: string,
-    codexConfig?: {
-      model?: string;
-      modelProvider?: string;
-      approvalPolicy?: 'auto' | 'manual';
-      sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-      webSearch?: boolean;
-      thinkingLevel?: 'low' | 'medium' | 'high';
-    },
     claudeConfig?: {
       model?: string;
       permissionMode?: 'approve' | 'ignore';
@@ -558,7 +484,7 @@ export class TaskQueue {
     for (let i = 0; i < count; i++) {
       // Use the generated base name if no template was provided
       const templateToUse = worktreeTemplate || generatedBaseName || '';
-      jobs.push(this.sessionQueue.add({ prompt, worktreeTemplate: templateToUse, index: i, permissionMode, projectId, folderId, baseBranch, autoCommit, toolType, commitMode, commitModeSettings, codexConfig, claudeConfig }));
+      jobs.push(this.sessionQueue.add({ prompt, worktreeTemplate: templateToUse, index: i, permissionMode, projectId, folderId, baseBranch, autoCommit, toolType, commitMode, commitModeSettings, claudeConfig }));
     }
     return Promise.all(jobs);
   }

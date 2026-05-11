@@ -8,8 +8,6 @@ export interface AppConfig {
   runScript?: string[];
   // Custom claude executable path (for when it's not in PATH)
   claudeExecutablePath?: string;
-  // Custom codex executable path (for when it's not in PATH)  
-  codexExecutablePath?: string;
   // Permission mode for all sessions
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default model for new sessions
@@ -36,22 +34,14 @@ export interface AppConfig {
   // Session creation preferences
   sessionCreationPreferences?: {
     sessionCount?: number;
-    toolType?: 'claude' | 'codex' | 'none';
+    toolType?: 'claude' | 'none';
     selectedTools?: {
       claude?: boolean;
-      codex?: boolean;
     };
     claudeConfig?: {
       model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
       permissionMode?: 'ignore' | 'approve';
       ultrathink?: boolean;
-    };
-    codexConfig?: {
-      model?: string;
-      modelProvider?: string;
-      approvalPolicy?: 'auto' | 'manual';
-      sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-      webSearch?: boolean;
     };
     showAdvanced?: boolean;
     baseBranch?: string;
@@ -76,7 +66,6 @@ export interface UpdateConfigRequest {
   anthropicApiKey?: string;
   openaiApiKey?: string;
   claudeExecutablePath?: string;
-  codexExecutablePath?: string;
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
@@ -95,22 +84,14 @@ export interface UpdateConfigRequest {
   additionalPaths?: string[];
   sessionCreationPreferences?: {
     sessionCount?: number;
-    toolType?: 'claude' | 'codex' | 'none';
+    toolType?: 'claude' | 'none';
     selectedTools?: {
       claude?: boolean;
-      codex?: boolean;
     };
     claudeConfig?: {
       model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
       permissionMode?: 'ignore' | 'approve';
       ultrathink?: boolean;
-    };
-    codexConfig?: {
-      model?: string;
-      modelProvider?: string;
-      approvalPolicy?: 'auto' | 'manual';
-      sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-      webSearch?: boolean;
     };
     showAdvanced?: boolean;
     baseBranch?: string;

@@ -209,7 +209,7 @@ export const SessionView = memo(() => {
       await panelApi.setActivePanel(activeSession.id, panel.id);
 
       // Clear unviewed content flag when panel is viewed (for AI panels)
-      if (panel.type === 'claude' || panel.type === 'codex') {
+      if (panel.type === 'claude') {
         const customState = panel.state?.customState as { hasUnviewedContent?: boolean; panelStatus?: string } | undefined;
         if (customState?.hasUnviewedContent || customState?.panelStatus === 'completed_unviewed') {
           try {
@@ -250,29 +250,9 @@ export const SessionView = memo(() => {
     async (type: ToolPanelType) => {
       if (!activeSession) return;
       
-      // For Codex panels, include the last selected model and thinking level in initial state
-      let initialState: { customState?: unknown } | undefined = undefined;
-      if (type === 'codex') {
-        const savedModel = localStorage.getItem('codex.lastSelectedModel');
-        const savedThinkingLevel = localStorage.getItem('codex.lastSelectedThinkingLevel');
-        
-        initialState = {
-          customState: {
-            codexConfig: {
-              model: savedModel || 'auto',
-              modelProvider: 'openai',
-              thinkingLevel: savedThinkingLevel || 'medium',
-              sandboxMode: 'workspace-write',
-              webSearch: false
-            }
-          }
-        };
-      }
-      
       const newPanel = await panelApi.createPanel({
         sessionId: activeSession.id,
-        type,
-        initialState
+        type
       });
       
       // Immediately add the panel and set it as active
@@ -503,7 +483,7 @@ export const SessionView = memo(() => {
             <SessionProvider session={activeSession} gitBranchActions={branchActions} isMerging={hook.isMerging}>
               {sessionPanels.map(panel => {
                 const isActive = panel.id === currentActivePanel.id;
-                const shouldKeepAlive = ['terminal', 'claude', 'codex'].includes(panel.type);
+                const shouldKeepAlive = ['terminal', 'claude'].includes(panel.type);
                 
                 // Only render if active OR if it's a panel type that needs to stay alive
                 if (!isActive && !shouldKeepAlive) {

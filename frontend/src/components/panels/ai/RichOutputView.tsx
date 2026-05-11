@@ -10,8 +10,6 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-import { CodexMessageTransformer } from './transformers/CodexMessageTransformer';
-
 // Local interface for combining user prompts with output messages
 interface UserPromptMessage {
   type: 'user';
@@ -134,7 +132,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
   }, []);
 
   const settings = propsSettings || localSettings;
-  const isCodexTransformer = useMemo(() => messageTransformer instanceof CodexMessageTransformer, [messageTransformer]);
+  const isCodexTransformer = false; // Codex removed - always false
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -185,34 +183,8 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
     try {
       setError(null);
       
-      // For Codex panels, use the getOutputsHandler to get outputs
-      if (getOutputsHandler.includes('codex')) {
-        const existingOutputs = await window.electron?.invoke(getOutputsHandler, panelId, 1000);
-        if (existingOutputs && existingOutputs.length > 0) {
-          const transformedMessages = messageTransformer.transform(existingOutputs);
-          setMessages(transformedMessages);
-          
-          // Auto-expand sub-agent (Task) tools for Codex too
-          const newSubAgentIds = new Set<string>();
-          transformedMessages.forEach(msg => {
-            msg.segments.forEach(seg => {
-              if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
-                newSubAgentIds.add(seg.tool.id);
-              }
-            });
-          });
-          
-          // Add sub-agent IDs to expanded tools
-          if (newSubAgentIds.size > 0) {
-            setExpandedTools(prev => {
-              const next = new Set(prev);
-              newSubAgentIds.forEach(id => next.add(id));
-              return next;
-            });
-          }
-        }
-      } else {
-        // For Claude panels, use the existing API calls
+      {
+        // Use the existing API calls
         const [conversationResponse, outputResponse] = await Promise.all([
           API.panels.getConversationMessages(panelId),
           API.panels.getJsonMessages(panelId)
@@ -303,29 +275,18 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         // Debounce message reloading to prevent excessive re-renders
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-          // For both Claude and Codex, reload all messages from database
-          // This ensures consistency and avoids duplicates
+          // Reload all messages from database to ensure consistency
           loadMessagesRef.current?.();
         }, 500); // Wait 500ms after last event
       }
     };
     
-    // Listen for the appropriate event based on the panel type
-    if (outputEventName.includes('codex')) {
-      // Only register Electron IPC listener for Codex
-      window.electron?.on(outputEventName, handleOutputAvailable);
-      // Don't also add a window event listener - this causes duplicate handling
-    } else {
-      window.addEventListener('session-output-available', handleOutputAvailable as EventListener);
-    }
-    
+    // Listen for session output events
+    window.addEventListener('session-output-available', handleOutputAvailable as EventListener);
+
     return () => {
       clearTimeout(debounceTimer);
-      if (outputEventName.includes('codex')) {
-        window.electron?.off(outputEventName, handleOutputAvailable);
-      } else {
-        window.removeEventListener('session-output-available', handleOutputAvailable as EventListener);
-      }
+      window.removeEventListener('session-output-available', handleOutputAvailable as EventListener);
     };
   }, [panelId, outputEventName]); // Remove messageTransformer from dependencies to avoid re-registering
 
@@ -776,7 +737,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
       const toString = (value: unknown): string => typeof value === 'string' ? value : '';
       
       const initialPrompt = toString(sessionInfo.initialPrompt || sessionInfo.initial_prompt);
-      const command = toString(sessionInfo.codexCommand || sessionInfo.claudeCommand || sessionInfo.codex_command);
+      const command = toString(sessionInfo.claudeCommand);
       const worktreePath = toString(sessionInfo.worktreePath || sessionInfo.worktree_path);
       const model = toString(sessionInfo.model);
       const provider = toString(sessionInfo.modelProvider || sessionInfo.model_provider);

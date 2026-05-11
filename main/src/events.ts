@@ -3,10 +3,9 @@ import { execSync } from './utils/commandExecutor';
 import type { AppServices } from './ipc/types';
 import type { VersionInfo } from './services/versionChecker';
 import { addSessionLog } from './ipc/logs';
-import { getCodexModelConfig } from '../../shared/types/models';
 import { panelManager } from './services/panelManager';
 import { terminalPanelManager } from './services/terminalPanelManager';
-import type { ToolPanel, CodexPanelState, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
+import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
 import type { ClaudePanelManager } from './services/panels/claude/claudePanelManager';
 import type { SessionOutput } from './types/session';
 import {
@@ -39,15 +38,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   if (analyticsManager) {
     panelManager.setAnalyticsManager(analyticsManager);
     terminalPanelManager.setAnalyticsManager(analyticsManager);
-  }
-
-  let codexCliManager: AbstractCliManager | undefined;
-  try {
-    const { codexManager: resolvedCodexManager } = require('./ipc/codexPanel');
-    codexCliManager = resolvedCodexManager;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    (logger || console).warn?.(`[Main] Unable to load Codex manager for lifecycle events: ${message}`);
   }
 
   let cachedClaudePanelManager: ClaudePanelManager | undefined;
@@ -325,7 +315,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   };
 
   /**
-   * Update the status of an AI panel (claude/codex) and notify frontend
+   * Update the status of an AI panel and notify frontend
    */
   const updateAIPanelStatus = async (
     panelId: string,
@@ -339,8 +329,8 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         return;
       }
 
-      // Only update status for AI panels (claude/codex)
-      if (panel.type !== 'claude' && panel.type !== 'codex') {
+      // Only update status for AI panels (claude)
+      if (panel.type !== 'claude') {
         return;
       }
 
@@ -491,16 +481,13 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
 
   const attachProcessLifecycleHandlers = (
     manager: AbstractCliManager | undefined,
-    tool: 'claude' | 'codex'
+    tool: 'claude'
   ) => {
     if (!manager) {
-      if (tool === 'codex') {
-        (logger || console).warn?.('[Main] Codex manager not available; skipping lifecycle handlers');
-      }
       return;
     }
 
-    const toolLabel = tool === 'claude' ? 'Claude Code' : 'Codex';
+    const toolLabel = 'Claude Code';
 
     manager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
       const validation = panelId
@@ -581,7 +568,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
 
         // Check if ALL panels for this session have stopped before updating session status
         const sessionPanels = panelManager.getPanelsForSession(sessionId);
-        const aiPanels = sessionPanels.filter((p: ToolPanel) => p.type === 'claude' || p.type === 'codex');
+        const aiPanels = sessionPanels.filter((p: ToolPanel) => p.type === 'claude');
 
         // Check if any AI panel is still running
         const hasRunningPanels = aiPanels.some((p: ToolPanel) => {
@@ -633,7 +620,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   };
 
   attachProcessLifecycleHandlers(claudeCodeManager, 'claude');
-  attachProcessLifecycleHandlers(codexCliManager, 'codex');
 
   // Listen to sessionManager events and broadcast to renderer
   sessionManager.on('session-created', async (session) => {
@@ -648,88 +634,46 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     
     // Auto-create AI panel for sessions with prompts
     if (session.prompt && typeof session.prompt === 'string' && session.prompt.trim().length > 0) {
-      // Decide whether to create a Codex or Claude panel based on the explicit tool type when available
-      const inferredToolType: 'claude' | 'codex' | 'none' = session.toolType
-        ? session.toolType
-        : (session.model && getCodexModelConfig(session.model)) ? 'codex' : 'claude';
+      const inferredToolType: 'claude' | 'none' = session.toolType === 'none' ? 'none' : 'claude';
 
-      if (inferredToolType === 'none') {
-        // Skip panel creation for sessions with no tool configured
-      } else {
-        const panelType = inferredToolType === 'codex' ? 'codex' : 'claude';
-        const panelTitle = inferredToolType === 'codex' ? 'Codex' : 'Claude';
-
+      if (inferredToolType !== 'none') {
         try {
-          // Prepare initial custom state for the panel
-          let customState: CodexPanelState | ClaudePanelState | undefined = undefined;
-          if (panelType === 'codex') {
-            const codexConfig = session.codexConfig || {};
-            customState = {
-              codexConfig: {
-                model: codexConfig.model || 'auto',
-                thinkingLevel: codexConfig.thinkingLevel || 'medium',
-                sandboxMode: codexConfig.sandboxMode || 'workspace-write',
-                webSearch: codexConfig.webSearch || false
-              },
-              modelProvider: codexConfig.modelProvider || 'openai',
-              approvalPolicy: codexConfig.approvalPolicy || 'auto',
-              sandboxMode: codexConfig.sandboxMode || 'workspace-write',
-              webSearch: codexConfig.webSearch || false
-            };
-          } else if (panelType === 'claude') {
-            const claudeConfig = session.claudeConfig || {};
-            customState = {
-              permissionMode: claudeConfig.permissionMode || 'ignore',
-              model: claudeConfig.model || 'auto'
-            };
-          }
-          
+          // Prepare initial custom state for the Claude panel
+          const claudeConfig = session.claudeConfig || {};
+          const customState: ClaudePanelState = {
+            permissionMode: claudeConfig.permissionMode || 'ignore',
+            model: claudeConfig.model || 'auto'
+          };
+
           const panel = await panelManager.createPanel({
             sessionId: session.id,
-            type: panelType,
-            title: panelTitle,
+            type: 'claude',
+            title: 'Claude',
             initialState: customState
           });
-          
+
           // Ensure the panel is set as active
           await panelManager.setActivePanel(session.id, panel.id);
-          
-          // For Codex panels, also save the config to the settings column for persistence
-          if (panelType === 'codex' && customState && 'codexConfig' in customState && customState.codexConfig) {
-            databaseService.updatePanelSettings(panel.id, customState.codexConfig);
-          }
 
-          // For Claude panels, also save the config to the settings column for persistence
-          if (panelType === 'claude' && customState && 'model' in customState) {
-            const claudeState = customState as ClaudePanelState;
-            databaseService.updatePanelSettings(panel.id, {
-              model: claudeState.model,
-              permissionMode: claudeState.permissionMode
-            });
-          }
+          // Save the config to the settings column for persistence
+          databaseService.updatePanelSettings(panel.id, {
+            model: customState.model,
+            permissionMode: customState.permissionMode
+          });
 
-          // Register with the appropriate panel manager
+          // Register with the Claude panel manager
           try {
-            if (panelType === 'codex') {
-              const { codexPanelManager } = require('./ipc/codexPanel');
-              if (codexPanelManager) {
-                codexPanelManager.registerPanel(panel.id, session.id, panel.state.customState);
-              } else {
-                console.warn('[Events] CodexPanelManager not initialized yet; panel will register later');
-              }
+            const { claudePanelManager } = require('./ipc/claudePanel');
+            if (claudePanelManager) {
+              claudePanelManager.registerPanel(panel.id, session.id, panel.state.customState);
             } else {
-              const { claudePanelManager } = require('./ipc/claudePanel');
-              if (claudePanelManager) {
-                claudePanelManager.registerPanel(panel.id, session.id, panel.state.customState);
-              } else {
-                console.warn('[Events] ClaudePanelManager not initialized yet; panel will register later');
-              }
+              console.warn('[Events] ClaudePanelManager not initialized yet; panel will register later');
             }
           } catch (err) {
-            console.error(`[Events] Failed to register ${panelType} panel with its manager:`, err);
+            console.error('[Events] Failed to register Claude panel with its manager:', err);
           }
         } catch (error) {
-          console.error(`[Events] Failed to auto-create ${panelType} panel for session ${session.id}:`, error);
+          console.error(`[Events] Failed to auto-create Claude panel for session ${session.id}:`, error);
         }
       }
     }

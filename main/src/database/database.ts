@@ -759,12 +759,6 @@ export class DatabaseService {
       this.db.prepare("ALTER TABLE sessions ADD COLUMN tool_type TEXT DEFAULT 'claude'").run();
       console.log('[Database] Added tool_type column to sessions table');
 
-      // Best effort: mark known Codex sessions (removed model-based detection)
-      try {
-        // No longer detecting based on model since it's panel-level now
-      } catch (error) {
-        // Migration error handling removed - empty try/catch serves no purpose
-      }
     }
 
     // Add user_preferences table to store all user preferences
