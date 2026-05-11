@@ -15,7 +15,6 @@ import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
 import { ConfigManager } from './services/configManager';
 import { WorktreeManager } from './services/worktreeManager';
-import { WorktreeNameGenerator } from './services/worktreeNameGenerator';
 import { GitDiffManager } from './services/gitDiffManager';
 import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
@@ -76,7 +75,6 @@ let defaultCliManager: AbstractCliManager;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
-let worktreeNameGenerator: WorktreeNameGenerator;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
 let permissionIpcServer: PermissionIpcServer | null;
@@ -766,7 +764,6 @@ async function initializeServices() {
   gitDiffManager = new GitDiffManager(logger, analyticsManager);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
-  worktreeNameGenerator = new WorktreeNameGenerator(configManager);
   runCommandManager = new RunCommandManager(databaseService);
 
   // Initialize version checker
@@ -780,7 +777,6 @@ async function initializeServices() {
     claudeCodeManager: defaultCliManager, // Use default CLI manager for backward compatibility
     gitDiffManager,
     executionTracker,
-    worktreeNameGenerator,
     getMainWindow: () => mainWindow
   });
 
@@ -795,7 +791,6 @@ async function initializeServices() {
     gitDiffManager,
     gitStatusManager,
     executionTracker,
-    worktreeNameGenerator,
     runCommandManager,
     versionChecker,
     stravuAuthManager,
