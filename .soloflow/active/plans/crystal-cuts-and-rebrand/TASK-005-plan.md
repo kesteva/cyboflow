@@ -7,6 +7,7 @@ files_owned:
   - frontend/src/components/panels/PanelTabBar.tsx
   - frontend/src/components/SessionView.tsx
   - frontend/src/components/ProjectView.tsx
+  - frontend/src/types/panelComponents.ts
 files_readonly:
   - frontend/src/services/panelApi.ts
   - frontend/src/stores/panelStore.ts
