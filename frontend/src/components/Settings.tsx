@@ -40,7 +40,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
-  const [platform, setPlatform] = useState<string>('darwin');
   const [enableCrystalFooter, setEnableCrystalFooter] = useState(true);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
@@ -61,8 +60,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   useEffect(() => {
     if (isOpen) {
       fetchConfig();
-      // Get platform for PATH help text
-      window.electronAPI.getPlatform().then(setPlatform);
     }
   }, [isOpen]);
 
@@ -453,22 +450,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   label=""
                   value={additionalPathsText}
                   onChange={(e) => setAdditionalPathsText(e.target.value)}
-                  placeholder={
-                    platform === 'win32' 
-                      ? "C:\\tools\\bin\nC:\\Program Files\\MyApp\n%USERPROFILE%\\bin"
-                      : platform === 'darwin'
-                      ? "/opt/homebrew/bin\n/usr/local/bin\n~/bin\n~/.cargo/bin"
-                      : "/usr/local/bin\n/opt/bin\n~/bin\n~/.local/bin"
-                  }
+                  placeholder="/opt/homebrew/bin\n/usr/local/bin\n~/bin\n~/.cargo/bin"
                   rows={4}
                   fullWidth
-                  helperText={
-                    `Enter one directory path per line. These will be added to PATH for all tools.\n${
-                      platform === 'win32' 
-                        ? "Windows: Use backslashes (C:\\path) or forward slashes (C:/path). Environment variables like %USERPROFILE% are supported."
-                        : "Unix/macOS: Use forward slashes (/path). The tilde (~) expands to your home directory."
-                    }\nNote: Changes require restarting Crystal to take full effect.`
-                  }
+                  helperText="Enter one directory path per line. These will be added to PATH for all tools.\nUse forward slashes (/path). The tilde (~) expands to your home directory.\nNote: Changes require restarting Crystal to take full effect."
                 />
               </SettingsSection>
 

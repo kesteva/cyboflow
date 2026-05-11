@@ -19,51 +19,18 @@ export async function findNodeExecutable(): Promise<string> {
 
   console.log('[NodeFinder] Node not found in PATH, trying common locations...');
 
-  // Common node installation paths on different platforms
-  const platform = os.platform();
-  const commonNodePaths: string[] = [];
-
-  if (platform === 'darwin') {
-    // macOS paths
-    commonNodePaths.push(
-      '/usr/local/bin/node',
-      '/opt/homebrew/bin/node',
-      '/opt/homebrew/opt/node/bin/node',
-      '/usr/bin/node',
-      path.join(os.homedir(), '.nvm/versions/node/*/bin/node'), // nvm
-      path.join(os.homedir(), '.volta/bin/node'), // volta
-      path.join(os.homedir(), '.asdf/shims/node'), // asdf
-      '/opt/local/bin/node', // MacPorts
-      '/sw/bin/node' // Fink
-    );
-  } else if (platform === 'linux') {
-    // Linux paths
-    commonNodePaths.push(
-      '/usr/bin/node',
-      '/usr/local/bin/node',
-      '/snap/bin/node',
-      path.join(os.homedir(), '.nvm/versions/node/*/bin/node'),
-      path.join(os.homedir(), '.volta/bin/node'),
-      path.join(os.homedir(), '.asdf/shims/node'),
-      path.join(os.homedir(), '.local/bin/node'),
-      '/opt/node/bin/node'
-    );
-  } else if (platform === 'win32') {
-    // Windows paths
-    commonNodePaths.push(
-      'C:\\Program Files\\nodejs\\node.exe',
-      'C:\\Program Files (x86)\\nodejs\\node.exe',
-      path.join(os.homedir(), 'AppData\\Roaming\\npm\\node.exe'),
-      path.join(os.homedir(), 'scoop\\apps\\nodejs\\current\\node.exe'),
-      path.join(os.homedir(), '.volta\\bin\\node.exe')
-    );
-
-    // Check nvm-windows
-    const nvmHome = process.env.NVM_HOME;
-    if (nvmHome) {
-      commonNodePaths.push(path.join(nvmHome, 'node.exe'));
-    }
-  }
+  // Common node installation paths on macOS
+  const commonNodePaths: string[] = [
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+    '/opt/homebrew/opt/node/bin/node',
+    '/usr/bin/node',
+    path.join(os.homedir(), '.nvm/versions/node/*/bin/node'), // nvm
+    path.join(os.homedir(), '.volta/bin/node'), // volta
+    path.join(os.homedir(), '.asdf/shims/node'), // asdf
+    '/opt/local/bin/node', // MacPorts
+    '/sw/bin/node' // Fink
+  ];
 
   // Check each path
   for (const nodePath of commonNodePaths) {
@@ -103,10 +70,9 @@ export async function findNodeExecutable(): Promise<string> {
     return process.execPath;
   }
 
-  // Final attempt: try which/where command
+  // Final attempt: try which command
   try {
-    const whichCommand = platform === 'win32' ? 'where' : 'which';
-    const nodePath = execSync(`${whichCommand} node`, { encoding: 'utf8' }).trim().split('\n')[0];
+    const nodePath = execSync('which node', { encoding: 'utf8' }).trim().split('\n')[0];
     if (nodePath && fs.existsSync(nodePath)) {
       console.log(`[NodeFinder] Found node using ${whichCommand}: ${nodePath}`);
       return nodePath;
