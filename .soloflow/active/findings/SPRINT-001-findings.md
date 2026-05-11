@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-001
-pending_count: 9
-last_updated: "2026-05-11T23:00:00.000Z"
+pending_count: 10
+last_updated: "2026-05-11T13:56:39Z"
 ---
 # Findings Queue
 
@@ -73,7 +73,7 @@ last_updated: "2026-05-11T23:00:00.000Z"
 - **location:** frontend/src/components/ProjectView.tsx:158, frontend/src/components/SessionView.tsx (handlePanelCreated handlers)
 - **description:** `handlePanelCreate` (creator) and `handlePanelCreated` (event listener) coexist in `ProjectView.tsx`, differing by one trailing `d`. After TASK-005, `handlePanelCreate` is only called internally by `handleGitPull`/`handleGitPush` as a fallback when no Claude panel exists, and `handlePanelCreated` is the `panel:created` IPC subscriber. The near-identical names are a readability hazard — a future maintainer skim-reading the file may confuse the imperative creator with the past-tense event handler. In SessionView, after this task removed `handlePanelCreate` entirely, only `handlePanelCreated` remains, so the collision is localized to ProjectView.
 - **suggested_action:** Rename `handlePanelCreate` in `ProjectView.tsx` to something action-specific like `ensureClaudePanel` or `createClaudePanelFallback` (since post-TASK-005 it only ever creates a `'claude'` panel). Leaves `handlePanelCreated` as the only "panel created" identifier in the file.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-001-8
 - **source:** TASK-003 (code-reviewer)
@@ -83,7 +83,7 @@ last_updated: "2026-05-11T23:00:00.000Z"
 - **location:** main/src/services/taskQueue.ts:94-97,134-135; main/src/services/analyticsManager.ts:105,143,178; main/src/services/panels/claude/claudeCodeManager.ts:385
 - **description:** TASK-003 deleted Linux/Windows platform branches from `files_owned`, but identical `isLinux`/`os.platform() === 'linux'` patterns survive in three out-of-scope files. `taskQueue.ts` halves the session concurrency cap on Linux (1 vs 5) — dead branch on a macOS-only build. `claudeCodeManager.ts:385` (`skipDirTest = os.platform() === 'linux'`) is dead by definition. `analyticsManager.ts` legitimately needs `os.platform()` for telemetry payloads (line 105, 143, 178), so those three call sites should stay; only the branch-on-linux pattern should be removed. The executor correctly skipped these per `files_owned`; flagging for a follow-up task to finish the deletion sweep.
 - **suggested_action:** Open a follow-up cleanup task that owns `taskQueue.ts`, `claudeCodeManager.ts`, and revisits `analyticsManager.ts` (only to confirm `os.platform()` is used purely as a telemetry value, not as a branch predicate). Collapse `taskQueue.ts:94-97` to `const sessionConcurrency = 5;` and remove the duplicate at 134-135. Replace `claudeCodeManager.ts:385` `skipDirTest = os.platform() === 'linux'` with `skipDirTest = false` (or drop the guard entirely if the directory test always runs on macOS).
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-001-9
 - **source:** TASK-003 (code-reviewer)
@@ -93,4 +93,24 @@ last_updated: "2026-05-11T23:00:00.000Z"
 - **location:** main/src/utils/shellPath.ts:73-172; main/src/services/runCommandManager.ts:297-350; main/src/services/panels/cli/AbstractCliManager.ts:855-902; main/src/services/panels/cli/AbstractCliManager.ts:531; main/src/services/panels/logPanel/logsManager.ts:227-230; main/src/services/sessionManager.ts:1370-1371; main/src/ipc/app.ts:12-14 + main/src/preload.ts:181 + frontend/src/types/electron.d.ts:37
 - **description:** Cosmetic residue from TASK-003's platform-branch deletion: (a) three bare `{ ... }` block-scopes remain where the macOS arm of an `if/else if/else` once lived — they compile and behave correctly but signal "leftover collapsed branch" to readers (`shellPath.ts:73-172`, `runCommandManager.ts:297-350`, `AbstractCliManager.ts:855-902`); (b) stale comments still reference Linux/Windows: `AbstractCliManager.ts:531` says "(includes Linux-specific paths)", `logsManager.ts:227-230` and `sessionManager.ts:1370-1371` still describe "taskkill on Windows" and "process tree (Windows)" in JSDoc; (c) the `get-platform` IPC handler, its preload binding (`getPlatform`), and its frontend type declaration are now unreferenced — `grep` for `electronAPI.getPlatform` returns zero hits in `frontend/src` after this task removed the last consumer in `Settings.tsx`.
 - **suggested_action:** Flatten the three bare blocks (delete the wrapping braces, dedent the body) so the macOS code reads as the sole path. Rewrite the three stale comments to drop Linux/Windows mentions. Either remove the `get-platform` IPC handler + preload + type declaration (now dead), or keep it as documented telemetry surface — decide as part of the same cleanup.
-- **resolved_by:***
+- **resolved_by:** *
+
+## FIND-SPRINT-001-10
+- **type:** bug
+- **source:** TASK-006 (executor)
+- **severity:** medium
+- **status:** open
+- **location:** main/src/services/__tests__/gitStatusManager.test.ts
+- **description:** 19 of 23 tests in gitStatusManager.test.ts fail with TypeErrors (e.g., executeGitCommand is not a function, pollAllSessions does not exist) and assertion errors (state always returns conflict instead of clean/modified/etc). These failures existed in the Crystal baseline fork at 7a5ee42 and are unrelated to TASK-006 changes. The test file references private methods and internal state that no longer match the current gitStatusManager implementation.
+- **suggested_action:** Rewrite gitStatusManager.test.ts to match the current public API, or delete it if the service is sufficiently covered by E2E tests.
+- **resolved_by:**
+
+## FIND-SPRINT-001-11
+- **source:** TASK-006 (code-reviewer)
+- **type:** cleanup
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/assets/crystal-logo.svg (imported by Sidebar.tsx:6, Welcome.tsx:3, AnalyticsConsentDialog.tsx:3); main/src/utils/logger.ts:73,86,106; main/src/ipc/file.ts:245,248,283,286; main/src/services/worktreeManager.ts:629; main/src/utils/shellEscape.ts:31; main/src/services/panels/claude/claudeCodeManager.ts:340 ("Crystal Settings"); frontend/src/components/panels/SetupTasksPanel.tsx:81,90,459; frontend/src/App.tsx:61 ("crystal-sidebar-width" localStorage key); frontend/src/components/panels/editor/FileEditor.tsx:608; frontend/src/utils/console.ts:10; frontend/src/components/panels/claude/RichOutputWithSidebar.tsx:38; main/src/services/analyticsManager.ts:39 ("crystal_" distinctId prefix); main/src/index.ts:93-94,227,261,323,379,427,467 (debug log filenames); main/src/index.ts:114-122 (--crystal-dir CLI flag); main/src/services/panels/claude/claudeCodeManager.ts:889 (crystal-base-mcp-{id}.json filename).
+- **description:** TASK-006 completed the in-scope rebrand (appId, productName, data dir, env var, README, AboutDialog). However, with the rebrand now public, several user-visible and analytics-visible "Crystal" strings remain across the codebase outside the task's `files_owned`: (1) `frontend/src/assets/crystal-logo.svg` is still shipped and rendered by Sidebar/Welcome/AnalyticsConsentDialog with `alt="Crystal"`, contradicting the new Cyboflow logo placeholder in AboutDialog; (2) log file names (`crystal-{date}.log`, `crystal-frontend-debug.log`, `crystal-backend-debug.log`) are now Cyboflow log files with Crystal prefixes; (3) git commit co-author trailer is still `Co-Authored-By: Crystal <crystal@stravu.com>`, which will be visible on every commit Cyboflow makes; (4) localStorage keys (`crystal-sidebar-width`, `crystal.verboseLogging`, `crystal-file-tree-width`, `crystal-sidebar-collapsed-{id}`) — non-cosmetic since they persist; (5) PostHog distinctId prefix `crystal_{uuid}` will bleed Crystal-era IDs into Cyboflow analytics; (6) error message at claudeCodeManager.ts:340 reads "Or set a custom Claude executable path in Crystal Settings" — user-facing and now wrong; (7) the `--crystal-dir` CLI flag was kept as backward-compat but `CRYSTAL_DIR` env var was renamed without backward-compat, an inconsistent migration story; (8) SetupTasksPanel hard-codes `./crystal-run.sh` as the run-script filename it tells Claude to create. The plan explicitly scoped `getCrystalDirectory()`, `crystal-permissions`, and `crystal-mcp-<sessionId>.json` as deferred, but did not call out these other surfaces.
+- **suggested_action:** Open a follow-up task "Finish Crystal-string sweep" with `files_owned` covering: the three components that import `crystal-logo.svg` (swap to a Cyboflow asset or remove); `logger.ts` log filename pattern (`cyboflow-{date}.log`); `index.ts` debug log filenames (`cyboflow-frontend-debug.log`, `cyboflow-backend-debug.log`); `shellEscape.ts` + `file.ts` + `worktreeManager.ts` commit trailer (`Co-Authored-By: Cyboflow <hello@cyboflow.com>`); the four localStorage keys (with migration to read old keys on first load if state preservation matters); `analyticsManager.ts` distinctId prefix (`cyboflow_{uuid}` — keep mapping table if telemetry continuity matters); the user-visible error string at `claudeCodeManager.ts:340`; `SetupTasksPanel` run-script default. Decide whether `--crystal-dir` CLI flag should keep its backward-compat alias or also rename to `--cyboflow-dir` (consistency with the env-var migration). Update `CLAUDE.md`'s debug-log filename guidance to match.
+- **resolved_by:**
