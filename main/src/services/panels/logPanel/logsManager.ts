@@ -1,5 +1,4 @@
 import { ChildProcess, spawn, exec, execSync } from 'child_process';
-import * as os from 'os';
 import { ToolPanel, LogsPanelState } from '../../../../../shared/types/panels';
 import { panelManager } from '../../panelManager';
 import { addSessionLog, cleanupSessionLogs } from '../../../ipc/logs';
@@ -203,58 +202,21 @@ export class LogsManager {
    */
   private getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
-    const platform = os.platform();
-    
+
     try {
-      if (platform === 'win32') {
-        // On Windows, use wmic to get process tree
-        const output = execSync(`wmic process where (ParentProcessId=${parentPid}) get ProcessId`, { encoding: 'utf8' });
-        const lines = output.split('\n').filter(line => line.trim());
-        for (let i = 1; i < lines.length; i++) { // Skip header
-          const pid = parseInt(lines[i].trim());
-          if (!isNaN(pid)) {
-            descendants.push(pid);
-            // Recursively get children of this process
-            descendants.push(...this.getAllDescendantPids(pid));
-          }
-        }
-      } else {
-        // On Unix-like systems, we need different commands for macOS vs Linux
-        try {
-          // Try Linux-style first (with --ppid)
-          const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
-          const pids = output.split('\n')
-            .map(line => parseInt(line.trim()))
-            .filter(pid => !isNaN(pid));
-          
-          for (const pid of pids) {
-            descendants.push(pid);
-            // Recursively get children of this process
-            descendants.push(...this.getAllDescendantPids(pid));
-          }
-        } catch (e) {
-          // If that fails, try macOS/BSD style
-          try {
-            // Get all processes with their parent PIDs, then filter
-            const output = execSync(`ps -eo pid,ppid | awk '$2==${parentPid} {print $1}'`, { encoding: 'utf8' });
-            const pids = output.split('\n')
-              .map(line => parseInt(line.trim()))
-              .filter(pid => !isNaN(pid));
-            
-            for (const pid of pids) {
-              descendants.push(pid);
-              // Recursively get children of this process
-              descendants.push(...this.getAllDescendantPids(pid));
-            }
-          } catch (e2) {
-            // Could not find children
-          }
-        }
+      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
+      const pids = output.split('\n')
+        .map(line => parseInt(line.trim()))
+        .filter(pid => !isNaN(pid));
+
+      for (const pid of pids) {
+        descendants.push(pid);
+        descendants.push(...this.getAllDescendantPids(pid));
       }
     } catch (error) {
       // Command might fail if no children exist, which is fine
     }
-    
+
     return descendants;
   }
 
@@ -275,79 +237,33 @@ export class LogsManager {
     }
     
     const pid = childProcess.pid;
-    const platform = os.platform();
-    
+
     // Immediately remove from active processes to prevent new output
     this.activeProcesses.delete(panelId);
-    
+
     try {
       // First, get all descendant PIDs before we start killing
       const descendantPids = this.getAllDescendantPids(pid);
-      
-      if (platform === 'win32') {
-        // On Windows, use taskkill to terminate the process tree
-        await new Promise<void>((resolve) => {
-          exec(`taskkill /F /T /PID ${pid}`, (error) => {
-            if (error) {
-              console.warn(`Error killing Windows process tree: ${error.message}`);
-              
-              // Fallback: kill individual processes
-              try {
-                childProcess.kill('SIGKILL');
-              } catch (killError) {
-                console.warn('Fallback kill failed:', killError);
-              }
-              
-              // Kill descendants individually
-              let processedCount = 0;
-              const totalDescendants = descendantPids.length;
-              
-              if (totalDescendants === 0) {
-                resolve();
-                return;
-              }
-              
-              descendantPids.forEach(descPid => {
-                exec(`taskkill /F /PID ${descPid}`, () => {
-                  processedCount++;
-                  if (processedCount === totalDescendants) {
-                    resolve();
-                  }
-                });
-              });
-            } else {
-              console.log(`Successfully killed Windows process tree ${pid}`);
-              resolve();
-            }
-          });
-        });
-      } else {
-        // On Unix-like systems (macOS, Linux)
-        // When using shell: true, the actual script runs as children of the shell
-        // We need to kill the shell AND all its descendants
-        
-        // Build a list of all PIDs to kill (main + descendants)
-        const allPids = [pid, ...descendantPids];
-        
-        // Try to kill each PID with SIGKILL
-        for (const targetPid of allPids) {
-          try {
-            process.kill(targetPid, 'SIGKILL');
-          } catch (error: unknown) {
-            // Process might already be dead or inaccessible
-          }
+
+      // macOS/Unix: kill the shell AND all its descendants
+      const allPids = [pid, ...descendantPids];
+
+      for (const targetPid of allPids) {
+        try {
+          process.kill(targetPid, 'SIGKILL');
+        } catch (error: unknown) {
+          // Process might already be dead or inaccessible
         }
-        
-        // Use shell command as ultimate fallback
-        // This uses kill -9 which cannot be caught or ignored
-        const killCmd = `kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`;
-        await new Promise<void>((resolve) => {
-          exec(killCmd, () => {
-            // Ignore errors - processes might already be dead
-            resolve();
-          });
-        });
       }
+
+      // Use shell command as ultimate fallback (kill -9 cannot be caught or ignored)
+      const killCmd = `kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`;
+      await new Promise<void>((resolve) => {
+        exec(killCmd, () => {
+          // Ignore errors - processes might already be dead
+          resolve();
+        });
+      });
     } catch (error) {
       console.error('Error killing process tree:', error);
     }

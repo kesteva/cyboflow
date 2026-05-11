@@ -34,17 +34,11 @@
     "build:mac:universal": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never",
     "build:mac:x64": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --x64 --publish never",
     "build:mac:arm64": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --arm64 --publish never",
-    "build:linux": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --linux --publish never",
-    "build:linux:ci": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --linux --publish never",
     "build:mac:ci": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish never",
-    "build:win": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --win --publish never",
-    "build:win:x64": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --win --x64 --publish never",
     "inject-build-info": "node scripts/inject-build-info.js",
     "release:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish always",
     "release:mac:universal": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish always",
-    "release:linux": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --linux --publish always",
     "canary:mac": "node scripts/prepare-canary.js && CANARY_BUILD=true pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish always --config.releaseInfo.releaseNotes=\"Canary build from main branch\"",
-    "canary:linux": "node scripts/prepare-canary.js && CANARY_BUILD=true pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && electron-builder --linux --publish always --config.releaseInfo.releaseNotes=\"Canary build from main branch\"",
     "preview": "pnpm run --filter frontend preview",
     "lint": "pnpm run -r lint",
     "typecheck": "pnpm run -r typecheck",
@@ -124,67 +118,6 @@
       ],
       "artifactName": "${productName}-${version}-macOS-universal.${ext}",
       "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib,@anthropic-ai/claude-code/vendor/**/*}"
-    },
-    "linux": {
-      "target": [
-        {
-          "target": "deb",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "category": "Development",
-      "icon": "main/assets/icon.png",
-      "desktop": {
-        "entry": {
-          "Name": "Crystal",
-          "Comment": "Claude Code Commander for managing multiple Claude Code instances",
-          "Categories": "Development;IDE;",
-          "StartupWMClass": "crystal"
-        }
-      }
-    },
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "main/assets/icon.ico",
-      "artifactName": "${productName}-${version}-Windows-${arch}.${ext}"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Crystal"
-    },
-    "deb": {
-      "depends": [
-        "libgtk-3-0",
-        "libnotify4",
-        "libnss3",
-        "libxss1",
-        "libxtst6",
-        "xdg-utils",
-        "libatspi2.0-0",
-        "libuuid1"
-      ],
-      "artifactName": "${productName}-${version}-linux-${arch}.deb"
-    },
-    "appImage": {
-      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
     },
     "publish": {
       "provider": "github",

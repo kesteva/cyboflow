@@ -36,8 +36,7 @@ export class TerminalPanelManager {
     // Determine shell based on platform using the detector from the legacy terminal manager
     const shellInfo = ShellDetector.getDefaultShell();
 
-    const isLinux = process.platform === 'linux';
-    const enhancedPath = isLinux ? (process.env.PATH || '') : getShellPath();
+    const enhancedPath = getShellPath();
     
     // Create PTY process with enhanced environment
     const ptyProcess = pty.spawn(shellInfo.path, shellInfo.args || [], {
@@ -273,18 +272,7 @@ export class TerminalPanelManager {
     
   }
   
-  private async getProcessCwd(pid: number): Promise<string> {
-    // This is platform-specific and simplified
-    // In production, you'd use more robust methods
-    if (process.platform === 'darwin' || process.platform === 'linux') {
-      try {
-        const fs = require('fs').promises;
-        const cwdLink = `/proc/${pid}/cwd`;
-        return await fs.readlink(cwdLink);
-      } catch {
-        return process.cwd();
-      }
-    }
+  private async getProcessCwd(_pid: number): Promise<string> {
     return process.cwd();
   }
   
