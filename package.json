@@ -1,11 +1,11 @@
 {
-  "name": "crystal",
+  "name": "cyboflow",
   "version": "0.3.5",
   "private": true,
-  "description": "Crystal - Claude Code Commander for managing multiple Claude Code instances",
+  "description": "Cyboflow - Multi-session AI code assistant manager built on Crystal",
   "author": {
-    "name": "Crystal Team",
-    "email": "jordan@stravu.com"
+    "name": "Cyboflow",
+    "email": "hello@cyboflow.com"
   },
   "license": "MIT",
   "main": "main/dist/main/src/index.js",
@@ -75,8 +75,8 @@
     "wait-on": "^9.0.0"
   },
   "build": {
-    "appId": "com.stravu.crystal",
-    "productName": "Crystal",
+    "appId": "com.cyboflow.app",
+    "productName": "Cyboflow",
     "directories": {
       "output": "dist-electron"
     },
