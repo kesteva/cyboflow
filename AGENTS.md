@@ -31,7 +31,7 @@
 ## Security & Configuration Tips
 - Node >= `22.14`; `pnpm` >= `8`. Use `pnpm` only.
 - Secrets via `.env` (dotenv) for local dev; never commit secrets.
-- To avoid clobbering local data when hacking on Crystal with Crystal: `CRYSTAL_DIR=~/.crystal_test pnpm dev`.
+- To avoid clobbering local data when hacking on Cyboflow with Cyboflow: `CYBOFLOW_DIR=~/.cyboflow_test pnpm dev`.
 
 ## Agent Notes (for automation)
 - Keep changes minimal and scoped; prefer small patches.
