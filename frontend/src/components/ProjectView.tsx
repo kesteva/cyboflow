@@ -341,7 +341,6 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
             activePanel={currentActivePanel}
             onPanelSelect={handlePanelSelect}
             onPanelClose={handlePanelClose}
-            onPanelCreate={handlePanelCreate}
             context="project"
           />
         </SessionProvider>

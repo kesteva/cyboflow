@@ -25,7 +25,7 @@ import { panelApi } from '../services/panelApi';
 import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
 import { SessionProvider } from '../contexts/SessionContext';
-import { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
+import { ToolPanel } from '../../../shared/types/panels';
 import { Download, Upload, Code2 } from 'lucide-react';
 import type { Project } from '../types/project';
 import { devLog, renderLog } from '../utils/console';
@@ -246,23 +246,6 @@ export const SessionView = memo(() => {
     [activeSession, sessionPanels, removePanel, setActivePanelInStore]
   );
 
-  const handlePanelCreate = useCallback(
-    async (type: ToolPanelType) => {
-      if (!activeSession) return;
-      
-      const newPanel = await panelApi.createPanel({
-        sessionId: activeSession.id,
-        type
-      });
-      
-      // Immediately add the panel and set it as active
-      // The panel:created event will also fire, but addPanel checks for duplicates
-      addPanel(newPanel);
-      setActivePanelInStore(activeSession.id, newPanel.id);
-    },
-    [activeSession, addPanel, setActivePanelInStore]
-  );
-
   // Load project data for active session
   useEffect(() => {
     const loadSessionProject = async () => {
@@ -451,7 +434,6 @@ export const SessionView = memo(() => {
           activePanel={currentActivePanel}
           onPanelSelect={handlePanelSelect}
           onPanelClose={handlePanelClose}
-          onPanelCreate={handlePanelCreate}
         />
       </SessionProvider>
       
