@@ -74,7 +74,7 @@ export async function findNodeExecutable(): Promise<string> {
   try {
     const nodePath = execSync('which node', { encoding: 'utf8' }).trim().split('\n')[0];
     if (nodePath && fs.existsSync(nodePath)) {
-      console.log(`[NodeFinder] Found node using ${whichCommand}: ${nodePath}`);
+      console.log(`[NodeFinder] Found node using which: ${nodePath}`);
       return nodePath;
     }
   } catch {
