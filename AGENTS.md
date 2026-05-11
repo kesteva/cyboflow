@@ -27,7 +27,6 @@
 ## Commit & Pull Request Guidelines
 - Commits: present tense, focused, reference issues (e.g., "Fix session diff flicker, closes #123").
 - PRs must include: clear description, linked issues, testing notes; screenshots/GIFs for UI changes.
-- If dependencies change, run `pnpm run generate-notices` and commit updated `NOTICES`.
 
 ## Security & Configuration Tips
 - Node >= `22.14`; `pnpm` >= `8`. Use `pnpm` only.

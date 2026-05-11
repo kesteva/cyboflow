@@ -30,7 +30,7 @@ branding, IPC transport, and Crystal-specific features are being progressively r
 - **`shared/`** — TypeScript types shared between `main/` and `frontend/`. The contract layer.
 - **`docs/`** — Product spec, research package, reference designs, Crystal legacy docs.
 - **`tests/`** — Playwright E2E tests run against a live Electron instance.
-- **`scripts/`** — Build tooling: `inject-build-info.js`, `configure-build.js`, `generate-notices.js`.
+- **`scripts/`** — Build tooling: `inject-build-info.js`, `configure-build.js`.
 - **`build/`** — Electron Builder config files: `afterSign.js`, `entitlements.mac.plist`.
 
 ## Major Components / Layers
