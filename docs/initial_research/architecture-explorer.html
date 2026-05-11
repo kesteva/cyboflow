@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SoloFlow Architecture Explorer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  .diagram { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  .fade-in { animation: fadeIn 0.2s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  .module-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px -10px rgba(0,0,0,0.15); }
+  .module-card { transition: all 0.15s ease-out; }
+</style>
+</head>
+<body class="bg-stone-50 text-stone-900">
+
+<div id="app" class="min-h-screen p-6"></div>
+
+<script>
+const modules = {
+  pty: {
+    title: 'Concurrent PTY Sessions',
+    num: 1,
+    color: 'bg-amber-100 border-amber-400',
+    accent: 'text-amber-900',
+    summary: 'Spawn and manage parallel Claude Code processes via node-pty',
+    pathA: {
+      effort: '0.5 days',
+      keep: ['AbstractCliManager + CliManagerFactory', 'SimpleQueue (delete Bull import)', 'Zombie detection on app boot', 'Platform-specific concurrency caps (5 macOS, 1 Linux)'],
+      change: ['Collapse "panel" abstraction to "workflow run"', 'Hide multi-agent-per-session UI', 'Remove CodexCliManager if not needed'],
+    },
+    pathB: {
+      effort: '3 days',
+      decisions: ['node-pty vs @homebridge/node-pty-prebuilt-multiarch (use latter)', 'Completion gate: child exited AND stdout EOF AND parser drained', 'Concurrency primitive: p-limit (no Redis)'],
+    },
+    risks: [
+      { sev: 'high', text: 'PTY zombie processes on kill without unref/cleanup' },
+      { sev: 'high', text: 'macOS PTY exhaustion at ~256 open — cap concurrency at 8' },
+      { sev: 'med', text: 'result event missing (issue #1920) — never use as only completion signal' },
+    ],
+    diagram: `MAIN PROCESS
+├─ SessionManager (state in SQLite, EventEmitter bus)
+├─ TaskQueue (SimpleQueue)
+│   ├─ session-creation conc=5
+│   └─ session-input    conc=10
+├─ CliManagerFactory
+│   ├─ ClaudeCodeManager  ═══► node-pty #1 ═══► claude -p (stream-json)
+│   ├─ ClaudeCodeManager  ═══► node-pty #2 ═══► claude -p (stream-json)
+│   └─ ClaudeCodeManager  ═══► node-pty #N ═══► claude -p (stream-json)
+└─ Watchdog (30s grace after child exit)`,
+  },
+  extraction: {
+    title: 'Stream Extraction',
+    num: 2,
+    color: 'bg-rose-100 border-rose-400',
+    accent: 'text-rose-900',
+    summary: 'LOAD-BEARING. PTY bytes → typed events → store mutations → UI',
+    loadBearing: true,
+    pathA: {
+      effort: '2 days',
+      keep: ["Crystal's line buffering in AbstractCliManager", 'panel_outputs/messages tables (rename to raw_events)'],
+      change: ['MOVE ClaudeMessageTransformer from renderer to main/', 'Add typed ClaudeStreamEvent discriminated union', 'Add EventRouter with explicit consumer registration', 'Emit typed events on internal EventEmitter + IPC'],
+    },
+    pathB: {
+      effort: '4 days',
+      decisions: ['Lock ClaudeStreamEvent union BEFORE writing parser', 'Raw events table is append-only/immutable', 'Use Zod with .passthrough() at boundary only', 'Single EventRouter, not many listeners'],
+    },
+    risks: [
+      { sev: 'high', text: 'Partial-line bug — line buffer must carry partial bytes across data events' },
+      { sev: 'high', text: 'Schema drift — Anthropic adds event types without SemVer; use .passthrough() + unknown variant' },
+      { sev: 'high', text: 'input_json_delta accumulation — only JSON.parse on content_block_stop' },
+      { sev: 'med', text: 'Crystal parses on RENDERER side; orchestrator needs typed events too — must move' },
+    ],
+    diagram: `LAYER A: PARSING PIPELINE
+PTY stdout (bytes)
+  └─► LineBufferer (carry partial line across chunks)
+      └─► JSONParser (per-line, never throws into event loop)
+          └─► TypedEventNarrowing (discriminate on .type/.subtype)
+              └─► EventRouter (per-runId fanout)
+
+LAYER B: EVENT → UI FLOW
+EventRouter
+  ├─► raw_events table (audit trail, append-only)
+  ├─► sessionSlice.appendMessage()      [conversation panel]
+  ├─► reviewQueueSlice.maybeEnqueue()   [DIFFERENTIATOR]
+  ├─► usageSlice.accumulate()           [cost meter]
+  └─► workflowSlice.advance()           [state machine]
+
+EVENT TYPES (TypeScript discriminated union):
+  system.init | system.retry | system.compact_boundary
+  assistant.message (contains tool_use, text, thinking blocks)
+  user.message (contains tool_result blocks)
+  stream.delta (text_delta, input_json_delta, thinking_delta)
+  result (success/error, usage totals)
+  error`,
+  },
+  state: {
+    title: 'Task State Management',
+    num: 3,
+    color: 'bg-blue-100 border-blue-400',
+    accent: 'text-blue-900',
+    summary: 'SQLite schema, state machine, mutation discipline',
+    pathA: {
+      effort: '2 days',
+      keep: ['DatabaseService with better-sqlite3 + WAL', 'Migration system', 'Soft-delete/archive pattern', '~/.crystal → ~/.soloflow path convention'],
+      change: ['ADD workflows, workflow_runs, approvals, checkpoints tables', "Don't drop sessions/tool_panels — coexist", 'Add awaiting_review to status enum'],
+    },
+    pathB: {
+      effort: '3 days',
+      decisions: ['Store messages denormalized AND normalized (raw + projected)', 'Checkpoints as label on approval in v1, table in v2', 'MCP reads via orchestrator method, not direct DB', 'Hand-roll migrations (skip Drizzle/Prisma)'],
+    },
+    risks: [
+      { sev: 'high', text: 'Concurrent run mutations — use per-run p-queue({concurrency:1})' },
+      { sev: 'med', text: 'WAL recovery after crash — back up DB before schema changes' },
+      { sev: 'med', text: "Crystal schema drift — pin commit, don't merge upstream (deprecated anyway)" },
+    ],
+    diagram: `STATE MACHINE: workflow_runs.status
+  queued ──► starting ──► running ─┬──► awaiting_review ──► running (loop)
+                │                  │
+                │                  ├──► completed
+                │                  ├──► failed
+                │                  └──► canceled
+                │
+                └──► failed (start error)
+
+CORE TABLES (Path B target schema):
+  workflow_runs (id, workflow_id, project_id, worktree_path,
+                 branch_name, base_commit, status, claude_session_id,
+                 pty_pid, total_cost_usd, input/output_tokens, ...)
+  raw_events (id, run_id, ts, parsed_kind, raw_json) -- audit log
+  messages (id, run_id, role, ord, blocks_json, ts) -- normalized
+  approvals (id, run_id, kind, tool_name, tool_use_id, payload_json,
+             rationale, state, created_at, decided_at, decision_comment)
+  checkpoints (id, run_id, phase, summary, plan, created_at)
+
+MUTATION DISCIPLINE:
+  • Renderer NEVER writes DB directly
+  • Orchestrator owns all transitions
+  • BEGIN IMMEDIATE for state + approval co-writes
+  • Per-run p-queue({concurrency:1}) serializes mutations`,
+  },
+  worktree: {
+    title: 'Worktree Lifecycle',
+    num: 4,
+    color: 'bg-emerald-100 border-emerald-400',
+    accent: 'text-emerald-900',
+    summary: 'Git worktree per agent — 1:1 mapping, deterministic naming',
+    pathA: {
+      effort: '0.5 days',
+      keep: ['Entire WorktreeManager class', 'getProjectPaths cache', 'ensureUniqueNames', 'ArchiveProgressManager-style background cleanup'],
+      change: ['Replace WorktreeNameGenerator AI-naming with deterministic scheme', 'Hide rebase/squash UI in v1 (keep code)'],
+    },
+    pathB: {
+      effort: '2 days',
+      decisions: ['Parent dir: .soloflow/worktrees/ inside repo (cleaner gitignore)', 'Branch naming: soloflow/<workflow>/<runId8>', 'Auto-cleanup policy: never auto, manual archive in v1'],
+    },
+    risks: [
+      { sev: 'high', text: 'Uncommitted changes lost on --force remove — show diff, require opt-in' },
+      { sev: 'med', text: 'Branch name collision with AI naming — use deterministic instead' },
+      { sev: 'med', text: 'Orphan worktrees from manual rm -rf — weekly git worktree prune' },
+    ],
+    diagram: `WORKTREE LIFECYCLE
+on workflow_run.start:
+  1. worktreeDir = <repo>/.soloflow/worktrees/
+  2. branchName = soloflow/<workflow>/<runId8>
+  3. git worktree add -b <branchName> <path> <baseBranch>
+  4. write base_commit, branch_name, worktree_path
+
+on workflow_run.end (terminal state):
+  • completed: keep until user merges/archives
+  • canceled/failed: optional auto-remove after N days
+  • cleanup: git worktree remove --force, then git branch -D
+  • SAFETY: refuse if git status --porcelain non-empty
+
+PERIODIC: git worktree prune (weekly)
+
+MAPPING: 1 workflow run = 1 worktree = 1 branch = 1 Claude PTY`,
+  },
+  macos: {
+    title: 'macOS Wrapper',
+    num: 5,
+    color: 'bg-slate-100 border-slate-400',
+    accent: 'text-slate-900',
+    summary: 'Electron Forge build, code sign, notarize, package',
+    pathA: {
+      effort: '0.5 days',
+      keep: ['package.json build config', 'osxSign + osxNotarize setup', 'asarUnpack for native modules', 'Universal binary recipe', '@electron/rebuild postinstall'],
+      change: ['appId: com.stravu.crystal → com.soloflow.app', 'Regenerate app icon', 'Swap signing identity to your Developer ID'],
+    },
+    pathB: {
+      effort: '2 days',
+      decisions: ['Apple Developer Program ($99/yr) — already have', 'Cert setup in Xcode → Settings → Accounts (Day 1)', 'DMG vs PKG (DMG fine)'],
+    },
+    risks: [
+      { sev: 'high', text: 'Apple ID password is wrong — need app-specific password via notarytool' },
+      { sev: 'high', text: 'Universal binary breakage — module not rebuilt for both arches SIGKILLs' },
+      { sev: 'med', text: 'asar + sqlite — .node loading from asar fails silently without asarUnpack' },
+    ],
+    diagram: `BUILD PIPELINE
+pnpm build:frontend (Vite → dist/)
+pnpm build:main     (tsc → main/dist/)
+electron-builder
+  ├─ electron@latest LTS (pin yours)
+  ├─ universal: x64+arm64 single .dmg
+  ├─ asar: true
+  ├─ asarUnpack:
+  │   ├─ better-sqlite3/**
+  │   └─ node-pty-prebuilt-multiarch/**
+  ├─ osxSign: Developer ID Application
+  │   ├─ entitlements.plist
+  │   └─ hardenedRuntime: true
+  └─ osxNotarize: notarytool
+      └─ @keychain:AC_PASSWORD
+
+POSTINSTALL
+@electron/rebuild → rebuilds native modules for Electron ABI
+
+APP LIFECYCLE
+• BrowserWindow: titleBarStyle: hiddenInset, contextIsolation: true
+• Single-instance lock (focus existing window on relaunch)
+• Dock badge bound to reviewQueueSlice.queue.length
+• openAtLogin: false by default`,
+  },
+  mcp: {
+    title: 'MCP Server Lifecycle',
+    num: 6,
+    color: 'bg-violet-100 border-violet-400',
+    accent: 'text-violet-900',
+    summary: 'SoloFlowMcpServer exposes task state to Claude sessions',
+    pathA: {
+      effort: '2 days',
+      keep: ['@modelcontextprotocol/sdk dep', 'PermissionIpcServer module as template', 'Env-var injection pattern in ClaudeCodeManager'],
+      change: ['ADD main/src/mcp/soloflowMcpServer.ts (net-new)', 'ADD .mcp.json write step in worktree creation'],
+    },
+    pathB: {
+      effort: '3 days',
+      decisions: ['Transport: stdio (no port collisions, works offline)', 'V1 tool surface: list_pending_approvals, get_run, submit_checkpoint', 'Scope: per-session via SOLOFLOW_RUN_ID env'],
+    },
+    risks: [
+      { sev: 'med', text: 'Env-var leak on respawn — handshake to verify scope' },
+      { sev: 'med', text: 'Stdio buffering — same LineBufferer pattern as Claude parser' },
+      { sev: 'low', text: 'Socket name collisions across instances — random suffix' },
+    ],
+    diagram: `MCP SERVER ARCHITECTURE
+Electron main:
+  ├─ Orchestrator (workflow state)
+  └─ SoloFlowMcpServer ◄──── private socket
+                            (orchestrator callbacks)
+       │ stdio (JSON-RPC)
+       ▼
+  Claude Code child sessions
+       Each spawned with .mcp.json injected:
+       {
+         "mcpServers": {
+           "soloflow": {
+             "type": "stdio",
+             "command": "node",
+             "args": ["<resources>/mcp/server.js"],
+             "env": {
+               "SOLOFLOW_RUN_ID": "<runId>",
+               "SOLOFLOW_ORCH_SOCKET": "<path>"
+             }
+           }
+         }
+       }
+
+V1 TOOL SURFACE (minimal):
+  • soloflow_list_pending_approvals
+  • soloflow_get_run
+  • soloflow_submit_checkpoint
+  ✗ Resist adding write-state tools until v2`,
+  },
+  queue: {
+    title: 'Human Review Queue',
+    num: 7,
+    color: 'bg-fuchsia-100 border-fuchsia-400',
+    accent: 'text-fuchsia-900',
+    summary: 'LOAD-BEARING DIFFERENTIATOR. Cross-workflow approval queue with reliable pause-resume',
+    loadBearing: true,
+    pathA: {
+      effort: '3 days',
+      keep: ['PermissionIpcServer + Unix socket plumbing (gold)', 'Permission-prompt-tool integration with claude'],
+      change: ['DELETE per-panel approval modal', 'Wire socket inbound → ApprovalRouter → reviewQueueSlice', 'Build new <ReviewQueueView /> as workspace-scoped left rail'],
+    },
+    pathB: {
+      effort: '4 days',
+      decisions: ['Mechanism: permission-prompt-tool socket bridge (steal from Crystal)', 'Policy: per-workflow frontmatter in markdown', 'Sort: oldest-pending first, pinned until decided'],
+    },
+    risks: [
+      { sev: 'high', text: 'PAUSE NOT ENFORCED — must use synchronous permission-prompt-tool, never post-hoc inspection' },
+      { sev: 'high', text: 'Approval expires while held — on timeout ALSO reply on socket with deny' },
+      { sev: 'high', text: 'Silent self-deadlock between runs — detect cycles, flag stuck after 5min' },
+      { sev: 'med', text: 'UI freeze during pending storm — virtualized list, single subscription' },
+      { sev: 'med', text: 'Notification fatigue — collapse "5 pending in run X" summary card' },
+    ],
+    diagram: `END-TO-END FLOW
+
+[3 PTY runs] ──► [Parser × 3] ──► EventRouter
+                                       │
+                                       │ tool_use + policy.requiresApproval
+                                       ▼
+                              ApprovalRouter
+                                1. INSERT approvals(state=pending)
+                                2. UPDATE workflow_runs
+                                     SET status=awaiting_review
+                                3. PAUSE Claude (socket holds reply)
+                                4. Push 'approval:created' to renderer
+                                       │
+                                       ▼
+   ┌─────────── RENDERER ──────────────────┐
+   │                                        │
+   │ reviewQueueSlice.maybeEnqueue(ev)      │
+   │              │                          │
+   │              ▼                          │
+   │ <ReviewQueueView />                    │
+   │   ▸ <PendingApprovalCard /> per item   │
+   │     ▸ Approve  ─► api.approvals.approve│
+   │     ▸ Reject   ─► api.approvals.reject │
+   │     ▸ Open run ─► focus RunDetailView  │
+   │ Dock badge bound to queue.length       │
+   └────────────────┬───────────────────────┘
+                    │
+                    ▼
+              ApprovalRouter
+                BEGIN IMMEDIATE
+                  UPDATE approvals SET state, decided_at
+                  UPDATE workflow_runs SET status=running
+                COMMIT
+                Reply on socket: allow/deny
+                Claude RESUMES`,
+  },
+  ipc: {
+    title: 'IPC Layer',
+    num: 8,
+    color: 'bg-cyan-100 border-cyan-400',
+    accent: 'text-cyan-900',
+    summary: 'Orchestrator-UI boundary — extractable to backend service later',
+    pathA: {
+      effort: '1 day',
+      keep: ['Crystal IPC for inherited functionality (worktree, git, file ops)', 'electron.d.ts type contract'],
+      change: ['ADD electron-trpc + tRPC router for SoloFlow-specific routes', 'Namespace as soloflow.* to disambiguate', 'New code through tRPC; old code stays Crystal IPC'],
+    },
+    pathB: {
+      effort: '2 days',
+      decisions: ['tRPC v11 + electron-trpc/trpc-electron', 'superjson transformer for Date/BigInt', 'Subscription strategy: tRPC subs are Observables (perfect for streams)', 'Auth principal in context from Day 1'],
+    },
+    risks: [
+      { sev: 'med', text: 'IPC backpressure on stream events — throttle broadcast at 60Hz, full fidelity in raw_events' },
+      { sev: 'med', text: 'Duplicate API surfaces (Crystal IPC + tRPC) — clear naming convention' },
+      { sev: 'med', text: 'superjson serialization mismatch — configure transformer at router-create time' },
+    ],
+    diagram: `BOUNDARY DESIGN (Path B target — Path A layers tRPC alongside)
+
+shared/router.ts (tRPC v11):
+  appRouter = t.router({
+    runs: t.router({
+      list: q.query(...).output(z.array(RunSchema)),
+      start: q.input(StartRunInput).mutation(...),
+      cancel: q.input(...).mutation(...),
+    }),
+    approvals: t.router({
+      listPending: q.query(...).output(...),
+      approve: q.input(...).mutation(...),
+      reject: q.input(...).mutation(...),
+    }),
+    events: t.router({
+      onStreamEvent: q.subscription(...),  // Observable per runId
+    }),
+  });
+
+main:    createIPCHandler({ router: appRouter, windows: [win] })
+preload: process.once('loaded', exposeElectronTRPC)
+renderer:
+  trpc.approvals.listPending.useQuery()
+  trpc.events.onStreamEvent.useSubscription({runId}, ...)
+
+EXTRACTION PATH (team tier):
+  ipcLink ──swap──► httpLink + wsLink
+  Renderer call sites unchanged.
+  Orchestrator becomes a Node service.`,
+  },
+};
+
+const order = ['pty', 'extraction', 'state', 'worktree', 'macos', 'mcp', 'queue', 'ipc'];
+
+let state = { selected: null, path: 'A' };
+
+const sevClass = (sev) => sev === 'high'
+  ? 'text-red-700 bg-red-50 border-red-200'
+  : sev === 'med'
+    ? 'text-amber-700 bg-amber-50 border-amber-200'
+    : 'text-slate-600 bg-slate-50 border-slate-200';
+
+const escape = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function renderOverview() {
+  const cards = order.map(key => {
+    const m = modules[key];
+    const lb = m.loadBearing
+      ? `<span class="px-2 py-0.5 bg-rose-200 border border-rose-400 text-rose-900 text-[10px] font-bold inline-flex items-center gap-1">⚡ LOAD-BEARING</span>`
+      : '';
+    return `
+      <button data-module="${key}" class="module-card ${m.color} border-2 p-4 text-left relative cursor-pointer">
+        <div class="flex items-start justify-between gap-2 mb-2">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs uppercase tracking-wider text-stone-500">primitive ${m.num}</span>
+            ${lb}
+          </div>
+          <span class="text-stone-500 flex-shrink-0 mt-0.5">→</span>
+        </div>
+        <h2 class="text-lg font-bold ${m.accent} mb-1">${escape(m.title)}</h2>
+        <p class="text-sm text-stone-700 leading-snug">${escape(m.summary)}</p>
+        <div class="mt-3 flex gap-3 text-xs text-stone-600">
+          <span>A: <span class="font-bold text-stone-900">${escape(m.pathA.effort)}</span></span>
+          <span>B: <span class="font-bold text-stone-900">${escape(m.pathB.effort)}</span></span>
+        </div>
+      </button>`;
+  }).join('');
+
+  return `
+  <div class="max-w-6xl mx-auto fade-in">
+    <div class="mb-8">
+      <div class="text-xs uppercase tracking-wider text-stone-500 mb-1">soloflow mvp</div>
+      <h1 class="text-3xl font-bold mb-2">architecture explorer</h1>
+      <p class="text-stone-600 max-w-2xl">8 primitives that build the desktop app. click any module to see path A (fork crystal) vs path B (greenfield), inherited decisions, risks, and the architecture diagram.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
+      <div class="bg-stone-900 text-stone-100 p-4">
+        <div class="text-xs uppercase tracking-wider text-stone-400 mb-1">path A · fork crystal</div>
+        <div class="text-2xl font-bold mb-1">~11.5 days</div>
+        <div class="text-xs text-stone-400">inherits ~30k LOC of working infra; 6 of 8 primitives substantially solved</div>
+      </div>
+      <div class="bg-white border-2 border-stone-300 p-4">
+        <div class="text-xs uppercase tracking-wider text-stone-500 mb-1">path B · greenfield</div>
+        <div class="text-2xl font-bold mb-1">~23 days</div>
+        <div class="text-xs text-stone-600">cleaner seams, especially IPC/orchestrator boundary; 2× calendar time</div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${cards}</div>
+
+    <div class="mt-8 text-xs text-stone-500 border-t border-stone-200 pt-4">
+      load-bearing primitives are where the differentiator lives. extraction (#2) is the spine; review queue (#7) is the product. ship those right or nothing else matters.
+    </div>
+  </div>`;
+}
+
+function renderDetail() {
+  const m = modules[state.selected];
+  const p = state.path === 'A' ? m.pathA : m.pathB;
+
+  const leftItems = state.path === 'A'
+    ? p.keep.map(i => `<li class="flex items-start gap-2 text-stone-700"><span class="text-emerald-600 mt-0.5 flex-shrink-0">✓</span><span>${escape(i)}</span></li>`).join('')
+    : p.decisions.map(i => `<li class="flex items-start gap-2 text-stone-700"><span class="text-emerald-600 mt-0.5 flex-shrink-0">✓</span><span>${escape(i)}</span></li>`).join('');
+
+  const rightPanel = state.path === 'A'
+    ? `<div class="bg-white border border-stone-300 p-4">
+         <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-3">modify or replace</h3>
+         <ul class="space-y-2">${p.change.map(i => `<li class="flex items-start gap-2 text-stone-700"><span class="text-amber-600 mt-0.5 flex-shrink-0">→</span><span>${escape(i)}</span></li>`).join('')}</ul>
+       </div>`
+    : `<div class="bg-white border border-stone-300 p-4">
+         <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-3">why these matter</h3>
+         <p class="text-stone-700 leading-relaxed">Day-1 commits to these decisions before writing code. Locking schemas, transports, and patterns now prevents day-5 architecture rewrites.</p>
+       </div>`;
+
+  const risks = m.risks.map(r => `
+    <li class="px-3 py-2 border ${sevClass(r.sev)}">
+      <span class="text-xs font-bold uppercase mr-2">${r.sev}</span>
+      <span>${escape(r.text)}</span>
+    </li>`).join('');
+
+  const lbBadge = m.loadBearing
+    ? `<div class="flex items-center gap-1 px-3 py-1 bg-rose-200 border border-rose-400 text-rose-900 text-xs font-bold whitespace-nowrap">⚡ LOAD-BEARING</div>`
+    : '';
+
+  return `
+  <div class="max-w-5xl mx-auto fade-in">
+    <button id="back-btn" class="flex items-center gap-2 mb-6 text-stone-600 hover:text-stone-900 cursor-pointer">
+      <span>←</span> back to overview
+    </button>
+
+    <div class="${m.color} border-2 p-6 mb-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <div class="text-xs uppercase tracking-wider text-stone-500 mb-1">primitive ${m.num}</div>
+          <h1 class="text-2xl font-bold ${m.accent} mb-2">${escape(m.title)}</h1>
+          <p class="text-stone-700">${escape(m.summary)}</p>
+        </div>
+        ${lbBadge}
+      </div>
+    </div>
+
+    <div class="flex gap-2 mb-6 flex-wrap items-center">
+      <button data-path="A" class="path-btn px-4 py-2 border-2 cursor-pointer ${state.path === 'A' ? 'bg-stone-900 text-stone-50 border-stone-900' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-500'}">
+        path A · fork crystal
+      </button>
+      <button data-path="B" class="path-btn px-4 py-2 border-2 cursor-pointer ${state.path === 'B' ? 'bg-stone-900 text-stone-50 border-stone-900' : 'bg-white border-stone-300 text-stone-700 hover:border-stone-500'}">
+        path B · greenfield
+      </button>
+      <div class="ml-auto text-xs text-stone-600">
+        effort: <span class="font-bold text-stone-900">${escape(p.effort)}</span>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+      <div class="bg-white border border-stone-300 p-4">
+        <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-3">${state.path === 'A' ? 'inherit & keep' : 'day-1 decisions'}</h3>
+        <ul class="space-y-2">${leftItems}</ul>
+      </div>
+      ${rightPanel}
+    </div>
+
+    <div class="bg-stone-900 text-stone-100 p-5 mb-6 overflow-x-auto">
+      <h3 class="text-xs uppercase tracking-wider text-stone-400 mb-3">architecture</h3>
+      <pre class="diagram text-xs leading-relaxed whitespace-pre">${escape(m.diagram)}</pre>
+    </div>
+
+    <div class="bg-white border border-stone-300 p-4">
+      <h3 class="text-xs uppercase tracking-wider text-stone-500 mb-3 flex items-center gap-2">
+        <span class="text-amber-600">⚠</span> what could go wrong
+      </h3>
+      <ul class="space-y-2">${risks}</ul>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = state.selected ? renderDetail() : renderOverview();
+  bindEvents();
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+function bindEvents() {
+  document.querySelectorAll('[data-module]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.selected = btn.dataset.module;
+      render();
+    });
+  });
+
+  const back = document.getElementById('back-btn');
+  if (back) back.addEventListener('click', () => { state.selected = null; render(); });
+
+  document.querySelectorAll('.path-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.path = btn.dataset.path;
+      render();
+    });
+  });
+}
+
+render();
+</script>
+</body>
+</html>
