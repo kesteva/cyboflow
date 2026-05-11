@@ -244,13 +244,9 @@ export class TerminalPanelManager {
     let cwd = (panel.state.customState && 'cwd' in panel.state.customState) ? panel.state.customState.cwd : undefined;
     cwd = cwd || process.cwd();
     try {
-      // Try to get CWD from process (platform-specific)
-      if (process.platform !== 'win32') {
-        const pid = terminal.pty.pid;
-        if (pid) {
-          // This is a simplified approach - in production you might use platform-specific methods
-          cwd = await this.getProcessCwd(pid);
-        }
+      const pid = terminal.pty.pid;
+      if (pid) {
+        cwd = await this.getProcessCwd(pid);
       }
     } catch (error) {
       console.warn(`[TerminalPanelManager] Could not get CWD for terminal ${panelId}:`, error);
