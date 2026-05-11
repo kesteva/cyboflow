@@ -6,14 +6,14 @@ import type { ToolPanelType, ToolPanel, BaseAIPanelState } from '../../../shared
 
 export interface AIPanelHandlerConfig {
   panelType: ToolPanelType;
-  panelTypeName: string; // e.g., 'Claude', 'Codex'
-  ipcPrefix: string; // e.g., 'claude-panels', 'codexPanel'
+  panelTypeName: string; // e.g., 'Claude'
+  ipcPrefix: string; // e.g., 'claude-panels'
   defaultTitle?: string;
 }
 
 /**
  * Base class for AI panel IPC handlers
- * Provides common functionality for Claude, Codex, and other AI panels
+ * Provides common functionality for Claude AI panels
  */
 export abstract class BaseAIPanelHandler {
   protected panelManager: AbstractAIPanelManager;
