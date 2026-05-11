@@ -469,6 +469,10 @@ export class WorktreeManager {
     }
   }
 
+  // @cyboflow-hidden: The following methods (rebaseMainIntoWorktree, abortRebase,
+  // squashAndMergeWorktreeToMain, mergeWorktreeToMain) are intentionally preserved but
+  // not exposed in the v1 UI. The corresponding UI entry points have been removed from
+  // SessionView.tsx. Re-enable by adding branch action entries back in the frontend.
   async rebaseMainIntoWorktree(worktreePath: string, mainBranch: string): Promise<void> {
     return await withLock(`git-rebase-${worktreePath}`, async () => {
       const executedCommands: string[] = [];
