@@ -11,7 +11,7 @@ import { useSessionView } from '../hooks/useSessionView';
 import { SessionHeader } from './session/SessionHeader';
 // import { SessionInputWithImages } from './panels/claude/ClaudeInputWithImages'; // Removed - now in panels
 import { GitErrorDialog } from './session/GitErrorDialog';
-import { CommitMessageDialog } from './session/CommitMessageDialog';
+// @cyboflow-hidden import { CommitMessageDialog } from './session/CommitMessageDialog'; -- dialog is unreachable in v1 (rebase/squash UI entry points hidden)
 import { FolderArchiveDialog } from './session/FolderArchiveDialog';
 // import { FileEditor } from './panels/editor/FileEditor'; // Removed - now in panels
 import { ProjectView } from './ProjectView';
@@ -26,7 +26,7 @@ import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
 import { SessionProvider } from '../contexts/SessionContext';
 import { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
-import { Download, Upload, GitMerge, Code2 } from 'lucide-react';
+import { Download, Upload, Code2 } from 'lucide-react';
 import type { Project } from '../types/project';
 import { devLog, renderLog } from '../utils/console';
 
@@ -379,27 +379,6 @@ export const SessionView = memo(() => {
       }
     ] : [
       {
-        id: 'rebase-from-main',
-        label: `Rebase from ${hook.gitCommands?.mainBranch || 'main'}`,
-        icon: GitMerge,
-        onClick: hook.handleRebaseMainIntoWorktree,
-        disabled: hook.isMerging || activeSession.status === 'running' || activeSession.status === 'initializing' || !hook.hasChangesToRebase,
-        variant: 'default' as const,
-        description: hook.gitCommands?.getRebaseFromMainCommand ? hook.gitCommands.getRebaseFromMainCommand() : `Pulls latest changes from ${hook.gitCommands?.mainBranch || 'main'}`
-      },
-      {
-        id: 'rebase-to-main',
-        label: `Merge to ${hook.gitCommands?.mainBranch || 'main'}`,
-        icon: GitMerge,
-        onClick: hook.handleSquashAndRebaseToMain,
-        disabled: hook.isMerging || activeSession.status === 'running' || activeSession.status === 'initializing' ||
-                  (!activeSession.gitStatus?.totalCommits || activeSession.gitStatus?.totalCommits === 0 || activeSession.gitStatus?.ahead === 0),
-        variant: 'success' as const,
-        description: (!activeSession.gitStatus?.totalCommits || activeSession.gitStatus?.totalCommits === 0 || activeSession.gitStatus?.ahead === 0) ?
-                     'No commits to merge' :
-                     (hook.gitCommands?.getSquashAndRebaseToMainCommand ? hook.gitCommands.getSquashAndRebaseToMainCommand() : `Merges all commits to ${hook.gitCommands?.mainBranch || 'main'} (with safety checks)`)
-      },
-      {
         id: 'open-ide',
         label: hook.isOpeningIDE ? 'Opening...' : 'Open in IDE',
         icon: Code2,
@@ -409,7 +388,7 @@ export const SessionView = memo(() => {
         description: sessionProject?.open_ide_command ? 'Open the worktree in your default IDE' : 'No IDE command configured'
       }
     ];
-  }, [activeSession, hook.isMerging, hook.gitCommands, hook.hasChangesToRebase, hook.handleGitPull, hook.handleGitPush, hook.handleRebaseMainIntoWorktree, hook.handleSquashAndRebaseToMain, hook.handleOpenIDE, hook.isOpeningIDE, sessionProject?.open_ide_command, activeSession?.gitStatus]);
+  }, [activeSession, hook.isMerging, hook.gitCommands, hook.handleGitPull, hook.handleGitPush, hook.handleOpenIDE, hook.isOpeningIDE, sessionProject?.open_ide_command]);
   
   // Removed unused variables - now handled by panels
 
@@ -546,20 +525,8 @@ export const SessionView = memo(() => {
       )}
       */}
 
-      <CommitMessageDialog
-        isOpen={hook.showCommitMessageDialog}
-        onClose={() => hook.setShowCommitMessageDialog(false)}
-        dialogType={hook.dialogType}
-        gitCommands={hook.gitCommands}
-        commitMessage={hook.commitMessage}
-        setCommitMessage={hook.setCommitMessage}
-        shouldSquash={hook.shouldSquash}
-        setShouldSquash={hook.setShouldSquash}
-        onConfirm={hook.performSquashWithCommitMessage}
-        onMergeAndArchive={hook.performSquashWithCommitMessageAndArchive}
-        isMerging={hook.isMerging}
-        isMergingAndArchiving={hook.isMergingAndArchiving}
-      />
+      {/* @cyboflow-hidden: CommitMessageDialog removed from render; rebase/squash UI entry points are hidden in v1.
+          The underlying hook methods (performSquashWithCommitMessage, etc.) are preserved in useSessionView.ts. */}
 
       <GitErrorDialog
         isOpen={hook.showGitErrorDialog}
