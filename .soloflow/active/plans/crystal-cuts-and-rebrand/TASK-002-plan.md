@@ -1,8 +1,8 @@
 ---
 id: TASK-002
 idea: IDEA-001
-status: approved
-created: 2026-05-11T00:00:00Z
+status: ready
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/taskQueue.ts
   - main/src/services/worktreeNameGenerator.ts
@@ -25,22 +25,21 @@ acceptance_criteria:
     verification: "`grep -nE 'Bull|REDIS_URL|useSimpleQueue|redisOptions' main/src/services/taskQueue.ts` returns zero matches"
   - criterion: "`WorktreeNameGenerator` class and file are deleted"
     verification: "`test ! -f main/src/services/worktreeNameGenerator.ts` returns exit 0"
-  - criterion: "No source files import `WorktreeNameGenerator`"
+  - criterion: No source files import `WorktreeNameGenerator`
     verification: "`grep -rn --include='*.ts' 'WorktreeNameGenerator\\|worktreeNameGenerator' main/src/ frontend/src/ shared/` returns zero matches"
   - criterion: "`@anthropic-ai/sdk` is removed from `package.json` (only used by the deleted WorktreeNameGenerator)"
     verification: "`node -e \"const p=require('./package.json'); process.exit((p.dependencies && p.dependencies['@anthropic-ai/sdk']) ? 1 : 0)\"` returns exit 0"
   - criterion: "`taskQueue.ts` generates fallback worktree names deterministically without any API call"
     verification: "`grep -n 'anthropic\\|Anthropic' main/src/services/taskQueue.ts` returns zero matches"
   - criterion: "Build and typecheck succeed: `pnpm run build:main && pnpm typecheck` exit 0"
-    verification: "Run both commands from repo root; both exit 0"
+    verification: Run both commands from repo root; both exit 0
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: false
-  justification: "Pure deletion. The replaced behavior (deterministic local naming) is a one-line fallback inside an existing code path; existing session-creation tests (if any) will exercise it via the normal `pnpm test` path. The grep-based ACs are sufficient to prove the deletion is structural. The build + typecheck steps prove no callers were missed."
+  justification: Pure deletion. The replaced behavior (deterministic local naming) is a one-line fallback inside an existing code path; existing session-creation tests (if any) will exercise it via the normal `pnpm test` path. The grep-based ACs are sufficient to prove the deletion is structural. The build + typecheck steps prove no callers were missed.
 ---
-
 # Delete Bull Import and WorktreeNameGenerator API Hop
 
 ## Objective
