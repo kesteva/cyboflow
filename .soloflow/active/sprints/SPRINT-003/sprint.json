@@ -1,0 +1,22 @@
+{
+  "sprint": {
+    "id": "SPRINT-003",
+    "status": "active",
+    "started": "2026-05-12T00:00:00.000Z",
+    "execution_mode": "serial"
+  },
+  "tasks": {
+    "TASK-055": {
+      "status": "pending"
+    },
+    "TASK-056": {
+      "status": "pending"
+    }
+  },
+  "run": {
+    "branch": "soloflow/run-20260512-155628-SPRINT-003",
+    "base_branch": "main",
+    "base_sha": "bc732a07dc39406795a718ad88519c8fdc99b4c5",
+    "created_at": "2026-05-12T00:00:00.000Z"
+  }
+}
