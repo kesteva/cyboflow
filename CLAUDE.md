@@ -39,3 +39,7 @@ In `pnpm dev`, the app writes `cyboflow-frontend-debug.log` and `cyboflow-backen
 ## TypeScript Rules
 
 The `any` type is forbidden. ESLint rule `@typescript-eslint/no-explicit-any` is set to `error` and CI enforces it. Use `unknown` (with type guards) or narrow generics instead.
+
+## localStorage Key Migrations
+
+Use `frontend/src/utils/migrateLocalStorageKey.ts` for any localStorage key rename — never write ad-hoc `getItem`/`setItem` rename logic. See `docs/CODE-PATTERNS.md` for the mount-only call contract and the `console.ts` anti-pattern.
