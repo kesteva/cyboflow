@@ -27,8 +27,8 @@ test_strategy:
 prerequisites:
   - check: "test -f dist-electron/*-macOS-universal.dmg 2>/dev/null"
     fix: Run TASK-055 to produce the signed DMG
-    description: This task requires the DMG artifact from TASK-055; without it there is nothing to test.
-    blocking: true
+    description: "This task requires the DMG artifact from TASK-055; sprint-init time check is advisory — depends_on graph (TASK-055) enforces ordering. Executor verifies again at run time."
+    blocking: false
   - check: "sw_vers -productVersion >/dev/null 2>&1"
     fix: This task must run on macOS — sw_vers is missing on non-macOS shells.
     description: Gatekeeper is a macOS subsystem; the acceptance test cannot run on Linux or Windows.

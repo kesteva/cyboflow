@@ -44,9 +44,9 @@ test_strategy:
       test_file: scripts/configure-build.test.js
       type: integration
 prerequisites:
-  - check: "test -n \"$APPLE_ID\" && test -n \"$APPLE_TEAM_ID\" && test -n \"$APPLE_APP_SPECIFIC_PASSWORD\" && test -n \"$CSC_LINK\" && test -n \"$CSC_KEY_PASSWORD\""
-    fix: "Export the five env vars per docs/signing/APPLE_DEVELOPER_SETUP.md before invoking pnpm run build:mac:universal"
-    description: "scripts/configure-build.js (lines 18-25) gates the signed-posture build on these env vars. Without all five, the build downgrades to unsigned and this task's signed-DMG acceptance criteria cannot pass."
+  - check: "{ test -f .envrc.local && set -a && . ./.envrc.local && set +a; } 2>/dev/null; test -n \"$APPLE_ID\" && test -n \"$APPLE_TEAM_ID\" && test -n \"$APPLE_APP_SPECIFIC_PASSWORD\" && test -n \"$CSC_LINK\" && test -n \"$CSC_KEY_PASSWORD\""
+    fix: "Populate .envrc.local with the five APPLE_*/CSC_* exports (per docs/signing/APPLE_DEVELOPER_SETUP.md) or export them directly in the shell where /soloflow:sprint runs."
+    description: "scripts/configure-build.js (lines 18-25) gates the signed-posture build on these env vars. The probe sources .envrc.local if present, since this project keeps signing secrets out of the shell env."
     blocking: true
   - check: "xcrun notarytool history --keychain-profile AC_PASSWORD >/dev/null 2>&1"
     fix: Run TASK-051 to provision the AC_PASSWORD keychain profile
