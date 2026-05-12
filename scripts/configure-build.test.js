@@ -41,7 +41,6 @@ function runCase(label, envOverrides, assertFn) {
 
   // Isolate env mutations
   const savedEnv = {};
-  const keysToDelete = [];
 
   // Clear all signing-related env vars first so cases are isolated
   const signingKeys = [
@@ -57,8 +56,6 @@ function runCase(label, envOverrides, assertFn) {
   for (const key of signingKeys) {
     if (key in process.env) {
       savedEnv[key] = process.env[key];
-    } else {
-      keysToDelete.push(key);
     }
     delete process.env[key];
   }
@@ -90,8 +87,6 @@ function runCase(label, envOverrides, assertFn) {
     for (const [key, value] of Object.entries(savedEnv)) {
       process.env[key] = value;
     }
-    // Keys that weren't set before — already deleted above; no-op since we deleted them in the loop
-    // (keysToDelete items were already not present, nothing to restore)
   }
 }
 
@@ -111,11 +106,6 @@ try {
   );
 } catch (err) {
   console.error('FAIL: Case A — ' + err.message);
-  // Ensure restore even if runCase's finally didn't fire (shouldn't happen, but belt+suspenders)
-  if (fs.existsSync(PACKAGE_BAK)) {
-    fs.copyFileSync(PACKAGE_BAK, PACKAGE_JSON);
-    fs.unlinkSync(PACKAGE_BAK);
-  }
   failed = true;
 }
 
@@ -144,10 +134,6 @@ try {
   );
 } catch (err) {
   console.error('FAIL: Case B — ' + err.message);
-  if (fs.existsSync(PACKAGE_BAK)) {
-    fs.copyFileSync(PACKAGE_BAK, PACKAGE_JSON);
-    fs.unlinkSync(PACKAGE_BAK);
-  }
   failed = true;
 }
 
