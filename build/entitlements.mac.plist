@@ -17,8 +17,9 @@
     <!-- Anthropic API outbound calls (main/src/services/panels/claude/claudeCodeManager.ts) + Apple notarization + future electron-updater -->
     <key>com.apple.security.network.client</key>
     <true/>
-    <!-- forward-compat placeholder: sandbox-only entitlement, no runtime effect without com.apple.security.app-sandbox. Listed in IDEA-002 slice 3 as required; retained pending future sandbox decision in v2. -->
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
+    <!-- com.apple.security.files.user-selected.read-write omitted: sandbox-only,
+         no effect without com.apple.security.app-sandbox. Re-add when enabling the
+         app sandbox (node-pty, better-sqlite3, and git CLI invocations all need
+         extension grants — non-trivial migration). -->
 </dict>
 </plist>
