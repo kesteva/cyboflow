@@ -1,8 +1,8 @@
 ---
 id: TASK-054
 idea: IDEA-002
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - build/afterSign.js
 files_readonly:
@@ -20,23 +20,23 @@ acceptance_criteria:
     verification: "`grep -n 'notarization is handled by electron-builder' build/afterSign.js` returns a match"
   - criterion: "The legacy 'No signing credentials found' early-log path is preserved (still useful for debugging dev builds), but it no longer claims responsibility for skipping notarization"
     verification: "`grep -n 'No signing credentials' build/afterSign.js` returns a match, AND the surrounding log line does not mention 'notariz' (case-insensitive)"
-  - criterion: "afterSign.js exits cleanly (returns/awaits with no thrown error) on a non-mac platform (Linux/Windows CI runners that also load this hook)"
+  - criterion: afterSign.js exits cleanly (returns/awaits with no thrown error) on a non-mac platform (Linux/Windows CI runners that also load this hook)
     verification: "Run `node -e \"const f=require('./build/afterSign.js').default; f({appOutDir:'/tmp', packager:{platform:{name:'linux'}, appInfo:{productName:'X'}}}).then(()=>process.exit(0)).catch(()=>process.exit(1))\"` exits 0"
-depends_on: [TASK-053]
+depends_on:
+  - TASK-053
 estimated_complexity: low
 epic: apple-signing-notarization-setup
 test_strategy:
   needed: true
   justification: "afterSign.js runs at packaging time inside electron-builder; we cannot exercise it in a normal unit test, but we can write a Node-driven smoke test that invokes the exported function with a synthetic context and asserts the JAR-removal + early-exit branches behave correctly."
   targets:
-    - behavior: "afterSign returns early on non-mac platforms without throwing"
-      test_file: "build/afterSign.test.js"
+    - behavior: afterSign returns early on non-mac platforms without throwing
+      test_file: build/afterSign.test.js
       type: integration
-    - behavior: "afterSign removes JAR files under a fake vendor directory when given a mac context"
-      test_file: "build/afterSign.test.js"
+    - behavior: afterSign removes JAR files under a fake vendor directory when given a mac context
+      test_file: build/afterSign.test.js
       type: integration
 ---
-
 # Refit afterSign.js: keep JAR strip, delegate notarization to electron-builder
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-051
 idea: IDEA-002
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - docs/signing/APPLE_DEVELOPER_SETUP.md
 files_readonly:
@@ -12,12 +12,12 @@ files_readonly:
   - .soloflow/active/ideas/IDEA-002.md
   - .soloflow/active/research/ROADMAP-001-research-risks.md
 acceptance_criteria:
-  - criterion: "Apple Developer Program membership is active for the team that will sign Cyboflow"
+  - criterion: Apple Developer Program membership is active for the team that will sign Cyboflow
     verification: "Run `xcrun notarytool history --keychain-profile AC_PASSWORD` — exits 0 and shows the team. (Pre-enrollment, this command errors with 'No Apple ID in keychain'.)"
-  - criterion: "A Developer ID Application certificate for the enrolled team is installed in the local login keychain"
+  - criterion: A Developer ID Application certificate for the enrolled team is installed in the local login keychain
     verification: "Run `security find-identity -v -p codesigning | grep 'Developer ID Application'` — prints at least one identity line; capture the SHA1 / Team ID in the setup doc"
   - criterion: "A `notarytool` keychain profile named `AC_PASSWORD` is stored with Apple ID, team ID, and an app-specific password"
-    verification: "Run `xcrun notarytool history --keychain-profile AC_PASSWORD` — exits 0 (or exits 0 with an empty history). Profile presence is sufficient; history may be empty."
+    verification: Run `xcrun notarytool history --keychain-profile AC_PASSWORD` — exits 0 (or exits 0 with an empty history). Profile presence is sufficient; history may be empty.
   - criterion: "`docs/signing/APPLE_DEVELOPER_SETUP.md` documents the exact commands used (with secrets redacted) and the Team ID + Bundle ID combination Cyboflow will sign against"
     verification: "`test -f docs/signing/APPLE_DEVELOPER_SETUP.md` and `grep -n 'Team ID' docs/signing/APPLE_DEVELOPER_SETUP.md` returns at least one match"
 depends_on: []
@@ -25,7 +25,7 @@ estimated_complexity: medium
 epic: apple-signing-notarization-setup
 test_strategy:
   needed: false
-  justification: "Manual external-account provisioning task; verification is provided by the four CLI-based acceptance checks above. No code is modified."
+  justification: Manual external-account provisioning task; verification is provided by the four CLI-based acceptance checks above. No code is modified.
 prerequisites:
   - check: "test -n \"$APPLE_ID\" || echo 'WARN: APPLE_ID not in shell env; will set during this task'"
     fix: "Capture APPLE_ID, APPLE_TEAM_ID, APPLE_APP_SPECIFIC_PASSWORD via this task's documented flow"
@@ -36,7 +36,6 @@ prerequisites:
     description: "`notarytool` ships with Xcode CLT. Without it, no notarization is possible."
     blocking: true
 ---
-
 # Apple Developer Program enrollment, Developer ID cert, and notarytool keychain profile
 
 ## Objective
