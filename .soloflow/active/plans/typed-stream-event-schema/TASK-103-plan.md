@@ -136,4 +136,218 @@ gracefully until the schema is updated.
 4. **Create the test file** `main/src/services/streamParser/__tests__/schemas.test.ts`. Use the
    same import style as `main/src/services/__tests__/gitStatusManager.test.ts`
    (`import { describe, it, expect } from 'vitest'`). Header imports:
-   
+
+   ```ts
+   import { describe, it, expect } from 'vitest';
+   import { readFileSync } from 'node:fs';
+   import { join } from 'node:path';
+   import { parseClaudeStreamEvent } from '../schemas';
+   import type { ClaudeStreamEvent } from '@shared/types/claudeStream';
+   import { assertNever } from '@shared/types/claudeStream';
+   ```
+
+   Add a small `loadFixture(name: string): unknown` helper that does
+   `JSON.parse(readFileSync(join(__dirname, '..', '__fixtures__', name), 'utf-8'))` so each
+   `it(...)` block reads its fixture by filename. Keeping the helper local (not a shared util)
+   avoids dragging an export surface into `schemas.ts`.
+
+5. **Author one `describe()` block per wire variant.** Eight top-level blocks, mirroring the
+   union in TASK-101. Inside each, at least one `it()` round-trips the corresponding fixture(s)
+   through `parseClaudeStreamEvent` and asserts the discriminant + key fields:
+
+   - `describe('SystemInitEvent', ...)` — load `system_init.json`, assert `event.type === 'system'`
+     and `event.subtype === 'init'`, then narrow and assert `event.session_id`, `event.cwd`,
+     `event.model`, `Array.isArray(event.tools)`, and that `event.permissionMode` is present as
+     a camelCase key (the documented wire-spec exception from TASK-101).
+   - `describe('SystemApiRetryEvent', ...)` — load `system_api_retry.json`, assert
+     `event.type === 'system'` and `event.subtype === 'api_retry'`, then assert
+     `typeof event.attempt === 'number'` and `typeof event.max_retries === 'number'`.
+   - `describe('SystemCompactEvent', ...)` — load `system_compact.json`, assert
+     `event.type === 'system'` and `event.subtype === 'compact'`. Note in a comment that the
+     ClaudeMessageTransformer uses subtype `context_compacted` for its renderer-side handling,
+     but the wire literal is `compact` per research §1; this test pins the wire literal.
+   - `describe('AssistantEvent', ...)` — load `assistant.json`, assert `event.type === 'assistant'`,
+     then walk `event.message.content` and assert it contains at least one block matching
+     `block.type === 'tool_use'` and at least one matching `block.type === 'text'` (the
+     mixed-content array case from research §1).
+   - `describe('UserEvent', ...)` — TWO `it()` blocks: one loads `user_string_content.json` and
+     asserts `event.type === 'user'` with `typeof event.message.content[0].content === 'string'`;
+     the other loads `user_array_content.json` and asserts the same `event.type` with
+     `Array.isArray(event.message.content[0].content)`. Both blocks reference the fixture
+     filenames in the assertion text so the AC grep gate (`grep -nE 'user_string_content|user_array_content'`)
+     passes.
+   - `describe('ResultEvent', ...)` — FOUR `it()` blocks, one per subtype. Each loads its
+     fixture (`result_success.json`, `result_error_max_turns.json`,
+     `result_error_max_budget_usd.json`, `result_error_during_execution.json`) and asserts
+     `event.type === 'result'` plus the exact subtype literal (`expect(event.subtype).toBe('success')`,
+     etc.). These four literal-equality assertions satisfy the result-subtypes AC.
+   - `describe('StreamEvent', ...)` — load `stream_event.json`, assert `event.type === 'stream_event'`
+     and `typeof event.event.type === 'string'` (e.g. `'message_start'`, `'content_block_delta'`).
+   - `describe('UnknownStreamEvent fallback', ...)` — see step 6.
+
+6. **Add a "rejects unknown payload" test.** Inside `describe('UnknownStreamEvent fallback', ...)`,
+   add at least three `it()` blocks asserting the parser never throws:
+   - `it('returns __unknown__ for payload with type: never_seen_before', ...)` — pass
+     `{ type: 'never_seen_before', foo: 'bar' }`. Assert the result narrows to
+     `{ kind: '__unknown__', raw: <the original object> }`, that `expect(() => parseClaudeStreamEvent(...)).not.toThrow()`,
+     and that the original payload is preserved on `result.raw`.
+   - `it('returns __unknown__ for missing type field', ...)` — pass `{ foo: 'bar' }`.
+   - `it('returns __unknown__ for primitives and malformed input', ...)` — call
+     `parseClaudeStreamEvent(null)`, `parseClaudeStreamEvent(42)`, `parseClaudeStreamEvent('string')`
+     and assert each returns `kind: '__unknown__'` without throwing.
+
+   These cover the AC requiring "missing `type` field, garbage object, primitive" → `__unknown__`.
+
+7. **Add the field-preservation / camelCase exception test.** Inside `describe('SystemInitEvent', ...)`
+   (or a dedicated `describe('wire-format casing', ...)` block), assert that after parsing
+   `system_init.json`, the parsed object exposes the key literally as `permissionMode`
+   (camelCase) — not as `permission_mode`. Use `expect(Object.keys(event)).toContain('permissionMode')`
+   and `expect(event).not.toHaveProperty('permission_mode')`. This pins the documented wire-spec
+   exception from TASK-101's AC.
+
+8. **Add a passthrough preservation test.** In a dedicated `describe('passthrough', ...)` block,
+   take the parsed `system_init.json` fixture, mutate the raw JSON to add a synthetic unknown
+   field (e.g. `future_unannounced_field: 'lorem'`), re-parse, and assert
+   `expect(event).toHaveProperty('future_unannounced_field', 'lorem')`. This is the AC requiring
+   "when a fixture is mutated to add an unknown field, parsing still succeeds AND the unknown
+   field is preserved on the parsed object."
+
+9. **Add the compile-time exhaustive switch.** In a dedicated `describe('exhaustive union coverage', ...)`
+   block, add an `it()` block that defines an inline function:
+
+   ```ts
+   function summarize(event: ClaudeStreamEvent): string {
+     switch (event.type) {
+       case 'system': return `system/${event.subtype}`;
+       case 'assistant': return 'assistant';
+       case 'user': return 'user';
+       case 'result': return `result/${event.subtype}`;
+       case 'stream_event': return 'stream_event';
+       default:
+         // If a new variant is added to ClaudeStreamEvent without being handled here,
+         // tsc --noEmit will fail to compile this line. The catch-all UnknownStreamEvent
+         // is reached via the `kind` discriminant branch below.
+         if ('kind' in event && event.kind === '__unknown__') return 'unknown';
+         return assertNever(event);
+     }
+   }
+   ```
+
+   Call `summarize` against every loaded fixture and assert the return strings are non-empty.
+   The runtime assertion is incidental; the load-bearing check is the `assertNever` line that
+   only typechecks if the union is fully covered.
+
+10. **Grep verifications.** After authoring, run the AC grep gates directly to confirm:
+    - `grep -cE "^\s*(it|test)\(" main/src/services/streamParser/__tests__/schemas.test.ts` — must return ≥ 13.
+    - `grep -nE "parseClaudeStreamEvent\(" main/src/services/streamParser/__tests__/schemas.test.ts` — must return ≥ 11 matches.
+    - `grep -nE "'__unknown__'|kind.*unknown" main/src/services/streamParser/__tests__/schemas.test.ts` — must hit at least one block whose `it(...)` description references "unknown" or "malformed" or "catch-all".
+    - `grep -nE "assertNever" main/src/services/streamParser/__tests__/schemas.test.ts` — must hit ≥ 1.
+    - `grep -nE "passthrough|unknown.*field|unrecognized" main/src/services/streamParser/__tests__/schemas.test.ts` — must hit ≥ 1 in a passing assertion context (not a comment).
+    - `grep -nE "user_string_content|user_array_content" main/src/services/streamParser/__tests__/schemas.test.ts` — must hit ≥ 2.
+    - `grep -nE "'success'|'error_max_turns'|'error_max_budget_usd'|'error_during_execution'" main/src/services/streamParser/__tests__/schemas.test.ts` — must hit all four literals.
+    - `ls main/src/services/streamParser/__fixtures__/*.json | wc -l` — must print 11.
+
+11. **Run the suite.** `cd main && pnpm test -- streamParser`. Exit 0, ≥ 13 passing tests.
+
+## Acceptance Criteria
+
+All ten frontmatter AC entries above must hold. The eleven JSON fixtures exist and each parses
+as valid JSON. The fixtures README documents the exact `claude -p --output-format stream-json`
+capture command and labels each fixture as real or synthetic. The test file holds ≥ 13 `it(...)`
+blocks invoking `parseClaudeStreamEvent` ≥ 11 times across the fixture set. The four result
+subtypes each get an explicit equality assertion on `event.subtype`. The user variant is
+covered with both string-content and array-content fixtures. A dedicated catch-all block
+asserts malformed input (missing `type`, garbage object, primitives) returns
+`{ kind: '__unknown__', raw: ... }` without throwing. A passthrough block confirms unknown
+fields survive parsing. An exhaustive-switch block uses `assertNever` so the file fails to
+compile if the union grows without test coverage. `pnpm --filter main test streamParser`
+exits 0.
+
+## Test Strategy
+
+This task IS the test suite — it produces the contract tests that make TASK-101 (TS union) and
+TASK-102 (Zod schemas) trustworthy. The targets:
+
+- **Per-variant parse round-trip.** Every wire variant gets a fixture and at least one
+  assertion that `parseClaudeStreamEvent(fixture).type` matches the expected discriminant.
+  This is the lowest-level contract: given a real Claude payload, our parser produces a typed
+  event of the right variant.
+- **Subtype enumeration on result.** The four result subtypes are the most failure-prone area
+  (Anthropic could rename `error_max_turns` to something else in a CLI patch release). Each
+  subtype gets its own fixture and its own equality assertion against the literal string. If
+  Anthropic renames any of them, exactly one test fails and points directly at the offending
+  subtype.
+- **tool_result.content shape duality.** Research §1 notes that `user.message.content[].content`
+  is sometimes a string and sometimes an array of `{ type, text }`. Both forms get fixtures and
+  both forms get parsing assertions; this prevents a future "we only accept strings" regression.
+- **Catch-all safety.** Unknown `type` values, missing `type`, primitives, and arbitrary garbage
+  all route to `{ kind: '__unknown__', raw }`. This is the firewall: even if Anthropic ships a
+  brand-new variant tomorrow, the orchestrator pipeline keeps flowing and we log the unknown
+  payload for later schema-update review.
+- **Passthrough preservation.** Unknown fields on a known variant are preserved (not stripped).
+  If Anthropic adds a new optional field to `system/init`, our parser carries it through to
+  downstream consumers (e.g. the `raw_events` table writer) instead of silently dropping it.
+- **Compile-time exhaustiveness.** The `assertNever` switch is the tripwire: any future PR that
+  adds a new variant to `ClaudeStreamEvent` without extending the switch fails `tsc --noEmit`.
+
+Together these tests form the contract firewall between Anthropic's CLI wire-format evolution
+and our internal pipeline. Without them, schema drift would land silently and surface as
+mysterious downstream bugs (missing fields in the UI, broken DB writes, dropped events) weeks
+later. With them, drift either fails CI or routes through the catch-all variant where it gets
+logged and triaged.
+
+## Hardest Decision
+
+**Real captured fixtures vs hand-written synthetic fixtures.** Real captures are the
+gold standard: they reflect what the CLI actually emits today, byte-for-byte, including
+fields that aren't yet documented in any spec. They also rot — Anthropic ships CLI updates,
+the wire format drifts in minor ways, the fixture becomes stale, and tests pass against a
+6-month-old snapshot while production breaks against the current CLI. Hand-written
+fixtures are the inverse: they encode exactly what the schema claims, are forever in sync
+with TASK-101's union, and make the test author's intent obvious in code review — but they
+miss undocumented fields and can drift in the opposite direction (the schema says X, the
+fixture says X, the wire actually says Y). The choice for this task is hybrid: capture real
+fixtures for the 6 variants that are easy to elicit (`system/init`, `assistant`,
+`user_string_content`, `user_array_content` where possible, `result_success`, `stream_event`),
+and hand-write the 5 that require fault injection or long-session triggering
+(`system/api_retry`, `system/compact`, the three error result subtypes). The fixtures README
+labels each so the next executor knows which to re-capture quarterly and which to update by
+hand when TASK-101's union changes.
+
+## Rejected Alternatives
+
+- **Use Anthropic's published SDK types (`@anthropic-ai/sdk`) as the fixture source of truth.**
+  Rejected — the SDK types describe the API request/response shapes, not the CLI's
+  `stream-json` wire format. The CLI wire format is documented only in the SamSaffron gist
+  referenced by research §1 plus the architecture research itself; there is no first-party
+  TypeScript artifact we can reuse. Pulling SDK types would actively mislead because the
+  field casing, event names, and subtype enumeration all differ from CLI output.
+- **Snapshot testing (Vitest `toMatchSnapshot`) over explicit field assertions.** Rejected —
+  snapshots make the failure mode "the JSON changed somewhere, please re-bless" which is
+  noisy and hides the load-bearing claims of the contract. Explicit `expect(event.subtype).toBe('success')`
+  fails with a clear message pointing at the offending field. Snapshots would also rot
+  silently if a developer reflexively runs `vitest -u` after any CLI update.
+- **Generate fixtures dynamically by spawning `claude -p` inside the test.** Rejected — would
+  introduce network dependency, API key requirement, non-deterministic test runs, and CI
+  cost. The whole point of fixtures is offline determinism. The "re-capture quarterly" cadence
+  in the README is the explicit safety valve against drift.
+- **Skip TS-only assertions (rely on Zod runtime tests only).** Rejected — `assertNever` is
+  the only check that catches "PR adds new variant, forgets to extend consumers." Without it,
+  a missing branch would compile and silently break at runtime months later.
+
+## Lowest Confidence Area
+
+**Fixture realism vs current Claude CLI behavior in 2026.** The architecture research §1
+captures the wire format as of the research date, but the `claude` CLI is a moving target —
+Anthropic ships updates frequently and the wire format has changed at least once in the
+public history (the `stream_event` discriminant was renamed from `delta` at some point per
+the SamSaffron gist). The fixtures committed in this task reflect the CLI version available
+when the executor runs the capture, not necessarily what production users see today.
+**Verification path:** during execution, the executor MUST record `claude --version` output
+in the fixtures README. After the task ships, set a reminder to re-run the capture roughly
+quarterly; diff the new capture against the committed fixture and, if the diff is
+non-trivial, file a follow-up task to update TASK-101's union, TASK-102's schemas, and the
+fixture set in lockstep. If the executor cannot run a real capture at all (no `claude` CLI
+available, no credentials), the synthetic-fixture path documented in step 3 is the fallback
+and the fixtures README must label every fixture as synthetic with the schema source cited
+(research §1, line references).
