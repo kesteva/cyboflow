@@ -12,7 +12,8 @@
       "verdict_at": "2026-05-12T18:17:01.579Z"
     },
     "TASK-056": {
-      "status": "pending"
+      "status": "blocked",
+      "verdict_at": "2026-05-12T18:17:02.687Z"
     },
     "TASK-557": {
       "status": "pending"
