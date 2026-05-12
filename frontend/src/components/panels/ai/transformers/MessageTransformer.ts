@@ -5,12 +5,7 @@ export interface SessionInfoData {
   claudeCommand?: string;
   worktreePath?: string;
   model?: string;
-  modelProvider?: string;
-  approvalPolicy?: string;
-  sandboxMode?: boolean | string;
   permissionMode?: string;
-  resumeSessionId?: string;
-  isResume?: boolean;
   timestamp?: string;
   [key: string]: unknown; // Allow any additional properties
 }
