@@ -18,6 +18,10 @@ Use these reference pages for more information:
 
 All core features have been successfully implemented with significant enhancements beyond the original requirements.
 
+## `@cyboflow-hidden` Convention
+
+Code that is intentionally unreachable in cyboflow v1 (but preserved from the Crystal baseline for future re-enablement) is marked with `@cyboflow-hidden`. Do NOT delete such code; do NOT add the marker to actively-called code. See `docs/CODE-PATTERNS.md` for the annotation template and canonical examples (`main/src/services/worktreeManager.ts:472`, `frontend/src/components/SessionView.tsx:14`).
+
 ## ✅ Implemented Features
 
 ### Core Session Management
