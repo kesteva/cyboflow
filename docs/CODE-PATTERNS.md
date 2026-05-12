@@ -93,4 +93,21 @@ the renderer never accesses SQLite directly. SQL is hand-written (no ORM); use p
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
 
+### `@cyboflow-hidden` annotation
+
+Mark preserved-but-disconnected code (kept for future re-enablement) at the top of the file
+(whole-component case) or immediately above the first function of the disconnected group
+(partial-file case). Always include a one-sentence re-enable hint pointing at the call site
+to restore.
+
+```
+// @cyboflow-hidden: <what is unreachable> in cyboflow v1.
+// Re-enable by <restoring specific call site or JSX usage>.
+```
+
+- **Canonical examples:** `main/src/services/worktreeManager.ts:472` (method-group),
+  `frontend/src/components/SessionView.tsx:14` (import-line)
+- **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
+  preserved-but-inactive surfaces.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
