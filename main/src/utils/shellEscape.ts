@@ -10,17 +10,8 @@
 export function escapeShellArg(arg: string): string {
   // If the argument is empty, return empty quotes
   if (!arg) return "''";
-  
-  // For Windows, wrap in double quotes and escape internal quotes
-  if (process.platform === 'win32') {
-    // Escape existing double quotes and backslashes
-    const escaped = arg
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"');
-    return `"${escaped}"`;
-  }
-  
-  // For Unix-like systems, use single quotes and handle internal single quotes
+
+  // Use single quotes and handle internal single quotes
   // by ending the quote, adding an escaped single quote, and starting a new quote
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
@@ -38,19 +29,7 @@ export function buildGitCommitCommand(message: string, enableCrystalFooter: bool
 💎 Built using [Crystal](https://github.com/stravu/crystal)
 
 Co-Authored-By: Crystal <crystal@stravu.com>` : message;
-  
-  // For Windows, use a different approach
-  if (process.platform === 'win32') {
-    // Write to a temporary file or use -F - with stdin
-    // For now, escape for direct use
-    const escaped = fullMessage
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, '\\n');
-    return `git commit -m "${escaped}"`;
-  }
-  
-  // For Unix-like systems, use proper shell escaping
+
   const escapedMessage = escapeShellArg(fullMessage);
   return `git commit -m ${escapedMessage}`;
 }

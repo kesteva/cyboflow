@@ -25,20 +25,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
         }
       }
 
-      // Auto-register Codex panels so they're hooked to the Codex runtime
-      if (panel.type === 'codex') {
-        try {
-          const { codexPanelManager } = require('./codexPanel');
-          if (codexPanelManager) {
-            codexPanelManager.registerPanel(panel.id, panel.sessionId, panel.state.customState);
-          } else {
-            console.warn('[Panels IPC] CodexPanelManager not initialized yet; will register later');
-          }
-        } catch (err) {
-          console.error('[Panels IPC] Failed to register Codex panel with CodexPanelManager:', err);
-        }
-      }
-
       return { success: true, data: panel };
     } catch (error) {
       console.error('[IPC] Failed to create panel:', error);
@@ -63,21 +49,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
           }
         } catch (err) {
           console.warn('[Panels IPC] Failed to unregister Claude panel during delete:', err);
-        }
-      }
-      // Unregister Codex panels from CodexPanelManager
-      if (panel?.type === 'codex') {
-        try {
-          const { codexPanelManager } = require('./codexPanel');
-          if (codexPanelManager) {
-            // Stop if running, then unregister
-            if (codexPanelManager.isPanelRunning(panelId)) {
-              await codexPanelManager.stopPanel(panelId);
-            }
-            codexPanelManager.unregisterPanel(panelId);
-          }
-        } catch (err) {
-          console.warn('[Panels IPC] Failed to unregister Codex panel during delete:', err);
         }
       }
       if (panel?.type === 'terminal') {
@@ -177,11 +148,6 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       return customState?.isInitialized || false;
     }
     
-    if (panel.type === 'codex') {
-      const customState = panel.state.customState as { isInitialized?: boolean } | undefined;
-      return customState?.isInitialized || false;
-    }
-    
     // Editor panels don't need initialization
     if (panel.type === 'editor') {
       return true;
@@ -204,7 +170,7 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       }
 
       // Only applicable to AI panels
-      if (panel.type !== 'claude' && panel.type !== 'codex') {
+      if (panel.type !== 'claude') {
         return { success: true };
       }
 

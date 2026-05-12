@@ -1,3 +1,7 @@
+// @cyboflow-hidden: This dialog is unreachable in cyboflow v1. The rebase/squash UI
+// entry points that triggered it were removed in TASK-004. Re-enable by re-adding
+// <CommitMessageDialog /> JSX in SessionView.tsx and restoring the branchActions entries.
+
 import React from 'react';
 import { GitCommands } from '../../types/session';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';

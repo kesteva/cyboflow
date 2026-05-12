@@ -18,7 +18,7 @@ export interface PanelMapping {
 }
 
 /**
- * Abstract base class for managing AI agent panels (Claude, Codex, etc.)
+ * Abstract base class for managing AI agent panels (Claude)
  * Uses unified configuration object approach
  */
 export abstract class AbstractAIPanelManager {
@@ -38,7 +38,7 @@ export abstract class AbstractAIPanelManager {
   }
 
   /**
-   * Get the name of the AI agent (e.g., 'Claude', 'Codex')
+   * Get the name of the AI agent (e.g., 'Claude')
    */
   protected abstract getAgentName(): string;
 

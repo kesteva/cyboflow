@@ -1,8 +1,8 @@
 import React, { useCallback, memo, useState, useRef, useEffect } from 'react';
-import { Plus, X, Terminal, ChevronDown, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Code2, Edit2 } from 'lucide-react';
+import { X, Terminal, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Edit2 } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
-import { ToolPanel, ToolPanelType, PANEL_CAPABILITIES, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
+import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
 import { Button } from '../ui/Button';
 import { Dropdown } from '../ui/Dropdown';
 import { useSession } from '../../contexts/SessionContext';
@@ -13,13 +13,10 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   activePanel,
   onPanelSelect,
   onPanelClose,
-  onPanelCreate,
   context = 'worktree'  // Default to worktree for backward compatibility
 }) => {
   const sessionContext = useSession();
   const { gitBranchActions, isMerging } = sessionContext || {};
-  const [showDropdown, setShowDropdown] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
   const [editingPanelId, setEditingPanelId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -31,7 +28,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
 
   const handlePanelClose = useCallback((e: React.MouseEvent, panel: ToolPanel) => {
     e.stopPropagation();
-    
+
     // Prevent closing logs panel while it's running
     if (panel.type === 'logs') {
       const logsState = panel.state?.customState as LogsPanelState;
@@ -40,14 +37,9 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
         return;
       }
     }
-    
+
     onPanelClose(panel);
   }, [onPanelClose]);
-  
-  const handleAddPanel = useCallback((type: ToolPanelType) => {
-    onPanelCreate(type);
-    setShowDropdown(false);
-  }, [onPanelCreate]);
   
   const handleStartRename = useCallback((e: React.MouseEvent, panel: ToolPanel) => {
     e.stopPropagation();
@@ -92,20 +84,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   }, [handleRenameSubmit, handleRenameCancel]);
   
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && event.target && event.target instanceof Node && !dropdownRef.current.contains(event.target)) {
-        setShowDropdown(false);
-      }
-    };
-    
-    if (showDropdown) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [showDropdown]);
-  
   // Focus input when editing starts
   useEffect(() => {
     if (editingPanelId && editInputRef.current) {
@@ -114,38 +92,12 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   }, [editingPanelId]);
   
-  // Get available panel types (excluding permanent panels, logs, and enforcing singleton)
-  const availablePanelTypes = (Object.keys(PANEL_CAPABILITIES) as ToolPanelType[])
-    .filter(type => {
-      const capabilities = PANEL_CAPABILITIES[type];
-      
-      // Filter based on context
-      if (context === 'project' && !capabilities.canAppearInProjects) return false;
-      if (context === 'worktree' && !capabilities.canAppearInWorktrees) return false;
-      
-      // Exclude permanent panels
-      if (capabilities.permanent) return false;
-      
-      // Exclude logs panel - it's only created automatically when running scripts
-      if (type === 'logs') return false;
-      
-      // Enforce singleton panels
-      if (capabilities.singleton) {
-        // Check if a panel of this type already exists
-        return !panels.some(p => p.type === type);
-      }
-      
-      return true;
-    });
-  
   const getPanelIcon = (type: ToolPanelType) => {
     switch (type) {
       case 'terminal':
         return <Terminal className="w-4 h-4" />;
       case 'claude':
         return <MessageSquare className="w-4 h-4" />;
-      case 'codex':
-        return <Code2 className="w-4 h-4" />;
       case 'diff':
         return <GitBranch className="w-4 h-4" />;
       case 'editor':
@@ -160,10 +112,10 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     }
   };
 
-  // Get panel status indicator config for AI panels (claude/codex)
+  // Get panel status indicator config for AI panels (claude)
   const getPanelStatusConfig = (panel: ToolPanel): { status: 'running' | 'waiting' | 'info' | 'error' | 'default'; animated: boolean; pulse: boolean } | null => {
     // Only show status for AI panels
-    if (panel.type !== 'claude' && panel.type !== 'codex') {
+    if (panel.type !== 'claude') {
       return null;
     }
 
@@ -288,35 +240,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
             </div>
           );
         })}
-        
-        {/* Add Panel dropdown button */}
-        <div className="relative h-8 flex items-center ml-1" ref={dropdownRef}>
-          <button
-            className="inline-flex items-center h-8 px-3 text-sm rounded-t-md border border-border-primary dark:border-border-hover border-b-0 -mb-px bg-surface-secondary text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
-            onClick={() => setShowDropdown(!showDropdown)}
-            aria-haspopup="menu"
-            aria-expanded={showDropdown}
-          >
-            <Plus className="w-4 h-4 mr-1" />
-            Add Tool
-            <ChevronDown className="w-3 h-3 ml-1" />
-          </button>
-          
-          {showDropdown && (
-            <div className="absolute top-full left-0 mt-1 bg-surface-primary border border-border-primary dark:border-border-hover rounded shadow-dropdown z-10 animate-dropdown-enter">
-              {availablePanelTypes.map((type) => (
-                <button
-                  key={type}
-                  className="flex items-center w-full px-4 py-2 text-sm text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary text-left"
-                  onClick={() => handleAddPanel(type)}
-                >
-                  {getPanelIcon(type)}
-                  <span className="ml-2 capitalize">{type}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
         
         {/* Branch Actions button - moved from ViewTabs - only in worktree context */}
         {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (

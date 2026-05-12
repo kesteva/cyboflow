@@ -9,10 +9,6 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
     return app.getVersion();
   });
 
-  ipcMain.handle('get-platform', () => {
-    return process.platform;
-  });
-
   ipcMain.handle('is-packaged', () => {
     return app.isPackaged;
   });

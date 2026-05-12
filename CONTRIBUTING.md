@@ -96,10 +96,7 @@ Fixes #42
 2. Add tests for new functionality
 3. Ensure all tests pass
 4. Update the README if adding new features
-5. If you've added or updated dependencies:
-   - Run `pnpm run generate-notices` to update the NOTICES file
-   - Commit the updated NOTICES file with your changes
-6. Submit a pull request with:
+5. Submit a pull request with:
    - Clear title and description
    - Link to related issues
    - Screenshots for UI changes

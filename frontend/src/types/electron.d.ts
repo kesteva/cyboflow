@@ -34,7 +34,6 @@ interface ElectronAPI {
   
   // Basic app info
   getAppVersion: () => Promise<string>;
-  getPlatform: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
   // Version checking
@@ -298,12 +297,6 @@ interface ElectronAPI {
   claudePanels: {
     getModel: (panelId: string) => Promise<IPCResponse>;
     setModel: (panelId: string, model: string) => Promise<IPCResponse>;
-  };
-
-  // Codex panel operations
-  codexPanels: {
-    getSettings: (panelId: string) => Promise<IPCResponse>;
-    setSettings: (panelId: string, settings: Record<string, unknown>) => Promise<IPCResponse>;
   };
 
   // Logs panel operations

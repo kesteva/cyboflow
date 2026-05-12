@@ -1,7 +1,6 @@
 import { EventEmitter } from 'events';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import * as path from 'path';
-import * as os from 'os';
 import { execSync, exec } from 'child_process';
 import { promisify } from 'util';
 import type { Logger } from '../../../utils/logger';
@@ -529,16 +528,15 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Uses centralized shellPath utility for consistent PATH management
    */
   protected async getSystemEnvironment(): Promise<{ [key: string]: string }> {
-    // Get the enhanced PATH from centralized utility (includes Linux-specific paths)
+    // Get the enhanced PATH from centralized utility
     const shellPath = getShellPath();
 
     // Find Node.js and ensure it's in the PATH
     const nodePath = await findNodeExecutable();
     const nodeDir = path.dirname(nodePath);
-    const pathSeparator = process.platform === 'win32' ? ';' : ':';
-    
+
     // Combine Node.js directory with enhanced PATH
-    const pathWithNode = nodeDir + pathSeparator + shellPath;
+    const pathWithNode = nodeDir + ':' + shellPath;
 
     return {
       ...process.env,
@@ -571,11 +569,6 @@ export abstract class AbstractCliManager extends EventEmitter {
     while (spawnAttempt < 2) {
       try {
         const startTime = Date.now();
-
-        // On Linux, add a small delay before spawning to avoid resource contention
-        if (os.platform() === 'linux' && this.processes.size > 0) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
 
         if (spawnAttempt === 0 && !(global as typeof global & Record<string, boolean>)[needsNodeFallbackKey]) {
           // First attempt: normal spawn
@@ -805,37 +798,20 @@ export abstract class AbstractCliManager extends EventEmitter {
    */
   protected getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
-    const platform = os.platform();
 
     try {
-      if (platform === 'win32') {
-        const result = execSync(
-          `wmic process where (ParentProcessId=${parentPid}) get ProcessId`,
-          { encoding: 'utf8' }
-        );
+      const result = execSync(
+        `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
+        { encoding: 'utf8' }
+      );
 
-        const lines = result.split('\n').filter((line: string) => line.trim());
-        for (let i = 1; i < lines.length; i++) {
-          const pid = parseInt(lines[i].trim());
-          if (!isNaN(pid) && pid !== parentPid) {
-            descendants.push(pid);
-            descendants.push(...this.getAllDescendantPids(pid));
-          }
-        }
-      } else {
-        const result = execSync(
-          `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
-          { encoding: 'utf8' }
-        );
+      const pids = result.split('\n')
+        .map((line: string) => parseInt(line.trim()))
+        .filter((pid: number) => !isNaN(pid) && pid !== parentPid);
 
-        const pids = result.split('\n')
-          .map((line: string) => parseInt(line.trim()))
-          .filter((pid: number) => !isNaN(pid) && pid !== parentPid);
-
-        for (const pid of pids) {
-          descendants.push(pid);
-          descendants.push(...this.getAllDescendantPids(pid));
-        }
+      for (const pid of pids) {
+        descendants.push(pid);
+        descendants.push(...this.getAllDescendantPids(pid));
       }
     } catch (error) {
       this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
@@ -849,29 +825,14 @@ export abstract class AbstractCliManager extends EventEmitter {
    */
   protected async getProcessInfo(pids: number[]): Promise<{ pid: number; name?: string }[]> {
     const processInfo: { pid: number; name?: string }[] = [];
-    const platform = os.platform();
 
     for (const pid of pids) {
       try {
-        let name: string | undefined;
-
-        if (platform === 'win32') {
-          const result = execSync(
-            `wmic process where ProcessId=${pid} get Name`,
-            { encoding: 'utf8' }
-          );
-          const lines = result.split('\n').filter((line: string) => line.trim());
-          if (lines.length > 1) {
-            name = lines[1].trim();
-          }
-        } else {
-          const result = execSync(
-            `ps -p ${pid} -o comm= 2>/dev/null || true`,
-            { encoding: 'utf8' }
-          );
-          name = result.trim();
-        }
-
+        const result = execSync(
+          `ps -p ${pid} -o comm= 2>/dev/null || true`,
+          { encoding: 'utf8' }
+        );
+        const name = result.trim();
         processInfo.push({ pid, name: name || 'unknown' });
       } catch (error) {
         processInfo.push({ pid, name: 'unknown' });
@@ -885,75 +846,57 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Kill a process and all its descendants
    */
   protected async killProcessTree(pid: number, panelId: string, sessionId: string): Promise<boolean> {
-    const platform = os.platform();
-
     const descendantPids = this.getAllDescendantPids(pid);
     this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} descendant processes for PID ${pid} in session ${sessionId}`);
 
     let success = true;
 
     try {
-      if (platform === 'win32') {
-        try {
-          await this.execAsync(`taskkill /F /T /PID ${pid}`);
-          this.logger?.verbose(`[${this.getCliToolName()}] Successfully killed Windows process tree ${pid}`);
-        } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error killing Windows process tree: ${error as Error}`);
-          for (const childPid of descendantPids) {
-            try {
-              await this.execAsync(`taskkill /F /PID ${childPid}`);
-            } catch (e) {
-              // Process might already be dead
-            }
-          }
-        }
-      } else {
-        // Unix-like systems
-        try {
-          process.kill(pid, 'SIGTERM');
-        } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error as Error);
-        }
+      // macOS/Unix
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error as Error);
+      }
 
-        // Kill the entire process group
+      // Kill the entire process group
+      try {
+        await this.execAsync(`kill -TERM -${pid}`);
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGTERM to process group: ${error}`);
+      }
+
+      // Give processes a chance to clean up gracefully
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Force kill
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch (error) {
+        // Process might already be dead
+      }
+
+      try {
+        await this.execAsync(`kill -9 -${pid}`);
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGKILL to process group: ${error}`);
+      }
+
+      // Kill all known descendants individually
+      for (const childPid of descendantPids) {
         try {
-          await this.execAsync(`kill -TERM -${pid}`);
+          await this.execAsync(`kill -9 ${childPid}`);
+          this.logger?.verbose(`[${this.getCliToolName()}] Killed descendant process ${childPid}`);
         } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGTERM to process group: ${error}`);
+          this.logger?.verbose(`[${this.getCliToolName()}] Process ${childPid} already terminated`);
         }
+      }
 
-        // Give processes a chance to clean up gracefully
-        await new Promise(resolve => setTimeout(resolve, 200));
-
-        // Force kill
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch (error) {
-          // Process might already be dead
-        }
-
-        try {
-          await this.execAsync(`kill -9 -${pid}`);
-        } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGKILL to process group: ${error}`);
-        }
-
-        // Kill all known descendants individually
-        for (const childPid of descendantPids) {
-          try {
-            await this.execAsync(`kill -9 ${childPid}`);
-            this.logger?.verbose(`[${this.getCliToolName()}] Killed descendant process ${childPid}`);
-          } catch (error) {
-            this.logger?.verbose(`[${this.getCliToolName()}] Process ${childPid} already terminated`);
-          }
-        }
-
-        // Final cleanup attempt
-        try {
-          await this.execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
-          // Ignore errors - processes might already be dead
-        }
+      // Final cleanup attempt
+      try {
+        await this.execAsync(`pkill -9 -P ${pid}`);
+      } catch (error) {
+        // Ignore errors - processes might already be dead
       }
 
       // Verify all processes are actually dead

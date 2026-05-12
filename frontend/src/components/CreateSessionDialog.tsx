@@ -12,8 +12,6 @@ import { Button } from './ui/Button';
 import { Input } from './ui/Input';
 import { Card } from './ui/Card';
 import { ClaudeCodeConfigComponent, type ClaudeCodeConfig } from './dialog/ClaudeCodeConfig';
-import { CodexConfigComponent, type CodexConfig } from './dialog/CodexConfig';
-import { DEFAULT_CODEX_MODEL, type OpenAICodexModel } from '../../../shared/types/models';
 import { useSessionPreferencesStore, type SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 
 // Interface for branch information
@@ -56,20 +54,13 @@ interface CreateSessionDialogProps {
   initialPrompt?: string;
   initialSessionName?: string;
   // For "Discard and Retry" feature - pre-fill session creation settings
-  initialToolType?: 'claude' | 'codex' | 'none';
+  initialToolType?: 'claude' | 'none';
   initialBaseBranch?: string;
   initialFolderId?: string; // Folder to create the new session in
   initialClaudeConfig?: {
     model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
     permissionMode?: 'approve' | 'ignore';
     ultrathink?: boolean;
-  };
-  initialCodexConfig?: {
-    model?: string;
-    modelProvider?: string;
-    sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-    webSearch?: boolean;
-    thinkingLevel?: 'low' | 'medium' | 'high';
   };
   // Callback called after session is successfully created (for "Discard and Retry" to archive old session)
   onSessionCreated?: () => void;
@@ -86,14 +77,12 @@ export function CreateSessionDialog({
   initialBaseBranch,
   initialFolderId,
   initialClaudeConfig,
-  initialCodexConfig,
   onSessionCreated
 }: CreateSessionDialogProps) {
   const [sessionName, setSessionName] = useState<string>(initialSessionName || '');
   const [sessionCount, setSessionCount] = useState<number>(1);
-  const [selectedTools, setSelectedTools] = useState<{ claude: boolean; codex: boolean }>({
-    claude: initialToolType === 'claude' || !!initialPrompt,
-    codex: initialToolType === 'codex'
+  const [selectedTools, setSelectedTools] = useState<{ claude: boolean }>({
+    claude: initialToolType === 'claude' || !!initialPrompt
   });
   const [sharedPrompt, setSharedPrompt] = useState<string>(initialPrompt || '');
   const [claudeConfig, setClaudeConfig] = useState<ClaudeCodeConfig>({
@@ -101,17 +90,6 @@ export function CreateSessionDialog({
     model: initialClaudeConfig?.model || 'auto',
     permissionMode: initialClaudeConfig?.permissionMode || 'ignore',
     ultrathink: initialClaudeConfig?.ultrathink || false,
-    attachedImages: [],
-    attachedTexts: []
-  });
-  const [codexConfig, setCodexConfig] = useState<CodexConfig>({
-    prompt: initialPrompt || '',
-    model: (initialCodexConfig?.model as OpenAICodexModel) || DEFAULT_CODEX_MODEL,
-    modelProvider: initialCodexConfig?.modelProvider || 'openai',
-    approvalPolicy: 'auto',  // Always 'auto' - manual mode not implemented
-    sandboxMode: initialCodexConfig?.sandboxMode || 'workspace-write',
-    webSearch: initialCodexConfig?.webSearch || false,
-    thinkingLevel: initialCodexConfig?.thinkingLevel || 'medium',
     attachedImages: [],
     attachedTexts: []
   });
@@ -144,7 +122,6 @@ export function CreateSessionDialog({
     setSharedPrompt(newPrompt);
     setFormData(prev => (prev.prompt === newPrompt ? prev : { ...prev, prompt: newPrompt }));
     setClaudeConfig(prev => (prev.prompt === newPrompt ? prev : { ...prev, prompt: newPrompt }));
-    setCodexConfig(prev => (prev.prompt === newPrompt ? prev : { ...prev, prompt: newPrompt }));
   }, []);
 
   const syncImageAttachments = useCallback((updater: (prev: AttachedImage[]) => AttachedImage[]) => {
@@ -156,13 +133,6 @@ export function CreateSessionDialog({
       }
 
       setClaudeConfig(prev => {
-        const current = prev.attachedImages || [];
-        return attachmentListsEqual(current, updatedImages)
-          ? prev
-          : { ...prev, attachedImages: updatedImages };
-      });
-
-      setCodexConfig(prev => {
         const current = prev.attachedImages || [];
         return attachmentListsEqual(current, updatedImages)
           ? prev
@@ -182,13 +152,6 @@ export function CreateSessionDialog({
       }
 
       setClaudeConfig(prev => {
-        const current = prev.attachedTexts || [];
-        return attachmentListsEqual(current, updatedTexts)
-          ? prev
-          : { ...prev, attachedTexts: updatedTexts };
-      });
-
-      setCodexConfig(prev => {
         const current = prev.attachedTexts || [];
         return attachmentListsEqual(current, updatedTexts)
           ? prev
@@ -232,8 +195,7 @@ export function CreateSessionDialog({
       // Apply initial tool type if provided (for "Discard and Retry")
       if (initialToolType) {
         setSelectedTools({
-          claude: initialToolType === 'claude',
-          codex: initialToolType === 'codex'
+          claude: initialToolType === 'claude'
         });
       }
 
@@ -246,20 +208,8 @@ export function CreateSessionDialog({
           ultrathink: initialClaudeConfig.ultrathink ?? prev.ultrathink
         }));
       }
-
-      // Apply initial Codex config if provided
-      if (initialCodexConfig) {
-        setCodexConfig(prev => ({
-          ...prev,
-          model: (initialCodexConfig.model as OpenAICodexModel) || prev.model,
-          modelProvider: initialCodexConfig.modelProvider || prev.modelProvider,
-          sandboxMode: initialCodexConfig.sandboxMode || prev.sandboxMode,
-          webSearch: initialCodexConfig.webSearch ?? prev.webSearch,
-          thinkingLevel: initialCodexConfig.thinkingLevel || prev.thinkingLevel
-        }));
-      }
     }
-  }, [isOpen, loadPreferences, syncPromptAcrossConfigs, syncImageAttachments, syncTextAttachments, initialPrompt, initialSessionName, initialToolType, initialBaseBranch, initialClaudeConfig, initialCodexConfig]);
+  }, [isOpen, loadPreferences, syncPromptAcrossConfigs, syncImageAttachments, syncTextAttachments, initialPrompt, initialSessionName, initialToolType, initialBaseBranch, initialClaudeConfig]);
 
 
   // Apply loaded preferences to state (only if initial configs not provided)
@@ -270,17 +220,15 @@ export function CreateSessionDialog({
       if (!initialToolType) {
         if (initialPrompt) {
           // If we have an initialPrompt, default to Claude being selected
-          setSelectedTools({ claude: true, codex: false });
+          setSelectedTools({ claude: true });
         } else if (preferences.selectedTools) {
           setSelectedTools({
-            claude: !!preferences.selectedTools.claude,
-            codex: !!preferences.selectedTools.codex
+            claude: !!preferences.selectedTools.claude
           });
         } else if (preferences.toolType) {
           // Map old preference format to new checkbox format
           setSelectedTools({
-            claude: preferences.toolType === 'claude',
-            codex: preferences.toolType === 'codex'
+            claude: preferences.toolType === 'claude'
           });
         }
       }
@@ -295,44 +243,24 @@ export function CreateSessionDialog({
         }));
       }
 
-      // Only apply Codex config from preferences if no initial config provided
-      if (!initialCodexConfig) {
-        setCodexConfig(prev => ({
-          ...prev,
-          model: preferences.codexConfig.model as OpenAICodexModel,
-          modelProvider: preferences.codexConfig.modelProvider,
-          approvalPolicy: 'auto',  // Always 'auto' - manual mode not implemented
-          sandboxMode: preferences.codexConfig.sandboxMode,
-          webSearch: preferences.codexConfig.webSearch,
-          thinkingLevel: preferences.codexConfig.thinkingLevel || 'medium'
-        }));
-      }
-
       setShowAdvanced(preferences.showAdvanced);
       setCommitModeSettings(preferences.commitModeSettings);
       // Note: we don't apply baseBranch as it should be project-specific
     }
-  }, [preferences, initialPrompt, initialToolType, initialClaudeConfig, initialCodexConfig]);
+  }, [preferences, initialPrompt, initialToolType, initialClaudeConfig]);
 
   // Save preferences when certain settings change
   const savePreferences = useCallback(async (updates: Partial<SessionCreationPreferences>) => {
     await updatePreferences(updates);
   }, [updatePreferences]);
 
-  const persistSelectedToolsPreference = useCallback((tools: { claude: boolean; codex: boolean }) => {
-    const nextToolType: SessionCreationPreferences['toolType'] = tools.claude && tools.codex
-      ? 'none'
-      : tools.claude
-        ? 'claude'
-        : tools.codex
-          ? 'codex'
-          : 'none';
+  const persistSelectedToolsPreference = useCallback((tools: { claude: boolean }) => {
+    const nextToolType: SessionCreationPreferences['toolType'] = tools.claude ? 'claude' : 'none';
 
     void savePreferences({
       toolType: nextToolType,
       selectedTools: {
-        claude: tools.claude,
-        codex: tools.codex
+        claude: tools.claude
       }
     });
   }, [savePreferences]);
@@ -545,10 +473,10 @@ export function CreateSessionDialog({
 
     // Check if session name is required
     // Session name is always required when no tools are selected OR when there's no API key
-    if (!sessionName && (!hasApiKey || (!selectedTools.claude && !selectedTools.codex))) {
+    if (!sessionName && (!hasApiKey || !selectedTools.claude)) {
       showError({
         title: 'Session Name Required',
-        error: !selectedTools.claude && !selectedTools.codex
+        error: !selectedTools.claude
           ? 'Please provide a session name when creating a session without AI tools.'
           : 'Please provide a session name or add an Anthropic API key in Settings to enable auto-naming.'
       });
@@ -623,9 +551,8 @@ export function CreateSessionDialog({
       }
 
       // Determine which tools to create sessions for
-      const toolsToCreate: Array<'claude' | 'codex' | 'none'> = [];
+      const toolsToCreate: Array<'claude' | 'none'> = [];
       if (selectedTools.claude) toolsToCreate.push('claude');
-      if (selectedTools.codex) toolsToCreate.push('codex');
 
       // If no tools selected, create a session with no agent
       if (toolsToCreate.length === 0) {
@@ -701,24 +628,15 @@ export function CreateSessionDialog({
             toolPrompt += '\nultrathink';
           }
           toolPermissionMode = claudeConfig.permissionMode;
-        } else if (toolType === 'codex') {
-          toolPermissionMode = formData.permissionMode || 'ignore';
         } else if (toolType === 'none') {
           // For sessions with no agent, use default permission mode
           toolPermissionMode = formData.permissionMode || 'ignore';
         }
 
-        // Determine session name:
-        // - If multiple tools selected, add tool prefix (e.g., 'CC-' for Claude Code or 'CX-' for Codex)
-        // - If both sessionCount > 1 AND multiple tools, the count suffix will be added by taskQueue
+        // Determine session name
         let finalSessionName: string | undefined;
         if (baseSessionName) {
-          if (toolsToCreate.length > 1) {
-            const prefix = toolType === 'claude' ? 'CC' : toolType === 'codex' ? 'CX' : toolType;
-            finalSessionName = `${prefix}-${baseSessionName}`;
-          } else {
-            finalSessionName = baseSessionName;
-          }
+          finalSessionName = baseSessionName;
         }
 
         console.log('[CreateSessionDialog] Creating session with:', {
@@ -740,14 +658,6 @@ export function CreateSessionDialog({
           commitMode: commitModeSettings.mode,
           commitModeSettings: JSON.stringify(commitModeSettings),
           baseBranch: formData.baseBranch,
-          codexConfig: toolType === 'codex' ? {
-            model: codexConfig.model,
-            modelProvider: codexConfig.modelProvider,
-            approvalPolicy: 'auto',
-            sandboxMode: codexConfig.sandboxMode,
-            webSearch: codexConfig.webSearch,
-            thinkingLevel: codexConfig.thinkingLevel
-          } : undefined,
           claudeConfig: toolType === 'claude' ? {
             model: claudeConfig.model,
             permissionMode: claudeConfig.permissionMode,
@@ -757,7 +667,7 @@ export function CreateSessionDialog({
 
         if (!response.success) {
           showError({
-            title: `Failed to Create ${toolType === 'claude' ? 'Claude' : 'Codex'} Session`,
+            title: 'Failed to Create Session',
             error: response.error || 'An error occurred while creating the session.',
             details: response.details,
             command: response.command
@@ -814,7 +724,7 @@ export function CreateSessionDialog({
                 {/* Session Name */}
                 <div>
                   <label className="block text-sm font-medium text-text-primary mb-1">
-                    Session Name {(!selectedTools.claude && !selectedTools.codex) || !hasApiKey ? '(Required)' : '(Optional)'}
+                    Session Name {!selectedTools.claude || !hasApiKey ? '(Required)' : '(Optional)'}
                   </label>
                   <div className="flex gap-2">
                     <Input
@@ -872,14 +782,14 @@ export function CreateSessionDialog({
                     </Button>
                   )}
                 </div>
-                  {!sessionName && (!hasApiKey || (!selectedTools.claude && !selectedTools.codex)) && (
+                  {!sessionName && (!hasApiKey || !selectedTools.claude) && (
                   <p className="text-xs text-status-warning mt-1">
-                    {(!selectedTools.claude && !selectedTools.codex)
+                    {!selectedTools.claude
                       ? 'Session name is required when creating sessions without AI tools.'
                       : 'Session name is required. Add an Anthropic API key in Settings to enable AI-powered auto-naming.'}
                   </p>
                 )}
-                  {!worktreeError && (sessionName || (hasApiKey && (selectedTools.claude || selectedTools.codex))) && (
+                  {!worktreeError && (sessionName || (hasApiKey && selectedTools.claude)) && (
                   <p className="text-xs text-text-tertiary mt-1">
                     The name for your session and worktree folder.
                   </p>
@@ -968,19 +878,19 @@ export function CreateSessionDialog({
                     value={sharedPrompt}
                     onChange={(value) => syncPromptAcrossConfigs(value)}
                     projectId={projectId?.toString()}
-                    placeholder={!selectedTools.claude && !selectedTools.codex ? "Prompt disabled (no AI tools selected)" : "Describe your task... (use @ to reference files)"}
+                    placeholder={!selectedTools.claude ? "Prompt disabled (no AI tools selected)" : "Describe your task... (use @ to reference files)"}
                     className="w-full px-3 py-2 pr-10 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary placeholder-text-tertiary"
                     isTextarea={true}
                     rows={3}
                     onPaste={handlePaste}
-                    disabled={!selectedTools.claude && !selectedTools.codex}
+                    disabled={!selectedTools.claude}
                   />
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     className="absolute bottom-2 right-2 p-1.5 rounded hover:bg-surface-hover transition-colors"
                     title="Attach images"
-                    disabled={!selectedTools.claude && !selectedTools.codex}
+                    disabled={!selectedTools.claude}
                   >
                     <Paperclip className="w-4 h-4 text-text-tertiary hover:text-text-secondary" />
                   </button>
@@ -1012,12 +922,12 @@ export function CreateSessionDialog({
                 <h3 className="text-sm font-semibold text-text-primary">AI Tool Selection</h3>
               </div>
 
-              {/* Tool Type Selection - Checkboxes */}
+              {/* Tool Type Selection */}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-text-secondary mb-2">
-                  Select Tools (optional - select one, both, or none)
+                  Select Tool (optional)
                 </label>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3">
                   <Card
                     variant={selectedTools.claude ? 'interactive' : 'bordered'}
                     padding="sm"
@@ -1046,39 +956,6 @@ export function CreateSessionDialog({
                         <div>
                           <span className={`text-sm font-medium block ${selectedTools.claude ? 'text-interactive' : ''}`}>Claude Code</span>
                           <span className="text-xs opacity-75">AI assistant</span>
-                        </div>
-                      </div>
-                    </div>
-                  </Card>
-
-                  <Card
-                    variant={selectedTools.codex ? 'interactive' : 'bordered'}
-                    padding="sm"
-                    className={`relative cursor-pointer transition-all ${
-                      selectedTools.codex
-                        ? 'border-interactive bg-interactive/10'
-                        : ''
-                    }`}
-                    onClick={() => {
-                      setSelectedTools(prev => {
-                        const nextState = { ...prev, codex: !prev.codex };
-                        persistSelectedToolsPreference(nextState);
-                        return nextState;
-                      });
-                    }}
-                  >
-                    <div className="flex items-center gap-3 py-2 px-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedTools.codex}
-                        onChange={() => {}}
-                        className="w-4 h-4 rounded border-border-primary text-interactive focus:ring-2 focus:ring-interactive"
-                      />
-                      <div className="flex items-center gap-2 flex-1">
-                        <Code2 className={`w-5 h-5 ${selectedTools.codex ? 'text-interactive' : 'text-text-tertiary'}`} />
-                        <div>
-                          <span className={`text-sm font-medium block ${selectedTools.codex ? 'text-interactive' : ''}`}>Codex</span>
-                          <span className="text-xs opacity-75">Multi-model AI</span>
                         </div>
                       </div>
                     </div>
@@ -1115,38 +992,7 @@ export function CreateSessionDialog({
                 </Card>
               )}
 
-              {selectedTools.codex && (
-                <Card variant="bordered" className="p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Code2 className="w-4 h-4 text-interactive" />
-                    <h4 className="text-sm font-semibold text-text-primary">Codex Settings</h4>
-                  </div>
-                  <CodexConfigComponent
-                    config={codexConfig}
-                    onChange={(newConfig) => {
-                      setCodexConfig(newConfig);
-                      // Don't sync prompt anymore since it's managed at the top level
-                      // Save codex config preferences (excluding prompt and attachments)
-                      const { prompt, attachedImages, attachedTexts, ...configToSave } = newConfig;
-                      savePreferences({ codexConfig: {
-                        model: (configToSave.model ?? DEFAULT_CODEX_MODEL) as string,
-                        modelProvider: configToSave.modelProvider ?? 'openai',
-                        approvalPolicy: 'auto',  // Always 'auto' - manual mode not implemented
-                        sandboxMode: configToSave.sandboxMode ?? 'workspace-write',
-                        webSearch: configToSave.webSearch ?? false,
-                        thinkingLevel: configToSave.thinkingLevel ?? 'medium'
-                      } });
-                    }}
-                    projectId={projectId?.toString()}
-                    onPaste={handlePaste}
-                    onRemoveImage={removeImage}
-                    onRemoveText={removeText}
-                    disabled={false}
-                  />
-                </Card>
-              )}
-
-              {!selectedTools.claude && !selectedTools.codex && (
+              {!selectedTools.claude && (
                 <Card variant="bordered" className="p-4 text-center text-text-tertiary">
                   <p className="text-sm">No AI tools selected. The session will be created without an AI agent.</p>
                   <p className="text-xs mt-2 opacity-75">You can use the terminal and git features without an AI assistant.</p>
@@ -1346,22 +1192,21 @@ export function CreateSessionDialog({
             disabled={
               isSubmitting ||
               !!worktreeError ||
-              (!sessionName && (!hasApiKey || (!selectedTools.claude && !selectedTools.codex)))
+              (!sessionName && (!hasApiKey || !selectedTools.claude))
             }
             loading={isSubmitting}
             title={
               isSubmitting ? 'Creating session...' :
               worktreeError ? 'Please fix the session name error' :
-              (!sessionName && (!hasApiKey || (!selectedTools.claude && !selectedTools.codex))) ?
-                (!selectedTools.claude && !selectedTools.codex)
+              (!sessionName && (!hasApiKey || !selectedTools.claude)) ?
+                !selectedTools.claude
                   ? 'Please enter a session name (required for sessions without AI tools)'
                   : 'Please enter a session name (required without API key)' :
               undefined
             }
           >
             {isSubmitting ? 'Creating...' : (() => {
-              const toolCount = Math.max(1, (selectedTools.claude ? 1 : 0) + (selectedTools.codex ? 1 : 0));
-              const totalSessions = toolCount * sessionCount;
+              const totalSessions = sessionCount;
               return `Create ${totalSessions > 1 ? totalSessions + ' Sessions' : 'Session'}`;
             })()}
           </Button>

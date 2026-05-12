@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { API } from '../../../utils/api';
 import type { LucideIcon } from 'lucide-react';
-import { User, Bot, Eye, EyeOff, Settings2, CheckCircle, XCircle, ArrowDown, Copy, Check, FileText, Terminal, Info, Loader2, Clock } from 'lucide-react';
+import { User, Bot, Eye, EyeOff, Settings2, CheckCircle, XCircle, ArrowDown, Copy, Check, Terminal, Info, Loader2, Clock } from 'lucide-react';
 import { parseTimestamp, formatDistanceToNow } from '../../../utils/timestampUtils';
 import { ThinkingPlaceholder, InlineWorkingIndicator } from '../../session/ThinkingPlaceholder';
 import { MessageSegment } from './components/MessageSegment';
@@ -10,8 +10,6 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-import { CodexMessageTransformer } from './transformers/CodexMessageTransformer';
-
 // Local interface for combining user prompts with output messages
 interface UserPromptMessage {
   type: 'user';
@@ -134,8 +132,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
   }, []);
 
   const settings = propsSettings || localSettings;
-  const isCodexTransformer = useMemo(() => messageTransformer instanceof CodexMessageTransformer, [messageTransformer]);
-  
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isLoadingRef = useRef(false);
@@ -185,34 +182,8 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
     try {
       setError(null);
       
-      // For Codex panels, use the getOutputsHandler to get outputs
-      if (getOutputsHandler.includes('codex')) {
-        const existingOutputs = await window.electron?.invoke(getOutputsHandler, panelId, 1000);
-        if (existingOutputs && existingOutputs.length > 0) {
-          const transformedMessages = messageTransformer.transform(existingOutputs);
-          setMessages(transformedMessages);
-          
-          // Auto-expand sub-agent (Task) tools for Codex too
-          const newSubAgentIds = new Set<string>();
-          transformedMessages.forEach(msg => {
-            msg.segments.forEach(seg => {
-              if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
-                newSubAgentIds.add(seg.tool.id);
-              }
-            });
-          });
-          
-          // Add sub-agent IDs to expanded tools
-          if (newSubAgentIds.size > 0) {
-            setExpandedTools(prev => {
-              const next = new Set(prev);
-              newSubAgentIds.forEach(id => next.add(id));
-              return next;
-            });
-          }
-        }
-      } else {
-        // For Claude panels, use the existing API calls
+      {
+        // Use the existing API calls
         const [conversationResponse, outputResponse] = await Promise.all([
           API.panels.getConversationMessages(panelId),
           API.panels.getJsonMessages(panelId)
@@ -303,29 +274,18 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         // Debounce message reloading to prevent excessive re-renders
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-          // For both Claude and Codex, reload all messages from database
-          // This ensures consistency and avoids duplicates
+          // Reload all messages from database to ensure consistency
           loadMessagesRef.current?.();
         }, 500); // Wait 500ms after last event
       }
     };
     
-    // Listen for the appropriate event based on the panel type
-    if (outputEventName.includes('codex')) {
-      // Only register Electron IPC listener for Codex
-      window.electron?.on(outputEventName, handleOutputAvailable);
-      // Don't also add a window event listener - this causes duplicate handling
-    } else {
-      window.addEventListener('session-output-available', handleOutputAvailable as EventListener);
-    }
-    
+    // Listen for session output events
+    window.addEventListener('session-output-available', handleOutputAvailable as EventListener);
+
     return () => {
       clearTimeout(debounceTimer);
-      if (outputEventName.includes('codex')) {
-        window.electron?.off(outputEventName, handleOutputAvailable);
-      } else {
-        window.removeEventListener('session-output-available', handleOutputAvailable as EventListener);
-      }
+      window.removeEventListener('session-output-available', handleOutputAvailable as EventListener);
     };
   }, [panelId, outputEventName]); // Remove messageTransformer from dependencies to avoid re-registering
 
@@ -765,219 +725,6 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
       .map(seg => seg.type === 'text' ? seg.content : '')
       .join('\n\n');
 
-    if (message.metadata?.systemSubtype === 'session_info') {
-      if (!showSystemMessages && isCodexTransformer) {
-        return null;
-      }
-      const infoSegment = message.segments.find(seg => seg.type === 'system_info');
-      const sessionInfo = infoSegment?.type === 'system_info' ? infoSegment.info || {} : {};
-      
-      // Type guard helper to safely convert unknown values to strings
-      const toString = (value: unknown): string => typeof value === 'string' ? value : '';
-      
-      const initialPrompt = toString(sessionInfo.initialPrompt || sessionInfo.initial_prompt);
-      const command = toString(sessionInfo.codexCommand || sessionInfo.claudeCommand || sessionInfo.codex_command);
-      const worktreePath = toString(sessionInfo.worktreePath || sessionInfo.worktree_path);
-      const model = toString(sessionInfo.model);
-      const provider = toString(sessionInfo.modelProvider || sessionInfo.model_provider);
-      const approvalPolicy = toString(sessionInfo.approvalPolicy || sessionInfo.approval_policy);
-      const sandboxMode = toString(sessionInfo.sandboxMode || sessionInfo.sandbox_mode);
-      const permissionMode = toString(sessionInfo.permissionMode || sessionInfo.permission_mode);
-      const rawResumeSessionId = sessionInfo.resumeSessionId ?? sessionInfo.resume_session_id;
-      const resumeSessionId = typeof rawResumeSessionId === 'string' && rawResumeSessionId.trim().length > 0
-        ? rawResumeSessionId
-        : null;
-
-      return (
-        <div
-          key={message.id}
-          className={`
-            rounded-lg transition-all bg-surface-tertiary border border-border-primary
-            ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
-          `}
-        >
-          <div className="flex items-start gap-3">
-            <div className="rounded-full p-2 bg-interactive/15 text-interactive-on-dark">
-              <Settings2 className="w-5 h-5" />
-            </div>
-            <div className="flex-1 space-y-4">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-semibold text-text-primary">Codex Session Ready</span>
-                <span className="text-[11px] font-mono text-text-secondary bg-surface-secondary/70 border border-border-secondary px-2 py-0.5 rounded">
-                  Resume ID: {resumeSessionId ?? 'none'}
-                </span>
-                <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
-                </span>
-              </div>
-
-              {initialPrompt && (
-                <div>
-                  <div className="flex items-center gap-2 text-text-secondary mb-1">
-                    <FileText className="w-3.5 h-3.5" />
-                    <span className="text-xs font-semibold tracking-wider">You</span>
-                  </div>
-                  <div className="bg-surface-secondary rounded p-3 text-sm text-text-primary whitespace-pre-wrap break-words">
-                    {initialPrompt}
-                  </div>
-                </div>
-              )}
-
-              {command && (
-                <div>
-                  <div className="flex items-center gap-2 text-text-secondary mb-1">
-                    <Terminal className="w-3.5 h-3.5" />
-                    <span className="text-xs font-semibold uppercase tracking-wider">Codex Command</span>
-                  </div>
-                  <div className="bg-surface-secondary rounded p-3 text-xs text-text-primary font-mono overflow-x-auto">
-                    {command}
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                {model && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Model</span>
-                    <div className="text-text-secondary mt-1 font-medium">
-                      {model}
-                      {provider && (
-                        <span className="block text-text-tertiary text-[11px] font-normal">Provider: {provider}</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {worktreePath && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Worktree</span>
-                    <div className="text-text-secondary mt-1 font-mono truncate" title={worktreePath}>
-                      {worktreePath}
-                    </div>
-                  </div>
-                )}
-                {approvalPolicy && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Approval Policy</span>
-                    <div className="text-text-secondary mt-1">
-                      {approvalPolicy}
-                    </div>
-                  </div>
-                )}
-                {sandboxMode && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Sandbox</span>
-                    <div className="text-text-secondary mt-1">
-                      {sandboxMode}
-                    </div>
-                  </div>
-                )}
-                {permissionMode && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Permission Mode</span>
-                    <div className="text-text-secondary mt-1 capitalize">
-                      {permissionMode}
-                    </div>
-                  </div>
-                )}
-                {resumeSessionId && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Resume Session ID</span>
-                    <div className="text-text-secondary mt-1 font-mono truncate" title={resumeSessionId}>
-                      {resumeSessionId}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    if (message.metadata?.systemSubtype === 'session_runtime') {
-      if (!showSystemMessages && isCodexTransformer) {
-        return null;
-      }
-      const infoSegment = message.segments.find(seg => seg.type === 'system_info');
-      const runtimeInfo = infoSegment?.type === 'system_info' ? infoSegment.info || {} : {};
-      
-      // Type guard helper to safely convert unknown values to strings
-      const toString = (value: unknown): string => typeof value === 'string' ? value : '';
-      
-      const provider = toString(runtimeInfo.provider);
-      const sandboxMode = toString(runtimeInfo.sandboxMode);
-      const approvalPolicy = toString(runtimeInfo.approvalPolicy);
-      const reasoningEffort = toString(runtimeInfo.reasoningEffort);
-      const reasoningSummaries = toString(runtimeInfo.reasoningSummaries);
-      const workdir = toString(runtimeInfo.workdir);
-
-      return (
-        <div
-          key={message.id}
-          className={`
-            rounded-lg transition-all bg-surface-secondary/60 border border-border-primary
-            ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
-          `}
-        >
-          <div className="flex items-start gap-3">
-            <div className="rounded-full p-2 bg-surface-secondary text-text-secondary">
-              <Settings2 className="w-5 h-5" />
-            </div>
-            <div className="flex-1 space-y-3">
-              <div className="flex items-center gap-2">
-                <span className="font-semibold text-text-primary">Runtime Configuration</span>
-                <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                {provider && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Provider</span>
-                    <div className="text-text-secondary mt-1">{provider}</div>
-                  </div>
-                )}
-                {sandboxMode && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Sandbox</span>
-                    <div className="text-text-secondary mt-1">{sandboxMode}</div>
-                  </div>
-                )}
-                {approvalPolicy && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Approval Policy</span>
-                    <div className="text-text-secondary mt-1">{approvalPolicy}</div>
-                  </div>
-                )}
-                {reasoningEffort && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Reasoning Effort</span>
-                    <div className="text-text-secondary mt-1">{reasoningEffort}</div>
-                  </div>
-                )}
-                {reasoningSummaries && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Reasoning Summaries</span>
-                    <div className="text-text-secondary mt-1">{reasoningSummaries}</div>
-                  </div>
-                )}
-                {workdir && (
-                  <div>
-                    <span className="text-text-quaternary uppercase tracking-wide text-[10px]">Workdir</span>
-                    <div className="text-text-secondary mt-1 font-mono truncate" title={workdir}>
-                      {workdir}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
     const errorSegment = message.segments.find(seg => seg.type === 'error');
     if (errorSegment?.type === 'error' && errorSegment.error) {
       const { message: errorMessage, details } = errorSegment.error;
@@ -1307,7 +1054,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         const StatusIcon = config.icon;
         const title = config.title ?? formatStatusLabel(rawStatus);
 
-        if (!showSystemMessages && isCodexTransformer && statusKey === 'completed') {
+        if (!showSystemMessages && statusKey === 'completed') {
           return null;
         }
 
@@ -1359,7 +1106,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
       }
 
       if (info.type === 'task_started') {
-        if (!showSystemMessages && isCodexTransformer) {
+        if (!showSystemMessages) {
           return null;
         }
         

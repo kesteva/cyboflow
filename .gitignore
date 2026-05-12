@@ -92,6 +92,9 @@ test-report/
 test-file.txt
 *.test.tmp
 
+# Pre-rewrite backups
+*.backup
+
 # Crystal user data directory (if accidentally placed in repo)
 .crystal/
 
