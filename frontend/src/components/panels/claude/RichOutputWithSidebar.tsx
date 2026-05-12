@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, History } from 'lucide-react';
 import { RichOutputView } from '../ai/RichOutputView';
 import { PromptNavigation } from './PromptNavigation';
 import { cn } from '../../../utils/cn';
+import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
 import { RichOutputSettings } from '../ai/AbstractAIPanel';
 import { MessageTransformer } from '../ai/transformers/MessageTransformer';
 import { ClaudeMessageTransformer } from '../ai/transformers/ClaudeMessageTransformer';
@@ -35,14 +36,15 @@ export const RichOutputWithSidebar: React.FC<RichOutputWithSidebarProps> = React
   }
   
   // Create panel-specific localStorage keys
-  const sidebarCollapsedKey = `crystal-sidebar-collapsed-${id}`;
-  
-  // Load collapsed state from localStorage (keyed by panel ID)
+  const sidebarCollapsedKey = `cyboflow-sidebar-collapsed-${id}`;
+
+  // Load collapsed state from localStorage (keyed by panel ID), with legacy key migration
   const [isCollapsed, setIsCollapsed] = useState(() => {
-    const stored = localStorage.getItem(sidebarCollapsedKey);
+    const legacyKey = `crystal-sidebar-collapsed-${id}`;
+    const stored = migrateLocalStorageKey(legacyKey, sidebarCollapsedKey);
     return stored === 'true';
   });
-  
+
   const richOutputRef = useRef<{ scrollToPrompt: (promptIndex: number) => void }>(null);
 
   // Save collapsed state to localStorage when it changes (keyed by panel ID)

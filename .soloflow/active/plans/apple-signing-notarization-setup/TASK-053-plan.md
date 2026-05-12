@@ -1,8 +1,8 @@
 ---
 id: TASK-053
 idea: IDEA-002
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - package.json
 files_readonly:
@@ -20,21 +20,21 @@ acceptance_criteria:
     verification: "`node -e \"const p=require('./package.json'); const n=p.build.mac.notarize; if(typeof n==='boolean'){process.exit(0)}else if(n&&n.teamId==='\\${APPLE_TEAM_ID}'){process.exit(0)}else process.exit(1)\"` exits 0 — either form is accepted, but if the object form is used it must reference APPLE_TEAM_ID"
   - criterion: "No regression to `appId`, `productName`, or other Crystal-specific fields outside this task's scope"
     verification: "`git diff package.json` touches only `build.mac.hardenedRuntime` and `build.mac.notarize` keys (and not `appId`, `productName`, `name`, `version`)"
-depends_on: [TASK-052]
+depends_on:
+  - TASK-052
 estimated_complexity: low
 epic: apple-signing-notarization-setup
 test_strategy:
   needed: true
-  justification: "The interaction between the static package.json defaults and scripts/configure-build.js runtime override is subtle. A small smoke check confirms both paths still produce the expected build config."
+  justification: The interaction between the static package.json defaults and scripts/configure-build.js runtime override is subtle. A small smoke check confirms both paths still produce the expected build config.
   targets:
-    - behavior: "scripts/configure-build.js downgrades the build config to unsigned when CSC_DISABLE=true"
-      test_file: "scripts/configure-build.test.js"
+    - behavior: scripts/configure-build.js downgrades the build config to unsigned when CSC_DISABLE=true
+      test_file: scripts/configure-build.test.js
       type: integration
     - behavior: "scripts/configure-build.js leaves the build config in signed-posture when all APPLE_* and CSC_LINK env vars are set"
-      test_file: "scripts/configure-build.test.js"
+      test_file: scripts/configure-build.test.js
       type: integration
 ---
-
 # Flip hardenedRuntime and notarize defaults in package.json
 
 ## Objective

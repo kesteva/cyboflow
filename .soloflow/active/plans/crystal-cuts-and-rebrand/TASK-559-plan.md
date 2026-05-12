@@ -1,9 +1,9 @@
 ---
 id: TASK-559
 idea: IDEA-001
-status: ready
-created: 2026-05-11T00:00:00Z
-source_compound: SPRINT-001-proposal.md#B4
+status: in-flight
+created: "2026-05-11T00:00:00Z"
+source_compound: SPRINT-001-proposal.md
 files_owned:
   - main/src/services/__tests__/gitStatusManager.test.ts
 files_readonly:
@@ -26,7 +26,7 @@ acceptance_criteria:
     verification: "`grep -nE 'GitStatusManagerWithPrivates|as unknown as.*Private' main/src/services/__tests__/gitStatusManager.test.ts` returns zero matches. (If the file was deleted entirely, this AC trivially passes — the grep returns zero matches.)"
   - criterion: "If the file is deleted, the deletion decision is documented in the task commit message with a one-sentence justification referencing Playwright coverage"
     verification: "`git log -1 --format=%B -- main/src/services/__tests__/gitStatusManager.test.ts` (or the parent commit if the file is removed) contains the phrase `playwright` or `tests/git-status.spec.ts` in the commit body. Reviewer reads the commit message and confirms it states the coverage delta."
-  - criterion: "Typecheck and lint pass after the change"
+  - criterion: Typecheck and lint pass after the change
     verification: "`pnpm typecheck && pnpm lint` exit 0 from repo root"
 depends_on: []
 estimated_complexity: low
@@ -48,7 +48,6 @@ test_strategy:
       test_file: main/src/services/__tests__/gitStatusManager.test.ts
       type: unit
 ---
-
 # Fix or Delete gitStatusManager.test.ts
 
 ## Objective

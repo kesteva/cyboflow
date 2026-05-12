@@ -1,9 +1,9 @@
 ---
 id: TASK-557
 idea: IDEA-001
-status: ready
-created: 2026-05-11T00:00:00Z
-source_compound: SPRINT-001-proposal.md#B1
+status: in-flight
+created: "2026-05-11T00:00:00Z"
+source_compound: SPRINT-001-proposal.md
 files_owned:
   - main/package.json
   - pnpm-lock.yaml
@@ -20,7 +20,7 @@ acceptance_criteria:
     verification: "`grep -nE \"^      (bull|openai|'@types/bull'|'@anthropic-ai/sdk'):\" pnpm-lock.yaml` returns zero matches"
   - criterion: "`pnpm install --frozen-lockfile` succeeds against the regenerated lockfile (CI parity check)"
     verification: "`pnpm install --frozen-lockfile` exits 0 with no `ERR_PNPM_OUTDATED_LOCKFILE` error"
-  - criterion: "No source code imports Bull or `@anthropic-ai/sdk`"
+  - criterion: No source code imports Bull or `@anthropic-ai/sdk`
     verification: "`grep -rnE \"from ['\\\"]@anthropic-ai/sdk['\\\"]|from ['\\\"]bull['\\\"]|require\\(['\\\"]@anthropic-ai/sdk['\\\"]\\)|require\\(['\\\"]bull['\\\"]\\)\" main/src frontend/src shared` returns zero matches"
   - criterion: "Main process builds, typechecks, and lints cleanly"
     verification: "`pnpm run build:main && pnpm typecheck && pnpm lint` all exit 0 from repo root"
@@ -31,7 +31,6 @@ test_strategy:
   needed: false
   justification: "Purely a manifest + lockfile maintenance task. No source code is modified. The acceptance grep, build, and `pnpm install --frozen-lockfile` checks are sufficient verification. Adding a unit test would not exercise any new logic."
 ---
-
 # Finish Dependency Cleanup (main/package.json + pnpm-lock.yaml)
 
 ## Objective

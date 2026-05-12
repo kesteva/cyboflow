@@ -1,6 +1,6 @@
 import React from 'react';
 import { Zap, CheckCircle, GitBranch } from 'lucide-react';
-import crystalLogo from '../assets/crystal-logo.svg';
+import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { Modal, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 
@@ -47,7 +47,7 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
       <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center justify-between">
           <div className="flex items-center">
-            <img src={crystalLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
+            <img src={cyboflowLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
             <div>
               <h1 className="text-2xl font-bold">Welcome to Cyboflow</h1>
               <p className="text-interactive-text/80">Multi-Session Claude Code Manager</p>
@@ -82,7 +82,7 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
                   </li>
                   <li className="flex items-start">
                     <span className="mr-2">•</span>
-                    <span>Crystal runs Claude Code with <code className="bg-status-warning/20 px-1 rounded text-sm">--dangerously-ignore-permissions</code></span>
+                    <span>Cyboflow runs Claude Code with <code className="bg-status-warning/20 px-1 rounded text-sm">--dangerously-ignore-permissions</code></span>
                   </li>
                 </ul>
               </div>
@@ -96,7 +96,7 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
                   <div className="ml-4 flex-1">
                     <h4 className="font-semibold text-text-primary mb-1">Create or Select a Project</h4>
                     <ul className="text-text-secondary space-y-1 text-sm">
-                      <li>• Point to a <strong>new directory</strong> - Crystal will create it and initialize git</li>
+                      <li>• Point to a <strong>new directory</strong> - Cyboflow will create it and initialize git</li>
                       <li>• Or select an <strong>existing git repository</strong></li>
                     </ul>
                   </div>

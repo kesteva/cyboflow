@@ -70,7 +70,7 @@ export class Logger {
 
   private getCurrentLogFileName(): string {
     const date = formatForDatabase().split('T')[0]; // YYYY-MM-DD
-    return path.join(this.logDir, `crystal-${date}.log`);
+    return path.join(this.logDir, `cyboflow-${date}.log`);
   }
 
   private rotateLogIfNeeded() {
@@ -83,7 +83,7 @@ export class Logger {
 
         // Generate new filename with timestamp
         const timestamp = formatForDatabase().replace(/[:.]/g, '-');
-        const rotatedFileName = path.join(this.logDir, `crystal-${timestamp}.log`);
+        const rotatedFileName = path.join(this.logDir, `cyboflow-${timestamp}.log`);
         
         // Rename current file
         fs.renameSync(this.currentLogFile, rotatedFileName);
@@ -103,7 +103,7 @@ export class Logger {
   private cleanupOldLogs() {
     try {
       const files = fs.readdirSync(this.logDir)
-        .filter(file => file.startsWith('crystal-') && file.endsWith('.log'))
+        .filter(file => file.startsWith('cyboflow-') && file.endsWith('.log'))
         .map(file => ({
           name: file,
           path: path.join(this.logDir, file),

@@ -1,9 +1,9 @@
 ---
 id: TASK-558
 idea: IDEA-001
-status: ready
-created: 2026-05-11T00:00:00Z
-source_compound: SPRINT-001-proposal.md#B3
+status: in-flight
+created: "2026-05-11T00:00:00Z"
+source_compound: SPRINT-001-proposal.md
 files_owned:
   - main/src/utils/logger.ts
   - main/src/index.ts
@@ -33,21 +33,21 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Log filenames in `main/src/utils/logger.ts` use `cyboflow-` prefix, not `crystal-`"
     verification: "`grep -nE 'crystal-' main/src/utils/logger.ts` returns zero matches AND `grep -nE 'cyboflow-' main/src/utils/logger.ts` returns at least 3 matches (line ~73, ~86, ~106)"
-  - criterion: "Debug log filenames in `main/src/index.ts` use `cyboflow-` prefix"
+  - criterion: Debug log filenames in `main/src/index.ts` use `cyboflow-` prefix
     verification: "`grep -nE \"cyboflow-(frontend|backend)-debug\\.log\" main/src/index.ts | wc -l` returns at least 8 AND `grep -nE \"crystal-(frontend|backend)-debug\\.log\" main/src/index.ts` returns zero matches"
-  - criterion: "Git commit footer trailer no longer references Crystal as the author"
+  - criterion: Git commit footer trailer no longer references Crystal as the author
     verification: "`grep -rnE 'Co-Authored-By: Crystal' main/src` returns zero matches AND `grep -rnE 'Co-Authored-By: Cyboflow' main/src` returns at least 3 matches"
-  - criterion: "Temp commit filenames in `main/src/ipc/file.ts` use `cyboflow-commit-` prefix"
+  - criterion: Temp commit filenames in `main/src/ipc/file.ts` use `cyboflow-commit-` prefix
     verification: "`grep -n 'crystal-commit' main/src/ipc/file.ts` returns zero matches AND `grep -n 'cyboflow-commit' main/src/ipc/file.ts` returns at least 2 matches"
   - criterion: "localStorage keys in frontend are migrated to `cyboflow-*` with a backward-read fallback for the old `crystal-*` key"
     verification: "`grep -rnE \"localStorage\\.(getItem|setItem|removeItem)\\(['\\\"`]crystal[._-]\" frontend/src` returns zero matches in non-fallback contexts (the migration helper in `frontend/src/utils/console.ts` and `frontend/src/App.tsx` may read the old key once for migration — verified by code review). `grep -rnE \"cyboflow[._-](sidebar-width|file-tree-width|sidebar-collapsed|verboseLogging)\" frontend/src` returns at least 4 matches."
-  - criterion: "PostHog distinctId prefix in `analyticsManager.ts` is `cyboflow_`"
+  - criterion: PostHog distinctId prefix in `analyticsManager.ts` is `cyboflow_`
     verification: "`grep -n 'cyboflow_\\${uuid}' main/src/services/analyticsManager.ts` returns 1 match AND `grep -n 'crystal_\\${uuid}' main/src/services/analyticsManager.ts` returns zero matches"
   - criterion: "User-facing error string in `claudeCodeManager.ts:340` reads `Cyboflow Settings` not `Crystal Settings`"
     verification: "`grep -n 'Cyboflow Settings' main/src/services/panels/claude/claudeCodeManager.ts` returns 1 match AND `grep -n 'Crystal Settings' main/src/services/panels/claude/claudeCodeManager.ts` returns zero matches"
   - criterion: "`crystal-base-mcp-` filename in `claudeCodeManager.ts:889` is renamed to `cyboflow-base-mcp-`"
     verification: "`grep -n 'cyboflow-base-mcp-' main/src/services/panels/claude/claudeCodeManager.ts` returns 1 match AND `grep -n 'crystal-base-mcp-' main/src/services/panels/claude/claudeCodeManager.ts` returns zero matches"
-  - criterion: "Run-script filename string `./crystal-run.sh` in `SetupTasksPanel.tsx` is renamed to `./cyboflow-run.sh`"
+  - criterion: Run-script filename string `./crystal-run.sh` in `SetupTasksPanel.tsx` is renamed to `./cyboflow-run.sh`
     verification: "`grep -n 'cyboflow-run.sh' frontend/src/components/panels/SetupTasksPanel.tsx` returns at least 3 matches AND `grep -n 'crystal-run.sh' frontend/src/components/panels/SetupTasksPanel.tsx` returns zero matches"
   - criterion: "Logo asset is imported from `cyboflow-logo.svg` (file exists) in `Sidebar.tsx`, `Welcome.tsx`, `AnalyticsConsentDialog.tsx`"
     verification: "`test -f frontend/src/assets/cyboflow-logo.svg` exits 0 AND `grep -rnE \"from ['\\\"]\\.\\.?/assets/crystal-logo\\.svg['\\\"]\" frontend/src` returns zero matches AND `grep -rnE \"cyboflow-logo\\.svg\" frontend/src/components` returns at least 3 matches"
@@ -77,7 +77,6 @@ test_strategy:
       test_file: frontend/src/utils/console.test.ts
       type: unit
 ---
-
 # Finish Crystal-String Sweep (Identity-Layer Followup)
 
 ## Objective
