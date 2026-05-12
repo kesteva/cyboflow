@@ -39,6 +39,8 @@ pids/
 .env.development.local
 .env.test.local
 .env.production.local
+.envrc
+.envrc.local
 
 # OS
 .DS_Store
