@@ -1,27 +1,17 @@
 import { create } from 'zustand';
 import { API } from '../utils/api';
-import { DEFAULT_CODEX_MODEL } from '../../../shared/types/models';
 import type { CommitModeSettings } from '../../../shared/types';
 
 export interface SessionCreationPreferences {
   sessionCount: number;
-  toolType: 'claude' | 'codex' | 'none';
+  toolType: 'claude' | 'none';
   selectedTools: {
     claude: boolean;
-    codex: boolean;
   };
   claudeConfig: {
     model: 'auto' | 'sonnet' | 'opus' | 'haiku';
     permissionMode: 'ignore' | 'approve';
     ultrathink: boolean;
-  };
-  codexConfig: {
-    model: string;
-    modelProvider: string;
-    approvalPolicy: 'auto' | 'manual';
-    sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access';
-    webSearch: boolean;
-    thinkingLevel?: 'low' | 'medium' | 'high';
   };
   showAdvanced: boolean;
   baseBranch?: string;
@@ -32,21 +22,12 @@ const defaultPreferences: SessionCreationPreferences = {
   sessionCount: 1,
   toolType: 'none',
   selectedTools: {
-    claude: false,
-    codex: false
+    claude: false
   },
   claudeConfig: {
     model: 'auto',
     permissionMode: 'ignore',
     ultrathink: false
-  },
-  codexConfig: {
-    model: DEFAULT_CODEX_MODEL,
-    modelProvider: 'openai',
-    approvalPolicy: 'auto',
-    sandboxMode: 'workspace-write',
-    webSearch: false,
-    thinkingLevel: 'medium'
   },
   showAdvanced: false,
   commitModeSettings: {
@@ -86,10 +67,6 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
             ...defaultPreferences.claudeConfig,
             ...response.data.claudeConfig
           },
-          codexConfig: {
-            ...defaultPreferences.codexConfig,
-            ...response.data.codexConfig
-          },
           commitModeSettings: {
             ...defaultPreferences.commitModeSettings,
             ...response.data.commitModeSettings
@@ -108,7 +85,7 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
   updatePreferences: async (updates: Partial<SessionCreationPreferences>) => {
     const { sessionCount: _ignoredSessionCount, ...allowedUpdates } = updates;
     const currentPreferences = get().preferences;
-    
+
     // Deep merge the updates while keeping session count at its default
     const newPreferences: SessionCreationPreferences = {
       ...currentPreferences,
@@ -120,10 +97,6 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
       claudeConfig: {
         ...currentPreferences.claudeConfig,
         ...(allowedUpdates.claudeConfig || {})
-      },
-      codexConfig: {
-        ...currentPreferences.codexConfig,
-        ...(allowedUpdates.codexConfig || {})
       },
       commitModeSettings: {
         ...currentPreferences.commitModeSettings,

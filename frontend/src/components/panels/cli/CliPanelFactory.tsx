@@ -79,7 +79,6 @@ LoadingFallback.displayName = 'CliLoadingFallback';
 
 // Lazy-loaded CLI panel components
 const ClaudePanel = lazy(() => import('../claude/ClaudePanel'));
-const CodexPanel = lazy(() => import('../codex/CodexPanel'));
 
 /**
  * Factory component that dynamically renders the appropriate CLI panel
@@ -91,7 +90,6 @@ export const CliPanelFactory: React.FC<CliPanelFactoryProps> = React.memo(({ pan
   // Determine CLI tool ID from panel
   const cliToolId = useMemo(() => {
     if (panel.type === 'claude') return 'claude';
-    if (panel.type === 'codex') return 'codex';
     
     // For future CLI panels, extract from panel data
     const cliPanel = panel as CliPanel;
@@ -105,13 +103,6 @@ export const CliPanelFactory: React.FC<CliPanelFactoryProps> = React.memo(({ pan
         return (
           <Suspense fallback={<LoadingFallback cliToolId={cliToolId} />}>
             <ClaudePanel panel={panel} isActive={isActive} />
-          </Suspense>
-        );
-      
-      case 'codex':
-        return (
-          <Suspense fallback={<LoadingFallback cliToolId={cliToolId} />}>
-            <CodexPanel panel={panel} isActive={isActive} />
           </Suspense>
         );
       
@@ -147,7 +138,7 @@ CliPanelFactory.displayName = 'CliPanelFactory';
  */
 export const useCliToolSupport = (cliToolId: string) => {
   return useMemo(() => {
-    const supportedTools = ['claude', 'codex'];
+    const supportedTools = ['claude'];
     
     return {
       isSupported: supportedTools.includes(cliToolId),

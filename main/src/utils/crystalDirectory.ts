@@ -5,7 +5,7 @@ import { app } from 'electron';
 let customCrystalDir: string | undefined;
 
 /**
- * Sets a custom Crystal directory path. This should be called early in the
+ * Sets a custom Cyboflow directory path. This should be called early in the
  * application lifecycle, before any services are initialized.
  */
 export function setCrystalDirectory(dir: string): void {
@@ -13,7 +13,7 @@ export function setCrystalDirectory(dir: string): void {
 }
 
 /**
- * Determines if Crystal is running from an installed application (DMG/Applications folder)
+ * Determines if Cyboflow is running from an installed application (DMG/Applications folder)
  * rather than a development build
  */
 function isInstalledApp(): boolean {
@@ -21,7 +21,7 @@ function isInstalledApp(): boolean {
   if (!app.isPackaged) {
     return false;
   }
-  
+
   // On macOS, check if running from /Applications or a mounted DMG volume
   if (process.platform === 'darwin') {
     const appPath = app.getPath('exe');
@@ -29,18 +29,18 @@ function isInstalledApp(): boolean {
     const isInApplications = appPath.startsWith('/Applications/');
     const isInVolumes = appPath.startsWith('/Volumes/');
     const isInPrivateTmp = appPath.includes('/private/var/folders/'); // Temp mount for DMG
-    
+
     return isInApplications || isInVolumes || isInPrivateTmp;
   }
-  
+
   // For other platforms, being packaged is sufficient
   return true;
 }
 
 /**
- * Gets the Crystal directory path. Returns the custom directory if set,
- * otherwise falls back to the environment variable CRYSTAL_DIR,
- * and finally defaults to ~/.crystal
+ * Gets the Cyboflow directory path. Returns the custom directory if set,
+ * otherwise falls back to the environment variable CYBOFLOW_DIR,
+ * and finally defaults to ~/.cyboflow
  */
 export function getCrystalDirectory(): string {
   // 1. Check if custom directory was set programmatically
@@ -49,30 +49,30 @@ export function getCrystalDirectory(): string {
   }
 
   // 2. Check environment variable
-  const envDir = process.env.CRYSTAL_DIR;
+  const envDir = process.env.CYBOFLOW_DIR;
   if (envDir) {
     return envDir;
   }
 
-  // 3. If running as an installed app (from DMG, /Applications, etc), always use ~/.crystal
+  // 3. If running as an installed app (from DMG, /Applications, etc), always use ~/.cyboflow
   if (isInstalledApp()) {
-    console.log('[Crystal] Running as installed app, using ~/.crystal');
-    return join(homedir(), '.crystal');
+    console.log('[Cyboflow] Running as installed app, using ~/.cyboflow');
+    return join(homedir(), '.cyboflow');
   }
 
-  // 4. If running inside Crystal (detected by bundle identifier) in development, use development directory
-  // This prevents development Crystal from interfering with production Crystal
-  if (process.env.__CFBundleIdentifier === 'com.stravu.crystal' && !app.isPackaged) {
-    console.log('[Crystal] Detected running inside Crystal development, using ~/.crystal_dev for isolation');
-    return join(homedir(), '.crystal_dev');
+  // 4. If running inside Cyboflow (detected by bundle identifier) in development, use development directory
+  // This prevents development Cyboflow from interfering with production Cyboflow
+  if (process.env.__CFBundleIdentifier === 'com.cyboflow.app' && !app.isPackaged) {
+    console.log('[Cyboflow] Detected running inside Cyboflow development, using ~/.cyboflow_dev for isolation');
+    return join(homedir(), '.cyboflow_dev');
   }
 
-  // 5. Default to ~/.crystal
-  return join(homedir(), '.crystal');
+  // 5. Default to ~/.cyboflow
+  return join(homedir(), '.cyboflow');
 }
 
 /**
- * Gets a subdirectory path within the Crystal directory
+ * Gets a subdirectory path within the Cyboflow directory
  */
 export function getCrystalSubdirectory(...subPaths: string[]): string {
   return join(getCrystalDirectory(), ...subPaths);

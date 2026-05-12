@@ -106,8 +106,8 @@ export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width
         </div>
         <div className="p-4 border-b border-border-primary flex items-center justify-between overflow-hidden">
           <div className="flex items-center space-x-2 min-w-0">
-            <img src={crystalLogo} alt="Crystal" className="h-6 w-6 flex-shrink-0" />
-            <h1 className="text-xl font-bold truncate">Crystal</h1>
+            <img src={crystalLogo} alt="Cyboflow" className="h-6 w-6 flex-shrink-0" />
+            <h1 className="text-xl font-bold truncate">Cyboflow</h1>
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
             <IconButton

@@ -1325,7 +1325,12 @@ export const useSessionView = (
       console.error('Error toggling auto-commit:', error);
     }
   };
-  
+
+  // @cyboflow-hidden: The four handlers below (handleRebaseMainIntoWorktree,
+  // handleSquashAndRebaseToMain, performSquashWithCommitMessage,
+  // performSquashWithCommitMessageAndArchive) and their related state are preserved
+  // per TASK-004 plan AC#4 but are not wired to any UI entry point in cyboflow v1.
+  // Re-enable by restoring branchActions entries in SessionView.tsx.
   const handleRebaseMainIntoWorktree = async () => {
     if (!activeSession) return;
     setIsMerging(true);

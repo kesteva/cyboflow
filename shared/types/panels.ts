@@ -7,13 +7,13 @@ export interface ToolPanel {
   metadata: ToolPanelMetadata;   // Creation time, position, etc.
 }
 
-export type ToolPanelType = 'terminal' | 'claude' | 'codex' | 'diff' | 'editor' | 'logs' | 'dashboard' | 'setup-tasks'; // Will expand later
+export type ToolPanelType = 'terminal' | 'claude' | 'diff' | 'editor' | 'logs' | 'dashboard' | 'setup-tasks';
 
 export interface ToolPanelState {
   isActive: boolean;
   isPinned?: boolean;
   hasBeenViewed?: boolean;       // Track if panel has ever been viewed
-  customState?: TerminalPanelState | ClaudePanelState | CodexPanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | Record<string, unknown>;
+  customState?: TerminalPanelState | ClaudePanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | Record<string, unknown>;
 }
 
 export interface TerminalPanelState {
@@ -71,9 +71,7 @@ export interface BaseAIPanelState {
 
   // Legacy fields for backward compatibility (will be migrated to agentSessionId)
   claudeSessionId?: string;       // Deprecated: Use agentSessionId instead
-  codexSessionId?: string;        // Deprecated: Use agentSessionId instead
   claudeResumeId?: string;        // Deprecated: Claude's old resume ID
-  codexResumeId?: string;         // Deprecated: Codex's old resume ID
 }
 
 export interface ClaudePanelState extends BaseAIPanelState {
@@ -84,22 +82,6 @@ export interface ClaudePanelState extends BaseAIPanelState {
   contextUsage?: string | null;          // Latest context usage summary (e.g., "54k/200k tokens (27%)")
   autoContextRunState?: 'idle' | 'running'; // Tracks whether an automatic /context run is in progress
   lastAutoContextAt?: string;            // ISO timestamp of the most recent automatic context refresh
-}
-
-export interface CodexPanelState extends BaseAIPanelState {
-  // Codex-specific state
-  modelProvider?: string;        // Provider (openai, anthropic, etc.)
-  approvalPolicy?: 'auto' | 'manual'; // Approval policy for tool calls
-  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'; // Sandbox mode
-  webSearch?: boolean;           // Whether web search is enabled
-  
-  // Settings to remember for new tabs
-  codexConfig?: {
-    model: string;
-    thinkingLevel: 'low' | 'medium' | 'high';
-    sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access';
-    webSearch: boolean;
-  };
 }
 
 export interface EditorPanelState {
@@ -160,7 +142,7 @@ export interface CreatePanelRequest {
   sessionId: string;
   type: ToolPanelType;
   title?: string;                // Optional custom title
-  initialState?: TerminalPanelState | ClaudePanelState | CodexPanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
+  initialState?: TerminalPanelState | ClaudePanelState | DiffPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
 }
 
@@ -248,14 +230,6 @@ export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
     singleton: false,
     canAppearInProjects: true,       // Claude can appear in projects
     canAppearInWorktrees: true       // Claude can appear in worktrees
-  },
-  codex: {
-    canEmit: ['files:changed'], // Codex can change files through tool calls
-    canConsume: [], // Codex doesn't consume events in initial implementation
-    requiresProcess: true,
-    singleton: false,
-    canAppearInProjects: true,       // Codex can appear in projects
-    canAppearInWorktrees: true       // Codex can appear in worktrees
   },
   diff: {
     canEmit: ['diff:refreshed'],
