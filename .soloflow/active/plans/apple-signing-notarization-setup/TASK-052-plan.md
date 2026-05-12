@@ -1,8 +1,8 @@
 ---
 id: TASK-052
 idea: IDEA-002
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - build/entitlements.mac.plist
 files_readonly:
@@ -18,18 +18,17 @@ acceptance_criteria:
     verification: "Run `/usr/libexec/PlistBuddy -c 'Print' build/entitlements.mac.plist` — output enumerates only the keys named in this plan's Implementation Steps. Every key has an inline XML comment explaining why."
   - criterion: "The four entitlements named in IDEA-002 slice 3 are present: `com.apple.security.cs.allow-jit`, `com.apple.security.network.client`, `com.apple.security.files.user-selected.read-write`, `com.apple.security.cs.allow-unsigned-executable-memory`"
     verification: "`grep -c 'com.apple.security.cs.allow-jit\\|com.apple.security.network.client\\|com.apple.security.files.user-selected.read-write\\|com.apple.security.cs.allow-unsigned-executable-memory' build/entitlements.mac.plist` returns at least 4"
-  - criterion: "The plist parses as valid XML"
+  - criterion: The plist parses as valid XML
     verification: "`plutil -lint build/entitlements.mac.plist` prints `OK`"
-  - criterion: "Each entitlement key has a sibling XML comment explaining its rationale (which subsystem requires it)"
+  - criterion: Each entitlement key has a sibling XML comment explaining its rationale (which subsystem requires it)
     verification: "`grep -B1 'com.apple.security' build/entitlements.mac.plist | grep -c '<!--'` is >= number of entitlement keys"
 depends_on: []
 estimated_complexity: low
 epic: apple-signing-notarization-setup
 test_strategy:
   needed: false
-  justification: "Configuration audit task. The runtime correctness of these entitlements is verified by TASK-055 (the first signed DMG actually runs node-pty + better-sqlite3 without crashing under hardened runtime)."
+  justification: Configuration audit task. The runtime correctness of these entitlements is verified by TASK-055 (the first signed DMG actually runs node-pty + better-sqlite3 without crashing under hardened runtime).
 ---
-
 # Audit and document entitlements.mac.plist
 
 ## Objective
