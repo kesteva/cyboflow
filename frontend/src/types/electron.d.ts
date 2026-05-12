@@ -34,7 +34,6 @@ interface ElectronAPI {
   
   // Basic app info
   getAppVersion: () => Promise<string>;
-  getPlatform: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
   // Version checking

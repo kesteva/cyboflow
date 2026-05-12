@@ -294,59 +294,57 @@ export class RunCommandManager extends EventEmitter {
     let success = true;
 
     try {
-      {
-        // macOS/Unix: First, try SIGTERM for graceful shutdown
+      // macOS/Unix: First, try SIGTERM for graceful shutdown
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (error) {
+        this.logger?.warn('SIGTERM failed:', error as Error);
+      }
+
+      // Kill the entire process group using negative PID
+      // Use the actual process group ID if we found it, otherwise use the PID
+      const killGroupId = pgid || pid;
+      try {
+        await execAsync(`kill -TERM -${killGroupId}`);
+        this.logger?.info(`Sent SIGTERM to process group ${killGroupId}`);
+      } catch (error) {
+        this.logger?.warn(`Error sending SIGTERM to process group ${killGroupId}: ${error}`);
+      }
+
+      // Give processes 10 seconds to clean up gracefully
+      this.logger?.info(`Waiting 10 seconds for graceful shutdown of process ${pid}...`);
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
+      // Now forcefully kill the main process
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch (error) {
+        // Process might already be dead
+      }
+
+      // Kill the process group with SIGKILL
+      try {
+        await execAsync(`kill -9 -${killGroupId}`);
+        this.logger?.info(`Sent SIGKILL to process group ${killGroupId}`);
+      } catch (error) {
+        this.logger?.warn(`Error sending SIGKILL to process group ${killGroupId}: ${error}`);
+      }
+
+      // Kill all known descendants individually to be sure
+      for (const childPid of descendantPids) {
         try {
-          process.kill(pid, 'SIGTERM');
+          await execAsync(`kill -9 ${childPid}`);
+          this.logger?.verbose(`Killed descendant process ${childPid}`);
         } catch (error) {
-          this.logger?.warn('SIGTERM failed:', error as Error);
+          this.logger?.verbose(`Process ${childPid} already terminated`);
         }
-        
-        // Kill the entire process group using negative PID
-        // Use the actual process group ID if we found it, otherwise use the PID
-        const killGroupId = pgid || pid;
-        try {
-          await execAsync(`kill -TERM -${killGroupId}`);
-          this.logger?.info(`Sent SIGTERM to process group ${killGroupId}`);
-        } catch (error) {
-          this.logger?.warn(`Error sending SIGTERM to process group ${killGroupId}: ${error}`);
-        }
-        
-        // Give processes 10 seconds to clean up gracefully
-        this.logger?.info(`Waiting 10 seconds for graceful shutdown of process ${pid}...`);
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        
-        // Now forcefully kill the main process
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch (error) {
-          // Process might already be dead
-        }
-        
-        // Kill the process group with SIGKILL
-        try {
-          await execAsync(`kill -9 -${killGroupId}`);
-          this.logger?.info(`Sent SIGKILL to process group ${killGroupId}`);
-        } catch (error) {
-          this.logger?.warn(`Error sending SIGKILL to process group ${killGroupId}: ${error}`);
-        }
-        
-        // Kill all known descendants individually to be sure
-        for (const childPid of descendantPids) {
-          try {
-            await execAsync(`kill -9 ${childPid}`);
-            this.logger?.verbose(`Killed descendant process ${childPid}`);
-          } catch (error) {
-            this.logger?.verbose(`Process ${childPid} already terminated`);
-          }
-        }
-        
-        // Final cleanup attempt using pkill
-        try {
-          await execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
-          // Ignore errors - processes might already be dead
-        }
+      }
+
+      // Final cleanup attempt using pkill
+      try {
+        await execAsync(`pkill -9 -P ${pid}`);
+      } catch (error) {
+        // Ignore errors - processes might already be dead
       }
 
       // Verify all processes are actually dead
