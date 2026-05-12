@@ -18,6 +18,7 @@ import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
 import { API } from './utils/api';
+import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
@@ -54,15 +55,10 @@ function App() {
   const { sessions, isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
   
-  // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width
-  if (typeof localStorage !== 'undefined' &&
-      localStorage.getItem('cyboflow-sidebar-width') === null) {
-    const legacy = localStorage.getItem('crystal-sidebar-width');
-    if (legacy !== null) {
-      localStorage.setItem('cyboflow-sidebar-width', legacy);
-      localStorage.removeItem('crystal-sidebar-width');
-    }
-  }
+  // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
+  useEffect(() => {
+    migrateLocalStorageKey('crystal-sidebar-width', 'cyboflow-sidebar-width');
+  }, []);
 
   const { width: sidebarWidth, startResize } = useResizable({
     defaultWidth: 500,  // Increased to show git status labels without truncation

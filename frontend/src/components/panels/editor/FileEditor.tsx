@@ -6,6 +6,7 @@ import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Plus, Trash2, Folde
 import { MonacoErrorBoundary } from '../../MonacoErrorBoundary';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { debounce } from '../../../utils/debounce';
+import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
 import { MarkdownPreview } from '../../MarkdownPreview';
 import { useResizablePanel } from '../../../hooks/useResizablePanel';
 import { EditorPanelState } from '../../../../../shared/types/panels';
@@ -600,15 +601,10 @@ export function FileEditor({
     }
   }, [onStateChange]);
   
-  // One-shot migration: move legacy crystal-file-tree-width → cyboflow-file-tree-width
-  if (typeof localStorage !== 'undefined' &&
-      localStorage.getItem('cyboflow-file-tree-width') === null) {
-    const legacy = localStorage.getItem('crystal-file-tree-width');
-    if (legacy !== null) {
-      localStorage.setItem('cyboflow-file-tree-width', legacy);
-      localStorage.removeItem('crystal-file-tree-width');
-    }
-  }
+  // One-shot migration: move legacy crystal-file-tree-width → cyboflow-file-tree-width (mount only)
+  useEffect(() => {
+    migrateLocalStorageKey('crystal-file-tree-width', 'cyboflow-file-tree-width');
+  }, []);
 
   // Add resizable hook for file tree column
   const { width: fileTreeWidth, startResize } = useResizablePanel({
