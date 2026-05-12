@@ -1,6 +1,6 @@
 import React from 'react';
 import { BarChart3 } from 'lucide-react';
-import crystalLogo from '../assets/crystal-logo.svg';
+import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { Modal, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 import { useConfigStore } from '../stores/configStore';
@@ -77,7 +77,7 @@ export default function AnalyticsConsentDialog({ isOpen, onClose }: AnalyticsCon
       {/* Header with gradient */}
       <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center">
-          <img src={crystalLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
+          <img src={cyboflowLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
           <h1 className="text-2xl font-bold">Help Improve Cyboflow</h1>
         </div>
       </div>
@@ -91,7 +91,7 @@ export default function AnalyticsConsentDialog({ isOpen, onClose }: AnalyticsCon
                 We do not collect any code, prompts, or identifying information.
               </p>
               <p className="text-text-secondary">
-                Your data helps us make Crystal better. You can change this anytime in Settings.
+                Your data helps us make Cyboflow better. You can change this anytime in Settings.
               </p>
             </div>
           </div>

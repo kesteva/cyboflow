@@ -6,6 +6,7 @@ import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Plus, Trash2, Folde
 import { MonacoErrorBoundary } from '../../MonacoErrorBoundary';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { debounce } from '../../../utils/debounce';
+import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
 import { MarkdownPreview } from '../../MarkdownPreview';
 import { useResizablePanel } from '../../../hooks/useResizablePanel';
 import { EditorPanelState } from '../../../../../shared/types/panels';
@@ -600,12 +601,17 @@ export function FileEditor({
     }
   }, [onStateChange]);
   
+  // One-shot migration: move legacy crystal-file-tree-width → cyboflow-file-tree-width (mount only)
+  useEffect(() => {
+    migrateLocalStorageKey('crystal-file-tree-width', 'cyboflow-file-tree-width');
+  }, []);
+
   // Add resizable hook for file tree column
   const { width: fileTreeWidth, startResize } = useResizablePanel({
     defaultWidth: initialState?.fileTreeWidth || 256,  // Use saved width or default
     minWidth: 200,
     maxWidth: 400,
-    storageKey: 'crystal-file-tree-width',
+    storageKey: 'cyboflow-file-tree-width',
     onResize: handleTreeResize
   });
   

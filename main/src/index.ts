@@ -90,8 +90,8 @@ const isDevelopment = process.env.NODE_ENV !== 'production' && !app.isPackaged;
 
 // Reset debug log files at startup in development mode
 if (isDevelopment) {
-  const frontendLogPath = path.join(process.cwd(), 'crystal-frontend-debug.log');
-  const backendLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+  const frontendLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
+  const backendLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
 
   try {
     fs.writeFileSync(frontendLogPath, '');
@@ -110,16 +110,23 @@ const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
 
-  // Support both --crystal-dir=/path and --crystal-dir /path formats (kept for backward compat)
-  if (arg.startsWith('--crystal-dir=')) {
-    const dir = arg.substring('--crystal-dir='.length);
+  // Support --cyboflow-dir=/path, --cyboflow-dir /path (canonical) and --crystal-dir (deprecated alias)
+  if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
+    const flagName = arg.startsWith('--cyboflow-dir=') ? '--cyboflow-dir=' : '--crystal-dir=';
+    const dir = arg.substring(flagName.length);
     setCrystalDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-  } else if (arg === '--crystal-dir' && i + 1 < args.length) {
+    if (flagName === '--crystal-dir=') {
+      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
+    }
+  } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < args.length) {
     const dir = args[i + 1];
     setCrystalDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
-    i++; // Skip the next argument since we've consumed it
+    if (arg === '--crystal-dir') {
+      console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
+    }
+    i++;
   }
 }
 
@@ -224,7 +231,7 @@ async function createWindow() {
       // Always log to main console
       
       // Also write to debug log file for Claude Code to read
-      const debugLogPath = path.join(process.cwd(), 'crystal-frontend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
       const logLine = `${logMessage} (${path.basename(sourceId)}:${line})\n`;
       
       try {
@@ -258,7 +265,7 @@ async function createWindow() {
     if (isDevelopment) {
       const timestamp = new Date().toISOString();
       const logMessage = `[${timestamp}] [BACKEND LOG] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
       const logLine = `${logMessage}\n`;
 
       try {
@@ -320,7 +327,7 @@ async function createWindow() {
       if (isDevelopment) {
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] [BACKEND ERROR] ${message}`;
-        const debugLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+        const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
         const logLine = `${logMessage}\n`;
 
         try {
@@ -376,7 +383,7 @@ async function createWindow() {
     if (isDevelopment) {
       const timestamp = new Date().toISOString();
       const logMessage = `[${timestamp}] [BACKEND WARNING] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
       const logLine = `${logMessage}\n`;
 
       try {
@@ -423,7 +430,7 @@ async function createWindow() {
     if (isDevelopment) {
       const timestamp = new Date().toISOString();
       const logMessage = `[${timestamp}] [BACKEND INFO] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
       const logLine = `${logMessage}\n`;
 
       try {
@@ -464,7 +471,7 @@ async function createWindow() {
     if (isDevelopment) {
       const timestamp = new Date().toISOString();
       const logMessage = `[${timestamp}] [BACKEND DEBUG] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'crystal-backend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
       const logLine = `${logMessage}\n`;
 
       try {
@@ -637,7 +644,7 @@ async function initializeServices() {
       const logLine = `[${timestamp}] [${source.toUpperCase()} ${level.toUpperCase()}] ${message}\n`;
       
       // Write to debug log file
-      const debugLogPath = path.join(process.cwd(), 'crystal-frontend-debug.log');
+      const debugLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
       try {
         fs.appendFileSync(debugLogPath, logLine);
       } catch (error) {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- V8 JIT compilation — required by every Electron app under hardened runtime -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- node-pty subprocess executable pages — consumer: main/src/services/panels/cli/AbstractCliManager.ts -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- unsigned native modules: better-sqlite3, @homebridge/node-pty-prebuilt-multiarch — dlopen requires this under hardened runtime -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Electron helper process DYLD_* env vars — removing this breaks Electron under hardened runtime -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <!-- Anthropic API outbound calls (main/src/services/panels/claude/claudeCodeManager.ts) + Apple notarization + future electron-updater -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- forward-compat placeholder: sandbox-only entitlement, no runtime effect without com.apple.security.app-sandbox. Listed in IDEA-002 slice 3 as required; retained pending future sandbox decision in v2. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

@@ -104,12 +104,14 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "main/assets/icon.icns",
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "signIgnore": [
         "node_modules/@anthropic-ai/claude-code/vendor/.*\\.jar$"
       ],
-      "notarize": false,
+      "notarize": { "teamId": "${APPLE_TEAM_ID}" },
       "target": [
         {
           "target": "default",

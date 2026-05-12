@@ -337,7 +337,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       '',
       'If Claude is installed but not in your PATH:',
       '- Add the Claude installation directory to your PATH environment variable',
-      '- Or set a custom Claude executable path in Crystal Settings',
+      '- Or set a custom Claude executable path in Cyboflow Settings',
       '',
       `Current PATH: ${process.env.PATH}`,
       `Attempted command: claude --version`
@@ -886,7 +886,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         fs.mkdirSync(tempDir, { recursive: true });
       }
 
-      const mcpConfigPath = path.join(tempDir, `crystal-base-mcp-${sessionId}.json`);
+      const mcpConfigPath = path.join(tempDir, `cyboflow-base-mcp-${sessionId}.json`);
       const mcpConfig = { mcpServers: baseProjectMcp.mcpServers };
 
       try {

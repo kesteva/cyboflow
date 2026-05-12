@@ -621,12 +621,12 @@ export class WorktreeManager {
         const config = this.configManager?.getConfig();
         const enableCrystalFooter = config?.enableCrystalFooter !== false;
 
-        // Add Crystal footer if enabled
+        // Add Cyboflow footer if enabled
         const fullMessage = enableCrystalFooter ? `${commitMessage}
 
-💎 Built using [Crystal](https://github.com/stravu/crystal)
+💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
 
-Co-Authored-By: Crystal <crystal@stravu.com>` : commitMessage;
+Co-Authored-By: Cyboflow <hello@cyboflow.com>` : commitMessage;
 
         // Properly escape commit message for cross-platform compatibility
         const escapedMessage = fullMessage.replace(/"/g, '\\"');

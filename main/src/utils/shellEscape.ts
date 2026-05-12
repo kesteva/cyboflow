@@ -26,9 +26,9 @@ export function buildGitCommitCommand(message: string, enableCrystalFooter: bool
   // Create the full commit message with signature
   const fullMessage = enableCrystalFooter ? `${message}
 
-💎 Built using [Crystal](https://github.com/stravu/crystal)
+💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
 
-Co-Authored-By: Crystal <crystal@stravu.com>` : message;
+Co-Authored-By: Cyboflow <hello@cyboflow.com>` : message;
 
   const escapedMessage = escapeShellArg(fullMessage);
   return `git commit -m ${escapedMessage}`;
