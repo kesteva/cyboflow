@@ -282,6 +282,10 @@ The main process has been refactored from a monolithic `index.ts` file into a co
 
 This modular structure improves maintainability and makes it easier to locate and modify specific functionality.
 
+### Preserved Extension Points
+
+`AbstractCliManager` (`main/src/services/panels/cli/AbstractCliManager.ts`) is an intentional extension surface per `docs/cyboflow_system_design.md:64` — do NOT collapse it into its single concrete subclass (`ClaudeCodeManager`). It is designed to host additional CLI tool integrations in future sprints. Contrast with `AbstractAIPanelManager` / `BaseAIPanelHandler`, which ARE collapse candidates (Crystal-era Claude+Codex scaffolding).
+
 ## API Endpoints
 
 ### Session Management
