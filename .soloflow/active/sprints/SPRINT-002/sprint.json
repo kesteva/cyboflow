@@ -7,7 +7,9 @@
   },
   "tasks": {
     "TASK-055": {
-      "status": "pending"
+      "status": "blocked",
+      "started": "2026-05-12T18:16:02.724Z",
+      "verdict_at": "2026-05-12T18:17:01.579Z"
     },
     "TASK-056": {
       "status": "pending"

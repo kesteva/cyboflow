@@ -10,6 +10,7 @@ SPRINT-002 started with missing infra: peekaboo, playwright; tests deferred.
 TASK-055 gated: failing blocking prereq (signing env vars not exported; depends on TASK-053 signed-posture flip).
 TASK-056 gated: failing blocking prereq (signed DMG artifact does not exist yet; depends on TASK-055).
 TASK-055/056 unblocked mid-sprint: user confirmed Apple Developer Program enrollment, Developer ID cert, and AC_PASSWORD notarytool profile are provisioned (verifier confirmed live in TASK-051 round). Tasks restored to pending; will run in serial order after TASK-002/053.
+TASK-055 re-blocked at run: APPLE_ID/APPLE_TEAM_ID/APPLE_APP_SPECIFIC_PASSWORD/CSC_LINK/CSC_KEY_PASSWORD not exported in the shell where /soloflow:sprint is running. AC_PASSWORD keychain profile is in place; the gap is shell env vars only. User can re-invoke /soloflow:sprint TASK-055 after exporting. TASK-056 re-blocked transitively.
 
 ## FIND-SPRINT-002-1
 - **source:** TASK-053 (code-reviewer)
