@@ -6,7 +6,7 @@ import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
 import { usePanelStore } from '../stores/panelStore';
 import { panelApi } from '../services/panelApi';
-import { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
+import { ToolPanel } from '../../../shared/types/panels';
 import { SessionProvider } from '../contexts/SessionContext';
 
 interface ProjectViewProps {
@@ -155,15 +155,15 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     [mainRepoSessionId, sessionPanels, removePanel, setActivePanelInStore]
   );
 
-  const handlePanelCreate = useCallback(
-    async (type: ToolPanelType) => {
+  const ensureClaudePanel = useCallback(
+    async () => {
       if (!mainRepoSessionId) return;
-      
+
       const newPanel = await panelApi.createPanel({
         sessionId: mainRepoSessionId,
-        type
+        type: 'claude'
       });
-      
+
       // Immediately add the panel and set it as active
       // The panel:created event will also fire, but addPanel checks for duplicates
       addPanel(newPanel);
@@ -179,21 +179,21 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     if (claudePanel) {
       handlePanelSelect(claudePanel);
     } else {
-      handlePanelCreate('claude');
+      ensureClaudePanel();
     }
     onGitPull();
-  }, [onGitPull, sessionPanels, handlePanelSelect, handlePanelCreate]);
-  
+  }, [onGitPull, sessionPanels, handlePanelSelect, ensureClaudePanel]);
+
   const handleGitPush = useCallback(() => {
     // Find or create a Claude panel
     const claudePanel = sessionPanels.find(p => p.type === 'claude');
     if (claudePanel) {
       handlePanelSelect(claudePanel);
     } else {
-      handlePanelCreate('claude');
+      ensureClaudePanel();
     }
     onGitPush();
-  }, [onGitPush, sessionPanels, handlePanelSelect, handlePanelCreate]);
+  }, [onGitPush, sessionPanels, handlePanelSelect, ensureClaudePanel]);
   
   // We don't need terminal handling or the hook for now, as panels handle their own terminals
   
