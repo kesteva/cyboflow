@@ -5,10 +5,17 @@
 
 const isDevelopment = process.env.NODE_ENV === 'development';
 const isVerboseEnabled = () => {
-  // Check if verbose logging is enabled in settings
   try {
-    const verboseLogging = localStorage.getItem('crystal.verboseLogging');
-    return verboseLogging === 'true';
+    const newKey = localStorage.getItem('cyboflow.verboseLogging');
+    if (newKey !== null) return newKey === 'true';
+    // Migration: read legacy key once, write new key, remove legacy
+    const legacy = localStorage.getItem('crystal.verboseLogging');
+    if (legacy !== null) {
+      localStorage.setItem('cyboflow.verboseLogging', legacy);
+      localStorage.removeItem('crystal.verboseLogging');
+      return legacy === 'true';
+    }
+    return false;
   } catch {
     return false;
   }

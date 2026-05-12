@@ -76,18 +76,18 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
     if (!projectId) return;
     
     try {
-      // First, update the project's run script to "./crystal-run.sh"
+      // First, update the project's run script to "./cyboflow-run.sh"
       const updateResponse = await API.projects.update(projectId, {
-        run_script: './crystal-run.sh'
+        run_script: './cyboflow-run.sh'
       });
-      
+
       if (!updateResponse.success) {
         console.error('Failed to update project run script:', updateResponse.error);
         alert(`Failed to update run script: ${updateResponse.error}`);
         return;
       }
-      
-      console.log('[SetupTasksPanel] Successfully set run script to ./crystal-run.sh');
+
+      console.log('[SetupTasksPanel] Successfully set run script to ./cyboflow-run.sh');
       
       // Now open the session dialog with the specific prompt
       setShowSessionDialog(true);
@@ -456,7 +456,7 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
         }}
         projectId={parseInt(projectId)}
         projectName={sessionContext?.projectName}
-        initialPrompt="Create a new file crystal-run.sh that launches this project. Before launching, the script should safely kill any other running instances of the project."
+        initialPrompt="Create a new file cyboflow-run.sh that launches this project. Before launching, the script should safely kill any other running instances of the project."
         initialSessionName="build-run-script"
       />
     </div>

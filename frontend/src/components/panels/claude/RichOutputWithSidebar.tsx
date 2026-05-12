@@ -35,14 +35,23 @@ export const RichOutputWithSidebar: React.FC<RichOutputWithSidebarProps> = React
   }
   
   // Create panel-specific localStorage keys
-  const sidebarCollapsedKey = `crystal-sidebar-collapsed-${id}`;
-  
-  // Load collapsed state from localStorage (keyed by panel ID)
+  const sidebarCollapsedKey = `cyboflow-sidebar-collapsed-${id}`;
+
+  // Load collapsed state from localStorage (keyed by panel ID), with legacy key migration
   const [isCollapsed, setIsCollapsed] = useState(() => {
     const stored = localStorage.getItem(sidebarCollapsedKey);
-    return stored === 'true';
+    if (stored !== null) return stored === 'true';
+    // Migration: read legacy crystal-sidebar-collapsed-{id} key once
+    const legacyKey = `crystal-sidebar-collapsed-${id}`;
+    const legacy = localStorage.getItem(legacyKey);
+    if (legacy !== null) {
+      localStorage.setItem(sidebarCollapsedKey, legacy);
+      localStorage.removeItem(legacyKey);
+      return legacy === 'true';
+    }
+    return false;
   });
-  
+
   const richOutputRef = useRef<{ scrollToPrompt: (promptIndex: number) => void }>(null);
 
   // Save collapsed state to localStorage when it changes (keyed by panel ID)

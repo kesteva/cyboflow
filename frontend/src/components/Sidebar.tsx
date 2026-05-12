@@ -3,7 +3,7 @@ import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
 import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, ArrowUpDown } from 'lucide-react';
-import crystalLogo from '../assets/crystal-logo.svg';
+import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 
@@ -106,7 +106,7 @@ export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width
         </div>
         <div className="p-4 border-b border-border-primary flex items-center justify-between overflow-hidden">
           <div className="flex items-center space-x-2 min-w-0">
-            <img src={crystalLogo} alt="Cyboflow" className="h-6 w-6 flex-shrink-0" />
+            <img src={cyboflowLogo} alt="Cyboflow" className="h-6 w-6 flex-shrink-0" />
             <h1 className="text-xl font-bold truncate">Cyboflow</h1>
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">

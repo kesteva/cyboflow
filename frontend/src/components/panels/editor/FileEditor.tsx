@@ -600,12 +600,22 @@ export function FileEditor({
     }
   }, [onStateChange]);
   
+  // One-shot migration: move legacy crystal-file-tree-width → cyboflow-file-tree-width
+  if (typeof localStorage !== 'undefined' &&
+      localStorage.getItem('cyboflow-file-tree-width') === null) {
+    const legacy = localStorage.getItem('crystal-file-tree-width');
+    if (legacy !== null) {
+      localStorage.setItem('cyboflow-file-tree-width', legacy);
+      localStorage.removeItem('crystal-file-tree-width');
+    }
+  }
+
   // Add resizable hook for file tree column
   const { width: fileTreeWidth, startResize } = useResizablePanel({
     defaultWidth: initialState?.fileTreeWidth || 256,  // Use saved width or default
     minWidth: 200,
     maxWidth: 400,
-    storageKey: 'crystal-file-tree-width',
+    storageKey: 'cyboflow-file-tree-width',
     onResize: handleTreeResize
   });
   

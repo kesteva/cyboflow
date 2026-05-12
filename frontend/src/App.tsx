@@ -54,11 +54,21 @@ function App() {
   const { sessions, isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
   
+  // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width
+  if (typeof localStorage !== 'undefined' &&
+      localStorage.getItem('cyboflow-sidebar-width') === null) {
+    const legacy = localStorage.getItem('crystal-sidebar-width');
+    if (legacy !== null) {
+      localStorage.setItem('cyboflow-sidebar-width', legacy);
+      localStorage.removeItem('crystal-sidebar-width');
+    }
+  }
+
   const { width: sidebarWidth, startResize } = useResizable({
     defaultWidth: 500,  // Increased to show git status labels without truncation
     minWidth: 200,
     maxWidth: 600,
-    storageKey: 'crystal-sidebar-width'
+    storageKey: 'cyboflow-sidebar-width'
   });
   
   useIPCEvents();
