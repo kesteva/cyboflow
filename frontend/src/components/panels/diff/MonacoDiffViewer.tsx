@@ -264,42 +264,6 @@ export const MonacoDiffViewer: React.FC<MonacoDiffViewerProps> = ({
     }
   }, []);
 
-  const handleBeforeMount = useCallback((_monaco: typeof monaco) => {
-    // Temporarily commented out to test built-in themes
-    // // Define custom themes before the editor mounts
-    // monaco.editor.defineTheme('crystal-dark', {
-    //   base: 'vs-dark',
-    //   inherit: true,
-    //   rules: [],
-    //   colors: {
-    //     'editor.background': '#111827',
-    //     'editor.foreground': '#f3f4f6',
-    //     'editorWidget.background': '#111827',
-    //     'editorWidget.foreground': '#f3f4f6',
-    //     'diffEditor.insertedTextBackground': '#10b98120',
-    //     'diffEditor.removedTextBackground': '#ef444420',
-    //     'diffEditor.insertedLineBackground': '#10b98115',
-    //     'diffEditor.removedLineBackground': '#ef444415',
-    //   }
-    // });
-    
-    // monaco.editor.defineTheme('crystal-light', {
-    //   base: 'vs',
-    //   inherit: true,
-    //   rules: [],
-    //   colors: {
-    //     'editor.background': '#ffffff',
-    //     'editor.foreground': '#1e2026',
-    //     'editorWidget.background': '#ffffff',
-    //     'editorWidget.foreground': '#1e2026',
-    //     'diffEditor.insertedTextBackground': '#16a34a15',
-    //     'diffEditor.removedTextBackground': '#dc262615',
-    //     'diffEditor.insertedLineBackground': '#16a34a10',
-    //     'diffEditor.removedLineBackground': '#dc262610',
-    //   }
-    // });
-  }, []);
-
   const handleEditorDidMount: DiffEditorProps['onMount'] = useCallback((editor: MonacoDiffEditor, monacoInstance: typeof monaco) => {
     try {
       editorRef.current = editor;
@@ -740,7 +704,6 @@ export const MonacoDiffViewer: React.FC<MonacoDiffViewerProps> = ({
                 modified={currentContent}
                 theme={isDarkMode ? 'vs-dark' : 'vs'}
                 options={options}
-                beforeMount={handleBeforeMount}
                 onMount={handleEditorDidMount}
               />
             </MonacoErrorBoundary>
