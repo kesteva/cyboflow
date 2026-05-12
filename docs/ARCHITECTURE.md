@@ -72,7 +72,7 @@ via `../../../shared/types/...`. Changing types here is a cross-package concern.
 
 - **Electron 37.6.0** — Desktop shell. `electron-builder` for packaging/signing; `@electron/rebuild`
   for native module rebuilds against Electron's Node ABI.
-- **React 18 + Vite** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
+- **React 19 + Vite** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
 - **Zustand** — Renderer state. One slice per domain; no Redux.
 - **better-sqlite3 11.10.0** — SQLite, synchronous, WAL mode. Database lives at `~/.cyboflow/`.
   (Still named `~/.crystal/` in the fork — to be renamed per system design §3.)
