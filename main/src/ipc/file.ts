@@ -240,12 +240,12 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         // Create the commit with Crystal signature if enabled
         const commitMessage = enableCrystalFooter ? `${request.message}
 
-💎 Built using [Crystal](https://github.com/stravu/crystal)
+💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
 
-Co-Authored-By: Crystal <crystal@stravu.com>` : request.message;
+Co-Authored-By: Cyboflow <hello@cyboflow.com>` : request.message;
 
         // Use a temporary file to handle commit messages with special characters
-        const tmpFile = path.join(os.tmpdir(), `crystal-commit-${Date.now()}.txt`);
+        const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-${Date.now()}.txt`);
         try {
           await fs.writeFile(tmpFile, commitMessage, 'utf-8');
           await execAsync(`git commit -F ${tmpFile}`, { cwd: session.worktreePath });
@@ -278,12 +278,12 @@ Co-Authored-By: Crystal <crystal@stravu.com>` : request.message;
             
             const retryMessage = enableCrystalFooter ? `${request.message}
 
-💎 Built using [Crystal](https://github.com/stravu/crystal)
+💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
 
-Co-Authored-By: Crystal <crystal@stravu.com>` : request.message;
+Co-Authored-By: Cyboflow <hello@cyboflow.com>` : request.message;
 
             // Use a temporary file for retry as well
-            const tmpFile = path.join(os.tmpdir(), `crystal-commit-retry-${Date.now()}.txt`);
+            const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-retry-${Date.now()}.txt`);
             try {
               await fs.writeFile(tmpFile, retryMessage, 'utf-8');
               await execAsync(`git commit -F ${tmpFile}`, { cwd: session.worktreePath });
