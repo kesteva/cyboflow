@@ -528,7 +528,7 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Uses centralized shellPath utility for consistent PATH management
    */
   protected async getSystemEnvironment(): Promise<{ [key: string]: string }> {
-    // Get the enhanced PATH from centralized utility (includes Linux-specific paths)
+    // Get the enhanced PATH from centralized utility
     const shellPath = getShellPath();
 
     // Find Node.js and ensure it's in the PATH
@@ -852,53 +852,51 @@ export abstract class AbstractCliManager extends EventEmitter {
     let success = true;
 
     try {
-      {
-        // macOS/Unix
+      // macOS/Unix
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error as Error);
+      }
+
+      // Kill the entire process group
+      try {
+        await this.execAsync(`kill -TERM -${pid}`);
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGTERM to process group: ${error}`);
+      }
+
+      // Give processes a chance to clean up gracefully
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Force kill
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch (error) {
+        // Process might already be dead
+      }
+
+      try {
+        await this.execAsync(`kill -9 -${pid}`);
+      } catch (error) {
+        this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGKILL to process group: ${error}`);
+      }
+
+      // Kill all known descendants individually
+      for (const childPid of descendantPids) {
         try {
-          process.kill(pid, 'SIGTERM');
+          await this.execAsync(`kill -9 ${childPid}`);
+          this.logger?.verbose(`[${this.getCliToolName()}] Killed descendant process ${childPid}`);
         } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error as Error);
+          this.logger?.verbose(`[${this.getCliToolName()}] Process ${childPid} already terminated`);
         }
+      }
 
-        // Kill the entire process group
-        try {
-          await this.execAsync(`kill -TERM -${pid}`);
-        } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGTERM to process group: ${error}`);
-        }
-
-        // Give processes a chance to clean up gracefully
-        await new Promise(resolve => setTimeout(resolve, 200));
-
-        // Force kill
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch (error) {
-          // Process might already be dead
-        }
-
-        try {
-          await this.execAsync(`kill -9 -${pid}`);
-        } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error sending SIGKILL to process group: ${error}`);
-        }
-
-        // Kill all known descendants individually
-        for (const childPid of descendantPids) {
-          try {
-            await this.execAsync(`kill -9 ${childPid}`);
-            this.logger?.verbose(`[${this.getCliToolName()}] Killed descendant process ${childPid}`);
-          } catch (error) {
-            this.logger?.verbose(`[${this.getCliToolName()}] Process ${childPid} already terminated`);
-          }
-        }
-
-        // Final cleanup attempt
-        try {
-          await this.execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
-          // Ignore errors - processes might already be dead
-        }
+      // Final cleanup attempt
+      try {
+        await this.execAsync(`pkill -9 -P ${pid}`);
+      } catch (error) {
+        // Ignore errors - processes might already be dead
       }
 
       // Verify all processes are actually dead

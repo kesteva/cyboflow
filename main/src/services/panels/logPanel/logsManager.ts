@@ -224,10 +224,9 @@ export class LogsManager {
    * Stop a running script and ensure all child processes are terminated.
    * This method uses multiple approaches to ensure complete cleanup:
    * 1. Gets all descendant PIDs recursively before killing
-   * 2. Uses platform-specific commands (taskkill on Windows, kill on Unix)
-   * 3. Kills the process group (Unix) or process tree (Windows)
-   * 4. Kills individual descendant processes as a fallback
-   * 5. Uses graceful SIGTERM first, then forceful SIGKILL
+   * 2. Kills the process group via `kill -TERM -<pgid>` then `-9`
+   * 3. Kills individual descendant processes as a fallback
+   * 4. Uses graceful SIGTERM first, then forceful SIGKILL
    */
   async stopScript(panelId: string): Promise<void> {
     const childProcess = this.activeProcesses.get(panelId);

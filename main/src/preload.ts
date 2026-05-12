@@ -178,7 +178,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Basic app info
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
-  getPlatform: () => ipcRenderer.invoke('get-platform'),
   isPackaged: () => ipcRenderer.invoke('is-packaged'),
 
   // Version checking

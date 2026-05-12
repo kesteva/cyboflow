@@ -70,107 +70,105 @@ export function getShellPath(): string {
   try {
     let shellPath: string;
 
-    {
-      // macOS — use login shell to get the user's full PATH
-      const shellInfo = ShellDetector.getDefaultShell();
-      const shell = shellInfo.path;
+    // macOS — use login shell to get the user's full PATH
+    const shellInfo = ShellDetector.getDefaultShell();
+    const shell = shellInfo.path;
 
-      console.log(`[ShellPath] Detected shell: ${shell} (${shellInfo.name})`);
+    console.log(`[ShellPath] Detected shell: ${shell} (${shellInfo.name})`);
 
-      const shellCommand = `${shell} -l -i -c 'echo $PATH'`;
+    const shellCommand = `${shell} -l -i -c 'echo $PATH'`;
 
-      console.log(`[ShellPath] macOS PATH detection - Shell: ${shell}`);
-      console.log(`[ShellPath] Shell command: ${shellCommand}`);
-      
-      // Execute the command to get the PATH
-      // For packaged apps, ALWAYS use login shell to get the user's real PATH
-      const isPackaged = process.env.NODE_ENV === 'production' || 'pkg' in process || app?.isPackaged;
-      
-      if (isPackaged) {
-        console.log('Running in packaged app, using login shell to get full PATH...');
-        
-        // Use minimal base PATH - just enough to find the shell
-        const minimalPath = '/usr/bin:/bin';
-        
-        // Use login shell to load user's full environment
-        try {
-          // First try with explicit sourcing of shell config files
-          let sourceCommand = '';
-          const homeDir = os.homedir();
-          
-          if (shell.includes('zsh')) {
-            // For zsh, source the standard config files
-            sourceCommand = `source /etc/zprofile 2>/dev/null || true; ` +
-                           `source ${homeDir}/.zprofile 2>/dev/null || true; ` +
-                           `source /etc/zshrc 2>/dev/null || true; ` +
-                           `source ${homeDir}/.zshrc 2>/dev/null || true; `;
-          } else if (shell.includes('bash')) {
-            // For bash, source the standard config files
-            sourceCommand = `source /etc/profile 2>/dev/null || true; ` +
-                           `source ${homeDir}/.bash_profile 2>/dev/null || true; ` +
-                           `source ${homeDir}/.bashrc 2>/dev/null || true; `;
+    console.log(`[ShellPath] macOS PATH detection - Shell: ${shell}`);
+    console.log(`[ShellPath] Shell command: ${shellCommand}`);
+
+    // Execute the command to get the PATH
+    // For packaged apps, ALWAYS use login shell to get the user's real PATH
+    const isPackaged = process.env.NODE_ENV === 'production' || 'pkg' in process || app?.isPackaged;
+
+    if (isPackaged) {
+      console.log('Running in packaged app, using login shell to get full PATH...');
+
+      // Use minimal base PATH - just enough to find the shell
+      const minimalPath = '/usr/bin:/bin';
+
+      // Use login shell to load user's full environment
+      try {
+        // First try with explicit sourcing of shell config files
+        let sourceCommand = '';
+        const homeDir = os.homedir();
+
+        if (shell.includes('zsh')) {
+          // For zsh, source the standard config files
+          sourceCommand = `source /etc/zprofile 2>/dev/null || true; ` +
+                         `source ${homeDir}/.zprofile 2>/dev/null || true; ` +
+                         `source /etc/zshrc 2>/dev/null || true; ` +
+                         `source ${homeDir}/.zshrc 2>/dev/null || true; `;
+        } else if (shell.includes('bash')) {
+          // For bash, source the standard config files
+          sourceCommand = `source /etc/profile 2>/dev/null || true; ` +
+                         `source ${homeDir}/.bash_profile 2>/dev/null || true; ` +
+                         `source ${homeDir}/.bashrc 2>/dev/null || true; `;
+        }
+
+        const fullCommand = `${shell} -c '${sourceCommand}echo $PATH'`;
+        console.log('Executing shell command to get PATH:', fullCommand);
+
+        shellPath = execSync(fullCommand, {
+          encoding: 'utf8',
+          timeout: 10000,
+          env: {
+            PATH: minimalPath,
+            SHELL: shell,
+            USER: os.userInfo().username,
+            HOME: homeDir,
+            // Add ZDOTDIR for zsh users who might have custom config location
+            ZDOTDIR: process.env.ZDOTDIR || homeDir
           }
-          
-          const fullCommand = `${shell} -c '${sourceCommand}echo $PATH'`;
-          console.log('Executing shell command to get PATH:', fullCommand);
-          
-          shellPath = execSync(fullCommand, {
+        }).trim();
+        console.log('Successfully loaded user PATH from shell config files');
+      } catch (error) {
+        console.error('Failed to load PATH from shell config:', error);
+
+        // Try the standard login shell approach
+        try {
+          shellPath = execSync(shellCommand, {
             encoding: 'utf8',
             timeout: 10000,
             env: {
               PATH: minimalPath,
               SHELL: shell,
               USER: os.userInfo().username,
-              HOME: homeDir,
-              // Add ZDOTDIR for zsh users who might have custom config location
-              ZDOTDIR: process.env.ZDOTDIR || homeDir
+              HOME: os.homedir()
             }
           }).trim();
-          console.log('Successfully loaded user PATH from shell config files');
-        } catch (error) {
-          console.error('Failed to load PATH from shell config:', error);
-
-          // Try the standard login shell approach
-          try {
-            shellPath = execSync(shellCommand, {
-              encoding: 'utf8',
-              timeout: 10000,
-              env: {
-                PATH: minimalPath,
-                SHELL: shell,
-                USER: os.userInfo().username,
-                HOME: os.homedir()
-              }
-            }).trim();
-            console.log('Loaded PATH using login shell flags');
-          } catch (loginError) {
-            console.error('Failed to load PATH from login shell:', loginError);
-            // Fallback to current PATH + common locations
-            shellPath = process.env.PATH || '';
-          }
-        }
-      } else {
-        // In development, try faster approach first
-        try {
-          shellPath = execSync(`${shell} -c 'echo $PATH'`, {
-            encoding: 'utf8',
-            timeout: 2000,
-            env: process.env
-          }).trim();
-          console.log(`[ShellPath] Quick PATH retrieval succeeded`);
-        } catch (quickError) {
-          console.log(`[ShellPath] Quick PATH retrieval failed: ${quickError instanceof Error ? quickError.message : quickError}`);
-          console.log(`[ShellPath] Falling back to login shell approach...`);
-          shellPath = execSync(shellCommand, {
-            encoding: 'utf8',
-            timeout: 10000,
-            env: process.env
-          }).trim();
-          console.log(`[ShellPath] Login shell PATH retrieval succeeded`);
+          console.log('Loaded PATH using login shell flags');
+        } catch (loginError) {
+          console.error('Failed to load PATH from login shell:', loginError);
+          // Fallback to current PATH + common locations
+          shellPath = process.env.PATH || '';
         }
       }
+    } else {
+      // In development, try faster approach first
+      try {
+        shellPath = execSync(`${shell} -c 'echo $PATH'`, {
+          encoding: 'utf8',
+          timeout: 2000,
+          env: process.env
+        }).trim();
+        console.log(`[ShellPath] Quick PATH retrieval succeeded`);
+      } catch (quickError) {
+        console.log(`[ShellPath] Quick PATH retrieval failed: ${quickError instanceof Error ? quickError.message : quickError}`);
+        console.log(`[ShellPath] Falling back to login shell approach...`);
+        shellPath = execSync(shellCommand, {
+          encoding: 'utf8',
+          timeout: 10000,
+          env: process.env
+        }).trim();
+        console.log(`[ShellPath] Login shell PATH retrieval succeeded`);
+      }
     }
-    
+
     console.log(`[ShellPath] Retrieved shell PATH (${shellPath.split(pathSep).length} entries): ${shellPath.substring(0, 200)}...`);
     
     // Combine with current process PATH to ensure we don't lose anything
