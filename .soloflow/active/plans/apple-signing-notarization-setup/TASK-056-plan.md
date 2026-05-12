@@ -1,7 +1,7 @@
 ---
 id: TASK-056
 idea: IDEA-002
-status: in-flight
+status: ready
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md
