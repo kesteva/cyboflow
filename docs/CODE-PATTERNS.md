@@ -121,4 +121,17 @@ to restore.
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   preserved-but-inactive surfaces.
 
+## Build & Packaging
+
+### macOS signing posture (`scripts/configure-build.js`)
+
+`scripts/configure-build.js` runs as a `prebuild:mac*` / `prerelease:mac` step and is the
+**single canonical writer** of `build.mac.notarize`, `hardenedRuntime`, and `gatekeeperAssess`.
+Do not edit these keys directly in `package.json` — `configure-build.js` overwrites them on
+every build. Decision is driven by env vars (`CSC_LINK`, `APPLE_ID`, `APPLE_TEAM_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `CSC_KEY_PASSWORD`, `CSC_DISABLE`).
+
+- **Canonical example:** `scripts/configure-build.js`, `scripts/configure-build.test.js`
+- **Env-var contract:** see `docs/signing/APPLE_DEVELOPER_SETUP.md`.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
