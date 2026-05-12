@@ -41,21 +41,3 @@ export interface AIPanelState {
   config?: Partial<AIPanelConfig>;
 }
 
-/**
- * Factory for creating default configurations
- */
-export class AIPanelConfigFactory {
-  static createClaudeConfig(
-    worktreePath: string,
-    prompt: string,
-    model?: string,
-    permissionMode?: 'approve' | 'ignore'
-  ): AIPanelConfig {
-    return {
-      worktreePath,
-      prompt,
-      model,
-      permissionMode
-    };
-  }
-}
