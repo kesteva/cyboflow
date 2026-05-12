@@ -77,8 +77,8 @@ export default function AnalyticsConsentDialog({ isOpen, onClose }: AnalyticsCon
       {/* Header with gradient */}
       <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center">
-          <img src={crystalLogo} alt="Crystal" className="h-10 w-10 mr-3" />
-          <h1 className="text-2xl font-bold">Help Improve Crystal</h1>
+          <img src={crystalLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
+          <h1 className="text-2xl font-bold">Help Improve Cyboflow</h1>
         </div>
       </div>
 

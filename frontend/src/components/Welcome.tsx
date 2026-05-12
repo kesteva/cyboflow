@@ -47,9 +47,9 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
       <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center justify-between">
           <div className="flex items-center">
-            <img src={crystalLogo} alt="Crystal" className="h-10 w-10 mr-3" />
+            <img src={crystalLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
             <div>
-              <h1 className="text-2xl font-bold">Welcome to Crystal</h1>
+              <h1 className="text-2xl font-bold">Welcome to Cyboflow</h1>
               <p className="text-interactive-text/80">Multi-Session Claude Code Manager</p>
             </div>
           </div>
