@@ -111,7 +111,7 @@
       "signIgnore": [
         "node_modules/@anthropic-ai/claude-code/vendor/.*\\.jar$"
       ],
-      "notarize": { "teamId": "${APPLE_TEAM_ID}" },
+      "notarize": true,
       "target": [
         {
           "target": "default",
