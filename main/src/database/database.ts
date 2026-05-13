@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { readFileSync, mkdirSync } from 'fs';
+import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
@@ -47,6 +47,14 @@ interface ExecutionDiffRow {
 
 export class DatabaseService {
   private db: Database.Database;
+
+  /** @internal — testing only: overrides the migrations directory used by runFileBasedMigrations() */
+  private migrationsDirOverride: string | null = null;
+
+  /** @internal — testing only */
+  setMigrationsDirForTesting(dir: string): void {
+    this.migrationsDirOverride = dir;
+  }
 
   constructor(dbPath: string) {
     // Ensure the directory exists before creating the database
@@ -1288,6 +1296,131 @@ export class DatabaseService {
       } catch (error) {
         console.error('[Database] Failed to fix folder/session ordering:', error);
         // Don't throw - allow app to continue
+      }
+    }
+
+    // Final phase: apply any numeric-prefix .sql migration files that have
+    // not yet been recorded as applied. This is the entry point for all
+    // cyboflow-era schema additions starting with 006_cyboflow_schema.sql.
+    this.runFileBasedMigrations();
+  }
+
+  /**
+   * Backfills file_migration_applied:* flags for the three legacy inline migrations
+   * (003/004/005) so the file runner never double-applies them on upgrade installs.
+   * Called at the top of runFileBasedMigrations() before the directory scan.
+   */
+  private backfillLegacyFileMigrationFlags(): void {
+    const legacyMap: Array<{ inlineKey: string; file: string }> = [
+      // Inline marker for 003 is implicit: presence of the tool_panels table.
+      // We use a schema probe rather than a user_preferences key because
+      // 003's inline implementation predates the marker convention.
+      { inlineKey: '__schema_probe:tool_panels', file: '003_add_tool_panels.sql' },
+      { inlineKey: 'claude_panels_migrated', file: '004_claude_panels.sql' },
+      { inlineKey: 'unified_panel_settings_migrated', file: '005_unified_panel_settings.sql' },
+    ];
+
+    const selectPref = this.db.prepare(
+      "SELECT value FROM user_preferences WHERE key = ?"
+    );
+    const insertPref = this.db.prepare(
+      "INSERT INTO user_preferences (key, value) VALUES (?, 'true')"
+    );
+
+    for (const { inlineKey, file } of legacyMap) {
+      const flagKey = `file_migration_applied:${file}`;
+      if (selectPref.get(flagKey)) continue; // already backfilled
+
+      let alreadyApplied = false;
+      if (inlineKey.startsWith('__schema_probe:')) {
+        const tableName = inlineKey.slice('__schema_probe:'.length);
+        const row = this.db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+          .get(tableName);
+        alreadyApplied = !!row;
+      } else {
+        alreadyApplied = !!selectPref.get(inlineKey);
+      }
+
+      if (alreadyApplied) {
+        insertPref.run(flagKey);
+        console.log(`[Database] Backfilled file_migration_applied for ${file} (inline marker present)`);
+      }
+    }
+  }
+
+  /**
+   * Scans the migrations directory for numeric-prefix .sql files and applies
+   * any that have not yet been recorded as applied in user_preferences.
+   * Each file is applied in its own transaction so a single failure does not
+   * prevent subsequent files from running (matching Crystal's existing migration
+   * tolerance pattern).
+   */
+  private runFileBasedMigrations(): void {
+    // Bootstrap: legacy inline migrations 003-005 ran before this runner existed.
+    // If their inline markers are set, auto-flag the corresponding .sql files as
+    // already applied so we never double-apply on upgrade.
+    this.backfillLegacyFileMigrationFlags();
+
+    // Resolve the migrations dir relative to the compiled main bundle.
+    // copy:assets places files at dist/main/src/database/migrations/*.sql at build
+    // time, so __dirname resolves correctly in both dev (tsx) and packaged (asar) runs.
+    const migrationsDir = this.migrationsDirOverride ?? join(__dirname, 'migrations');
+
+    let entries: string[];
+    try {
+      entries = readdirSync(migrationsDir);
+    } catch (err) {
+      console.warn('[Database] No migrations directory found at', migrationsDir, err);
+      return;
+    }
+
+    const PREFIX_RE = /^(\d{3})_.*\.sql$/;
+
+    const ordered = entries
+      .map((name) => {
+        const match = PREFIX_RE.exec(name);
+        if (!match) {
+          console.warn(`[Database] Skipping non-numeric migration file: ${name}`);
+          return null;
+        }
+        return { name, prefix: parseInt(match[1], 10) };
+      })
+      .filter((x): x is { name: string; prefix: number } => x !== null)
+      .sort((a, b) => a.prefix - b.prefix);
+
+    const selectApplied = this.db.prepare(
+      "SELECT value FROM user_preferences WHERE key = ?"
+    );
+    const insertApplied = this.db.prepare(
+      "INSERT INTO user_preferences (key, value) VALUES (?, 'true')"
+    );
+
+    for (const { name } of ordered) {
+      const key = `file_migration_applied:${name}`;
+      if (selectApplied.get(key)) {
+        continue; // idempotent: already recorded
+      }
+
+      const sqlPath = join(migrationsDir, name);
+      let sql: string;
+      try {
+        sql = readFileSync(sqlPath, 'utf-8');
+      } catch (err) {
+        console.error(`[Database] Could not read migration ${name}:`, err);
+        continue;
+      }
+
+      try {
+        this.transaction(() => {
+          this.db.exec(sql);
+          insertApplied.run(key);
+        });
+        console.log(`[Database] Applied file migration: ${name}`);
+      } catch (err) {
+        // Match Crystal's existing tolerance pattern (try/catch around 004/005):
+        // log + continue so a single broken file does not brick the app boot.
+        console.error(`[Database] Migration ${name} failed:`, err);
       }
     }
   }

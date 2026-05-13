@@ -84,10 +84,29 @@ via `../../../shared/types/...`. Changing types here is a cross-package concern.
 
 ## Data Model
 
-Schema in `main/src/database/schema.sql`; incremental migrations in
-`main/src/database/migrations/` (plain SQL files, applied in filename order by the migration runner).
-Central tables: `sessions`, `panels`, `execution_diffs`, `projects`. The target Cyboflow schema
-adds `workflow_runs`, `raw_events`, `approvals` — designed in system design §5.
+Schema in `main/src/database/schema.sql`; incremental migrations run in two phases inside
+`DatabaseService.initialize()` (see `main/src/database/database.ts`):
+
+- **Phase 1 — inline migrations** inside `runMigrations()`: hand-written `ALTER TABLE` /
+  `CREATE TABLE` blocks gated on `PRAGMA table_info` checks and on `user_preferences` marker
+  keys (e.g. `auto_commit_migrated`, `claude_panels_migrated`, `diff_panels_migrated`,
+  `unified_panel_settings_migrated`, `folder_session_order_fix_applied`). These are the
+  legacy Crystal-era migrations and run unconditionally on every boot (each block is
+  idempotent via the marker check).
+
+- **Phase 2 — file-based migrations** via `runFileBasedMigrations()` (added in TASK-151),
+  called at the tail of `runMigrations()`: reads `main/src/database/migrations/NNN_*.sql`
+  files (numeric prefix `NNN`), sorts them by prefix, and applies each whose
+  `file_migration_applied:<filename>` key is not yet in `user_preferences`. The ledger
+  uses the same `user_preferences` table as the inline markers; the
+  `file_migration_applied:` prefix namespaces file-runner entries from inline ones.
+  On upgrade installs, `runFileBasedMigrations()` also backfills
+  `file_migration_applied:003_add_tool_panels.sql`, `...004...`, and `...005...` when
+  the corresponding inline markers are present, so those files are never double-applied.
+
+Central tables (Crystal baseline): `sessions`, `panels`, `execution_diffs`, `projects`.
+Cyboflow-era additions (migration `006_cyboflow_schema.sql`): `workflows`, `workflow_runs`,
+`raw_events`, `messages`, `approvals` — designed in system design §5.
 
 ## Build & Run
 
