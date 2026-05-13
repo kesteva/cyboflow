@@ -1,8 +1,8 @@
 ---
 id: TASK-102
 idea_id: IDEA-003
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/schemas.ts
   - main/package.json
@@ -15,11 +15,11 @@ files_readonly:
   - main/tsconfig.json
   - main/vitest.config.ts
 acceptance_criteria:
-  - criterion: "File main/src/services/streamParser/schemas.ts exists and exports a Zod schema named `claudeStreamEventSchema` plus a parser function `parseClaudeStreamEvent`."
+  - criterion: File main/src/services/streamParser/schemas.ts exists and exports a Zod schema named `claudeStreamEventSchema` plus a parser function `parseClaudeStreamEvent`.
     verification: "grep -nE 'export const claudeStreamEventSchema|export function parseClaudeStreamEvent' main/src/services/streamParser/schemas.ts returns 2 matches."
-  - criterion: "The schema is a Zod discriminated union (or equivalent — see rejected alternatives) covering all 7 wire variants from shared/types/claudeStream.ts."
+  - criterion: The schema is a Zod discriminated union (or equivalent — see rejected alternatives) covering all 7 wire variants from shared/types/claudeStream.ts.
     verification: "grep -cE 'system.*init|system.*api_retry|system.*compact|assistant|^\\s+user|result.*success|stream_event' main/src/services/streamParser/schemas.ts returns at least 7 distinct variant declarations (count via `grep -E 'z\\.object\\(' main/src/services/streamParser/schemas.ts | wc -l` returns >= 7)."
-  - criterion: "Every variant schema uses `.passthrough()` so unknown fields do not cause validation to fail."
+  - criterion: Every variant schema uses `.passthrough()` so unknown fields do not cause validation to fail.
     verification: "grep -nE '\\.passthrough\\(\\)' main/src/services/streamParser/schemas.ts returns at least 7 matches (one per variant)."
   - criterion: "Tool-result content is encoded as `z.union([z.string(), z.array(...)])` for the user variant."
     verification: "grep -nE 'z\\.union\\(\\s*\\[\\s*z\\.string\\(\\)' main/src/services/streamParser/schemas.ts returns at least one match within the user variant block."
@@ -27,15 +27,16 @@ acceptance_criteria:
     verification: "grep -nE \"kind: '__unknown__'|'__unknown__'\" main/src/services/streamParser/schemas.ts returns at least one match inside the parseClaudeStreamEvent function body; grep -nE 'safeParse|catch' main/src/services/streamParser/schemas.ts confirms non-throwing path."
   - criterion: "Result variant subtype is encoded as `z.enum([...all 4 subtypes...])`."
     verification: "grep -nE \"z\\.enum\\(\\s*\\[\\s*'success'\" main/src/services/streamParser/schemas.ts returns at least one match AND grep -E \"'success'|'error_max_turns'|'error_max_budget_usd'|'error_during_execution'\" main/src/services/streamParser/schemas.ts returns all 4 literals."
-  - criterion: "Schema output is assignable to the ClaudeStreamEvent union type from shared/types/claudeStream.ts (compile-time check)."
+  - criterion: Schema output is assignable to the ClaudeStreamEvent union type from shared/types/claudeStream.ts (compile-time check).
     verification: "grep -nE \"satisfies ClaudeStreamEvent|: ClaudeStreamEvent\" main/src/services/streamParser/schemas.ts returns at least one match. `cd main && pnpm typecheck` exits 0."
   - criterion: "`zod` is declared as a direct dependency in main/package.json (not just a transitive)."
     verification: "node -e \"const pkg=require('./main/package.json'); process.exit(pkg.dependencies && pkg.dependencies.zod ? 0 : 1)\" exits 0."
   - criterion: "`pnpm install` runs cleanly after the package.json edit, resolving zod to a version compatible with @modelcontextprotocol/sdk's transitive zod (currently ^3.23.8 / 3.25.76 per pnpm-lock.yaml)."
-    verification: "pnpm install --frozen-lockfile=false exits 0 and the locked zod version in pnpm-lock.yaml satisfies the new constraint (run `pnpm why zod --filter main` returns the direct dependency on the new line plus the transitive line from @modelcontextprotocol/sdk)."
+    verification: pnpm install --frozen-lockfile=false exits 0 and the locked zod version in pnpm-lock.yaml satisfies the new constraint (run `pnpm why zod --filter main` returns the direct dependency on the new line plus the transitive line from @modelcontextprotocol/sdk).
   - criterion: "`pnpm --filter main typecheck` and `pnpm --filter main lint` both exit 0."
     verification: "cd main && pnpm typecheck && pnpm lint exits 0."
-depends_on: [TASK-101]
+depends_on:
+  - TASK-101
 estimated_complexity: medium
 epic: typed-stream-event-schema
 test_strategy:
@@ -43,11 +44,10 @@ test_strategy:
   justification: "This task produces Zod schemas and a non-throwing parser wrapper. Behavioral verification — that parsing a real Claude `system/init` JSON yields a `SystemInitEvent`, that parsing malformed input yields an UnknownStreamEvent, that all 4 result subtypes round-trip cleanly — is the explicit responsibility of TASK-103, which writes the fixture-driven test suite. Splitting tests across both tasks would duplicate fixtures and create coordination overhead; consolidating them in TASK-103 is the cleaner boundary. A minimal smoke `parseClaudeStreamEvent({})` returning `{ kind: '__unknown__' }` is implicit in the criteria above (verified by code inspection) but does not need a dedicated test file in this task."
 prerequisites:
   - check: "node -e \"const pkg=require('./main/package.json'); process.exit(pkg.dependencies && pkg.dependencies['@modelcontextprotocol/sdk'] ? 0 : 1)\""
-    fix: "pnpm install --filter main"
+    fix: pnpm install --filter main
     description: "Zod is currently a transitive dep through @modelcontextprotocol/sdk. If that dep is missing, zod cannot resolve."
     blocking: true
 ---
-
 # Zod Schemas + Parser Wrapper for ClaudeStreamEvent
 
 ## Objective

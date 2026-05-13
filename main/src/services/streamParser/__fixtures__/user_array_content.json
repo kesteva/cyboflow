@@ -1,0 +1,27 @@
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_02B10r01rz01mr028946mr0",
+        "content": [
+          {
+            "type": "text",
+            "text": "File written successfully to /Users/dev/projects/myapp/src/index.ts"
+          }
+        ],
+        "is_error": false
+      }
+    ]
+  },
+  "tool_use_result": {
+    "filenames": ["/Users/dev/projects/myapp/src/index.ts"],
+    "durationMs": 15,
+    "numFiles": 1,
+    "truncated": false
+  },
+  "parent_tool_use_id": "toolu_02B10r01rz01mr028946mr0",
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}

@@ -1,0 +1,21 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 12543,
+  "num_turns": 3,
+  "result": "Task completed successfully. Listed files and confirmed directory structure.",
+  "total_cost_usd": 0.0234,
+  "usage": {
+    "input_tokens": 3200,
+    "output_tokens": 412
+  },
+  "modelUsage": {
+    "claude-opus-4-5": {
+      "input_tokens": 3200,
+      "output_tokens": 412
+    }
+  },
+  "permission_denials": [],
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}

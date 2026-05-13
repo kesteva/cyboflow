@@ -1,0 +1,21 @@
+{
+  "type": "result",
+  "subtype": "error_during_execution",
+  "is_error": true,
+  "duration_ms": 5678,
+  "num_turns": 2,
+  "result": "An unrecoverable error occurred during execution: Connection to API lost unexpectedly.",
+  "total_cost_usd": 0.0089,
+  "usage": {
+    "input_tokens": 1200,
+    "output_tokens": 95
+  },
+  "modelUsage": {
+    "claude-opus-4-5": {
+      "input_tokens": 1200,
+      "output_tokens": 95
+    }
+  },
+  "permission_denials": [],
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
