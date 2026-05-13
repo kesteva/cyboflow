@@ -237,4 +237,78 @@ describe('ClaudeStreamParser', () => {
     }).not.toThrow();
     expect(events).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // Blank / whitespace-only lines are skipped (no events, no warns)
+  //   processLines has: if (line.trim() === '') continue;
+  //   Double newlines in the claude CLI stdout must not trigger spurious warns.
+  // -------------------------------------------------------------------------
+
+  it('silently skips blank and whitespace-only lines without emitting events or warns', () => {
+    const logger = { warn: vi.fn(), verbose: vi.fn() };
+    const RUN = 'blank-lines-run';
+    const events = collectEvents(router, RUN);
+    const parser = new ClaudeStreamParser(RUN, router, logger);
+
+    // A stream with blank lines between real events (double-newline separators)
+    const data = [
+      loadFixture('system_init.json'),
+      '',          // blank line (double newline produces this after split)
+      '   ',       // whitespace-only line
+      loadFixture('result_success.json'),
+      '',          // trailing blank
+    ].join('\n') + '\n';
+
+    parser.feed(data);
+    parser.flush();
+
+    // Only the two real events should appear — blank lines are not emitted
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: 'system' });
+    expect(events[1]).toMatchObject({ type: 'result' });
+
+    // No warns — blank lines must be skipped before the JSON parse attempt
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Interleaved feeds from two parser instances share no buffer state
+  //   Both parsers share the same EventRouter but each owns its own LineBufferer.
+  //   Alternating partial feeds must not corrupt each other's partial-line buffer.
+  // -------------------------------------------------------------------------
+
+  it('two parsers on a shared router with interleaved partial feeds do not corrupt each other', () => {
+    const eventsA: ClaudeStreamEvent[] = [];
+    const eventsB: ClaudeStreamEvent[] = [];
+
+    router.onRun('run-A', (e) => eventsA.push(e));
+    router.onRun('run-B', (e) => eventsB.push(e));
+
+    const parserA = new ClaudeStreamParser('run-A', router);
+    const parserB = new ClaudeStreamParser('run-B', router);
+
+    // Split each fixture JSON in half so each parser holds a partial line in its buffer
+    const jsonA = loadFixture('system_init.json');
+    const jsonB = loadFixture('result_success.json');
+    const midA = Math.floor(jsonA.length / 2);
+    const midB = Math.floor(jsonB.length / 2);
+
+    // Interleave: A feeds first half, B feeds first half, A completes, B completes
+    parserA.feed(jsonA.slice(0, midA));
+    parserB.feed(jsonB.slice(0, midB));
+
+    // No events yet — both parsers have partial data in their respective buffers
+    expect(eventsA).toHaveLength(0);
+    expect(eventsB).toHaveLength(0);
+
+    parserA.feed(jsonA.slice(midA) + '\n');
+    parserB.feed(jsonB.slice(midB) + '\n');
+
+    // Each parser emits exactly its own event
+    expect(eventsA).toHaveLength(1);
+    expect(eventsA[0]).toMatchObject({ type: 'system', subtype: 'init' });
+
+    expect(eventsB).toHaveLength(1);
+    expect(eventsB[0]).toMatchObject({ type: 'result', subtype: 'success' });
+  });
 });
