@@ -304,4 +304,63 @@ describe('RawEventsSink', () => {
       sink.dispose(RUN_ID); // second call — no-op
     }).not.toThrow();
   });
+
+  // -------------------------------------------------------------------------
+  // 7. Re-attach to same runId — old listener dropped, no duplicate rows
+  // -------------------------------------------------------------------------
+
+  it('re-attaching to the same runId drops the old listener and produces exactly one row per event', () => {
+    const sink = new RawEventsSink(db);
+
+    // First attach: emit one event → 1 row
+    sink.attachToRouter(router, RUN_ID);
+    router.emitForRun(RUN_ID, systemEvent);
+    expect(countRows(db, RUN_ID)).toBe(1);
+
+    // Re-attach to the same runId on the same router — old listener must be
+    // removed so the next event is NOT written twice.
+    sink.attachToRouter(router, RUN_ID);
+    router.emitForRun(RUN_ID, assistantEvent);
+
+    // Still exactly 2 rows (1 from before + 1 from after re-attach), not 3.
+    expect(countRows(db, RUN_ID)).toBe(2);
+
+    const rows = selectRows(db, RUN_ID);
+    expect(rows[0].event_type).toBe('system');
+    expect(rows[1].event_type).toBe('assistant');
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Very large payload_json — stored verbatim with no truncation
+  // -------------------------------------------------------------------------
+
+  it('persists a very large payload_json without truncation', () => {
+    const sink = new RawEventsSink(db);
+    sink.attachToRouter(router, RUN_ID);
+
+    // Build an assistant event with a ~100 KB text body.
+    const largeText = 'x'.repeat(100_000);
+    const largeEvent: ClaudeStreamEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg-large',
+        model: 'claude-opus',
+        role: 'assistant',
+        content: [{ type: 'text', text: largeText }],
+      },
+    };
+
+    router.emitForRun(RUN_ID, largeEvent);
+
+    expect(countRows(db, RUN_ID)).toBe(1);
+
+    const rows = selectRows(db, RUN_ID);
+    const parsed = JSON.parse(rows[0].payload_json) as typeof largeEvent;
+    // The text must be fully preserved — no truncation at any layer.
+    expect(parsed.message.content[0].type).toBe('text');
+    // Access text via index since TS narrowing requires it.
+    const firstContent = parsed.message.content[0] as { type: 'text'; text: string };
+    expect(firstContent.text).toBe(largeText);
+    expect(firstContent.text).toHaveLength(100_000);
+  });
 });
