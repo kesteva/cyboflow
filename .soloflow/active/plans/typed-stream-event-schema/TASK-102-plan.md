@@ -99,4 +99,145 @@ returns `{ kind: '__unknown__', raw }`. Add `zod` as an explicit direct dependen
 6. **Compose the union.** Zod's `z.discriminatedUnion` requires a single top-level discriminant
    key and does not nest cleanly when discriminants differ across branches (system has
    `type+subtype`, result has `type+subtype`, others have `type` only). Use this two-stage pattern:
-   
+
+   - **Stage 1 — top-level `z.discriminatedUnion('type', [...])`.** Branches are:
+     `assistantEventSchema`, `userEventSchema`, `streamEventSchema`, plus two *composite*
+     branches keyed off `type: 'system'` and `type: 'result'`. The composite branches are
+     themselves `z.discriminatedUnion('subtype', [...])` covering the inner shapes:
+     - `systemUnionSchema = z.discriminatedUnion('subtype', [systemInitSchema, systemApiRetrySchema, systemCompactSchema])`
+     - `resultUnionSchema = z.discriminatedUnion('subtype', [resultSuccessSchema, resultErrorMaxTurnsSchema, resultErrorMaxBudgetSchema, resultErrorDuringExecutionSchema])` —
+       split the single `resultEventSchema` into four sibling schemas, each pinning `subtype`
+       with `z.literal('success')` etc., so the inner discriminated union can dispatch on it.
+     The top-level union then has six entries: `[systemUnionSchema, assistantEventSchema,
+     userEventSchema, resultUnionSchema, streamEventSchema]` (five if you treat system+result
+     as collapsed). Each leaf still has `.passthrough()` so unknown sibling fields survive.
+
+   - **Stage 2 — fallback to `UnknownStreamEvent`.** Inside `parseClaudeStreamEvent`, wrap the
+     top-level call in `claudeStreamEventSchema.safeParse(raw)`. On `result.success === true`,
+     return `result.data` (TypeScript narrows it to `ClaudeStreamEvent` because the schema is
+     declared `satisfies z.ZodType<Exclude<ClaudeStreamEvent, UnknownStreamEvent>>`). On
+     `result.success === false`, return `{ kind: '__unknown__', raw: raw as Record<string, unknown> }`.
+     The function signature is `parseClaudeStreamEvent(raw: unknown): ClaudeStreamEvent`. It MUST
+     NOT throw — no `.parse()`, no rethrow, no `as` cast that bypasses the safeParse boundary.
+
+7. **Export the parser and the schema.**
+   ```ts
+   export const claudeStreamEventSchema = z.discriminatedUnion('type', [...]);
+   export function parseClaudeStreamEvent(raw: unknown): ClaudeStreamEvent {
+     const parsed = claudeStreamEventSchema.safeParse(raw);
+     if (parsed.success) return parsed.data;
+     // Observability: log the unmatched type + run_id (if extractable) before falling through.
+     const rawObj = (typeof raw === 'object' && raw !== null) ? raw as Record<string, unknown> : {};
+     const wireType = typeof rawObj.type === 'string' ? rawObj.type : '<missing>';
+     const sessionId = typeof rawObj.session_id === 'string' ? rawObj.session_id : '<unknown>';
+     // eslint-disable-next-line no-console
+     console.warn(`[streamParser] unknown ClaudeStreamEvent variant type=${wireType} session_id=${sessionId}`);
+     return { kind: '__unknown__', raw: rawObj };
+   }
+   ```
+   The `console.warn` is the minimal observability surface; IDEA-004 (full streamParser) will
+   replace it with the proper Logger, but for this task console.warn keeps the dep graph clean.
+
+8. **Add a `satisfies` compile-time assignability check.** Just before the export, add:
+   ```ts
+   // Compile-time guarantee that the schema output is assignable to ClaudeStreamEvent.
+   // If a wire variant is added to shared/types/claudeStream.ts and not mirrored here, this fails.
+   const _typeCheck: ClaudeStreamEvent = {} as z.infer<typeof claudeStreamEventSchema>;
+   void _typeCheck;
+   ```
+   (Or use the `satisfies` operator on the schema declaration directly if cleaner — both work.)
+
+9. **Verification gates.** After authoring the file:
+   - `grep -nE 'export const claudeStreamEventSchema|export function parseClaudeStreamEvent' main/src/services/streamParser/schemas.ts` returns 2 matches.
+   - `grep -E 'z\.object\(' main/src/services/streamParser/schemas.ts | wc -l` returns >= 7.
+   - `grep -nE '\.passthrough\(\)' main/src/services/streamParser/schemas.ts` returns >= 7 matches.
+   - `grep -nE "kind: '__unknown__'" main/src/services/streamParser/schemas.ts` returns >= 1 match.
+   - `grep -nE 'safeParse' main/src/services/streamParser/schemas.ts` returns >= 1 match.
+   - `cd main && pnpm typecheck && pnpm lint` exits 0.
+
+## Acceptance Criteria
+
+The frontmatter encodes nine grep-level and three exit-code gates; in narrative form they
+collapse to: (a) the file exists at `main/src/services/streamParser/schemas.ts` and exports
+`claudeStreamEventSchema` plus `parseClaudeStreamEvent`; (b) the schema covers all seven wire
+variants from TASK-101 using `z.object({...}).passthrough()` per variant so unknown fields
+survive; (c) the user variant's `tool_result.content` is a `z.union([z.string(), z.array(...)])`;
+(d) the result variant pins its four subtypes as `z.enum(['success', 'error_max_turns',
+'error_max_budget_usd', 'error_during_execution'])` either directly or via four sibling literals
+inside a `z.discriminatedUnion('subtype', ...)`; (e) `parseClaudeStreamEvent` uses `.safeParse`
+(or `try/catch`) so it never throws — on any mismatch it returns
+`{ kind: '__unknown__', raw }`; (f) the schema is statically assignable to `ClaudeStreamEvent`
+(`satisfies` or a `_typeCheck` line); (g) `zod` is a direct dependency in `main/package.json`
+(not transitive-only); (h) `pnpm install --frozen-lockfile=false`, `pnpm --filter main typecheck`,
+and `pnpm --filter main lint` all exit 0. The zod version pin (`^3.23.8`) must match the existing
+transitive resolution (`pnpm-lock.yaml:3934`) so no duplicate copies enter the bundle.
+
+## Test Strategy
+
+`test_strategy.needed: false` in the frontmatter. TASK-103 owns the fixture-driven contract suite
+(at least eight tests covering: `system/init`, `system/api_retry`, synthetic `system/compact`,
+`assistant`, `user` with both string and array `tool_result.content`, all four `result` subtypes,
+`stream_event`, and an unknown top-level type). Duplicating those fixtures here would create
+coordination cost without changing the verification surface; the schema is verified by TASK-103's
+green test run. The only behavioral assertion this task carries is implicit and inspection-only:
+`parseClaudeStreamEvent({})` (or any non-matching shape) returns `{ kind: '__unknown__', raw: {} }`
+without throwing — verified by reading the `safeParse` branch in step 7, not by a dedicated test
+file. `pnpm --filter main typecheck` is the compile-time gate that the schema output is assignable
+to `ClaudeStreamEvent`.
+
+## Hardest Decision
+
+**Whether to use `z.discriminatedUnion` (fast, single-key dispatch, no overlap allowed) versus
+`z.union` with `.passthrough()` plus a manual `if` ladder for the catch-all.** `discriminatedUnion`
+is the documented Zod-recommended path: it's O(1) dispatch instead of O(n) try-each, it produces
+much better error messages, and the resulting `z.infer<>` type is a clean TypeScript discriminated
+union that lines up directly with `ClaudeStreamEvent` from TASK-101. The cost is that it cannot
+natively express a *two-key* discriminant — system and result variants share `type` but differ on
+`subtype`. The workaround is nested unions: outer `discriminatedUnion('type', [...])` with the
+system and result branches each being an inner `discriminatedUnion('subtype', [...])`. This is
+the canonical Zod pattern for hierarchical discriminants and the documented Zod issue
+(`colinhacks/zod#1158`) confirms it works. The alternative — flat `z.union([...])` — works but
+loses error-message clarity and forces the runtime to attempt every branch in order on every
+parse, which becomes measurable on long sessions (10K+ events). Chosen: nested
+`discriminatedUnion`. If the nested form fails to compile under Zod 3.23.8 (low-probability but
+the lowest-confidence area below), fall back to flat `z.union` with explicit per-branch error
+collection.
+
+## Rejected Alternatives
+
+- **Use `zod-to-ts` to generate the TS types from the Zod schemas.** Rejected: TASK-101 already
+  owns the canonical hand-written TS types in `shared/types/claudeStream.ts` (consumed by the
+  renderer via `shared/`-path imports and by main via the same path). Bidirectional generation
+  would create drift between the renderer's view and main's runtime view of the schema; pick one
+  source of truth and verify the other via a compile-time `satisfies` check. The TS types are
+  the source of truth; the schema is verified against them.
+- **Skip Zod entirely; hand-roll discriminant `if`-ladders with manual type guards.** Rejected:
+  hand-rolled guards are easy to drift from the TS types (no compile-time link), do not preserve
+  unknown fields by default, and require their own test suite per variant. Zod gives us
+  `.passthrough()` for free and one schema-update site instead of N guard updates.
+- **Use Zod 4 (`zod@4.x`) for its faster discriminated-union performance.** Rejected: the
+  transitive zod from `@modelcontextprotocol/sdk` is `^3.23.8` (per `pnpm-lock.yaml:3934`).
+  Pinning Zod 4 at the top level would create two copies in the bundle (electron-builder asar
+  + main `node_modules`), inflating size and risking instanceof check failures across the
+  Zod-version boundary. Re-evaluate when the MCP SDK upgrades to Zod 4.
+- **Define one giant `resultEventSchema` with `subtype: z.enum([...])` instead of four sibling
+  schemas.** Rejected for the nested-discriminatedUnion path: `z.discriminatedUnion('subtype', ...)`
+  requires each branch to pin `subtype` with a `z.literal`, not a `z.enum`. The four-sibling
+  decomposition is the cost of using nested discriminated unions. (If we fall back to flat
+  `z.union`, the single-enum form would work — but we'd lose the discrimination perf.)
+
+## Lowest Confidence Area
+
+**Whether nested `z.discriminatedUnion` compiles cleanly under Zod 3.23.8 when an inner
+discriminated union is itself a branch of an outer discriminated union.** The Zod docs show
+discriminated unions composing in this way (issue `colinhacks/zod#1158` and the
+`discriminatedUnion-of-discriminatedUnion` test in Zod's own repo confirm it), but the type
+inference for the outer union's branch detection can occasionally surface as a
+`Type 'ZodDiscriminatedUnion<...>' is not assignable to type 'ZodDiscriminatedUnionOption<...>'`
+error in older Zod 3.x lines. Verification path: before authoring all seven variants, prototype
+a two-variant nested case (just `systemInitSchema` + `systemApiRetrySchema` wrapped in an outer
+`z.discriminatedUnion('type', [innerSystemUnion, assistantEventSchema])`), run
+`pnpm --filter main typecheck`, and confirm the inferred type narrows correctly. If it doesn't
+compile, the fallback is flat `z.union([...])` with the `parseClaudeStreamEvent` body unchanged
+(safeParse still works the same way on `z.union`). The acceptance-criterion `grep` gates do not
+depend on which union form is used; both satisfy them.
