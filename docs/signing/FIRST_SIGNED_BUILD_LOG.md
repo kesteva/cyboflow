@@ -116,8 +116,11 @@ The DMG was created manually (`hdiutil create`) after electron-builder was kille
 **statusSummary:** Ready for distribution  
 **statusCode:** 0  
 **archiveFilename:** Cyboflow-0.3.5-macOS-universal.dmg  
-**sha256:** `cdf62a509f69d9984ec43c1a884fa83effd3f91608b197367b390e675e09ee8e`  
+**sha256 (pre-staple, as submitted to notarytool):** `cdf62a509f69d9984ec43c1a884fa83effd3f91608b197367b390e675e09ee8e`  
+**sha256 (post-staple, distribution artifact):** `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494`  
 **notarytool wall-clock time:** ~2 minutes
+
+> Note: `xcrun stapler staple` rewrites the DMG to embed the notarization ticket, so the post-staple SHA differs from the pre-staple SHA submitted to Apple. Distribution / Gatekeeper-acceptance docs must reference the **post-staple** value (the file users actually download). The pre-staple SHA is preserved here only for cross-reference with the notarytool submission record.
 
 No issues reported.
 
