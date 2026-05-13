@@ -1,8 +1,8 @@
 ---
 id: TASK-103
 idea_id: IDEA-003
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/__fixtures__/system_init.json
   - main/src/services/streamParser/__fixtures__/system_api_retry.json
@@ -29,7 +29,7 @@ acceptance_criteria:
     verification: "ls main/src/services/streamParser/__fixtures__/*.json | wc -l prints 11; each file passes `node -e 'JSON.parse(require(\"fs\").readFileSync(\"<file>\", \"utf-8\"))'` without error."
   - criterion: "A fixture README documents each fixture's source (real capture vs synthetic) and the exact `claude` command used to capture real fixtures."
     verification: "test -f main/src/services/streamParser/__fixtures__/README.md AND grep -nE 'claude -p|--output-format stream-json' main/src/services/streamParser/__fixtures__/README.md returns at least one match AND grep -nE 'real|synthetic' main/src/services/streamParser/__fixtures__/README.md returns at least 2 matches."
-  - criterion: "Test file main/src/services/streamParser/__tests__/schemas.test.ts exists with at least 13 distinct `it(...)` / `test(...)` blocks."
+  - criterion: Test file main/src/services/streamParser/__tests__/schemas.test.ts exists with at least 13 distinct `it(...)` / `test(...)` blocks.
     verification: "grep -cE \"^\\s*(it|test)\\(\" main/src/services/streamParser/__tests__/schemas.test.ts returns >= 13."
   - criterion: "Every fixture file is loaded and parsed in the test suite; each fixture has at least one assertion that `parseClaudeStreamEvent(fixture).type === <expected>` (or `.kind === '__unknown__'` for the catch-all case)."
     verification: "grep -nE 'parseClaudeStreamEvent\\(' main/src/services/streamParser/__tests__/schemas.test.ts returns >= 11 matches."
@@ -41,46 +41,47 @@ acceptance_criteria:
     verification: "grep -nE 'passthrough|unknown.*field|unrecognized' main/src/services/streamParser/__tests__/schemas.test.ts returns at least one match in the context of a passing assertion (not just a comment)."
   - criterion: "Test suite includes both string-content and array-content cases for the user (tool_result) variant, both asserting they parse to the `user` type."
     verification: "grep -nE 'user_string_content|user_array_content' main/src/services/streamParser/__tests__/schemas.test.ts returns at least 2 matches."
-  - criterion: "All 4 result subtypes have explicit assertions on `event.subtype`."
+  - criterion: All 4 result subtypes have explicit assertions on `event.subtype`.
     verification: "grep -nE \"'success'|'error_max_turns'|'error_max_budget_usd'|'error_during_execution'\" main/src/services/streamParser/__tests__/schemas.test.ts returns >= 4 matches."
   - criterion: "`pnpm --filter main test streamParser` exits 0 with all fixture tests green."
     verification: "cd main && pnpm test -- streamParser exits 0; output reports >= 13 passing tests."
-depends_on: [TASK-101, TASK-102]
+depends_on:
+  - TASK-101
+  - TASK-102
 estimated_complexity: high
 epic: typed-stream-event-schema
 test_strategy:
   needed: true
   justification: "This task is the test task — it produces both the fixture corpus AND the test suite that validates TASK-101's union and TASK-102's schemas against real Claude wire output. Without these tests, the union and schemas have no behavioral coverage."
   targets:
-    - behavior: "Each real-captured fixture parses cleanly via parseClaudeStreamEvent and narrows to the expected variant."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: Each real-captured fixture parses cleanly via parseClaudeStreamEvent and narrows to the expected variant.
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
     - behavior: "Malformed input (missing type, garbage, primitives) returns UnknownStreamEvent without throwing."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
-    - behavior: "All 4 result subtypes narrow correctly via discriminated subtype."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: All 4 result subtypes narrow correctly via discriminated subtype.
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
-    - behavior: "tool_result.content accepts both string and array forms (per research §1 inconsistency)."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: tool_result.content accepts both string and array forms (per research §1 inconsistency).
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
-    - behavior: ".passthrough() preserves unknown fields on each variant."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: .passthrough() preserves unknown fields on each variant.
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
-    - behavior: "Compile-time exhaustive switch using assertNever covers all wire variants (forward-compatibility tripwire)."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: Compile-time exhaustive switch using assertNever covers all wire variants (forward-compatibility tripwire).
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
 prerequisites:
   - check: "command -v claude >/dev/null 2>&1"
-    fix: "npm install -g @anthropic-ai/claude-code"
+    fix: npm install -g @anthropic-ai/claude-code
     description: "Capturing real fixtures requires the claude CLI on PATH. If unavailable, the executor may hand-craft fixtures using the shape documented in architecture research §1, but real-captured fixtures are strongly preferred for the 7 documented variants."
     blocking: false
   - check: "test -n \"$ANTHROPIC_API_KEY\" || test -f ~/.claude/config.json"
-    fix: "Set ANTHROPIC_API_KEY env var or run `claude login`."
+    fix: Set ANTHROPIC_API_KEY env var or run `claude login`.
     description: "Capturing real fixtures requires a usable Claude credential. Without it, only synthetic fixtures are possible."
     blocking: false
 ---
-
 # Fixture-Driven Unit Tests Against Real Stream-JSON Output
 
 ## Objective

@@ -2,8 +2,8 @@
 id: TASK-155
 idea: IDEA-004
 idea_id: IDEA-004
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - docs/ARCHITECTURE.md
 files_readonly:
@@ -26,7 +26,9 @@ acceptance_criteria:
     verification: "Add an integration test step (in cyboflowSchema.test.ts or a new queryPlan.test.ts) that runs `db.prepare('EXPLAIN QUERY PLAN SELECT * FROM raw_events WHERE run_id = ? ORDER BY id DESC LIMIT 100').all('test')` and asserts the result includes the string 'idx_raw_events_run_id_id'."
   - criterion: "docs/ARCHITECTURE.md is updated to accurately describe the migration system: (a) inline migrations in runMigrations() apply ALTER/CREATE statements gated on PRAGMA + user_preferences, (b) numeric-prefix .sql files in migrations/ are applied by runFileBasedMigrations() at the end of runMigrations(), (c) the file-migration ledger is in user_preferences with prefix 'file_migration_applied:'."
     verification: "Read docs/ARCHITECTURE.md §Data Model; the prior misleading claim that '.sql files are applied in filename order' must be replaced with the actual two-phase pattern. grep -nE 'runFileBasedMigrations|file_migration_applied' docs/ARCHITECTURE.md returns at least 2 matches."
-depends_on: [TASK-151, TASK-152]
+depends_on:
+  - TASK-151
+  - TASK-152
 estimated_complexity: low
 epic: cyboflow-schema-migration
 test_strategy:
@@ -34,16 +36,15 @@ test_strategy:
   justification: "The integration tests for ordering + query-plan-uses-index are the only objective proof that the migration actually does what the spec promises. Manual verification is necessary for the fresh-install path because file-migration timing during Electron boot involves real fs reads under __dirname, which test environments mock differently."
   targets:
     - behavior: "Fresh DB: DatabaseService.initialize() ends with all 5 new tables present and file_migration_applied:006_cyboflow_schema.sql in user_preferences."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
     - behavior: "Existing-install simulation: DB pre-seeded with inline-migration markers; after initialize(), the legacy .sql files are auto-flagged applied AND 006 is applied."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
-    - behavior: "EXPLAIN QUERY PLAN on the canonical raw_events query uses idx_raw_events_run_id_id."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+    - behavior: EXPLAIN QUERY PLAN on the canonical raw_events query uses idx_raw_events_run_id_id.
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
 ---
-
 # Migration Ordering Verification and Architecture Docs Update
 
 ## Objective

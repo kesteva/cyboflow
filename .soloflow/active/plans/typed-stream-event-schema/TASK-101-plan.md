@@ -1,8 +1,8 @@
 ---
 id: TASK-101
 idea_id: IDEA-003
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - shared/types/claudeStream.ts
 files_readonly:
@@ -15,7 +15,7 @@ files_readonly:
   - docs/ARCHITECTURE.md
   - docs/CODE-PATTERNS.md
 acceptance_criteria:
-  - criterion: "File shared/types/claudeStream.ts exists and exports a `ClaudeStreamEvent` discriminated union type."
+  - criterion: File shared/types/claudeStream.ts exists and exports a `ClaudeStreamEvent` discriminated union type.
     verification: "grep -n 'export type ClaudeStreamEvent' shared/types/claudeStream.ts returns at least one line; `pnpm --filter main typecheck` succeeds with this type re-exported into a temp scratch import."
   - criterion: "Union has 8 variants distinguishable by a discriminant: system/init, system/api_retry, system/compact, assistant, user, result (with all 4 subtypes representable), stream_event, and an `unknown` catch-all."
     verification: "grep -E '(SystemInitEvent|SystemApiRetryEvent|SystemCompactEvent|AssistantEvent|UserEvent|ResultEvent|StreamEvent|UnknownStreamEvent)' shared/types/claudeStream.ts returns 8 distinct interface or type exports."
@@ -42,7 +42,6 @@ test_strategy:
   needed: false
   justification: "Pure type-only module with no runtime behavior. Validation is via `tsc --noEmit` (the project's `typecheck` script) and the consumer-side fixture tests in TASK-103. Adding runtime tests here would test the TypeScript compiler, not application logic."
 ---
-
 # Write Corrected ClaudeStreamEvent Discriminated Union in shared/
 
 ## Objective
