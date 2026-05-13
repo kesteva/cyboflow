@@ -1,9 +1,9 @@
 ---
-pending_count: 2
+pending_count: 3
 buckets:
   decisions: 0
   actions: 0
-  testing: 2
+  testing: 3
   deferred_visual: 0
 items: []
 ---
@@ -38,6 +38,16 @@ _No items._
     - AC-1 manual fresh-install verification under real Electron __dirname/fs conditions
   level: requirements
   severity: medium
+
+- task: TASK-205
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/stream-parser-to-main/TASK-205-plan.md
+  action: "Manually open Cyboflow, start a Claude session, and confirm the Claude panel renders messages without throwing TypeError. The renderer-side parser was removed in TASK-205 (replaced with an identity passthrough) but the main-side MessageProjection is NOT wired into the data path that feeds the renderer (`panels:get-json-messages` still returns raw stream-json — see FIND-SPRINT-005-9). The epic explicitly puts orchestrator integration in a future epic. Without the wiring, the Claude panel will throw `Cannot read properties of undefined (reading 'some')` at line 440 of RichOutputView.tsx because raw stream-json objects lack the `.segments` property the rendering code accesses. Either confirm the panel is broken (and accept the cross-epic gap until the next epic wires `MessageProjection`), or verify by running through the UI that messages still render."
+  blocked_checks:
+    - End-to-end Claude panel rendering after TASK-205 stub reduction
+  level: goal_backward
+  severity: high
 
 ## Deferred Visual
 
