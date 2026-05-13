@@ -14,15 +14,15 @@ export type {
   ToolResult,
   SessionInfoData,
   SystemInfoData,
-} from '../../../../../shared/types/unifiedMessage';
+} from '../../../../../../shared/types/unifiedMessage';
 
 // Message transformer interface for converting agent-specific formats to unified format
 export interface MessageTransformer {
   // Transform raw agent messages to unified format
-  transform(rawMessages: unknown[]): import('../../../../../shared/types/unifiedMessage').UnifiedMessage[];
+  transform(rawMessages: unknown[]): import('../../../../../../shared/types/unifiedMessage').UnifiedMessage[];
 
   // Parse a single message
-  parseMessage(raw: unknown): import('../../../../../shared/types/unifiedMessage').UnifiedMessage | null;
+  parseMessage(raw: unknown): import('../../../../../../shared/types/unifiedMessage').UnifiedMessage | null;
 
   // Agent-specific capabilities
   supportsStreaming(): boolean;
