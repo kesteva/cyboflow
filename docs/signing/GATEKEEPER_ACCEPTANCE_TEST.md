@@ -208,4 +208,4 @@ After completing the test steps above:
 3. Update the **Anomalies** section.
 4. Change each `PENDING — user to complete` row in **Result** to `PASS` or `FAIL`.
 5. Commit: `git add docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md && git commit -m "docs(TASK-056): record gatekeeper acceptance test results"`
-6. Re-invoke `/soloflow:sprint TASK-056` (or `/soloflow:review-queue`) to trigger final verification.
+6. Resolve the queued `manual_acceptance_test` action via `/soloflow:review-queue` (it will pull this completed doc into the testing bucket).
