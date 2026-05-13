@@ -5,6 +5,7 @@ status: in-flight
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - docs/signing/FIRST_SIGNED_BUILD_LOG.md
+  - package.json
 files_readonly:
   - package.json
   - build/afterSign.js
