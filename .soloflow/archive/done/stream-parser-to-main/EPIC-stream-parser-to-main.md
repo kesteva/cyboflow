@@ -1,7 +1,7 @@
 ---
 epic: stream-parser-to-main
 created: 2026-05-11T00:00:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-005]
 ---
 

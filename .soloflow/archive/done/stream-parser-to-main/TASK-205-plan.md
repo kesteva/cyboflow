@@ -11,6 +11,7 @@ files_owned:
   - main/src/services/streamParser/messageProjection.ts
   - main/src/services/streamParser/__tests__/messageProjection.test.ts
   - shared/types/unifiedMessage.ts
+  - frontend/src/components/panels/ai/transformers/MessageTransformer.ts
 files_readonly:
   - frontend/src/components/panels/ai/RichOutputView.tsx
   - frontend/src/components/panels/ai/transformers/MessageTransformer.ts
