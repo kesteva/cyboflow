@@ -324,10 +324,27 @@ export CSC_KEY_PASSWORD="<passphrase>"
 pnpm run build:mac:universal
 ```
 
-`scripts/configure-build.js` (invoked by `build:mac:universal` before
-`electron-builder`) reads these vars and sets `hardenedRuntime: true`,
-`notarize: true`, and `entitlements: build/entitlements.mac.plist` in the
-electron-builder configuration before the build runs.
+### configure-build.js contract
+
+`scripts/configure-build.js` rewrites `package.json` **in place** before invoking
+`electron-builder`, and is run automatically by every `pnpm run build:mac:*` script.
+The fields it rewrites on every invocation:
+
+| Field                           | Signed (all 5 env vars set) | Unsigned        |
+| ------------------------------- | --------------------------- | --------------- |
+| `build.mac.notarize`            | `true`                      | `false`         |
+| `build.mac.hardenedRuntime`     | `true`                      | `false`         |
+| `build.mac.entitlements`        | `build/entitlements.mac.plist` | deleted       |
+| `build.mac.entitlementsInherit` | `build/entitlements.mac.plist` | deleted       |
+
+The committed values in `package.json` (e.g. `"notarize": true` after a signed
+run) are post-run artifacts, not defaults — the script overwrites them every
+build based on the env vars present at that moment.
+
+**Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:universal`
+(or another `build:mac:*` / `release:mac` script). Skipping the npm script skips
+`configure-build.js`, leaving the signed/unsigned posture determined by whatever
+is committed in `package.json` rather than by the env vars in your shell.
 
 > TASK-052 flips the `hardenedRuntime` and `notarize` defaults in
 > `package.json`. TASK-053 creates `build/entitlements.mac.plist`. TASK-054
