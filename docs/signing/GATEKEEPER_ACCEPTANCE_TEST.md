@@ -146,10 +146,12 @@ Open Console.app, filter on the app process name `Cyboflow`. Confirm that in the
 Wait at least 30 seconds after step 7 with one session-creation interaction, then run:
 
 ```bash
-test -s ~/.cyboflow/cyboflow.db || test -s ~/.crystal/crystal.db; echo $?
+test -s ~/.cyboflow/cyboflow.db; echo $?
 ```
 
-**Expected:** `0` (at least one of the DB files exists and is non-empty).
+**Expected:** `0` (the DB file exists and is non-empty).
+
+> **Note:** AC3 fails if any `~/.crystal/` artifacts appear on a clean account — the rebrand is complete and the legacy path is not an acceptable substitute.
 
 ---
 
@@ -175,7 +177,7 @@ test -s ~/.cyboflow/cyboflow.db || test -s ~/.crystal/crystal.db; echo $?
 
 ```
 <TODO: paste verbatim output of:
-  test -s ~/.cyboflow/cyboflow.db || test -s ~/.crystal/crystal.db; echo $?
+  test -s ~/.cyboflow/cyboflow.db; echo $?
 >
 ```
 
