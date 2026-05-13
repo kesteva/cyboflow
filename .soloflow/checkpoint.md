@@ -1,28 +1,20 @@
 ---
-last_updated: 2026-05-13T19:45:00Z
+last_updated: 2026-05-13T20:50:00Z
 active_sprint: SPRINT-005
 phase: 3
-tasks_completed: [TASK-151, TASK-152, TASK-153]
-tasks_in_flight: []
+tasks_completed: [TASK-151, TASK-152, TASK-153, TASK-154, TASK-155, TASK-201, TASK-202, TASK-203, TASK-204]
+tasks_in_flight: [TASK-205]
 tasks_stuck: []
 tasks_human_needed: []
-next_action: "Build next batch from [TASK-154, TASK-155, TASK-201, TASK-202, TASK-203, TASK-204, TASK-205]; spawn parallel pipelines."
+next_action: "Run TASK-205 (renderer→main streamParser migration) serially; then end-of-sprint verification + code review + close."
 ---
 
 # Session Checkpoint
 
-Sprint SPRINT-005 is in execute phase (parallel mode, max_parallel=3).
+Sprint SPRINT-005 — 9 of 10 tasks complete. Last task TASK-205 (high complexity, behavior-parity sensitive) running serially.
 
-**Batch 1 complete (cyboflow-schema-migration partial):**
-- TASK-151 (file-based migration runner) — APPROVED, CLEAN, settled.
-- TASK-152 (006_cyboflow_schema.sql + types) — APPROVED, CLEAN, settled.
-- TASK-153 (atomic transition helpers) — APPROVED, CLEAN, settled.
+**Run branch:** `soloflow/run-20260513-185538-SPRINT-005` (head after batch 3 settlement).
 
-All three merged into run branch `soloflow/run-20260513-185538-SPRINT-005`.
+**Sprint findings queued for next compound run:** FIND-SPRINT-005-1 (legacy non-prefixed .sql WARN noise), -4 (cosmetic cast TASK-154), -5 (parseClaudeStreamEvent vs TypedEventNarrowing dedup), -6 (severity high — downstream UI callsites passing permissionMode='ignore'), -7 (index.ts barrel missing RawEventsSink re-export).
 
-**Remaining sprint scope:** TASK-154, TASK-155, TASK-201, TASK-202, TASK-203, TASK-204, TASK-205.
-
-**Notes:**
-- Per-task visual skipped for all (parallel mode); sprint-level visual still pending at end.
-- One out-of-scope finding queued: FIND-SPRINT-005-1 (legacy non-prefixed .sql files emit WARN on every boot — cleanup deferred to compounder).
-- better-sqlite3 ABI rebuild required for vitest under system Node v24 — pre-existing project concern.
+**Deferred check:** AC-1 manual electron-dev smoke for TASK-155 — queued under bucket:testing in human-review-queue.md.
