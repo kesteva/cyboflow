@@ -24,6 +24,10 @@ exists under a different team ID and is used for local dev only. Distribution
 signing uses **`Y7B83UUSAC`** — that is the value to export as `APPLE_TEAM_ID`
 at build time.
 
+All signing identifiers (Apple ID, Team ID, cert SHA1, notarytool submission
+IDs) are committed in plain text in `docs/signing/`. The only secret is
+`APPLE_APP_SPECIFIC_PASSWORD`, which is never committed.
+
 ---
 
 ## Prerequisites

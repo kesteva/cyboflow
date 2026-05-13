@@ -96,7 +96,7 @@ Hardened Runtime: enabled
 **notarytool wall-clock time:** ~95 minutes (exceptionally slow first-submission delay on Apple servers)
 
 ```
-xcrun notarytool log 0c820130-8bfc-4d58-b825-76f8abf94e40 --apple-id ... --team-id Y7B83UUSAC
+xcrun notarytool log 0c820130-8bfc-4d58-b825-76f8abf94e40 --apple-id <APPLE_ID> --team-id Y7B83UUSAC
 # status: Accepted
 # statusSummary: Ready for distribution
 # statusCode: 0
