@@ -86,11 +86,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
 
     // Handle permission mode
-    const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'ignore';
+    const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'approve';
     const effectiveMode = permissionMode || defaultMode;
 
     if (effectiveMode === 'ignore') {
-      args.push('--dangerously-skip-permissions');
+      // Cyboflow mandates approve mode — ignore mode disables the review queue.
+      throw new Error('[ClaudeCodeManager] Cyboflow runs require approve mode; --dangerously-skip-permissions is not allowed.');
     } else if (effectiveMode === 'approve' && this.permissionIpcPath) {
       // If MCP config path is provided, we'll add the MCP args
       // Otherwise just log that MCP will be set up
@@ -98,11 +99,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.logger?.verbose(`Will set up MCP for permission approval mode`);
       }
     } else {
-      // Fallback to skip permissions if IPC path not available
-      args.push('--dangerously-skip-permissions');
-      if (effectiveMode === 'approve') {
-        this.logger?.warn(`Permission approval mode requested but IPC server not available. Using skip permissions mode.`);
-      }
+      // approve mode was requested but permissionIpcPath is not configured — hard error.
+      throw new Error('[ClaudeCodeManager] approve mode requested but permissionIpcPath is not configured; cannot spawn Claude.');
     }
 
     // Handle resume and prompt logic
@@ -142,7 +140,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
       // Only add permission-specific flags if Crystal's permission server is included
       // (which happens when permission mode is 'approve')
-      const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'ignore';
+      const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'approve';
       const effectiveMode = permissionMode || defaultMode;
       if (effectiveMode === 'approve' && this.permissionIpcPath) {
         args.push('--permission-prompt-tool', 'mcp__crystal-permissions__approve_permission', '--allowedTools', 'mcp__crystal-permissions__approve_permission');
@@ -256,7 +254,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     };
 
     // Set up MCP configuration if permission approval is requested
-    const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'ignore';
+    const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'approve';
     const effectiveMode = permissionMode || defaultMode;
 
     if (effectiveMode === 'approve' && this.permissionIpcPath) {
@@ -400,7 +398,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
 
       // Set up MCP configuration if needed and add to args
-      const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'ignore';
+      const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'approve';
       const effectiveMode = permissionMode || defaultMode;
 
       let mcpConfigPath: string | null = null;
@@ -408,8 +406,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // Full MCP setup with permission server + base project MCP servers
         mcpConfigPath = await this.setupMcpConfigurationSync(sessionId);
       } else {
-        // Even without approval mode, check for base project MCP servers
-        // This ensures worktrees can access MCP servers from the base project
+        // Even in approve mode without a socket, check for base project MCP servers.
+        // Note: buildCommandArgs will throw below if approve+nosocket, but we still
+        // collect base MCP config to include in the error context.
         mcpConfigPath = await this.setupBaseProjectMcpConfig(sessionId);
       }
 
