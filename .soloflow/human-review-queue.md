@@ -1,9 +1,9 @@
 ---
-pending_count: 1
+pending_count: 3
 buckets:
   decisions: 0
   actions: 0
-  testing: 1
+  testing: 3
   deferred_visual: 0
 items: []
 ---
@@ -28,6 +28,26 @@ _No items._
   verdict_notes: "Executor completed mechanical prep (DMG SHA256, macOS version, full procedure scaffolded); manual portion requires user on a clean macOS account. Plan test_strategy.needed=false per design."
   level: ground_truth
   severity: medium
+
+- task: TASK-155
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/cyboflow-schema-migration/TASK-155-plan.md
+  action: "AC-1 fresh-install manual Electron boot: run `rm -rf ~/.cyboflow; pnpm --filter main build; pnpm electron-dev`; tail `crystal-backend-debug.log` (note: project may now log to `cyboflow-backend-debug.log` per CLAUDE.md) and confirm the line `[Database] Applied file-based migration 006_cyboflow_schema.sql` appears exactly once on first boot. Quit, relaunch, confirm the line does NOT appear on second boot (idempotency)."
+  blocked_checks:
+    - AC-1 manual fresh-install verification under real Electron __dirname/fs conditions
+  level: requirements
+  severity: medium
+
+- task: TASK-205
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/stream-parser-to-main/TASK-205-plan.md
+  action: "Manually open Cyboflow, start a Claude session, and confirm the Claude panel renders messages without throwing TypeError. The renderer-side parser was removed in TASK-205 (replaced with an identity passthrough) but the main-side MessageProjection is NOT wired into the data path that feeds the renderer (`panels:get-json-messages` still returns raw stream-json — see FIND-SPRINT-005-9). The epic explicitly puts orchestrator integration in a future epic. Without the wiring, the Claude panel will throw `Cannot read properties of undefined (reading 'some')` at line 440 of RichOutputView.tsx because raw stream-json objects lack the `.segments` property the rendering code accesses. Either confirm the panel is broken (and accept the cross-epic gap until the next epic wires `MessageProjection`), or verify by running through the UI that messages still render."
+  blocked_checks:
+    - End-to-end Claude panel rendering after TASK-205 stub reduction
+  level: goal_backward
+  severity: high
 
 ## Deferred Visual
 

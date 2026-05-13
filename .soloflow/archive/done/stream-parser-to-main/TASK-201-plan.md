@@ -2,8 +2,8 @@
 id: TASK-201
 idea: IDEA-005
 idea_id: IDEA-005
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/index.ts
   - main/src/services/streamParser/lineBufferer.ts
@@ -27,10 +27,10 @@ files_readonly:
 acceptance_criteria:
   - criterion: "main/src/services/streamParser/ exists with five module files: lineBufferer.ts, jsonParser.ts, typedEventNarrowing.ts, eventRouter.ts, streamParser.ts, plus an index.ts barrel export."
     verification: "ls main/src/services/streamParser/ shows all six .ts files; node -e \"console.log(Object.keys(require('./dist/main/src/services/streamParser')))\" lists ClaudeStreamParser, EventRouter, LineBufferer, JSONParser, TypedEventNarrowing after pnpm run build:main."
-  - criterion: "LineBufferer preserves partial trailing lines across chunk boundaries; feeding 'abc\\ndef\\ngh' followed by 'ij\\n' yields lines ['abc', 'def', 'ghij']."
-    verification: "pnpm --filter main test -- lineBufferer.test.ts passes; test asserts the documented chunk-boundary case and an empty-tail case explicitly."
+  - criterion: "LineBufferer preserves partial trailing lines across chunk boundaries; feeding 'abc\ndef\ngh' followed by 'ij\n' yields lines ['abc', 'def', 'ghij']."
+    verification: pnpm --filter main test -- lineBufferer.test.ts passes; test asserts the documented chunk-boundary case and an empty-tail case explicitly.
   - criterion: "JSONParser drops malformed JSON lines with a WARN log and never throws. Feeding ['{\"type\":\"system\"}', 'not-json', '{\"type\":\"assistant\"}'] yields two parsed objects and one logged warning."
-    verification: "pnpm --filter main test -- jsonParser.test.ts passes; test uses a logger spy to assert exactly one warn() call with the malformed payload truncated to 200 chars; no exception propagates."
+    verification: pnpm --filter main test -- jsonParser.test.ts passes; test uses a logger spy to assert exactly one warn() call with the malformed payload truncated to 200 chars; no exception propagates.
   - criterion: "TypedEventNarrowing validates each parsed object against the Zod schema from IDEA-003 (main/src/services/streamParser/schemas.ts). Valid events return their typed variant; unknown discriminants fall through to the unknown catch-all (never throw, never drop)."
     verification: "pnpm --filter main test -- typedEventNarrowing.test.ts passes; test feeds a captured system/init fixture, a captured assistant/tool_use fixture, and a synthetic {type:'not_a_real_type'} payload; first two narrow to their tagged variant, third narrows to {kind:'unknown', raw:{...}}."
   - criterion: "EventRouter exposes per-runId fanout via EventEmitter. Subscribers registered with router.on(runId, handler) only receive events for that runId; broadcast to runId 'A' does not invoke a runId 'B' handler."
@@ -44,25 +44,24 @@ estimated_complexity: medium
 epic: stream-parser-to-main
 test_strategy:
   needed: true
-  justification: "This is the core parser pipeline. Each module has nontrivial state (LineBufferer holds partial lines; JSONParser swallows errors; TypedEventNarrowing branches on discriminants; EventRouter routes per-runId). Unit tests are mandatory to lock the chunk-boundary contract and the never-throw contract."
+  justification: This is the core parser pipeline. Each module has nontrivial state (LineBufferer holds partial lines; JSONParser swallows errors; TypedEventNarrowing branches on discriminants; EventRouter routes per-runId). Unit tests are mandatory to lock the chunk-boundary contract and the never-throw contract.
   targets:
-    - behavior: "LineBufferer preserves partial trailing lines across chunk boundaries; handles empty input; handles a single chunk with no newline."
-      test_file: "main/src/services/streamParser/__tests__/lineBufferer.test.ts"
+    - behavior: LineBufferer preserves partial trailing lines across chunk boundaries; handles empty input; handles a single chunk with no newline.
+      test_file: main/src/services/streamParser/__tests__/lineBufferer.test.ts
       type: unit
     - behavior: "JSONParser parses valid JSON, drops malformed input with a WARN, never throws."
-      test_file: "main/src/services/streamParser/__tests__/jsonParser.test.ts"
+      test_file: main/src/services/streamParser/__tests__/jsonParser.test.ts
       type: unit
-    - behavior: "TypedEventNarrowing routes known discriminants to their variant and unknown ones to the catch-all; uses .passthrough() so extra fields survive."
-      test_file: "main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts"
+    - behavior: TypedEventNarrowing routes known discriminants to their variant and unknown ones to the catch-all; uses .passthrough() so extra fields survive.
+      test_file: main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts
       type: unit
-    - behavior: "EventRouter fans out per-runId; handlers do not cross-talk; .removeAllListeners(runId) cleanly tears down a run."
-      test_file: "main/src/services/streamParser/__tests__/eventRouter.test.ts"
+    - behavior: EventRouter fans out per-runId; handlers do not cross-talk; .removeAllListeners(runId) cleanly tears down a run.
+      test_file: main/src/services/streamParser/__tests__/eventRouter.test.ts
       type: unit
     - behavior: "ClaudeStreamParser end-to-end: same fixture stream produces identical event sequences regardless of chunk size."
-      test_file: "main/src/services/streamParser/__tests__/streamParser.test.ts"
+      test_file: main/src/services/streamParser/__tests__/streamParser.test.ts
       type: integration
 ---
-
 # Create main/src/services/streamParser/ parsing pipeline
 
 ## Objective

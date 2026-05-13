@@ -2,8 +2,8 @@
 id: TASK-202
 idea: IDEA-005
 idea_id: IDEA-005
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/completionDetector.ts
   - main/src/services/streamParser/__tests__/completionDetector.test.ts
@@ -22,11 +22,12 @@ acceptance_criteria:
     verification: "pnpm --filter main test -- completionDetector.test.ts passes; uses vitest fake timers (vi.useFakeTimers) to fire signalChildExited, advance 30001ms, assert one 'forced' emission, then fire remaining signals and assert no additional emission."
   - criterion: "The 'forced' path is distinguishable from the 'complete' path: 'complete' indicates clean shutdown, 'forced' indicates the watchdog fired (run should be marked failed per IDEA-005 constraint)."
     verification: "grep -n \"emit('complete'\\|emit('forced'\" main/src/services/streamParser/completionDetector.ts shows at least one match for each event name; emitted event payload includes a 'reason' field with values 'all_signals' or 'watchdog_timeout'."
-  - criterion: "Detector never relies on the Claude `result` event as a gate-opener. The three signals are (child exited) AND (stdout EOF) AND (parser queue drained) — `result` is not one of them."
+  - criterion: Detector never relies on the Claude `result` event as a gate-opener. The three signals are (child exited) AND (stdout EOF) AND (parser queue drained) — `result` is not one of them.
     verification: "grep -n \"result\" main/src/services/streamParser/completionDetector.ts returns no matches against the strings 'result' as an input signal name (matches against the word in comments or 'forced' results are acceptable; assert the signal method names are exactly signalChildExited/signalStdoutEof/signalParserDrained)."
   - criterion: "Detector is reusable per-run: each new run gets its own CompletionDetector instance. Calling .dispose() clears the watchdog timer and prevents any further emissions even if signals arrive late."
     verification: "pnpm --filter main test -- completionDetector.test.ts passes; test creates a detector, calls .dispose(), then fires all three signals and asserts no 'complete' or 'forced' emission and no pending timers (vi.getTimerCount() === 0)."
-depends_on: [TASK-201]
+depends_on:
+  - TASK-201
 estimated_complexity: low
 epic: stream-parser-to-main
 test_strategy:
@@ -34,19 +35,18 @@ test_strategy:
   justification: "The triple-gate completion + 30s watchdog is the mandatory mitigation for Anthropic's closed-not-planned result-event bug (issue #1920, #25629). Logic is purely temporal and AND-gated; missing test coverage here directly maps to runs hanging indefinitely in production. Vitest's fake timers make this deterministic to test."
   targets:
     - behavior: "All three signals fire → exactly one 'complete' emission with reason 'all_signals'."
-      test_file: "main/src/services/streamParser/__tests__/completionDetector.test.ts"
+      test_file: main/src/services/streamParser/__tests__/completionDetector.test.ts
       type: unit
-    - behavior: "Partial signal sets (1 or 2 of 3) produce zero emissions before watchdog fires."
-      test_file: "main/src/services/streamParser/__tests__/completionDetector.test.ts"
+    - behavior: Partial signal sets (1 or 2 of 3) produce zero emissions before watchdog fires.
+      test_file: main/src/services/streamParser/__tests__/completionDetector.test.ts
       type: unit
     - behavior: "30s watchdog fires exactly once if all three signals not received in time; subsequent signals do not double-emit."
-      test_file: "main/src/services/streamParser/__tests__/completionDetector.test.ts"
+      test_file: main/src/services/streamParser/__tests__/completionDetector.test.ts
       type: unit
-    - behavior: "dispose() cancels watchdog and prevents future emissions; verified via vi.getTimerCount() and signal replay."
-      test_file: "main/src/services/streamParser/__tests__/completionDetector.test.ts"
+    - behavior: dispose() cancels watchdog and prevents future emissions; verified via vi.getTimerCount() and signal replay.
+      test_file: main/src/services/streamParser/__tests__/completionDetector.test.ts
       type: unit
 ---
-
 # Triple-gate completion detector with 30s watchdog
 
 ## Objective
