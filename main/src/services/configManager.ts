@@ -21,7 +21,7 @@ export class ConfigManager extends EventEmitter {
       anthropicApiKey: undefined,
       systemPromptAppend: undefined,
       runScript: undefined,
-      defaultPermissionMode: 'ignore',
+      defaultPermissionMode: 'approve',
       defaultModel: 'sonnet',
       stravuApiKey: undefined,
       stravuServerUrl: 'https://api.stravu.com',
