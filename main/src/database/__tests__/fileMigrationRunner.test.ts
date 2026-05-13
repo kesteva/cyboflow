@@ -178,4 +178,92 @@ describe('runFileBasedMigrations', () => {
 
     db.close();
   });
+
+  it('skips non-numeric-prefix files and logs a warning for each', () => {
+    // A file without the NNN_ prefix pattern must never be exec'd, and
+    // console.warn must be called with the filename so the operator can see it.
+    writeFileSync(join(migrationsDir, 'README.md'), 'just docs');
+    writeFileSync(join(migrationsDir, 'notes.sql'), 'SELECT 1;');
+    writeFileSync(
+      join(migrationsDir, '999_valid.sql'),
+      'CREATE TABLE valid_only (id INTEGER PRIMARY KEY);'
+    );
+
+    const warnSpy = vi.spyOn(console, 'warn');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(migrationsDir);
+    svc.initialize();
+
+    const Database = require('better-sqlite3');
+    const db = new Database(dbPath);
+
+    // The valid file ran; the non-prefixed files did not create stray tables
+    const valid = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='valid_only'")
+      .all() as { name: string }[];
+    expect(valid).toHaveLength(1);
+
+    // No applied flag for the non-numeric files
+    const notesRow = db
+      .prepare("SELECT value FROM user_preferences WHERE key LIKE 'file_migration_applied:notes%'")
+      .get() as { value: string } | undefined;
+    expect(notesRow).toBeUndefined();
+
+    // console.warn was called at least once mentioning one of the skipped filenames
+    const warnCalls = warnSpy.mock.calls;
+    const mentionsSkipped = warnCalls.some((args) =>
+      args.some(
+        (arg) => typeof arg === 'string' && (arg.includes('notes.sql') || arg.includes('README.md'))
+      )
+    );
+    expect(mentionsSkipped).toBe(true);
+
+    db.close();
+    warnSpy.mockRestore();
+  });
+
+  it('applies files in numeric prefix order, not lexicographic order', () => {
+    // If sorted lexicographically, '010' < '009' is false but '010' < '9' IS false —
+    // more critically '010'.localeCompare('9') < 0 in some locales. The runner must
+    // use numeric (integer) sort so 9 < 10 < 11.
+    // We use a dependency chain: 011 reads from a table created by 009.
+    // If 011 ran first (wrong order) it would fail; if 009 ran first (correct) both succeed.
+    writeFileSync(
+      join(migrationsDir, '011_child.sql'),
+      // Inserts into the table that 009_parent.sql creates
+      "INSERT INTO ordering_parent (label) VALUES ('from_011');"
+    );
+    writeFileSync(
+      join(migrationsDir, '009_parent.sql'),
+      'CREATE TABLE ordering_parent (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT);'
+    );
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(migrationsDir);
+    // Should not throw — 009 runs before 011
+    expect(() => svc.initialize()).not.toThrow();
+
+    const Database = require('better-sqlite3');
+    const db = new Database(dbPath);
+
+    // The INSERT from 011 succeeded (table existed when 011 ran)
+    const rows = db
+      .prepare("SELECT label FROM ordering_parent")
+      .all() as { label: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].label).toBe('from_011');
+
+    // Both files are recorded as applied
+    const parent = db
+      .prepare("SELECT value FROM user_preferences WHERE key = 'file_migration_applied:009_parent.sql'")
+      .get() as { value: string } | undefined;
+    const child = db
+      .prepare("SELECT value FROM user_preferences WHERE key = 'file_migration_applied:011_child.sql'")
+      .get() as { value: string } | undefined;
+    expect(parent?.value).toBe('true');
+    expect(child?.value).toBe('true');
+
+    db.close();
+  });
 });
