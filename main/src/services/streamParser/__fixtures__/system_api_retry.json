@@ -1,0 +1,12 @@
+{
+  "type": "system",
+  "subtype": "api_retry",
+  "attempt": 2,
+  "max_retries": 5,
+  "retry_delay_ms": 2000,
+  "error_status": 529,
+  "error": {
+    "category": "rate_limit",
+    "message": "Rate limit exceeded. Please retry after 2 seconds."
+  }
+}
