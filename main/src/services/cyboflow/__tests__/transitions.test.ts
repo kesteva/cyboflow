@@ -300,5 +300,89 @@ describe('transitions', () => {
       expect(e.details.entity).toBe('workflow_run');
       expect(e.details.expectedStatus).toBe('awaiting_review');
     });
+
+    // -----------------------------------------------------------------------
+    // Case (e): Approval row deleted between transitions
+    //
+    // The run is in 'awaiting_review' (run UPDATE succeeds), but the
+    // approvals row was deleted before the transaction body runs (or was
+    // never inserted). The approval UPDATE returns changes===0, which must
+    // throw TransitionRejectedError with entity='approval' AND roll back the
+    // run UPDATE — leaving the run still in 'awaiting_review'.
+    // -----------------------------------------------------------------------
+
+    it('(e) missing approval row: throws with entity=approval and rolls back the run status update', () => {
+      seedRun(db, 'awaiting_review');
+      // Deliberately omit seedApproval — no row exists for APPROVAL_ID
+
+      let caught: unknown;
+      try {
+        transitionFromAwaitingReview(db, {
+          runId: RUN_ID,
+          approvalId: APPROVAL_ID,
+          decision: 'approved',
+          decidedBy: 'user',
+        });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(TransitionRejectedError);
+      const e = caught as TransitionRejectedError;
+      expect(e.code).toBe('TRANSITION_REJECTED');
+      expect(e.details.entity).toBe('approval');
+      expect(e.details.expectedStatus).toBe('pending');
+
+      // The run UPDATE must have been rolled back — run is still awaiting_review
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(run.status).toBe('awaiting_review');
+    });
+
+    // -----------------------------------------------------------------------
+    // Case (f): Approval already decided (non-pending status)
+    //
+    // Same code path as case (e) — approval UPDATE finds 0 rows — but the
+    // row *exists* with status='timed_out' rather than being absent entirely.
+    // Verifies the WHERE status='pending' guard, not just the row-existence
+    // guard. Rollback of the run UPDATE is again the key invariant.
+    // -----------------------------------------------------------------------
+
+    it('(f) already-decided approval: throws with entity=approval and rolls back the run status update', () => {
+      seedRun(db, 'awaiting_review');
+      seedApproval(db, 'timed_out'); // approval already decided; status guard rejects it
+
+      let caught: unknown;
+      try {
+        transitionFromAwaitingReview(db, {
+          runId: RUN_ID,
+          approvalId: APPROVAL_ID,
+          decision: 'approved',
+          decidedBy: 'user',
+        });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(TransitionRejectedError);
+      const e = caught as TransitionRejectedError;
+      expect(e.code).toBe('TRANSITION_REJECTED');
+      expect(e.details.entity).toBe('approval');
+      expect(e.details.expectedStatus).toBe('pending');
+
+      // Run UPDATE rolled back — run stays awaiting_review
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(run.status).toBe('awaiting_review');
+
+      // Approval status must be unchanged (still timed_out, not approved)
+      const approval = db
+        .prepare('SELECT status, decided_by FROM approvals WHERE id = ?')
+        .get(APPROVAL_ID) as { status: string; decided_by: string | null };
+      expect(approval.status).toBe('timed_out');
+      expect(approval.decided_by).toBeNull();
+    });
   });
 });
