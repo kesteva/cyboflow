@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-005
-pending_count: 5
-last_updated: "2026-05-13T19:15:00Z"
+pending_count: 7
+last_updated: "2026-05-13T21:30:00Z"
 ---
 
 # Findings Queue
@@ -54,4 +54,24 @@ last_updated: "2026-05-13T19:15:00Z"
 - **location:** main/src/services/streamParser/schemas.ts:279-299 and main/src/services/streamParser/typedEventNarrowing.ts:35-53
 - **description:** `parseClaudeStreamEvent` (in schemas.ts, from IDEA-003's earlier task family) and `TypedEventNarrowing.narrow` (added by TASK-201) implement the same safeParse-and-fallback-to-__unknown__ logic. The legacy function logs via `console.warn` directly; the new class logs via an injected `IDebugLogger`. Both call sites are reachable: schemas.test.ts exercises `parseClaudeStreamEvent`; the pipeline orchestrator wires `TypedEventNarrowing` through `streamParser.ts`. This is not a bug — the executor followed the plan, which prescribed the new class — but it leaves two parallel implementations of the same contract, with two different log channels, and risks divergence in future schema patches.
 - **suggested_action:** After TASK-202/203/205 wire the pipeline into actual callers, evaluate whether `parseClaudeStreamEvent` can be deleted (no production code paths use it; only schemas.test.ts). If it must stay, refactor it to delegate to `TypedEventNarrowing.narrow(parsed)` with a console-shaped IDebugLogger, so there is exactly one implementation of the safeParse contract.
+- **resolved_by:**
+
+## FIND-SPRINT-005-6
+- **source:** TASK-204 (verifier)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** frontend/src/components/CreateSessionDialog.tsx:91,100; frontend/src/components/CreateSessionButton.tsx:52; frontend/src/components/DraggableProjectTreeView.tsx:1132; frontend/src/stores/sessionPreferencesStore.ts:13,29; frontend/src/components/dialog/ClaudeCodeConfig.tsx:11,298; main/src/events.ts:644; main/src/services/configManager.ts:43,171
+- **description:** TASK-204 promoted any session spawn with `permissionMode === 'ignore'` to a hard error inside `claudeCodeManager.buildCommandArgs` (the plan's intentional "loud failure" trap). However, every existing user-initiated session-creation callsite still hardcodes `permissionMode: 'ignore'` as the form default, including the `sessionPreferencesStore` initial state, two callsites in `CreateSessionDialog`, `CreateSessionButton`, `DraggableProjectTreeView`, the `events.ts` quick-create path, and the `claudeConfig.permissionMode` defaults in `configManager.ts` (lines 43 and 171, distinct from the now-fixed top-level `defaultPermissionMode`). Result: when a user creates a session through the standard UI flow without explicitly toggling the permission mode, the spawn will now throw `[ClaudeCodeManager] Cyboflow runs require approve mode; --dangerously-skip-permissions is not allowed.` This is consistent with the plan's "Hardest Decision" (preferred a loud throw over silent coercion to surface stale callsites) and the plan's "Lowest Confidence Area" (anticipated downstream callsites passing 'ignore'). Not a regression in TASK-204's narrow security contract — but production sessions WILL fail until a follow-up callsite sweep flips these defaults to 'approve'.
+- **suggested_action:** Open a follow-up task (or attach to the crystal-cuts-and-rebrand epic, which already owns the rebrand sweep) to flip every UI-facing `permissionMode: 'ignore'` default to `'approve'`. Specific edits: (1) `frontend/src/stores/sessionPreferencesStore.ts:29` — change default `permissionMode: 'ignore'` → `'approve'`. (2) `frontend/src/components/CreateSessionDialog.tsx:91,100` and `:241,278` — flip both `initialClaudeConfig?.permissionMode || 'ignore'` and the bare `permissionMode: 'ignore'` literal to `'approve'`. (3) `frontend/src/components/CreateSessionButton.tsx:52` and `DraggableProjectTreeView.tsx:1132` — flip `permissionMode: 'ignore', // Use default permission mode` to `'approve'`. (4) `main/src/events.ts:644` — change `permissionMode: claudeConfig.permissionMode || 'ignore'` to `|| 'approve'`. (5) `main/src/services/configManager.ts:43,171` — flip the two `sessionCreationPreferences.claudeConfig.permissionMode: 'ignore'` defaults to `'approve'`. (6) `frontend/src/components/dialog/ClaudeCodeConfig.tsx` toggle UI may still expose the `'ignore'` choice; consider hiding it behind a debug-only escape hatch per the plan's rejected alternative ("CYBOFLOW_ALLOW_BYPASS=1"). Until this sweep lands, end-to-end session creation through the UI is broken.
+- **resolved_by:**
+
+## FIND-SPRINT-005-7
+- **source:** TASK-203 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/streamParser/index.ts
+- **description:** The streamParser barrel (`main/src/services/streamParser/index.ts`) is documented in its own header as the "Single import point for downstream consumers (TASK-202, TASK-203, TASK-205). Import individual classes from this file, not from their implementation modules." It re-exports `LineBufferer`, `JSONParser`, `TypedEventNarrowing`, `EventRouter`, `ClaudeStreamParser` and their logger types — but TASK-203's new `RawEventsSink` class and `IRawEventsSinkLogger` interface are NOT exported through the barrel. Downstream callers in upcoming tasks (TASK-205+) will either import from the implementation module directly (violating the documented convention) or hit a "no exported member" error when following the convention. This is out-of-diff for TASK-203 (the barrel is in `files_readonly`), so it stays a queued finding rather than blocking the review.
+- **suggested_action:** Add `export { RawEventsSink } from './rawEventsSink';` and `export type { IRawEventsSinkLogger } from './rawEventsSink';` to `main/src/services/streamParser/index.ts` alongside the existing exports. One-line follow-up; can be folded into the next streamParser task or a tiny TASK-204-prep cleanup.
 - **resolved_by:**
