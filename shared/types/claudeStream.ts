@@ -160,6 +160,12 @@ export interface UserEvent {
  *
  * `is_error` will be `true` for all non-success subtypes.
  * `permission_denials` records any tools that were denied by the --permission-prompt-tool handler.
+ *
+ * NOTE: `modelUsage` is intentionally camelCase — per the SamSaffron CLI spec gist this is the
+ * third documented wire exception alongside `system/init.permissionMode` and
+ * `user.tool_use_result.{durationMs,numFiles}`. Every sibling field on this variant
+ * (`total_cost_usd`, `num_turns`, `duration_ms`, `is_error`, `permission_denials`) is
+ * snake_case — do NOT "normalize" `modelUsage` to `model_usage` or parsing will break.
  */
 export interface ResultEvent {
   type: 'result';
@@ -173,6 +179,7 @@ export interface ResultEvent {
     input_tokens?: number;
     output_tokens?: number;
   };
+  /** camelCase on the wire per SamSaffron CLI spec — intentional exception to snake_case rule */
   modelUsage?: Record<string, unknown>;
   permission_denials?: Array<{
     tool_name: string;
