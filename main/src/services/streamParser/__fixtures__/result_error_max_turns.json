@@ -1,0 +1,21 @@
+{
+  "type": "result",
+  "subtype": "error_max_turns",
+  "is_error": true,
+  "duration_ms": 45210,
+  "num_turns": 10,
+  "result": "Reached maximum number of turns (10) without completing the task.",
+  "total_cost_usd": 0.1234,
+  "usage": {
+    "input_tokens": 12000,
+    "output_tokens": 1800
+  },
+  "modelUsage": {
+    "claude-opus-4-5": {
+      "input_tokens": 12000,
+      "output_tokens": 1800
+    }
+  },
+  "permission_denials": [],
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
