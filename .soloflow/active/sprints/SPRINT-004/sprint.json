@@ -5,23 +5,7 @@
     "started": "2026-05-13T00:00:00.000Z",
     "execution_mode": "serial"
   },
-  "tasks": {
-    "TASK-151": {
-      "status": "pending"
-    },
-    "TASK-152": {
-      "status": "pending"
-    },
-    "TASK-153": {
-      "status": "pending"
-    },
-    "TASK-154": {
-      "status": "pending"
-    },
-    "TASK-155": {
-      "status": "pending"
-    }
-  },
+  "tasks": {},
   "run": {
     "branch": "soloflow/run-20260513-075416-SPRINT-004",
     "base_branch": "main",

@@ -2,7 +2,7 @@
 id: TASK-153
 idea: IDEA-004
 idea_id: IDEA-004
-status: in-flight
+status: ready
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/cyboflow/transitions.ts
