@@ -509,21 +509,167 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 18. Warn logger called on unexpected error
+  // 18. Warn logger called on unexpected error — payload assertion (FIND-SPRINT-005-10)
   // -------------------------------------------------------------------------
 
-  it('calls logger.warn on unexpected errors without throwing', () => {
+  it('calls logger.warn with a non-empty message when an unexpected error occurs', () => {
     const warnings: string[] = [];
     const warnProjection = new MessageProjection('run-warn-test', {
       warn: (msg) => warnings.push(msg),
     });
 
-    // Pass a malformed event that will cause the projection to hit an unexpected path.
-    // The null guard and try/catch should absorb it.
+    // null message triggers a TypeError inside projectAssistantEvent, which the
+    // try/catch at the top of project() catches and delegates to logger.warn.
     const malformedEvent = { type: 'assistant', message: null } as unknown as AssistantEvent;
 
     expect(() => {
       warnProjection.project(malformedEvent);
     }).not.toThrow();
+
+    // FIND-SPRINT-005-10: the warn call must actually fire with a non-empty string.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/\[MessageProjection\]/);
+    expect(warnings[0]).toContain('run-warn-test');
+  });
+
+  // -------------------------------------------------------------------------
+  // 19. Out-of-order: tool_result arrives before tool_use
+  // -------------------------------------------------------------------------
+
+  it('correctly marks ToolCall as success when tool_result arrives before tool_use', () => {
+    // Send the user/tool_result event first — before the assistant event.
+    // No parent_tool_use_id so the result is not recorded in parentToolMap.
+    const earlyUserEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: TOOL_USE_ID,
+          content: 'early result content',
+          is_error: false,
+        }],
+      },
+      session_id: SESSION_ID,
+    };
+
+    const userResult = projection.project(earlyUserEvent);
+    expect(userResult).toBeNull(); // always absorbed
+
+    // Now send the assistant event that creates the ToolCall.
+    const result = projection.project(assistantToolUseEvent);
+    expect(result).not.toBeNull();
+    const msg = result as UnifiedMessage;
+
+    const toolSeg = msg.segments.find(s => s.type === 'tool_call');
+    expect(toolSeg?.type).toBe('tool_call');
+    if (toolSeg?.type === 'tool_call') {
+      // Because the result was already stored, the ToolCall must start as success.
+      expect(toolSeg.tool.status).toBe('success');
+      expect(toolSeg.tool.result?.content).toBe('early result content');
+      expect(toolSeg.tool.result?.isError).toBe(false);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // 20. Tool result with is_error: true → ToolCall status becomes 'error'
+  // -------------------------------------------------------------------------
+
+  it('sets ToolCall status to error when tool_result carries is_error=true', () => {
+    // Emit the assistant event first so the ToolCall starts pending.
+    projection.project(assistantToolUseEvent);
+
+    const errorUserEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: TOOL_USE_ID,
+          content: 'bash: command not found',
+          is_error: true,
+        }],
+      },
+      parent_tool_use_id: TOOL_USE_ID,
+      session_id: SESSION_ID,
+    };
+
+    const userResult = projection.project(errorUserEvent);
+    expect(userResult).toBeNull(); // absorbed
+
+    // Re-project the assistant event on a shared projection that already has the
+    // tool call registered. Inspect via the segment reference stored on the first
+    // projection (correlation updates in-place).
+    const freshProj = new MessageProjection('run-error-tool-test');
+    const assistResult = freshProj.project(assistantToolUseEvent) as UnifiedMessage;
+    const toolSeg = assistResult.segments.find(s => s.type === 'tool_call');
+
+    // Now send the error result.
+    freshProj.project(errorUserEvent);
+
+    if (toolSeg?.type === 'tool_call') {
+      expect(toolSeg.tool.status).toBe('error');
+      expect(toolSeg.tool.result?.isError).toBe(true);
+      expect(toolSeg.tool.result?.content).toContain('command not found');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // 21. Sub-agent: child tool_use linked to parent via parent_tool_use_id
+  // -------------------------------------------------------------------------
+
+  it('links child tool_use into parent.childToolCalls and omits child from top-level segments', () => {
+    const PARENT_TOOL_ID = 'toolu_parent_task';
+    const CHILD_TOOL_ID = 'toolu_child_bash';
+
+    // First event: parent assistant message with a Task tool_use.
+    const parentAssistantEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_parent',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: PARENT_TOOL_ID, name: 'Task', input: { subagent_type: 'general', prompt: 'Do X' } },
+        ],
+      },
+      session_id: SESSION_ID,
+    };
+
+    // Second event: child assistant message (sub-agent) with parent_tool_use_id set.
+    const childAssistantEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_child',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: CHILD_TOOL_ID, name: 'Bash', input: { command: 'echo hello' } },
+        ],
+      },
+      parent_tool_use_id: PARENT_TOOL_ID,
+      session_id: SESSION_ID,
+    };
+
+    const parentResult = projection.project(parentAssistantEvent) as UnifiedMessage;
+    expect(parentResult).not.toBeNull();
+
+    // Child event should return a message (it has content) but the child tool_use
+    // must NOT appear as a top-level segment (it has a parent).
+    const childResult = projection.project(childAssistantEvent);
+    // Child message is null because the only tool_use is nested (omitted from segments)
+    // and there are no other renderable blocks.
+    expect(childResult).toBeNull();
+
+    // Parent's Task ToolCall should now have the child in childToolCalls.
+    const parentToolSeg = parentResult.segments.find(s => s.type === 'tool_call');
+    expect(parentToolSeg?.type).toBe('tool_call');
+    if (parentToolSeg?.type === 'tool_call') {
+      expect(parentToolSeg.tool.name).toBe('Task');
+      expect(parentToolSeg.tool.isSubAgent).toBe(true);
+      expect(parentToolSeg.tool.childToolCalls).toHaveLength(1);
+      expect(parentToolSeg.tool.childToolCalls?.[0].id).toBe(CHILD_TOOL_ID);
+      expect(parentToolSeg.tool.childToolCalls?.[0].name).toBe('Bash');
+    }
   });
 });
