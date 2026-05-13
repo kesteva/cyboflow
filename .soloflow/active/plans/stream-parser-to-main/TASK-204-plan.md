@@ -2,8 +2,8 @@
 id: TASK-204
 idea: IDEA-005
 idea_id: IDEA-005
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
   - main/src/services/configManager.ts
@@ -33,19 +33,18 @@ test_strategy:
   justification: "This task changes a security-relevant default (whether the queue can be bypassed). The four buildCommandArgs() paths that emit --dangerously-skip-permissions must be covered by tests to guarantee no regression silently re-enables bypass. Without tests, a future refactor could re-introduce the fallback unnoticed."
   targets:
     - behavior: "approve mode + permissionIpcPath set → argv has --permission-prompt-tool, no --dangerously-skip-permissions."
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
-    - behavior: "approve mode + permissionIpcPath null → throws a named error."
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+    - behavior: approve mode + permissionIpcPath null → throws a named error.
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
     - behavior: "ignore mode (any caller) → throws with 'Cyboflow runs require approve mode'."
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
-    - behavior: "config default applied (no explicit permissionMode arg) → behaves as approve mode."
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+    - behavior: config default applied (no explicit permissionMode arg) → behaves as approve mode.
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
 ---
-
 # Force approve permission mode for Cyboflow runs
 
 ## Objective
