@@ -34,8 +34,11 @@ describe('SystemInitEvent', () => {
     const raw = loadFixture('system_init.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('system');
-    // Narrow to system branch
+    // Narrow to system/init branch
     if (event.type !== 'system' || event.subtype !== 'init') {
       throw new Error('Expected SystemInitEvent');
     }
@@ -50,6 +53,9 @@ describe('SystemInitEvent', () => {
     const raw = loadFixture('system_init.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     // permissionMode is the documented camelCase wire exception (SamSaffron spec gist)
     expect(Object.keys(event)).toContain('permissionMode');
     expect(event).not.toHaveProperty('permission_mode');
@@ -65,6 +71,9 @@ describe('SystemApiRetryEvent', () => {
     const raw = loadFixture('system_api_retry.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('system');
     if (event.type !== 'system' || event.subtype !== 'api_retry') {
       throw new Error('Expected SystemApiRetryEvent');
@@ -88,6 +97,9 @@ describe('SystemCompactEvent', () => {
     const raw = loadFixture('system_compact.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('system');
     if (event.type !== 'system' || event.subtype !== 'compact') {
       throw new Error('Expected SystemCompactEvent');
@@ -105,6 +117,9 @@ describe('AssistantEvent', () => {
     const raw = loadFixture('assistant.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('assistant');
     if (event.type !== 'assistant') {
       throw new Error('Expected AssistantEvent');
@@ -130,6 +145,9 @@ describe('UserEvent', () => {
     const raw = loadFixture('user_string_content.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('user');
     if (event.type !== 'user') {
       throw new Error('Expected UserEvent from user_string_content fixture');
@@ -145,6 +163,9 @@ describe('UserEvent', () => {
     const raw = loadFixture('user_array_content.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('user');
     if (event.type !== 'user') {
       throw new Error('Expected UserEvent from user_array_content fixture');
@@ -166,6 +187,9 @@ describe('ResultEvent', () => {
     const raw = loadFixture('result_success.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('result');
     if (event.type !== 'result') {
       throw new Error('Expected ResultEvent');
@@ -178,6 +202,9 @@ describe('ResultEvent', () => {
     const raw = loadFixture('result_error_max_turns.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('result');
     if (event.type !== 'result') {
       throw new Error('Expected ResultEvent');
@@ -190,6 +217,9 @@ describe('ResultEvent', () => {
     const raw = loadFixture('result_error_max_budget_usd.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('result');
     if (event.type !== 'result') {
       throw new Error('Expected ResultEvent');
@@ -202,6 +232,9 @@ describe('ResultEvent', () => {
     const raw = loadFixture('result_error_during_execution.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('result');
     if (event.type !== 'result') {
       throw new Error('Expected ResultEvent');
@@ -220,6 +253,9 @@ describe('StreamEvent', () => {
     const raw = loadFixture('stream_event.json');
     const event = parseClaudeStreamEvent(raw);
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     expect(event.type).toBe('stream_event');
     if (event.type !== 'stream_event') {
       throw new Error('Expected StreamEvent');
@@ -288,6 +324,9 @@ describe('passthrough', () => {
     // The unknown field must be preserved on the parsed object (not stripped)
     expect(event).toHaveProperty('future_unannounced_field', 'lorem');
 
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
     // Confirm it still parsed as the correct variant (not degraded to __unknown__)
     expect(event.type).toBe('system');
   });
@@ -299,7 +338,16 @@ describe('passthrough', () => {
 
 describe('exhaustive union coverage', () => {
   it('summarize() covers every ClaudeStreamEvent variant — assertNever fails to compile if union grows without a new case', () => {
+    // Type guard that narrows away UnknownStreamEvent from the full union.
+    type KnownStreamEvent = Exclude<ClaudeStreamEvent, { kind: '__unknown__' }>;
+    function isKnown(event: ClaudeStreamEvent): event is KnownStreamEvent {
+      return !('kind' in event);
+    }
+
     function summarize(event: ClaudeStreamEvent): string {
+      // Handle UnknownStreamEvent BEFORE the switch — its discriminant is `kind`, not `type`,
+      // so a switch on `event.type` would not compile if UnknownStreamEvent were in scope.
+      if (!isKnown(event)) return 'unknown';
       switch (event.type) {
         case 'system': return `system/${event.subtype}`;
         case 'assistant': return 'assistant';
@@ -308,9 +356,7 @@ describe('exhaustive union coverage', () => {
         case 'stream_event': return 'stream_event';
         default:
           // If a new variant is added to ClaudeStreamEvent without being handled here,
-          // tsc --noEmit will fail to compile this line. The catch-all UnknownStreamEvent
-          // is reached via the `kind` discriminant branch below.
-          if ('kind' in event && event.kind === '__unknown__') return 'unknown';
+          // tsc --noEmit will fail to compile this line — the assertNever tripwire.
           return assertNever(event);
       }
     }
