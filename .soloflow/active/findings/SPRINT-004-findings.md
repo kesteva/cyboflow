@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-004
-pending_count: 2
-last_updated: "2026-05-13T16:30:00Z"
+pending_count: 3
+last_updated: "2026-05-13T17:15:00Z"
 ---
 
 # Findings Queue
@@ -24,4 +24,14 @@ last_updated: "2026-05-13T16:30:00Z"
 - **location:** main/src/services/streamParser/schemas.ts:152-159
 - **description:** `resultSubtypeEnum` is declared but never used at runtime — it exists only to satisfy AC #6's grep gate (`z.enum(['success', ...`). The actual schema uses four `z.literal(...)` sibling schemas inside `z.discriminatedUnion('subtype', ...)` because `discriminatedUnion` branches must pin discriminants with `z.literal`, not `z.enum`. A `void resultSubtypeEnum` line silences the unused-binding lint. This is intentional (the plan's "Rejected Alternatives" documents the tension) but leaves behind a dead binding whose only purpose is to satisfy a grep. Either (a) replace the four `z.literal` siblings with a single resultEventSchema that uses `subtype: resultSubtypeEnum` and drop the discriminatedUnion('subtype') performance optimization, or (b) delete `resultSubtypeEnum` and rewrite AC #6 to grep for the four `z.literal('success' | 'error_max_turns' | ...)` declarations directly. Defer to TASK-103 timing — once the fixture suite is green, the dead enum can be removed without losing coverage.
 - **suggested_action:** Delete `resultSubtypeEnum` after TASK-103 lands. The schema's actual subtype coverage is enforced by the four `z.literal` sibling schemas plus the inner discriminatedUnion, which TASK-103's `result` subtype fixtures will verify behaviorally.
+- **resolved_by:**
+
+## FIND-SPRINT-004-3
+- **source:** TASK-103 (verifier)
+- **type:** claude-md
+- **severity:** medium
+- **status:** open
+- **location:** .soloflow/active/plans/typed-stream-event-schema/TASK-103-plan.md (AC #10 / verification command)
+- **description:** TASK-103's AC #10 verification command is `cd main && pnpm test -- streamParser exits 0` (runtime tests only). Vitest uses esbuild to strip TS types without compile-checking, so the test file passed runtime even though `tsc --noEmit` produces 55 type errors inside it. The plan's compile-time tripwire (the `assertNever` switch in step 9) is therefore not actually compiled by the AC, defeating its own forward-compatibility-tripwire purpose. Soloflow plans authoring a test file should require BOTH `pnpm test ...` AND `pnpm typecheck` as verification commands when the file is meant to host a compile-time assertion. Without the typecheck gate, "test passes" silently includes "but the file does not compile" — exactly the failure mode this plan was supposed to prevent.
+- **suggested_action:** Update plan-authoring guidance (or a soloflow check) so that when a task's acceptance criteria include a TypeScript compile-time assertion (e.g. `assertNever`, branded types, conditional types), the AC verification commands MUST include `pnpm typecheck` (or equivalent `tsc --noEmit`) in addition to the runtime test command. Otherwise the compile-time check is silently bypassed by transpile-only test runners.
 - **resolved_by:**
