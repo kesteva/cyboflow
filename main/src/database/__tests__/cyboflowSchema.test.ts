@@ -22,7 +22,7 @@
 
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseService } from '../database';
@@ -380,6 +380,11 @@ describe('006_cyboflow_schema — fresh-install migration runner integration', (
 // already ran. DatabaseService.initialize() must detect their markers, backfill the
 // file_migration_applied:003/004/005 entries without re-executing those files, then
 // apply 006 exactly once with no console.error calls.
+//
+// Isolation requirement (FIND-SPRINT-005-2): the 003/004/005 file_migration_applied
+// ledger flags must NOT be present when svc2.initialize() is called, so that the
+// backfillLegacyFileMigrationFlags() write path is actually exercised — not merely
+// read and skipped because svc1 already wrote them.
 // ---------------------------------------------------------------------------
 
 describe('006_cyboflow_schema — existing-install migration runner integration', () => {
@@ -403,8 +408,13 @@ describe('006_cyboflow_schema — existing-install migration runner integration'
     svc1.setMigrationsDirForTesting(realMigrationsDir);
     svc1.initialize();
 
-    // Simulate pre-TASK-151 state: remove the 006 ledger marker as if 006
-    // had never been applied (the inline 003/004/005 markers remain).
+    // Simulate pre-TASK-151 state by rolling back to the point-in-time just
+    // before TASK-151's file-based runner was introduced:
+    //   - The tool_panels table (003 inline marker) is present.
+    //   - The claude_panels_migrated preference (004 inline marker) is present.
+    //   - The unified_panel_settings_migrated preference (005 inline marker) is present.
+    //   - NO file_migration_applied:003/004/005/006 ledger entries exist.
+    //   - The five Cyboflow tables (added by 006) do NOT exist.
     const rawDb = new Database(dbPath);
 
     // Drop the Cyboflow tables added by 006 to truly reset to pre-006 state.
@@ -416,16 +426,30 @@ describe('006_cyboflow_schema — existing-install migration runner integration'
       DROP TABLE IF EXISTS workflows;
     `);
 
+    // Remove ALL file_migration_applied:* ledger entries so that svc2's
+    // backfillLegacyFileMigrationFlags() must actually write the 003/004/005
+    // entries — not find them pre-written by svc1.
     rawDb
       .prepare(
-        "DELETE FROM user_preferences WHERE key = 'file_migration_applied:006_cyboflow_schema.sql'"
+        "DELETE FROM user_preferences WHERE key LIKE 'file_migration_applied:%'"
       )
       .run();
     rawDb.close();
 
-    // Step 2: Run initialize() again; 003/004/005 backfill flags already exist
-    // (from the first initialize above), but 006 is absent from the ledger.
-    // The runner must apply 006 exactly once without any console.error.
+    // Confirm isolation: 003/004/005 flags are gone before svc2 runs.
+    const probe = new Database(dbPath);
+    const flagsBefore = probe
+      .prepare(
+        "SELECT key FROM user_preferences WHERE key LIKE 'file_migration_applied:%'"
+      )
+      .all() as Array<{ key: string }>;
+    expect(flagsBefore).toHaveLength(0);
+    probe.close();
+
+    // Step 2: Run initialize() — the backfill code path must detect the inline
+    // markers (tool_panels table, claude_panels_migrated, unified_panel_settings_migrated)
+    // and write the 003/004/005 ledger entries. Then 006 must be applied because
+    // it is absent from the ledger.
     const errorSpy = vi.spyOn(console, 'error');
 
     const svc2 = new DatabaseService(dbPath);
