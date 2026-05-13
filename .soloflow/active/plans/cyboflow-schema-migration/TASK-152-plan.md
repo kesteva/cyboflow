@@ -2,8 +2,8 @@
 id: TASK-152
 idea: IDEA-004
 idea_id: IDEA-004
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/database/migrations/006_cyboflow_schema.sql
   - shared/types/cyboflow.ts
@@ -33,8 +33,9 @@ acceptance_criteria:
   - criterion: "TypeScript types for the new schema exist in `shared/types/cyboflow.ts`, exporting interfaces WorkflowRow, WorkflowRunRow, RawEventRow, MessageRow, ApprovalRow, plus a `WorkflowRunStatus` union type listing all 8 status values and an `ApprovalStatus` union of the 4 approval statuses."
     verification: "grep -nE 'export (interface|type) (WorkflowRow|WorkflowRunRow|RawEventRow|MessageRow|ApprovalRow|WorkflowRunStatus|ApprovalStatus)' shared/types/cyboflow.ts returns 7 lines."
   - criterion: "After running `pnpm --filter main test` in a clean tree, the file-runner test from TASK-151 plus an integration test that asserts the new tables and indexes exist after migration both pass."
-    verification: "vitest --run main/src/database/__tests__/cyboflowSchema.test.ts exits 0; the test queries sqlite_master and asserts presence of every table and index from this migration."
-depends_on: [TASK-151]
+    verification: vitest --run main/src/database/__tests__/cyboflowSchema.test.ts exits 0; the test queries sqlite_master and asserts presence of every table and index from this migration.
+depends_on:
+  - TASK-151
 estimated_complexity: medium
 epic: cyboflow-schema-migration
 test_strategy:
@@ -42,19 +43,18 @@ test_strategy:
   justification: "The 5-table schema is load-bearing for every downstream Cyboflow feature. A typo in a CHECK constraint or a missing index silently degrades the entire orchestrator. Schema-level tests catch this at migration time, not at first prod usage."
   targets:
     - behavior: "After DatabaseService.initialize(), all 5 tables (workflows, workflow_runs, raw_events, messages, approvals) exist with the expected column set."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
     - behavior: "All 4 day-1 indexes exist on the expected (table, column) tuples."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
     - behavior: "INSERTing a workflow_runs row with an invalid status value (e.g., 'foo') fails the CHECK constraint."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
     - behavior: "INSERTing an approvals row with an invalid status (e.g., 'maybe') fails the CHECK constraint."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
 ---
-
 # Author 006_cyboflow_schema.sql with 5 Tables, State Columns, and Day-1 Indexes
 
 ## Objective
