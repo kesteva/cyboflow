@@ -27,11 +27,11 @@ last_updated: "2026-05-13T01:14:12.451Z"
 - **source:** SPRINT-003 (sprint-code-reviewer)
 - **type:** bug
 - **severity:** high
-- **status:** open
+- **status:** resolved
 - **location:** docs/signing/FIRST_SIGNED_BUILD_LOG.md:119
 - **description:** DMG SHA256 mismatch between sprint docs — FIRST_SIGNED_BUILD_LOG.md:119 records DMG sha256 as `cdf62a509f69d9984ec43c1a884fa83effd3f91608b197367b390e675e09ee8e`, but GATEKEEPER_ACCEPTANCE_TEST.md lists the same artifact (same path, same notarytool submission ID c5950a84-b245-4322-a866-f332b6a4bef8) with `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494` (lines 20, 50, 100). Ground-truth `shasum -a 256` against the on-disk DMG returns `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494` — the gatekeeper-test value is correct, the build-log value is wrong. The build-log value is almost certainly the pre-staple sha256 that notarytool computed on the bytes Apple received; stapling rewrites the DMG and changes its hash, which is the file users actually download. A clean-account tester following the procedure will compute the post-staple hash and treat any reference to the pre-staple hash as a sign of artifact tampering.
 - **suggested_action:** In FIRST_SIGNED_BUILD_LOG.md update the DMG SHA256 row at line 119 to `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494` (the post-staple, on-disk hash). Add a one-line note distinguishing the notarytool-reported sha256 (pre-staple, in Apple submission record) from the user-facing distribution sha256 (post-staple). Keep GATEKEEPER_ACCEPTANCE_TEST.md as the source of truth for the distribution hash — both docs must agree.
-- **resolved_by:** 
+- **resolved_by:** a4c31f4 fix(TASK-055): record post-staple DMG SHA256 in build log
 
 
 
