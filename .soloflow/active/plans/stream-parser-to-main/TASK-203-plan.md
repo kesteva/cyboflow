@@ -2,8 +2,8 @@
 id: TASK-203
 idea: IDEA-005
 idea_id: IDEA-005
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/rawEventsSink.ts
   - main/src/services/streamParser/__tests__/rawEventsSink.test.ts
@@ -26,7 +26,8 @@ acceptance_criteria:
     verification: "pnpm --filter main test -- rawEventsSink.test.ts passes; test dispatches { kind: 'unknown', raw: { type: 'future_variant', foo: 'bar' } }, asserts SELECT event_type, payload_json FROM raw_events shows event_type='unknown' and JSON.parse(payload_json).raw.type === 'future_variant'."
   - criterion: "Sink is dispose()-able: calling sink.dispose() detaches the EventRouter listener and stops further inserts. Re-dispatching events after dispose results in zero new rows."
     verification: "pnpm --filter main test -- rawEventsSink.test.ts passes; test attaches sink, dispatches 2 events (2 rows), calls dispose(), dispatches 2 more events, asserts still 2 rows in raw_events."
-depends_on: [TASK-201]
+depends_on:
+  - TASK-201
 estimated_complexity: low
 epic: stream-parser-to-main
 test_strategy:
@@ -34,19 +35,18 @@ test_strategy:
   justification: "RawEventsSink is the persistence boundary for the entire event-sourcing system. A silent insert failure means lost audit log and broken projection replay (the design's recovery mechanism). The fail-soft contract (log warn, never throw) must be tested explicitly because it inverts the normal 'errors propagate' default."
   targets:
     - behavior: "Happy path: 5 mixed events → 5 rows persisted with correct event_type, event_subtype, and payload_json."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
     - behavior: "DB insert error → log warn, continue, no exception. 5 events with 1 forced failure → 4 rows persisted."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
     - behavior: "Unknown variant → event_type='unknown', original payload preserved."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
-    - behavior: "dispose() detaches listener; subsequent events not persisted."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+    - behavior: dispose() detaches listener; subsequent events not persisted.
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
 ---
-
 # Append every parsed event to raw_events table
 
 ## Objective

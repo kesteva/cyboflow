@@ -2,8 +2,8 @@
 id: TASK-205
 idea: IDEA-005
 idea_id: IDEA-005
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/claude/RichOutputWithSidebar.tsx
   - frontend/src/components/panels/claude/ClaudePanel.tsx
@@ -24,7 +24,7 @@ acceptance_criteria:
     verification: "Either: test -f frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts returns exit 1 (deleted); OR cat frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts | wc -l shows <= 30 lines AND grep -n 'JSON.parse\\|tool_use\\|ContentBlock' frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts returns no matches."
   - criterion: "main/src/services/streamParser/messageProjection.ts exists and projects ClaudeStreamEvent (typed union from TASK-201) into the UnifiedMessage shape consumed by the renderer. The projection logic is the renderer-side parser's behavior, moved to main."
     verification: "grep -n \"export.*projectEventToMessage\\|export class MessageProjection\" main/src/services/streamParser/messageProjection.ts returns at least 1 match; pnpm --filter main test -- messageProjection.test.ts passes."
-  - criterion: "shared/types/unifiedMessage.ts defines the UnifiedMessage type as a shared contract between main and renderer. Both processes import the same type — no duplicated definitions."
+  - criterion: shared/types/unifiedMessage.ts defines the UnifiedMessage type as a shared contract between main and renderer. Both processes import the same type — no duplicated definitions.
     verification: "grep -n \"export.*UnifiedMessage\" shared/types/unifiedMessage.ts returns 1 match; grep -rn \"from.*['\\\"]\\(\\.\\./\\)\\+shared/types/unifiedMessage['\\\"]\" frontend/src main/src returns at least 2 matches (one from each process)."
   - criterion: "RichOutputWithSidebar.tsx and ClaudePanel.tsx no longer instantiate a ClaudeMessageTransformer that does JSON parsing. They either receive pre-projected UnifiedMessage[] directly from main, or use a passthrough that asserts the input is already in UnifiedMessage shape."
     verification: "grep -n \"new ClaudeMessageTransformer\" frontend/src/components/panels/claude/ClaudePanel.tsx frontend/src/components/panels/claude/RichOutputWithSidebar.tsx returns matches only against the passthrough stub (verify by reading the context lines — the constructor must not perform parsing logic). Run: grep -rn 'JSON.parse' frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts returns 0 matches."
@@ -32,7 +32,9 @@ acceptance_criteria:
     verification: "pnpm --filter main test -- messageProjection.test.ts passes; test imports a frozen snapshot of expected UnifiedMessage[] (captured by running the old transformer on a fixture before deletion), runs the new main-side pipeline, asserts deep equality."
   - criterion: "Renderer no longer parses raw JSONL. grep -rn \"JSON.parse\" frontend/src/components/panels/claude/ frontend/src/components/panels/ai/transformers/ returns no matches against parsing logic (matches inside the stub or against the literal string in a comment are acceptable; verify by reading context)."
     verification: "grep -rn 'JSON.parse' frontend/src/components/panels/claude/ frontend/src/components/panels/ai/transformers/ClaudeMessageTransformer.ts shows at most matches that are not parsing logic (e.g., empty stub file or doc comment). Run the grep manually and visually confirm zero parser logic remains."
-depends_on: [TASK-201, TASK-203]
+depends_on:
+  - TASK-201
+  - TASK-203
 estimated_complexity: high
 epic: stream-parser-to-main
 test_strategy:
@@ -40,16 +42,15 @@ test_strategy:
   justification: "This is the renderer-vs-orchestrator drift elimination. The behavior-parity test (old transformer output vs. new main-side projection output) is the only way to prove the migration is lossless. Without it, the renderer silently renders different content than before — invisible regression."
   targets:
     - behavior: "Fixture stream-json → ClaudeStreamParser → MessageProjection produces UnifiedMessage[] identical to what the OLD ClaudeMessageTransformer would have produced for the same input."
-      test_file: "main/src/services/streamParser/__tests__/messageProjection.test.ts"
+      test_file: main/src/services/streamParser/__tests__/messageProjection.test.ts
       type: integration
     - behavior: "Each variant (system/init, system/compact, assistant with tool_use, assistant with thinking, user with tool_result, result/success, result/error_during_execution, unknown) projects to the correct UnifiedMessage shape."
-      test_file: "main/src/services/streamParser/__tests__/messageProjection.test.ts"
+      test_file: main/src/services/streamParser/__tests__/messageProjection.test.ts
       type: integration
     - behavior: "Tool-result content as string vs. content as [{type:'text', text:'...'}] both project equivalently (matches the inconsistent encoding noted in architecture research §1)."
-      test_file: "main/src/services/streamParser/__tests__/messageProjection.test.ts"
+      test_file: main/src/services/streamParser/__tests__/messageProjection.test.ts
       type: integration
 ---
-
 # Replace renderer ClaudeMessageTransformer with tRPC subscription to main-process projection
 
 ## Objective
