@@ -44,10 +44,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
   useEffect(() => {
     const loadMessages = async () => {
       try {
-        let response: { success: boolean; data?: JSONMessage[] };
-        
         // Get JSON messages from API
-        response = await API.panels.getJsonMessages(panelId);
+        const response = await API.panels.getJsonMessages(panelId);
         
         if (response.success && response.data) {
           // Filter out session_info messages and handle them separately
