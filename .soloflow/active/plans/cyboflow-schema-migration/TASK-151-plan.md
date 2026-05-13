@@ -3,7 +3,7 @@ id: TASK-151
 idea: IDEA-004
 idea_id: IDEA-004
 status: ready
-created: 2026-05-11T00:00:00Z
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/database/database.ts
 files_readonly:
@@ -16,7 +16,7 @@ files_readonly:
   - docs/ARCHITECTURE.md
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
 acceptance_criteria:
-  - criterion: "DatabaseService.runMigrations() invokes a new private method runFileBasedMigrations() at the END of its body (after all existing inline migrations)."
+  - criterion: DatabaseService.runMigrations() invokes a new private method runFileBasedMigrations() at the END of its body (after all existing inline migrations).
     verification: "grep -n 'runFileBasedMigrations' main/src/database/database.ts shows the call is the last logical step inside runMigrations() (after the folder_session_order_fix_applied block)."
   - criterion: "runFileBasedMigrations() reads the directory `__dirname/migrations/`, filters entries matching the regex /^(\\d{3})_.*\\.sql$/, sorts ascending by the captured 3-digit prefix, and applies each file's SQL via db.exec() inside a transaction."
     verification: "Read the implementation; confirm it uses fs.readdirSync, a regex with a 3-digit numeric prefix capture group, .sort() on the prefix as integer, and db.exec() (which handles multi-statement SQL). Also confirm files without a matching numeric prefix are skipped (logged at WARN)."
@@ -29,28 +29,27 @@ acceptance_criteria:
   - criterion: "copy:assets npm script in main/package.json already copies migrations/*.sql to dist; no changes needed there. Verify it still works."
     verification: "grep -n 'copy:assets' main/package.json shows the existing 'cp src/database/migrations/*.sql dist/main/src/database/migrations/' clause is unchanged."
   - criterion: "Unit test covers: (1) a fresh DB with the new runner finds and applies a fixture .sql file, (2) running the runner twice does not re-apply the file, (3) a broken .sql file logs an error and does not crash."
-    verification: "vitest --run main/src/database/__tests__/fileMigrationRunner.test.ts exits 0 with at least 3 passing test cases."
+    verification: vitest --run main/src/database/__tests__/fileMigrationRunner.test.ts exits 0 with at least 3 passing test cases.
 depends_on: []
 estimated_complexity: medium
 epic: cyboflow-schema-migration
 test_strategy:
   needed: true
-  justification: "This task introduces the migration loader that all downstream cyboflow schema migrations depend on. A regression here silently breaks fresh installs. Test coverage is mandatory."
+  justification: This task introduces the migration loader that all downstream cyboflow schema migrations depend on. A regression here silently breaks fresh installs. Test coverage is mandatory.
   targets:
     - behavior: "Fresh DB: runner applies a fixture .sql file and records it in user_preferences."
-      test_file: "main/src/database/__tests__/fileMigrationRunner.test.ts"
+      test_file: main/src/database/__tests__/fileMigrationRunner.test.ts
       type: unit
     - behavior: "Re-running runMigrations() on a DB that already has all files applied is a no-op (no INSERTs, no errors)."
-      test_file: "main/src/database/__tests__/fileMigrationRunner.test.ts"
+      test_file: main/src/database/__tests__/fileMigrationRunner.test.ts
       type: unit
     - behavior: "A .sql file with invalid SQL logs an error, rolls back its transaction, and the next file in the queue still applies."
-      test_file: "main/src/database/__tests__/fileMigrationRunner.test.ts"
+      test_file: main/src/database/__tests__/fileMigrationRunner.test.ts
       type: unit
     - behavior: "Existing inline migrations 003-005 are detected via their user_preferences markers and the corresponding .sql files are auto-flagged as applied so they don't run again."
-      test_file: "main/src/database/__tests__/fileMigrationRunner.test.ts"
+      test_file: main/src/database/__tests__/fileMigrationRunner.test.ts
       type: unit
 ---
-
 # Add Numeric-Prefix File-Based Migration Runner
 
 ## Objective

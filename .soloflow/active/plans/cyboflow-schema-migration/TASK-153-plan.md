@@ -3,7 +3,7 @@ id: TASK-153
 idea: IDEA-004
 idea_id: IDEA-004
 status: ready
-created: 2026-05-11T00:00:00Z
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/cyboflow/transitions.ts
   - main/src/services/cyboflow/__tests__/transitions.test.ts
@@ -22,10 +22,11 @@ acceptance_criteria:
   - criterion: "Helper exposes a second function `transitionFromAwaitingReview(db, params)` that mirrors the same atomicity for the reverse transition: UPDATE workflow_runs SET status='running' WHERE id = ? AND status='awaiting_review' AND UPDATE approvals SET status=?, decided_at=CURRENT_TIMESTAMP, decided_by=? WHERE id = ? AND status='pending'."
     verification: "grep -nE 'export function transitionFromAwaitingReview' main/src/services/cyboflow/transitions.ts returns 1 match. The function uses BEGIN IMMEDIATE and includes both status guards."
   - criterion: "Unit tests cover: (a) happy-path awaiting_review write succeeds, (b) UPDATE with stale status (run is 'canceled') throws TransitionRejectedError AND the approvals row was NOT inserted, (c) reverse transition with valid approve→running succeeds, (d) reverse transition when run is in 'failed' state throws and approval status remains 'pending'."
-    verification: "vitest --run main/src/services/cyboflow/__tests__/transitions.test.ts exits 0 with at least 4 passing test cases."
-  - criterion: "Function signatures use the row types from shared/types/cyboflow.ts (specifically WorkflowRunStatus and ApprovalStatus); no use of `any`."
+    verification: vitest --run main/src/services/cyboflow/__tests__/transitions.test.ts exits 0 with at least 4 passing test cases.
+  - criterion: Function signatures use the row types from shared/types/cyboflow.ts (specifically WorkflowRunStatus and ApprovalStatus); no use of `any`.
     verification: "grep -n 'any' main/src/services/cyboflow/transitions.ts returns 0 matches outside comments (the `@typescript-eslint/no-explicit-any` rule is enforced in this repo)."
-depends_on: [TASK-152]
+depends_on:
+  - TASK-152
 estimated_complexity: medium
 epic: cyboflow-schema-migration
 test_strategy:
@@ -33,19 +34,18 @@ test_strategy:
   justification: "This helper is the only correctness primitive for the awaiting_review race-condition class. Bugs here directly cause the failure modes spec'd in §5.7 as non-negotiable: races between user approval and run cancellation. Tests must exercise both the happy path and the rejection path under realistic concurrent state."
   targets:
     - behavior: "Happy-path: run is in 'running' state; transitionToAwaitingReview updates the run AND inserts the approval row atomically."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
     - behavior: "Stale-status: run is in 'canceled'; transitionToAwaitingReview throws TransitionRejectedError, AND no approval row is inserted."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
     - behavior: "Reverse happy-path: run is in 'awaiting_review' AND approval is 'pending'; transitionFromAwaitingReview with decision='approved' updates both atomically."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
     - behavior: "Reverse stale-status: run is in 'failed'; transitionFromAwaitingReview throws and the approval row stays 'pending'."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
 ---
-
 # Atomic awaiting_review Co-Write Transaction Helper
 
 ## Objective

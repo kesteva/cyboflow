@@ -3,7 +3,7 @@ id: TASK-154
 idea: IDEA-004
 idea_id: IDEA-004
 status: ready
-created: 2026-05-11T00:00:00Z
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/cyboflow/stateMachine.ts
   - main/src/services/cyboflow/__tests__/stateMachine.test.ts
@@ -14,7 +14,7 @@ files_readonly:
   - docs/cyboflow_system_design.md
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
 acceptance_criteria:
-  - criterion: "File `main/src/services/cyboflow/stateMachine.ts` exports a constant `ALLOWED_TRANSITIONS` mapping every WorkflowRunStatus to the set of statuses it may transition to."
+  - criterion: File `main/src/services/cyboflow/stateMachine.ts` exports a constant `ALLOWED_TRANSITIONS` mapping every WorkflowRunStatus to the set of statuses it may transition to.
     verification: "grep -nE 'export const ALLOWED_TRANSITIONS' main/src/services/cyboflow/stateMachine.ts returns 1 match. The constant covers all 8 source states: queued, starting, running, awaiting_review, stuck, completed, failed, canceled."
   - criterion: "Terminal states (completed, failed, canceled) map to an empty set (no outgoing transitions allowed)."
     verification: "grep -nE \"completed:\\s*\\[\\]\" or similar empty-array pattern is present for completed, failed, canceled in the ALLOWED_TRANSITIONS constant. Unit tests assert that isTransitionAllowed('completed', '<anything>') === false."
@@ -25,10 +25,11 @@ acceptance_criteria:
   - criterion: "Allowed transitions match the system design §5.3 spec: queued→{starting,canceled}; starting→{running,failed,canceled}; running→{awaiting_review,completed,failed,canceled,stuck}; awaiting_review→{running,canceled,stuck,failed}; stuck→{running,canceled,failed}; terminal states (completed, failed, canceled) → none."
     verification: "Inspect ALLOWED_TRANSITIONS; each source-state's allowed-set matches the list above. Unit tests cover at least one allowed and one forbidden transition per source state."
   - criterion: "Unit tests cover (a) every allowed transition returns true, (b) every forbidden transition returns false, (c) assertTransitionAllowed throws on forbidden, (d) terminal states reject every target including same-status no-ops."
-    verification: "vitest --run main/src/services/cyboflow/__tests__/stateMachine.test.ts exits 0 with at least 6 test cases covering the four behaviors above."
-  - criterion: "No `any` types used (project enforces `@typescript-eslint/no-explicit-any` as error)."
+    verification: vitest --run main/src/services/cyboflow/__tests__/stateMachine.test.ts exits 0 with at least 6 test cases covering the four behaviors above.
+  - criterion: No `any` types used (project enforces `@typescript-eslint/no-explicit-any` as error).
     verification: "grep -nE ':\\s*any\\b' main/src/services/cyboflow/stateMachine.ts returns 0 matches outside comments."
-depends_on: [TASK-152]
+depends_on:
+  - TASK-152
 estimated_complexity: low
 epic: cyboflow-schema-migration
 test_strategy:
@@ -36,19 +37,18 @@ test_strategy:
   justification: "The state machine is the contract that prevents impossible transitions (e.g., a completed run accidentally going back to running, or a canceled run getting an awaiting_review approval). A bug in the allowed-set is invisible at compile time and would silently corrupt run history. Exhaustive tests across all 8 states are cheap and necessary."
   targets:
     - behavior: "isTransitionAllowed returns true for each allowed (from, to) pair per the spec."
-      test_file: "main/src/services/cyboflow/__tests__/stateMachine.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/stateMachine.test.ts
       type: unit
     - behavior: "isTransitionAllowed returns false for the explicit forbidden transitions: completed→running, failed→queued, canceled→running, queued→awaiting_review, awaiting_review→completed."
-      test_file: "main/src/services/cyboflow/__tests__/stateMachine.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/stateMachine.test.ts
       type: unit
     - behavior: "assertTransitionAllowed throws IllegalTransitionError on forbidden transitions; error message contains from, to, and runId."
-      test_file: "main/src/services/cyboflow/__tests__/stateMachine.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/stateMachine.test.ts
       type: unit
     - behavior: "Terminal states (completed, failed, canceled) reject every possible target status including themselves (no-op same-status transitions are explicitly disallowed)."
-      test_file: "main/src/services/cyboflow/__tests__/stateMachine.test.ts"
+      test_file: main/src/services/cyboflow/__tests__/stateMachine.test.ts
       type: unit
 ---
-
 # State Machine Transition Validator
 
 ## Objective
