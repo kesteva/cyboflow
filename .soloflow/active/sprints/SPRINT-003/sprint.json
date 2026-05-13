@@ -7,7 +7,9 @@
   },
   "tasks": {
     "TASK-056": {
-      "status": "pending"
+      "status": "human_needed",
+      "started": "2026-05-13T01:03:52.263Z",
+      "verdict_at": "2026-05-13T01:06:41.592Z"
     }
   },
   "run": {
