@@ -13,7 +13,7 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { PermissionResponse } from './permissionManager';
+import type { ApprovalDecision } from '../orchestrator/approvalRouter';
 
 const sessionId = process.argv[2];
 const ipcPath = process.argv[3];
@@ -21,13 +21,13 @@ const ipcPath = process.argv[3];
 
 if (!sessionId || !ipcPath) {
   console.error('[MCP Bridge] ERROR: Missing required arguments');
-  console.error('[MCP Bridge] Usage: node mcpPermissionBridge.js <sessionId> <ipcPath>');
+  console.error('[MCP Bridge] Usage: node cyboflowPermissionBridge.js <sessionId> <ipcPath>');
   process.exit(1);
 }
 
 // Create IPC client to communicate with main process
 let ipcClient: net.Socket | null = null;
-let pendingRequests = new Map<string, (response: PermissionResponse) => void>();
+let pendingRequests = new Map<string, (response: ApprovalDecision) => void>();
 
 function connectToMainProcess() {
   ipcClient = net.createConnection(ipcPath);
@@ -60,7 +60,7 @@ function connectToMainProcess() {
   });
 }
 
-async function requestPermission(toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> {
+async function requestPermission(toolName: string, input: Record<string, unknown>): Promise<ApprovalDecision> {
   return new Promise((resolve, reject) => {
     const requestId = `${Date.now()}-${Math.random()}`;
     
@@ -91,7 +91,7 @@ async function main() {
   await new Promise(resolve => setTimeout(resolve, 100));
   
   const server = new Server({
-    name: 'crystal-permissions',
+    name: 'cyboflow-permissions',
     version: '1.0.0'
   }, {
     capabilities: {

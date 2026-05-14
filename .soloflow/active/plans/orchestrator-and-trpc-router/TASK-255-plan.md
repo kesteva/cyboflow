@@ -2,8 +2,8 @@
 id: TASK-255
 idea: IDEA-006
 idea_id: IDEA-006
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/ipcAdapter.ts
   - main/src/index.ts
@@ -33,25 +33,25 @@ acceptance_criteria:
     verification: "Manual smoke-test step documented in the plan: launch dev (pnpm electron-dev), open DevTools console, paste `await window.__trpcSmokeTest()` (a temporary global exposed via preload that calls trpcClient.cyboflow.runs.list.query() and returns the error message), assert the returned string contains 'NOT_IMPLEMENTED'. The smoke-test global is removed before the task closes — see Implementation Step 7."
   - criterion: "Standalone-typecheck invariant for non-adapter files still holds: every file under main/src/orchestrator/trpc/ except ipcAdapter.ts is electron-free"
     verification: "grep -rnE \"from ['\\\"]electron['\\\"]\" main/src/orchestrator/trpc/ | grep -v 'ipcAdapter.ts:' returns 0 matches"
-  - criterion: "Unit test in ipcAdapter.test.ts asserts attachOrchestratorTrpc calls createIPCHandler with the expected shape using a mock for createIPCHandler"
+  - criterion: Unit test in ipcAdapter.test.ts asserts attachOrchestratorTrpc calls createIPCHandler with the expected shape using a mock for createIPCHandler
     verification: "Run pnpm --filter main test -- ipcAdapter and confirm test 'attaches router and createContext via createIPCHandler' passes"
   - criterion: "Crystal's existing ipcMain.handle handlers continue to work — no inherited Crystal surface is broken by the additive tRPC wiring"
     verification: "Run the existing pnpm --filter main test suite; previously-passing tests remain passing. Manual smoke: a Crystal session can still be created via the existing UI"
-depends_on: [TASK-254]
+depends_on:
+  - TASK-254
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "The IPC wiring is the only mainline path where the tRPC contract reaches the renderer in production. A unit test confirms the adapter shape; the manual smoke test in DevTools is the end-to-end gate. Together they prove the typed-IPC surface is live without faking the Electron context."
+  justification: The IPC wiring is the only mainline path where the tRPC contract reaches the renderer in production. A unit test confirms the adapter shape; the manual smoke test in DevTools is the end-to-end gate. Together they prove the typed-IPC surface is live without faking the Electron context.
   targets:
     - behavior: "attachOrchestratorTrpc forwards router, createContext, and window to trpc-electron's createIPCHandler"
-      test_file: "main/src/orchestrator/trpc/__tests__/ipcAdapter.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/trpc/__tests__/ipcAdapter.test.ts
+      type: unit
     - behavior: "End-to-end: renderer invokes trpcClient.cyboflow.runs.list.query() and receives NOT_IMPLEMENTED"
-      test_file: "(manual DevTools smoke documented in plan body)"
-      type: "integration"
+      test_file: (manual DevTools smoke documented in plan body)
+      type: integration
 ---
-
 # tRPC IPC Link Wiring — Bridge Router to Renderer
 
 ## Objective

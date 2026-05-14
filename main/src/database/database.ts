@@ -68,6 +68,17 @@ export class DatabaseService {
   }
 
   /**
+   * Expose the underlying better-sqlite3 handle for callers that need to
+   * construct a narrow DatabaseLike adapter (e.g. the Orchestrator wiring in
+   * main/src/index.ts).  The field itself remains private; this accessor
+   * avoids a type-erasure cast while keeping the concrete db instance
+   * encapsulated within DatabaseService.
+   */
+  getDb(): Database.Database {
+    return this.db;
+  }
+
+  /**
    * Execute a function within a database transaction with automatic rollback on error
    * @param fn Function to execute within the transaction
    * @returns Result of the function
