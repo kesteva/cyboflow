@@ -10,9 +10,7 @@
  *
  * See also: docs/ARCHITECTURE.md §Orchestrator, ROADMAP-001 §6.3.
  */
-import { EventEmitter } from 'node:events';
 import type { OrchestratorDeps } from './types';
-import { RunQueueRegistry } from './RunQueueRegistry';
 
 export class Orchestrator {
   private readonly deps: OrchestratorDeps;
@@ -69,7 +67,4 @@ export class Orchestrator {
   }
 }
 
-// Re-export RunQueueRegistry so callers building OrchestratorDeps can import
-// from a single location when convenient.
 export type { OrchestratorDeps };
-export { RunQueueRegistry, EventEmitter };
