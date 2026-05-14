@@ -12,8 +12,8 @@ files_owned:
   - main/src/index.ts
   - main/build-mcp-bridge.js
   - package.json
-files_readonly:
   - main/src/utils/crystalDirectory.ts
+files_readonly:
   - main/src/services/permissionManager.ts
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
   - .soloflow/active/ideas/IDEA-007.md

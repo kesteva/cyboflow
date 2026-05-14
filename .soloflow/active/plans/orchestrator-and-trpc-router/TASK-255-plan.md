@@ -10,6 +10,9 @@ files_owned:
   - main/src/preload.ts
   - frontend/src/utils/trpcClient.ts
   - main/src/orchestrator/trpc/__tests__/ipcAdapter.test.ts
+  - frontend/tsconfig.json
+  - frontend/package.json
+  - main/src/database/database.ts
 files_readonly:
   - .soloflow/active/ideas/IDEA-006.md
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
