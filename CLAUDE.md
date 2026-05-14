@@ -28,6 +28,7 @@ pnpm build:main        # Compile main process (run at least once before `pnpm de
 pnpm typecheck         # Type-check all workspaces
 pnpm lint              # Lint all workspaces
 pnpm test              # Playwright E2E
+pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron upgrades
 ```
 
 Platform packaging (`pnpm build:mac:arm64`, `pnpm build:linux`, etc.) — see `package.json` `scripts`.
