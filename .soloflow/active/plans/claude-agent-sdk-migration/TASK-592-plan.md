@@ -1,7 +1,7 @@
 ---
 id: TASK-592
 idea: IDEA-014
-status: ready
+status: in-flight
 created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/lineBufferer.ts
