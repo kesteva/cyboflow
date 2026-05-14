@@ -70,8 +70,23 @@ const systemInitSchema = z.object({
   permissionMode: z.string(),
   apiKeySource: z.string().optional(),
   claude_code_version: z.string().optional(),
+  uuid: z.string().optional(),
+  agents: z.record(z.unknown()).optional(),
+  betas: z.array(z.string()).optional(),
+  slash_commands: z.array(z.string()).optional(),
+  output_style: z.string().optional(),
+  skills: z.record(z.unknown()).optional(),
+  plugins: z.array(z.object({ name: z.string(), path: z.string() }).passthrough()).optional(),
 }).passthrough();
 
+/**
+ * system/api_retry: legacy CLI shape.
+ *
+ * NOTE: The Claude Agent SDK does NOT emit this exact shape. The SDK surfaces retry-ish
+ * signals via SDKStatusMessage and rate-limit signals via SDKRateLimitEvent.
+ * Retained to keep messageProjection.ts's api_retry skip branch compiling during the
+ * migration window. T8 owns its eventual removal.
+ */
 const systemApiRetrySchema = z.object({
   type: z.literal('system'),
   subtype: z.literal('api_retry'),
@@ -86,8 +101,12 @@ const systemApiRetrySchema = z.object({
 }).passthrough();
 
 /**
- * system/compact: not in the official spec but confirmed by community reverse-engineering
- * and handled in Crystal's ClaudeMessageTransformer.ts.
+ * system/compact: LEGACY — `--include-partial-messages` CLI shape for context-window compaction.
+ *
+ * The Claude Agent SDK emits the SAME semantic event with a DIFFERENT shape — see
+ * systemCompactBoundarySchema below. Retained to keep messageProjection.ts's existing compact
+ * handler (which reads `summary`) compiling during the migration. T8 owns removal once
+ * messageProjection.ts switches to reading compact_metadata from systemCompactBoundarySchema.
  */
 const systemCompactSchema = z.object({
   type: z.literal('system'),
@@ -96,11 +115,26 @@ const systemCompactSchema = z.object({
   summary: z.string().optional(),
 }).passthrough();
 
+/**
+ * system/compact_boundary: Claude Agent SDK shape for context-window compaction.
+ */
+const systemCompactBoundarySchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('compact_boundary'),
+  uuid: z.string().optional(),
+  session_id: z.string().optional(),
+  compact_metadata: z.object({
+    trigger: z.union([z.literal('manual'), z.literal('auto')]),
+    pre_tokens: z.number(),
+  }).passthrough(),
+}).passthrough();
+
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemInitSchema,
   systemApiRetrySchema,
   systemCompactSchema,
+  systemCompactBoundarySchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -126,9 +160,13 @@ const assistantEventSchema = z.object({
       cache_creation_input_tokens: z.number().optional(),
       cache_read_input_tokens: z.number().optional(),
     }).passthrough().optional(),
+    stop_reason: z.union([z.string(), z.null()]).optional(),
+    stop_sequence: z.union([z.string(), z.null()]).optional(),
   }).passthrough(),
-  parent_tool_use_id: z.string().optional(),
+  parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
+  uuid: z.string().optional(),
+  error: z.object({ message: z.string().optional() }).passthrough().optional(),
 }).passthrough();
 
 // ---------------------------------------------------------------------------
@@ -149,12 +187,13 @@ const userEventSchema = z.object({
     numFiles: z.number().optional(),
     truncated: z.boolean().optional(),
   }).passthrough().optional(),
-  parent_tool_use_id: z.string().optional(),
+  parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
+  uuid: z.string().optional(),
 }).passthrough();
 
 // ---------------------------------------------------------------------------
-// Result variant schemas (subtype-discriminated into four siblings)
+// Result variant schemas (subtype-discriminated into five siblings)
 // ---------------------------------------------------------------------------
 
 /** Shared fields present on every result variant. */
@@ -177,6 +216,7 @@ const resultBaseFields = {
     tool_input: z.record(z.unknown()),
   }).passthrough()).optional(),
   session_id: z.string().optional(),
+  uuid: z.string().optional(),
 };
 
 const resultSuccessSchema = z.object({
@@ -199,12 +239,18 @@ const resultErrorDuringExecutionSchema = z.object({
   subtype: z.literal('error_during_execution'),
 }).passthrough();
 
+const resultErrorMaxStructuredOutputRetriesSchema = z.object({
+  ...resultBaseFields,
+  subtype: z.literal('error_max_structured_output_retries'),
+}).passthrough();
+
 // Inner discriminated union for result variants — dispatches on subtype.
 const resultUnionSchema = z.discriminatedUnion('subtype', [
   resultSuccessSchema,
   resultErrorMaxTurnsSchema,
   resultErrorMaxBudgetSchema,
   resultErrorDuringExecutionSchema,
+  resultErrorMaxStructuredOutputRetriesSchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -231,8 +277,9 @@ const streamEventSchema = z.object({
     content_block: z.object({ type: z.string() }).passthrough().optional(),
     message: z.record(z.unknown()).optional(),
   }).passthrough(),
-  parent_tool_use_id: z.string().optional(),
+  parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
+  uuid: z.string().optional(),
 }).passthrough();
 
 // ---------------------------------------------------------------------------
