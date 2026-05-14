@@ -388,4 +388,123 @@ describe('ApprovalRouter', () => {
     const finalDecision = await approvalPromise;
     expect(finalDecision.behavior).toBe('deny');
   });
+
+  // -------------------------------------------------------------------------
+  // Case 6: respond(allow) happy path — approvals set to 'approved',
+  //         workflow_runs back to 'running', socketReply called with allow
+  // -------------------------------------------------------------------------
+  it("respond(allow) on a non-canceled run marks approvals 'approved', run 'running', calls socketReply with allow", async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-006';
+    seedRun(db, runId, 'running');
+
+    const approvalPromise = router.requestApproval(runId, 'read_file', { path: '/etc/hosts' }, socketReply);
+    await qf.getOrCreate(runId).onIdle();
+
+    // Confirm intermediate state.
+    const runMid = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get(runId) as { status: string };
+    expect(runMid.status).toBe('awaiting_review');
+
+    const approvalId = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string }).id;
+
+    // Respond with allow (run not canceled — changes > 0 path).
+    await router.respond(approvalId, { behavior: 'allow' });
+    const decision = await approvalPromise;
+
+    // The returned decision must be allow.
+    expect(decision.behavior).toBe('allow');
+
+    // socketReply must have been called exactly once with allow.
+    expect(socketReply).toHaveBeenCalledOnce();
+    expect(socketReply.mock.calls[0][0].behavior).toBe('allow');
+
+    // approvals row must be 'approved'.
+    const approval = db
+      .prepare("SELECT status FROM approvals WHERE id = ?")
+      .get(approvalId) as { status: string };
+    expect(approval.status).toBe('approved');
+
+    // workflow_runs must be back to 'running'.
+    const runAfter = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get(runId) as { status: string };
+    expect(runAfter.status).toBe('running');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 7: getPending() reflects in-flight approvals and clears after respond
+  // -------------------------------------------------------------------------
+  it('getPending returns in-flight approvals and is empty after respond', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-007';
+    seedRun(db, runId, 'running');
+
+    // Before any request, pending list is empty.
+    expect(router.getPending()).toHaveLength(0);
+
+    const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/out' }, socketReply);
+    await qf.getOrCreate(runId).onIdle();
+
+    // After transaction commits, one entry should be visible.
+    const pending = router.getPending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].runId).toBe(runId);
+    expect(pending[0].toolName).toBe('write_file');
+
+    // After respond, the entry must be removed.
+    await router.respond(pending[0].id, { behavior: 'deny' });
+    await approvalPromise;
+
+    expect(router.getPending()).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 8: 'approvalCreated' event is emitted after the transaction commits
+  // -------------------------------------------------------------------------
+  it("emits 'approvalCreated' event after requestApproval transaction commits", async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-008';
+    seedRun(db, runId, 'running');
+
+    const emittedRequests: unknown[] = [];
+    router.on('approvalCreated', (req) => { emittedRequests.push(req); });
+
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo hi' }, socketReply);
+    await qf.getOrCreate(runId).onIdle();
+
+    // One event should have fired after the transaction committed.
+    expect(emittedRequests).toHaveLength(1);
+    const emitted = emittedRequests[0] as { runId: string; toolName: string };
+    expect(emitted.runId).toBe(runId);
+    expect(emitted.toolName).toBe('bash');
+
+    // Clean up.
+    const approvalId = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string }).id;
+    await router.respond(approvalId, { behavior: 'allow' });
+    await approvalPromise;
+  });
 });
