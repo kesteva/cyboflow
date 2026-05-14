@@ -45,9 +45,16 @@ export interface ApprovalCreated {
  * subscription can tear down without leaking. Future epics replace this
  * with an EventEmitter-backed iterator that actually produces events.
  */
-async function* makePlaceholderAsyncIterator<T>(signal: AbortSignal): AsyncIterable<T> {
-  if (signal.aborted) return;
-  await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+function makePlaceholderAsyncIterator<T>(signal: AbortSignal): AsyncIterable<T> {
+  return {
+    // eslint-disable-next-line require-yield -- placeholder: yields nothing, only awaits abort signal
+    async *[Symbol.asyncIterator]() {
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) =>
+        signal.addEventListener('abort', () => resolve(), { once: true }),
+      );
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
