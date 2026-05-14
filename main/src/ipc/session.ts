@@ -7,15 +7,75 @@ import type { CreateSessionRequest } from '../types/session';
 import { getCrystalSubdirectory } from '../utils/crystalDirectory';
 import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
-import { 
-  validateSessionExists, 
-  validatePanelSessionOwnership, 
+import {
+  validateSessionExists,
+  validatePanelSessionOwnership,
   validatePanelExists,
   validateSessionIsActive,
   logValidationFailure,
   createValidationError
 } from '../utils/sessionValidation';
 import type { SerializedArchiveTask } from '../services/archiveProgressManager';
+import { MessageProjection, TypedEventNarrowing } from '../services/streamParser';
+import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
+import type { SessionOutput } from '../types/session';
+
+/**
+ * Project an ordered array of raw stored outputs into UnifiedMessage[].
+ *
+ * Each output whose `type === 'json'` is fed through TypedEventNarrowing and
+ * then MessageProjection. Outputs that project to null (e.g. user/tool_result
+ * events, stream_event deltas) are filtered out. The persisted output timestamp
+ * is used in place of MessageProjection's `new Date()` default so that UI
+ * ordering reflects the actual run time.
+ */
+export function projectStoredOutputs(
+  outputs: SessionOutput[],
+  panelId: string,
+): UnifiedMessage[] {
+  const narrower = new TypedEventNarrowing();
+  const projection = new MessageProjection(panelId);
+  const result: UnifiedMessage[] = [];
+
+  // Ensure chronological order (DB usually returns in insert order, but be safe).
+  const sorted = [...outputs].sort((a, b) => {
+    const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : 0;
+    const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : 0;
+    return ta - tb;
+  });
+
+  for (const output of sorted) {
+    if (output.type !== 'json') continue;
+
+    // sessionManager.getPanelOutputs pre-parses JSON data; accept objects directly.
+    // Also handle the string case defensively.
+    let raw: unknown;
+    if (typeof output.data === 'string') {
+      try {
+        raw = JSON.parse(output.data);
+      } catch {
+        continue; // Unparseable — skip.
+      }
+    } else if (typeof output.data === 'object' && output.data !== null) {
+      raw = output.data;
+    } else {
+      continue;
+    }
+
+    const event = narrower.narrow(raw);
+    const projected = projection.project(event);
+    if (projected !== null) {
+      // Overwrite the MessageProjection-generated timestamp with the persisted one.
+      const iso =
+        output.timestamp instanceof Date
+          ? output.timestamp.toISOString()
+          : projected.timestamp;
+      result.push({ ...projected, timestamp: iso });
+    }
+  }
+
+  return result;
+}
 
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
@@ -875,47 +935,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Panel-based output methods not available' };
       }
 
-      // Get all outputs and filter for JSON messages only
       const outputs = await sessionManager.getPanelOutputs(panelId);
-      const jsonMessages = outputs
-        .filter(output => output.type === 'json')
-        .map(output => {
-          // Return the unwrapped message data with timestamp
-          // The message transformer expects the actual message object, not wrapped in { type: 'json', data: ... }
-          if (output.data && typeof output.data === 'object') {
-            return {
-              ...output.data as Record<string, unknown>,
-              timestamp: output.timestamp instanceof Date
-                ? output.timestamp.toISOString()
-                : (typeof output.timestamp === 'string' ? output.timestamp : '')
-            };
-          }
-          // If data is a string, try to parse it
-          if (typeof output.data === 'string') {
-            try {
-              const parsed = JSON.parse(output.data);
-              return {
-                ...parsed,
-                timestamp: output.timestamp instanceof Date
-                  ? output.timestamp.toISOString()
-                  : (typeof output.timestamp === 'string' ? output.timestamp : '')
-              };
-            } catch {
-              // If parsing fails, return as-is with timestamp
-              return {
-                data: output.data,
-                timestamp: output.timestamp instanceof Date
-                  ? output.timestamp.toISOString()
-                  : (typeof output.timestamp === 'string' ? output.timestamp : '')
-              };
-            }
-          }
-          // Fallback
-          return output.data;
-        });
+      const unifiedMessages = projectStoredOutputs(outputs, panelId);
 
-      console.log(`[IPC] Returning ${jsonMessages.length} JSON messages for panel ${panelId}`);
-      return { success: true, data: jsonMessages };
+      console.log(`[IPC] panel ${panelId}: projected ${unifiedMessages.length} UnifiedMessages from ${outputs.length} raw outputs`);
+      return { success: true, data: unifiedMessages };
     } catch (error) {
       console.error('Failed to get panel JSON messages:', error);
       return { success: false, error: 'Failed to get panel JSON messages' };
