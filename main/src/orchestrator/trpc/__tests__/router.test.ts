@@ -11,9 +11,13 @@
  *   4. appRouter.cyboflow.approvals.listPending throws NOT_IMPLEMENTED.
  *   5. appRouter.cyboflow.workflows.list throws NOT_IMPLEMENTED.
  *   6. appRouter.cyboflow.workflows.get throws NOT_IMPLEMENTED.
+ *   7. cyboflow.events.onStreamEvent is a placeholder: yields zero events before
+ *      signal abort and terminates cleanly when the signal is aborted.
+ *   8. cyboflow.events.onApprovalCreated is a placeholder: yields zero events
+ *      before signal abort and terminates cleanly when the signal is aborted.
  */
 import { describe, it, expect } from 'vitest';
-import { TRPCError } from '@trpc/server';
+import { TRPCError, callProcedure, isAsyncIterable } from '@trpc/server/unstable-core-do-not-import';
 import { createContext } from '../context';
 import { appRouter } from '../router';
 
@@ -23,6 +27,30 @@ import { appRouter } from '../router';
 
 function isNotImplemented(err: unknown): boolean {
   return err instanceof TRPCError && err.code === 'NOT_IMPLEMENTED';
+}
+
+/**
+ * Invoke a subscription procedure via tRPC's internal `callProcedure` API
+ * and return the result as-is (should be an AsyncIterable for v11 subscriptions).
+ *
+ * We use `callProcedure` rather than `createCaller` because `createCaller` in
+ * tRPC v11 only supports queries and mutations, not subscriptions.
+ */
+async function callSubscription(
+  path: string,
+  input: unknown,
+  signal: AbortSignal,
+): Promise<unknown> {
+  return callProcedure({
+    router: appRouter,
+    ctx: createContext(),
+    path,
+    type: 'subscription',
+    getRawInput: async () => input,
+    input,
+    signal,
+    batchIndex: 0,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -95,5 +123,69 @@ describe('appRouter (createCaller)', () => {
     expect(err).toBeInstanceOf(TRPCError);
     expect((err as TRPCError).code).toBe('NOT_IMPLEMENTED');
     expect((err as TRPCError).code).not.toBe('UNAUTHORIZED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Subscription placeholder tests
+//
+// These tests verify that the events.onStreamEvent and events.onApprovalCreated
+// subscription procedures satisfy AC #5: they yield ZERO events before the
+// abort signal fires, and terminate cleanly (no hang) once the signal is
+// aborted.
+//
+// The test races the subscription drain against an immediate abort, then asserts
+// the iterable produced no items.
+// ---------------------------------------------------------------------------
+
+describe('appRouter subscription placeholders', () => {
+  it('cyboflow.events.onStreamEvent yields zero events and terminates on abort', async () => {
+    const controller = new AbortController();
+
+    // Invoke the subscription — for tRPC v11 async-generator subscriptions,
+    // callProcedure returns the generator directly.
+    const result = await callSubscription(
+      'cyboflow.events.onStreamEvent',
+      { runId: 'run-1' },
+      controller.signal,
+    );
+
+    expect(isAsyncIterable(result)).toBe(true);
+
+    const iterable = result as AsyncIterable<unknown>;
+    const collected: unknown[] = [];
+
+    // Abort immediately before draining — the placeholder awaits the abort
+    // signal, so this causes it to return without yielding any event.
+    controller.abort();
+
+    for await (const ev of iterable) {
+      collected.push(ev);
+    }
+
+    expect(collected).toHaveLength(0);
+  });
+
+  it('cyboflow.events.onApprovalCreated yields zero events and terminates on abort', async () => {
+    const controller = new AbortController();
+
+    const result = await callSubscription(
+      'cyboflow.events.onApprovalCreated',
+      undefined,
+      controller.signal,
+    );
+
+    expect(isAsyncIterable(result)).toBe(true);
+
+    const iterable = result as AsyncIterable<unknown>;
+    const collected: unknown[] = [];
+
+    controller.abort();
+
+    for await (const ev of iterable) {
+      collected.push(ev);
+    }
+
+    expect(collected).toHaveLength(0);
   });
 });
