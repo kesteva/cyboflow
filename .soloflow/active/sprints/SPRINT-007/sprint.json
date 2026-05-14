@@ -14,11 +14,6 @@
         "TASK-574"
       ]
     },
-    "TASK-574": {
-      "status": "in_progress",
-      "depends_on": [],
-      "started": "2026-05-14T18:18:39.344Z"
-    },
     "TASK-575": {
       "status": "pending",
       "depends_on": [
