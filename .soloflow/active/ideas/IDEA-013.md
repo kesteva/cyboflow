@@ -42,7 +42,7 @@ Why it matters: post-2026-06-15 the "run 8 parallel agents on your existing Clau
 
 ## Grounding
 
-Not yet grounded — run `/soloflow:planner IDEA-013` to refine and ground. Sequencing: do not start until v1 prototype on current `-p` architecture ships and we confirm whether the post-2026-06-15 unit economics actually drive a pivot.
+Not yet grounded — run `/soloflow:planner IDEA-013` to refine and ground. Sequencing: this is the **post-prototype** step. v1 prototype completes on the Claude Agent SDK (IDEA-014). IDEA-013 then lands to preserve subscription billing past the 2026-06-15 Agent-SDK-credit split, by pivoting the Claude panel from in-process SDK calls onto interactive `claude` in a node-pty PTY with a `PreToolUse` shell hook posting to the already-wired Unix socket. Pre-work probe (10-line shell hook in `.claude/settings.json` verifying sync-blocking hook semantics) can run in parallel with the SDK prototype sprint to de-risk the eventual pivot.
 
 ## Slices
 
@@ -58,11 +58,10 @@ See `slices[0].description` in frontmatter. Concrete scope sketch:
 
 ### Trade-offs accepted
 
-- Lose the structured Claude panel UI (typed assistant messages, code-block rendering, tool-call expansion).
-- Lose the `raw_events` semantic event-sourcing layer (no JSON event stream to source from).
-- Completion detection becomes heuristic rather than deterministic.
-- The `typed-stream-event-schema` epic becomes obsolete for the Claude panel.
-- Most of the orchestrator/tRPC stream-parsing work deletes.
+- Lose the structured Claude panel UI (typed assistant messages, code-block rendering, tool-call expansion). Note: under the now-decided sequencing, this is a regression FROM the SDK substrate, not from `-p` — the SDK prototype delivers structured UI; IDEA-013 trades it for subscription billing.
+- Lose the typed-event stream from `@anthropic-ai/claude-agent-sdk` query() (interactive TUI emits terminal bytes, not typed events).
+- Completion detection becomes heuristic (PostToolUse hook + PTY quiescence) rather than promise-resolution-deterministic.
+- The retargeted `typed-stream-event-schema` schemas become unused for the Claude panel (still in tree for IDEA-015 multi-provider reuse).
 
 ### What stays
 
@@ -84,4 +83,4 @@ Cheap probe before committing: write a 10-line shell hook in `.claude/settings.j
 
 ## Sequencing
 
-Mutually exclusive with IDEA-014 for the Claude panel (the two are alternative architectures). The prototype validates which path matches user expectations (subscription billing vs. richer UI). Do NOT start either until v1 prototype on current `-p` architecture validates the product.
+Sequenced AFTER IDEA-014 (SDK migration completes the prototype substrate). NOT mutually exclusive with IDEA-014 — the SDK sprint preserves the IPC server (`cyboflowPermissionIpcServer.ts`) and its `start()` call site specifically so this idea lands as a transport swap (shell hook → existing socket → `ApprovalRouter`), not as an un-deletion of removed code. The shared `ApprovalRouter` interface in `shared/types/approval.ts` (created by TASK-588) means review-queue UI and downstream subscribers don't churn across the SDK→interactive transition. `-p` is not on the path — the SDK sprint deletes the `-p` substrate entirely; IDEA-013 layers interactive-mode support on top of the survived scaffolding.
