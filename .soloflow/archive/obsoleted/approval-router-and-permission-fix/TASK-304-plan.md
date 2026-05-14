@@ -1,7 +1,9 @@
 ---
 id: TASK-304
 idea_id: IDEA-007
-status: in-flight
+status: obsoleted
+obsoleted_at: "2026-05-14T00:00:00Z"
+obsoleted_reason: "TASK-590 (SDK migration) fully rewrites claudeCodeManager.ts, removing the PTY-kill pathway this task wires into. Verification ACs reference socket reply behavior that does not exist under the in-process PreToolUse hook. The semantics (cancel pending approvals on run abort / app quit) are still meaningful and should be re-planned against the SDK substrate (and against IDEA-013's shell-hook substrate if that pivot lands) post-migration."
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
