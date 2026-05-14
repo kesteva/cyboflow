@@ -1,9 +1,19 @@
 ---
 sprint: SPRINT-006
-pending_count: 6
-last_updated: "2026-05-14T05:00:00.000Z"
+pending_count: 7
+last_updated: "2026-05-14T07:00:00.000Z"
 ---
 # Findings Queue
+
+## FIND-SPRINT-006-12
+- **source:** TASK-301 (code-reviewer)
+- **type:** bug
+- **severity:** low
+- **status:** open
+- **location:** package.json:102-108 (`build.asarUnpack`)
+- **description:** The `asarUnpack` entries `main/dist/services/cyboflowPermissionBridge.js`, `main/dist/services/cyboflowPermissionBridgeStandalone.js`, and the wildcard `main/dist/services/**/*.js` all point at the path `main/dist/services/...`, but the TypeScript build emits to `main/dist/main/src/services/...` (verified by `find main/dist -name 'cyboflowPermissionBridge*'`). This means the asarUnpack rules currently match zero compiled files — the bridge scripts remain packed inside the asar. The pre-existing pre-rename paths (`main/dist/services/mcpPermissionBridge.js`) had the same defect, so TASK-301 only preserved the bug while renaming. Runtime impact is minimized because `claudeCodeManager.ts:698` detects an `.asar` path and extracts the script to a temp directory before exec — but that fallback is "wrong on purpose" cover for a misconfigured unpack list. If the asarUnpack path were correct, the slower extract-to-temp path would no longer be needed in normal operation.
+- **suggested_action:** Change `main/dist/services/cyboflowPermissionBridge.js` → `main/dist/main/src/services/cyboflowPermissionBridge.js`, the standalone entry to `main/dist/main/src/services/cyboflowPermissionBridgeStandalone.js`, and the wildcard to `main/dist/main/src/services/**/*.js`. Validate that a packaged build still resolves `__dirname` to `app.asar.unpacked/main/dist/main/src/services/` for the bridge script before merging.
+- **resolved_by:** 
 
 ## FIND-SPRINT-006-9
 - **source:** TASK-255 (code-reviewer)
@@ -101,3 +111,12 @@ last_updated: "2026-05-14T05:00:00.000Z"
 - **location:** main/src/database/database.ts
 - **description:** required to meet AC: DatabaseService needs a public getDb() accessor so the inline DatabaseLike adapter in index.ts can forward prepare() and transaction() calls without a type-erasure cast. The as unknown as DatabaseLike cast in index.ts:687 was the code-review blocker for TASK-255.
 - **resolved_by:** verifier — plan-prescribed: Implementation Step 3 explicitly anticipates "TASK-253's DatabaseLike shape may need a tiny adapter object; if so, define it inline rather than expanding the orchestrator's surface." The getDb() accessor is the minimum surface needed for that inline adapter to delegate without exposing the private better-sqlite3 handle as public. Also AC-prescribed: removing the as unknown as DatabaseLike cast was required to satisfy "structural typecheck without cast bypass" surfaced by code review.
+
+## FIND-SPRINT-006-11
+- **type:** scope_deviation
+- **source:** TASK-301 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/utils/crystalDirectory.ts
+- **description:** required to meet AC: getCyboflowSubdirectory re-export needed in cyboflowPermissionIpcServer.ts; crystalDirectory.ts was files_readonly but the acceptance criterion explicitly requires getCyboflowSubdirectory. Filed claim and it was granted.
+- **resolved_by:** verifier — plan-prescribed: Implementation Step 3 (line 72 of TASK-301-plan.md) explicitly says "add a thin re-export `export const getCyboflowSubdirectory = getCrystalSubdirectory;` at the bottom of `crystalDirectory.ts` ONLY IF the symbol does not already exist." The file also appears in `files_owned` (line 15) alongside `files_readonly` (line 17). The edit is exactly what the plan prescribed.
