@@ -7,6 +7,7 @@
  * Sources:
  *   - CLAUDE_AGENT_SDK_SPEC.md gist (SamSaffron): https://gist.github.com/SamSaffron/603648958a8c18ceae34939a8951d417
  *   - Architecture research §1: .soloflow/active/research/ROADMAP-001-research-architecture.md
+ *   - @anthropic-ai/claude-agent-sdk@0.2.x sdk.d.ts (authoritative source for SDK wire format)
  */
 
 // ---------------------------------------------------------------------------
@@ -71,11 +72,23 @@ export interface SystemInitEvent {
   permissionMode: string;
   apiKeySource?: string;
   claude_code_version?: string;
+  uuid?: string;
+  agents?: Record<string, unknown>;
+  betas?: string[];
+  slash_commands?: string[];
+  output_style?: string;
+  skills?: Record<string, unknown>;
+  plugins?: Array<{ name: string; path: string }>;
 }
 
 /**
- * Emitted when the Claude API call is being retried after a transient failure.
- * `error.category` may be: `rate_limit`, `server_error`, `billing_error`, etc.
+ * Emitted by the legacy `--include-partial-messages` CLI when an API call retries.
+ *
+ * NOTE: The Claude Agent SDK does NOT emit this exact shape. The SDK surfaces retry-ish
+ * signals via `SDKStatusMessage` and rate-limit signals via `SDKRateLimitEvent`.
+ * This variant is retained intact to keep `messageProjection.ts`'s api_retry skip branch
+ * compiling during the migration window. T8 (fixture & test migration) owns its eventual
+ * removal once messageProjection.ts and rawEventsSink.ts no longer reference it.
  */
 export interface SystemApiRetryEvent {
   type: 'system';
@@ -91,18 +104,35 @@ export interface SystemApiRetryEvent {
 }
 
 /**
- * Emitted when Claude performs a context-window compaction.
+ * LEGACY: `--include-partial-messages` CLI shape for context-window compaction.
  *
- * NOTE: This variant is NOT in Anthropic's official stream-json specification but is confirmed
- * by community reverse-engineering and is handled by Crystal's ClaudeMessageTransformer.ts.
- * Crystal's transformer uses the string `context_compacted` internally (line 338), but the
- * actual wire discriminant is `compact` — this type uses the real wire value.
+ * The Claude Agent SDK emits the SAME semantic event with a DIFFERENT shape — see
+ * `SystemCompactBoundaryEvent` below. This variant is retained verbatim to keep
+ * messageProjection.ts's existing compact handler (which reads `summary`) compiling
+ * during the migration. T8 owns removal once messageProjection.ts switches to reading
+ * compact_metadata from SystemCompactBoundaryEvent.
  */
 export interface SystemCompactEvent {
   type: 'system';
   subtype: 'compact';
   session_id?: string;
   summary?: string;
+}
+
+/**
+ * Emitted by the Claude Agent SDK when context-window compaction occurs.
+ * Replaces the legacy `SystemCompactEvent` shape. The `compact_metadata` field
+ * carries the trigger reason and pre-compaction token count.
+ */
+export interface SystemCompactBoundaryEvent {
+  type: 'system';
+  subtype: 'compact_boundary';
+  uuid?: string;
+  session_id?: string;
+  compact_metadata: {
+    trigger: 'manual' | 'auto';
+    pre_tokens: number;
+  };
 }
 
 /**
@@ -122,9 +152,13 @@ export interface AssistantEvent {
       cache_creation_input_tokens?: number;
       cache_read_input_tokens?: number;
     };
+    stop_reason?: string | null;
+    stop_sequence?: string | null;
   };
-  parent_tool_use_id?: string;
+  parent_tool_use_id?: string | null;
   session_id?: string;
+  uuid?: string;
+  error?: { message?: string; [k: string]: unknown };
 }
 
 /**
@@ -147,16 +181,18 @@ export interface UserEvent {
     numFiles?: number;
     truncated?: boolean;
   };
-  parent_tool_use_id?: string;
+  parent_tool_use_id?: string | null;
   session_id?: string;
+  uuid?: string;
 }
 
 /**
- * Emitted once at session end. The `subtype` field encodes the 4 terminal conditions:
+ * Emitted once at session end. The `subtype` field encodes the 5 terminal conditions:
  *   - `success`               — completed normally
  *   - `error_max_turns`       — hit the --max-turns limit
  *   - `error_max_budget_usd`  — hit the --max-budget-usd spending cap
  *   - `error_during_execution` — an unrecoverable error occurred mid-run
+ *   - `error_max_structured_output_retries` — exceeded structured output retry budget (SDK)
  *
  * `is_error` will be `true` for all non-success subtypes.
  * `permission_denials` records any tools that were denied by the --permission-prompt-tool handler.
@@ -169,7 +205,7 @@ export interface UserEvent {
  */
 export interface ResultEvent {
   type: 'result';
-  subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | 'error_during_execution';
+  subtype: 'success' | 'error_max_turns' | 'error_max_budget_usd' | 'error_during_execution' | 'error_max_structured_output_retries';
   is_error: boolean;
   duration_ms: number;
   num_turns: number;
@@ -187,6 +223,7 @@ export interface ResultEvent {
     tool_input: Record<string, unknown>;
   }>;
   session_id?: string;
+  uuid?: string;
 }
 
 /**
@@ -215,8 +252,9 @@ export interface StreamEvent {
     content_block?: { type: string; [k: string]: unknown };
     message?: Record<string, unknown>;
   };
-  parent_tool_use_id?: string;
+  parent_tool_use_id?: string | null;
   session_id?: string;
+  uuid?: string;
 }
 
 /**
@@ -244,13 +282,14 @@ export interface UnknownStreamEvent {
  * --include-partial-messages`. Discriminate on `event.type` for all real wire variants;
  * discriminate on `event.kind === '__unknown__'` for the catch-all.
  *
- * For `system` events, also check `event.subtype` (`'init' | 'api_retry' | 'compact'`).
+ * For `system` events, also check `event.subtype` (`'init' | 'api_retry' | 'compact' | 'compact_boundary'`).
  * For `result` events, also check `event.subtype` (`'success' | 'error_max_turns' | ...`).
  */
 export type ClaudeStreamEvent =
   | SystemInitEvent
   | SystemApiRetryEvent
   | SystemCompactEvent
+  | SystemCompactBoundaryEvent
   | AssistantEvent
   | UserEvent
   | ResultEvent
