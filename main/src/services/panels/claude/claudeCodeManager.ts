@@ -71,7 +71,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Wire the shared DB handle.  Called once per app lifecycle from claudePanel.ts
    * after DatabaseService.initialize() completes.
    */
-  static setSharedDb(db: Database.Database): void {
+  static setSharedDb(db: Database.Database | null): void {
     ClaudeCodeManager.sharedDb = db;
   }
 

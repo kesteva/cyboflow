@@ -181,7 +181,7 @@ describe('ClaudeCodeManager pipeline wiring', () => {
 
   afterEach(() => {
     // Reset the shared DB to avoid polluting other tests
-    ClaudeCodeManager.setSharedDb(null as unknown as Database.Database);
+    ClaudeCodeManager.setSharedDb(null);
     db.close();
   });
 
@@ -276,7 +276,7 @@ describe('ClaudeCodeManager pipeline wiring', () => {
   it('degraded mode (sharedDb=null): feeding data does not throw and writes zero raw_events rows', () => {
     // Override the shared DB to null before this test's manager is used.
     // The beforeEach already called setSharedDb(db), so we reset to null here.
-    ClaudeCodeManager.setSharedDb(null as unknown as Database.Database);
+    ClaudeCodeManager.setSharedDb(null);
 
     const { pty } = makeMockPty();
     manager.callSetupProcessHandlers(pty, PANEL_ID, SESSION_ID);
