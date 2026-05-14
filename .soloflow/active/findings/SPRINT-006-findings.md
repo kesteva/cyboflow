@@ -1,19 +1,29 @@
 ---
 sprint: SPRINT-006
 pending_count: 6
-last_updated: "2026-05-13T00:00:00Z"
+last_updated: "2026-05-14T05:00:00.000Z"
 ---
 # Findings Queue
+
+## FIND-SPRINT-006-9
+- **source:** TASK-255 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/index.ts:698
+- **description:** When `mainWindow` is null at the orchestrator-wiring block, `attachOrchestratorTrpc` is silently skipped: `if (mainWindow) { attachOrchestratorTrpc(...) }`. This is a quiet failure mode — the orchestrator starts but the renderer's tRPC bridge is never installed, so every `trpc.*` call from the renderer will fail with the trpc-electron "Could not find `electronTRPC` global" error or similar. In practice, `createWindow()` is awaited immediately above this block so `mainWindow` should never be null here, but the guard hides a logically-impossible state without surfacing it. Either drop the guard (and assert with `mainWindow!` or `if (!mainWindow) throw ...`) or log a warning when the guard kicks in.
+- **suggested_action:** Replace `if (mainWindow) { attachOrchestratorTrpc(...) }` with `if (!mainWindow) throw new Error('mainWindow is null after createWindow — cannot attach orchestrator tRPC'); attachOrchestratorTrpc(...)`. The throw fails loudly at startup rather than producing a half-wired app where the renderer's typed surface silently breaks.
+- **resolved_by:** 
 
 ## FIND-SPRINT-006-6
 - **source:** TASK-254 (code-reviewer)
 - **type:** bug
 - **severity:** medium
-- **status:** open
+- **status:** resolved
 - **location:** frontend/tsconfig.json (include) vs shared/types/trpc.ts
 - **description:** TASK-254's AC #9 says the AppRouter is re-exported from `shared/types/trpc.ts` "so the frontend can import it without crossing the main/ boundary directly." However, `frontend/tsconfig.json` currently sets `"include": ["src"]` — it does NOT include `../shared`, while `main/tsconfig.json` does (`"include": ["src/**/*", "../shared/**/*"]`). When the next task in this epic wires the renderer-side tRPC client and tries `import type { AppRouter } from 'shared/types/trpc'` (or whatever the alias resolves to), tsc will not find the file under the frontend project. The re-export file itself compiles fine under main's tsconfig (which is why standalone-typecheck passes), but the consumer side will fail.
 - **suggested_action:** In the renderer-wiring follow-up (TASK-255 or equivalent), either (a) add `"../shared/**/*"` to `frontend/tsconfig.json` `include`, (b) add a path alias and `references`, or (c) build shared as its own project with `composite: true` and reference it from both `main` and `frontend`. Option (c) is cleanest if shared starts to grow.
-- **resolved_by:**
+- **resolved_by:** TASK-255
 
 ## FIND-SPRINT-006-3
 - **source:** TASK-253 (code-reviewer)
@@ -64,3 +74,30 @@ last_updated: "2026-05-13T00:00:00Z"
 - **description:** better-sqlite3 native module compiled against NODE_MODULE_VERSION 136 but current Node.js requires 137. Affects 22 tests across transitions.test.ts, rawEventsSink.test.ts, fileMigrationRunner.test.ts, and cyboflowSchema.test.ts. Tests in those suites all fail with the same binding error. Unrelated to TASK-254 changes — pre-existing environment issue. Fix: run npm rebuild better-sqlite3 or pnpm rebuild --filter main.
 - **suggested_action:** Run: cd main && pnpm rebuild better-sqlite3, or rebuild with the Electron version: electron-rebuild -f -w better-sqlite3
 - **resolved_by:** 
+
+## FIND-SPRINT-006-7
+- **type:** scope_deviation
+- **source:** TASK-255 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/tsconfig.json
+- **description:** required to meet AC: frontend tsconfig must include ../shared to resolve AppRouter type import — directly addresses FIND-SPRINT-006-6
+- **resolved_by:** verifier — files_owned: plan explicitly owns frontend/tsconfig.json (line 13 of TASK-255-plan.md), this is not a scope deviation
+
+## FIND-SPRINT-006-8
+- **type:** scope_deviation
+- **source:** TASK-255 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/package.json
+- **description:** required to meet AC: frontend must declare @trpc/client, trpc-electron, superjson as dependencies for trpcClient.ts to typecheck and bundle correctly
+- **resolved_by:** verifier — files_owned: plan explicitly owns frontend/package.json (line 14 of TASK-255-plan.md), this is not a scope deviation
+
+## FIND-SPRINT-006-10
+- **type:** scope_deviation
+- **source:** TASK-255 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/database/database.ts
+- **description:** required to meet AC: DatabaseService needs a public getDb() accessor so the inline DatabaseLike adapter in index.ts can forward prepare() and transaction() calls without a type-erasure cast. The as unknown as DatabaseLike cast in index.ts:687 was the code-review blocker for TASK-255.
+- **resolved_by:** verifier — plan-prescribed: Implementation Step 3 explicitly anticipates "TASK-253's DatabaseLike shape may need a tiny adapter object; if so, define it inline rather than expanding the orchestrator's surface." The getDb() accessor is the minimum surface needed for that inline adapter to delegate without exposing the private better-sqlite3 handle as public. Also AC-prescribed: removing the as unknown as DatabaseLike cast was required to satisfy "structural typecheck without cast bypass" surfaced by code review.
