@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-006
 pending_count: 7
-last_updated: "2026-05-14T07:00:00.000Z"
+last_updated: "2026-05-14T05:40:00.000Z"
 ---
 # Findings Queue
 
@@ -120,3 +120,12 @@ last_updated: "2026-05-14T07:00:00.000Z"
 - **location:** main/src/utils/crystalDirectory.ts
 - **description:** required to meet AC: getCyboflowSubdirectory re-export needed in cyboflowPermissionIpcServer.ts; crystalDirectory.ts was files_readonly but the acceptance criterion explicitly requires getCyboflowSubdirectory. Filed claim and it was granted.
 - **resolved_by:** verifier — plan-prescribed: Implementation Step 3 (line 72 of TASK-301-plan.md) explicitly says "add a thin re-export `export const getCyboflowSubdirectory = getCrystalSubdirectory;` at the bottom of `crystalDirectory.ts` ONLY IF the symbol does not already exist." The file also appears in `files_owned` (line 15) alongside `files_readonly` (line 17). The edit is exactly what the plan prescribed.
+
+## FIND-SPRINT-006-13
+- **type:** scope_deviation
+- **source:** TASK-302 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/services/cyboflowPermissionBridge.ts
+- **description:** required to meet AC8: file imported type PermissionResponse from permissionManager.ts; replaced with equivalent ApprovalDecision from approvalRouter.ts so no production import path resolves to the deprecated permissionManager file. mcpPermissionServer.ts could not be claimed (owned by TASK-301) but that file is dead code (no callers) so the remaining grep match is not a production import path.
+- **resolved_by:** verifier — files_owned: TASK-302-plan.md line 12 explicitly lists main/src/services/cyboflowPermissionBridge.ts in files_owned (the file is dual-listed in files_readonly at line 15 which is a plan inconsistency, but files_owned grants edit authority). Not a scope deviation.

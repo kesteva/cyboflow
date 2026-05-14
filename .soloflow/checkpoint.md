@@ -1,23 +1,20 @@
 ---
-last_updated: 2026-05-13T20:00:00Z
+last_updated: 2026-05-13T22:30:00Z
 active_sprint: SPRINT-006
 phase: 3
-tasks_completed: [TASK-251, TASK-252, TASK-253]
+tasks_completed: [TASK-251, TASK-252, TASK-253, TASK-254, TASK-255, TASK-301]
 tasks_in_flight: []
 tasks_stuck: []
 tasks_human_needed: []
-next_action: "Resume execute loop with TASK-254"
+next_action: "Resume execute loop with TASK-302"
 ---
 
 # Session Checkpoint
 
-SPRINT-006 in progress on branch `soloflow/run-20260513-185641-SPRINT-006` (base: main@0d0a927). Serial execution mode.
+SPRINT-006 in progress on branch `soloflow/run-20260513-185641-SPRINT-006` (base: main@0d0a927). Serial mode.
 
-Completed (3/10):
-- TASK-251 — tRPC v11 + trpc-electron + p-queue + superjson deps installed in main/ and root
-- TASK-252 — RunQueueRegistry (per-runId PQueue serialization)
-- TASK-253 — Orchestrator class with DI, start/stop, standalone-typecheck invariant
+Completed (6/10): TASK-251..255 (orchestrator-and-trpc-router epic), TASK-301 (permission-bridge rename).
 
-Remaining (7): TASK-254, TASK-255, TASK-301, TASK-302, TASK-303, TASK-304, TASK-305
+Remaining (4): TASK-302..305 (approval-router-and-permission-fix).
 
-Findings open: FIND-SPRINT-006-1 (electron-store parity), FIND-SPRINT-006-2 (speculative re-exports), FIND-SPRINT-006-3 (dead-write in test).
+Findings open queue notable items: FIND-SPRINT-006-9 (mainWindow null-guard silent skip), FIND-SPRINT-006-12 (asarUnpack path mismatch, pre-existing). AC6 of TASK-255 deferred (manual DevTools smoke for tRPC ipcLink → renderer).
