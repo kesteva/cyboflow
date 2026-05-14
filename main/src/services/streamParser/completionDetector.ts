@@ -19,7 +19,7 @@
  * run is gone.
  */
 
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 
 /** Minimal logger interface consumed by CompletionDetector. */
 export interface ICompletionDetectorLogger {
