@@ -3,10 +3,16 @@
  *
  * Type contract: `shared/types/claudeStream.ts`
  *
- * This module owns runtime validation only. Downstream code should consume the
- * typed return value from `parseClaudeStreamEvent` and never call
- * `claudeStreamEventSchema.parse` directly — the former is guaranteed non-throwing,
- * the latter is not.
+ * This module exports:
+ *   - `claudeStreamEventSchema` — the Zod schema that defines the full wire-event
+ *     union. Use `.safeParse()` only through the narrower below.
+ *   - `_typeCheck` — compile-time TS↔Zod drift bridge that fails to compile if the
+ *     schema output drifts from the `ClaudeStreamEvent` type.
+ *
+ * For runtime parsing of stream events, consume `TypedEventNarrowing.narrow()` from
+ * the streamParser barrel — that is the single production implementation of the
+ * safeParse-and-fallback contract. Do NOT call `claudeStreamEventSchema.parse` or
+ * `.safeParse` directly in production code.
  */
 
 import { z } from 'zod';
@@ -248,43 +254,11 @@ export const claudeStreamEventSchema = z.union([
   streamEventSchema,
 ]);
 
-// Compile-time guarantee: schema output is assignable to ClaudeStreamEvent.
-// The `parseClaudeStreamEvent` return type annotation below enforces this at
-// the call site — TypeScript errors if `parsed.data` is not assignable to
-// `ClaudeStreamEvent`. This explicit assignment also catches the case where
-// the function signature drifts from the actual returned union.
+// ---------------------------------------------------------------------------
+// Compile-time drift bridges
+// ---------------------------------------------------------------------------
+
+// Ensures schema output is assignable to ClaudeStreamEvent. TypeScript errors
+// here if the schema drifts from the shared type definition.
 const _typeCheck: ClaudeStreamEvent = {} as z.infer<typeof claudeStreamEventSchema>;
 void _typeCheck;
-
-// ---------------------------------------------------------------------------
-// Parser function — NEVER throws
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a raw unknown value into a typed `ClaudeStreamEvent`.
- *
- * On success, returns the narrowed `ClaudeStreamEvent` (one of the seven wire
- * variants). On any mismatch — unknown variant, extra/missing field, bad type
- * — returns `{ kind: '__unknown__', raw }` without throwing.
- */
-export function parseClaudeStreamEvent(raw: unknown): ClaudeStreamEvent {
-  const parsed = claudeStreamEventSchema.safeParse(raw);
-  if (parsed.success) return parsed.data;
-
-  // Observability: log the unmatched type + session_id before falling through.
-  // IDEA-004 (full streamParser) will replace this with the proper Logger.
-  const rawObj =
-    typeof raw === 'object' && raw !== null
-      ? (raw as Record<string, unknown>)
-      : {};
-  const wireType =
-    typeof rawObj['type'] === 'string' ? rawObj['type'] : '<missing>';
-  const sessionId =
-    typeof rawObj['session_id'] === 'string'
-      ? rawObj['session_id']
-      : '<unknown>';
-  console.warn(
-    `[streamParser] unknown ClaudeStreamEvent variant type=${wireType} session_id=${sessionId}`,
-  );
-  return { kind: '__unknown__', raw: rawObj };
-}
