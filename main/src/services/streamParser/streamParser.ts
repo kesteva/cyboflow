@@ -13,12 +13,7 @@ import { LineBufferer } from './lineBufferer';
 import { JSONParser } from './jsonParser';
 import { TypedEventNarrowing } from './typedEventNarrowing';
 import type { EventRouter } from './eventRouter';
-
-/** Minimal logger interface consumed by ClaudeStreamParser. */
-export interface IStreamParserLogger {
-  warn(message: string): void;
-  verbose?(message: string): void;
-}
+import type { ILogger } from './types';
 
 export class ClaudeStreamParser {
   private readonly runId: string;
@@ -26,9 +21,9 @@ export class ClaudeStreamParser {
   private readonly lineBufferer: LineBufferer;
   private readonly jsonParser: JSONParser;
   private readonly narrower: TypedEventNarrowing;
-  private readonly logger: IStreamParserLogger | undefined;
+  private readonly logger: ILogger | undefined;
 
-  constructor(runId: string, router: EventRouter, logger?: IStreamParserLogger) {
+  constructor(runId: string, router: EventRouter, logger?: ILogger) {
     this.runId = runId;
     this.router = router;
     this.logger = logger;

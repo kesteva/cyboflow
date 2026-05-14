@@ -1,10 +1,10 @@
 ---
-pending_count: 4
+pending_count: 7
 buckets:
   decisions: 0
   actions: 0
-  testing: 4
-  deferred_visual: 0
+  testing: 6
+  deferred_visual: 1
 items: []
 ---
 # Human Review Queue
@@ -59,6 +59,34 @@ _No items._
   level: requirements
   severity: medium
 
+- task: TASK-568
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-568-plan.md
+  action: "Manual smoke test for AC-2: run `pnpm dev`, create a session with a prompt, wait for output, open the Claude panel. Verify `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/. This task fixes FIND-SPRINT-005-9; final confirmation requires a live Electron run that the verifier cannot perform."
+  blocked_checks:
+    - AC-2 manual Claude-panel smoke test (no renderer TypeError after MessageProjection wiring)
+  level: requirements
+  severity: high
+
+- task: TASK-572
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-572-plan.md
+  action: "Manual smoke test of raw_events population: run pnpm dev, create+run a Claude Code session, then inspect ~/Library/Application Support/cyboflow/cyboflow.db (macOS) with sqlite3 cyboflow.db \"select event_type, count(*) from raw_events group by event_type;\". Confirm at least one row per active stream-json event_type (system, assistant, result, etc.). This validates AC#7 end-to-end (parser feed → router dispatch → sink persistence)"
+  blocked_checks:
+    - "AC#7 — sqlite raw_events smoke after fresh session"
+  level: requirements
+  severity: medium
+
 ## Deferred Visual
 
-_No items._
+- sprint: SPRINT-007
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  action: "Live Electron end-of-sprint smoke. Prereq: run `pnpm electron:rebuild` (resolves better-sqlite3 NODE_MODULE_VERSION 137 vs 136 mismatch that crashed Electron during the SPRINT-007 verifier run). Then `pnpm dev`, create a session, run a prompt, open the Claude panel, and confirm `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/ and the panel renders messages. This is the load-bearing cross-task confirmation for SPRINT-007 (TASK-568 + TASK-572 jointly resolve FIND-SPRINT-005-9). Overlaps the existing per-task entries for TASK-568 and TASK-572 — running this one flow satisfies both."
+  blocked_checks:
+    - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
+  level: requirements
+  severity: high

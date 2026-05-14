@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ApprovalStatus, WorkflowRunStatus } from '../../../../shared/types/cyboflow';
+import { assertTransitionAllowed } from './stateMachine';
 
 /**
  * Thrown when a state transition is rejected because the source row was no
@@ -56,6 +57,7 @@ export function transitionToAwaitingReview(
   );
 
   const tx = db.transaction((p: TransitionToAwaitingReviewParams) => {
+    assertTransitionAllowed('running', 'awaiting_review', p.runId);
     const result = updateRun.run({ runId: p.runId });
     if (result.changes === 0) {
       throw new TransitionRejectedError(
@@ -109,6 +111,7 @@ export function transitionFromAwaitingReview(
   );
 
   const tx = db.transaction((p: TransitionFromAwaitingReviewParams) => {
+    assertTransitionAllowed('awaiting_review', 'running', p.runId);
     const runResult = updateRun.run({ runId: p.runId });
     if (runResult.changes === 0) {
       throw new TransitionRejectedError(
