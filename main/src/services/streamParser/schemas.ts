@@ -6,8 +6,10 @@
  * This module exports:
  *   - `claudeStreamEventSchema` — the Zod schema that defines the full wire-event
  *     union. Use `.safeParse()` only through the narrower below.
- *   - `_typeCheck` — compile-time TS↔Zod drift bridge that fails to compile if the
- *     schema output drifts from the `ClaudeStreamEvent` type.
+ *
+ * Compile-time check (module-local, not exported):
+ *   - `_typeCheck` — TS↔Zod drift bridge that fails to compile if the schema output
+ *     drifts from the `ClaudeStreamEvent` type.
  *
  * For runtime parsing of stream events, consume `TypedEventNarrowing.narrow()` from
  * the streamParser barrel — that is the single production implementation of the
