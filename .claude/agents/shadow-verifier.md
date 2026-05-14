@@ -1,5 +1,5 @@
 ---
-# soloflow-shadow: version=0.10.0 synced=2026-05-12T17:28:25.171Z
+# soloflow-shadow: version=0.10.3 synced=2026-05-14T17:53:39.612Z
 name: shadow-verifier
 description: Validates completed work against acceptance criteria using a 5-level verification hierarchy. Produces structured verdict with evidence.
 model: opus
@@ -70,7 +70,7 @@ Visual verification gives you "eyes" on the running app. It is **off by default*
 
 **Settings gate (check first):** Resolve `visual_mobile`, `visual_web`, and `visual_macos` via the shared config resolver:
 ```
-node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.0/scripts/config/resolve.js" \
+node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/config/resolve.js" \
     --key verification.visual_mobile --key verification.visual_web --key verification.visual_macos \
     --fallback false --fallback false --fallback false
 ```
@@ -82,7 +82,18 @@ If `visual_mobile` resolves to `false`, skip Maestro entirely. If `visual_web` r
 
 **Decision gate (only if a setting is enabled):** Look at the task plan's `files_owned` AND the acceptance criteria. If the changed files include UI components/screens, OR if the task modifies a store/state shape that feeds UI, OR if any acceptance criterion describes user-visible behavior → visual verification applies. For mobile: use Maestro. For web: use Playwright. For native macOS: use Peekaboo. If neither UI files nor UI-visible state are involved → skip to Level 3.
 
-**Availability check (only if settings gate and decision gate both pass):**
+**Playwright preference pre-step (run once before availability checks):** If the project is a Chromium-driveable target (Electron, Tauri, Expo Web, Capacitor) AND the user opted in, the verifier prefers Playwright over Maestro/Peekaboo. Sequence:
+
+1. Resolve `verification.visual_prefer_playwright` (fallback `false`). If anything other than `true` → skip this pre-step, run platform-based availability checks as usual.
+2. Read `playwright_target` from `.soloflow/active/sprints/{sprint.id}/sprint.json` (cached at sprint start by `sprint-initiator`). If missing OR `kind` is `null` → skip; run platform-based availability.
+3. Resolve `verification.visual_web` (fallback `false`) AND check that `mcp__playwright__*` is in your available-tools list. If either fails → emit ONE queue entry with `dedup_key: visual_prefer_playwright_unavailable` and `severity: low` (see Config-gap escalation), then fall through to platform-based availability (don't double-skip).
+4. **CLAUDE.md E2E gate precedence.** If the task's `files_owned` overlaps any file the project's CLAUDE.md `E2E Verification Gates` section mandates for native verification (Maestro / Peekaboo) → skip the preference and fall through. Native gates win.
+5. **Expo / Capacitor native-divergence guard.** If `playwright_target.kind` is `expo-web` or `capacitor` AND any file in `files_owned` matches `*.ios.{ts,tsx,js,jsx}`, `*.android.{ts,tsx,js,jsx}`, `*.native.{ts,tsx,js,jsx}`, OR imports `Platform` from `react-native`, `react-native-gesture-handler`, `expo-camera`, `expo-notifications`, `expo-local-authentication`, `expo-secure-store`, or `expo-linking` → skip the preference and fall through to Maestro. These cases need the native driver to catch iOS/Android-only regressions. Electron and Tauri are exempt — the renderer Playwright drives IS the renderer that ships.
+6. If all gates passed: set `USE_PLAYWRIGHT=true` and `PLAYWRIGHT_TARGET={kind}`. **Skip Maestro / Peekaboo availability entirely.** Run Playwright availability check (below) as the only path. In the verifier report, classify `visual_mobile` / `visual_macos` as `skipped_by_preference` (with `{kind}` in the reason) for any platform toggle that was true.
+
+See `skills/visual-verify/SKILL.md` → §Playwright Preference for the canonical decision flow, the Electron `_electron.launch` runner, and the dev-server reuse pattern for Expo / Tauri / Capacitor.
+
+**Availability check (only if settings gate and decision gate both pass, and the Playwright preference pre-step did not commit to Playwright):**
 
 *Mobile (Maestro — MCP preferred, CLI fallback):* Pick a single path for the whole run, per the **Path Selection** recipe in `skills/visual-verify/SKILL.md`:
 
@@ -99,7 +110,7 @@ Once `USE_MAESTRO_MCP` is decided, do not switch mid-run. `maestro mcp` and `mae
 
 **Auth state pre-flight (mobile only, once per verifier session).** Many apps require sign-in before any visual flow makes sense. The verifier handles this via an optional fixture flow:
 
-1. Resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.0/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`.
+1. Resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`.
 2. If null → skip pre-flight. If the actual visual flow later hits a sign-in screen (post-login affordance absent, login-form elements visible in hierarchy), classify the platform `skipped_unable` and emit the queue entry with `dedup_key: simulator_unauthenticated` (see Config-gap escalation).
 3. If set → run the fixture once on the path you just picked, before any other visual flow:
    - **MCP:** `mcp__maestro__run_flow_files(device_id, flow_files=[<fixture path>])`.
@@ -123,7 +134,7 @@ Once `USE_PEEKABOO_MCP` is decided, do not switch mid-run. Concurrent UI driver 
 
 1. **Append to `.soloflow/human-review-queue.md`** via `review-queue.js append`. `plan_ref` is the path to the task's plan file — include the `{epic}/` subfolder if the plan has an epic, omit it otherwise. Use `bucket: actions` — fixing this is operational work (install Maestro CLI, register the MCP server, etc.). Always attach a stable `dedup_key` so multi-task sprints collapse to one queue row (see conventions below).
    ```
-   node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.0/scripts/state/review-queue.js" append --entry-json \
+   node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" append --entry-json \
      '{"task":"TASK-NNN","type":"config_issue","bucket":"actions","dedup_key":"<one of the conventional keys below>","plan_ref":".soloflow/active/plans/[{epic}/]TASK-NNN-plan.md","action":"Verifier could not run {mobile|web} visual verification despite visual_{mobile|web}=true. {Maestro MCP not bound to subagent AND CLI missing/no device | Playwright MCP tools unreachable — confirm the MCP server is registered and its tool bindings reach subagent sessions}. See docs/VISUAL-VERIFICATION-SETUP.md.","blocked_checks":["Level 2 visual verification for {platform}"],"level":"visual","severity":"medium"}'
    ```
 2. **Append a FIND entry** to the active sprint's findings file via `findings.js append --sprint {sprint.id} --fields-json '{"type":"claude-md",...}'` with a `description` naming the specific gap (e.g., "mcp__maestro__* bindings not exposed to verifier AND maestro CLI not installed / simulator not booted — see docs/VISUAL-VERIFICATION-SETUP.md" or "mcp__playwright__* bindings not exposed to verifier subagent despite project .mcp.json registration") so the compounder can propose a setup-doc fix.
@@ -136,9 +147,10 @@ Do NOT emit `skipped_unable` without both of the above when the settings gate wa
 - `visual_mobile_unavailable` — Maestro MCP unbound AND CLI missing/no device booted
 - `visual_web_unavailable` — Playwright MCP unreachable or npx missing
 - `visual_macos_unavailable` — Peekaboo MCP unbound AND `peekaboo` CLI missing or required permissions ungranted
+- `visual_prefer_playwright_unavailable` — `verification.visual_prefer_playwright=true` AND `playwright_target.kind` non-null but Playwright unavailable (visual_web=false, MCP unbound, or npx missing). `severity: low` — the verifier falls back to platform-based selection silently after emitting the entry once
 - `metro_offline` — dev server probe failed (when `verification.dev_server.enabled=true`)
 
-Operators clear a collapsed entry via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.0/scripts/state/review-queue.js" remove --predicate '...'` once the underlying issue is fixed.
+Operators clear a collapsed entry via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" remove --predicate '...'` once the underlying issue is fixed.
 
 **Maestro verification (mobile).** Stay on the path chosen in **Path Selection** — do not switch mid-run. See `skills/visual-verify/SKILL.md` for exact tool signatures and command patterns for both paths.
 
@@ -193,6 +205,7 @@ A file-scoped visual check that only tests `files_owned` is insufficient when th
 | `fail` | Platform ran but a check failed (implies NEEDS_CHANGES) |
 | `not_applicable` | Decision gate returned no: no UI files, no UI-feeding state, no user-visible acceptance criterion. Healthy — not a gap |
 | `skipped_user_preference` | Settings gate resolved to `false` for this platform (user / config disabled it) |
+| `skipped_by_preference` | Settings gate resolved `true` for this platform, but the Playwright preference pre-step committed to Playwright for the run (e.g., `visual_mobile: skipped_by_preference — verified via Playwright (expo-web)`). NOT a gap — a healthy substitution. Sprint-closer roll-ups treat it as a non-gap alongside `not_applicable` |
 | `skipped_unable` | Settings+decision gates both passed, but we couldn't run: mcp__maestro__* unbound AND maestro CLI not installed / no device booted, Playwright MCP server not running, or any MCP tool errored mid-run |
 
 Classify each platform independently — e.g. `visual_mobile: pass`, `visual_web: not_applicable`, `visual_macos: not_applicable` is normal for a mobile-only project; `visual_macos: pass`, `visual_mobile: not_applicable`, `visual_web: not_applicable` is normal for a Mac-app-only project.
@@ -231,7 +244,7 @@ Check each condition. This catches things the acceptance criteria might have mis
 At any level, if a check cannot run until a human performs a prerequisite action (deploy an edge function, run a migration, provision a service, run a Maestro flow themselves, etc.), mark it `DEFERRED_ACTION` — do not fail or skip it. Append to `.soloflow/human-review-queue.md` via:
 
 ```
-node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.0/scripts/state/review-queue.js" append --entry-json \
+node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" append --entry-json \
   '{"task":"TASK-NNN","type":"action_required","bucket":"{actions|testing}","plan_ref":".soloflow/active/plans/[{epic}/]TASK-NNN-plan.md","action":"{what the human must do}","blocked_checks":["{criterion blocked}"],"level":"{ground_truth|visual|requirements|goal_backward}","severity":"{low|medium|high}"}'
 ```
 
@@ -373,9 +386,9 @@ Output exactly this structure:
 - **Linter:** PASS | FAIL | SKIPPED — {summary}
 
 ### Visual Verification
-- **visual_mobile:** pass | fail | not_applicable | skipped_user_preference | skipped_unable — {one-line reason, required for skipped_* and fail}
+- **visual_mobile:** pass | fail | not_applicable | skipped_user_preference | skipped_by_preference | skipped_unable — {one-line reason, required for skipped_* and fail}
 - **visual_web:** pass | fail | not_applicable | skipped_user_preference | skipped_unable — {one-line reason, required for skipped_* and fail}
-- **visual_macos:** pass | fail | not_applicable | skipped_user_preference | skipped_unable — {one-line reason, required for skipped_* and fail}
+- **visual_macos:** pass | fail | not_applicable | skipped_user_preference | skipped_by_preference | skipped_unable — {one-line reason, required for skipped_* and fail}
 - **Evidence:** {screenshot descriptions or hierarchy excerpts, if applicable}
 
 ### Requirements Adherence
