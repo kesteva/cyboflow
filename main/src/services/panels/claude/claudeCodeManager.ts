@@ -368,6 +368,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     this.pipelines.delete(panelId);
   }
 
+  // @cyboflow-hidden: Day-3 integration point — no workflow_runs rows exist yet in v1.
+  // Re-enable by routing from ApprovalRouter.recordToolRequest() -> tryTransitionToAwaitingReview()
+  // once workflow_runs rows are auto-created on Claude spawn (TASK-302 territory).
   /**
    * Attempt to record a tool-use approval request for a running Claude process.
    *
