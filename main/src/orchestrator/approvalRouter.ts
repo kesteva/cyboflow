@@ -254,15 +254,32 @@ export class ApprovalRouter extends EventEmitter {
    * @param decision   - The user's (or policy's) decision.
    */
   async respond(approvalId: string, decision: ApprovalDecision): Promise<void> {
-    const entry = this.pending.get(approvalId);
-    if (!entry) {
+    // Fast-path guard: surface unknown IDs synchronously before touching the queue.
+    const peek = this.pending.get(approvalId);
+    if (!peek) {
       throw new ApprovalNotFoundError(approvalId);
     }
 
-    const { request, socketReply, resolve } = entry;
-    const now = new Date().toISOString();
+    // The authoritative reservation happens INSIDE the queue so that two
+    // concurrent respond() calls for the same approvalId (same runId queue)
+    // are serialized — the second one finds the entry already gone and
+    // returns as a silent no-op, satisfying the exactly-once socketReply
+    // contract.
+    await this.getQueueForRun(peek.request.runId).add(async () => {
+      // Re-fetch inside the queue — a prior concurrent respond() may have
+      // already removed the entry.
+      const entry = this.pending.get(approvalId);
+      if (!entry) {
+        // A prior respond() already settled this approval; no-op.
+        return;
+      }
 
-    await this.getQueueForRun(request.runId).add(async () => {
+      // Atomically reserve this entry before any async work.
+      this.pending.delete(approvalId);
+
+      const { request, socketReply, resolve } = entry;
+      const now = new Date().toISOString();
+
       if (decision.behavior === 'allow') {
         const updateStmt = this.db.prepare(
           `UPDATE workflow_runs SET status = 'running', updated_at = ?
@@ -282,7 +299,6 @@ export class ApprovalRouter extends EventEmitter {
             `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'auto-policy'
              WHERE id = ?`,
           ).run(now, approvalId);
-          this.pending.delete(approvalId);
           // Resolve the requestApproval promise with a synthetic deny so the
           // awaiting caller is not left hanging.
           resolve({ behavior: 'deny', message: 'Run was canceled before approval could be processed' });
@@ -295,7 +311,6 @@ export class ApprovalRouter extends EventEmitter {
            WHERE id = ?`,
         ).run(now, approvalId);
 
-        this.pending.delete(approvalId);
         resolve(decision);
         socketReply(decision);
       } else {
@@ -305,7 +320,6 @@ export class ApprovalRouter extends EventEmitter {
            WHERE id = ?`,
         ).run(now, approvalId);
 
-        this.pending.delete(approvalId);
         resolve(decision);
         socketReply(decision);
       }
