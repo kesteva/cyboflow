@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-007
-pending_count: 6
-last_updated: "2026-05-14T19:15:00.000Z"
+pending_count: 7
+last_updated: "2026-05-14T19:30:00.000Z"
 ---
 # Findings Queue
 
@@ -84,6 +84,16 @@ TASK-575 had failing blocking prereq (grep of legacy parseClaudeStreamEvent — 
 - **location:** main/src/services/panels/claude/claudeCodeManager.ts:74, main/src/services/__tests__/claudeCodeManagerWiring.test.ts:184
 - **description:** `ClaudeCodeManager.setSharedDb(db: Database.Database)` accepts only a non-null handle, but the underlying static field is typed `Database.Database | null` (line 68). The test `afterEach` at line 184 needs to reset state and does so via `ClaudeCodeManager.setSharedDb(null as unknown as Database.Database)` — a cast that papers over the setter/field signature mismatch and weakens type safety. Either widen the setter to `db: Database.Database | null` (so passing `null` is honest) or add a dedicated `clearSharedDb(): void` reset helper used by tests. Trivial fix; surfaces because the test had to lie to TypeScript to compile.
 - **suggested_action:** Pick one of: (a) change line 74 to `static setSharedDb(db: Database.Database | null): void` and drop the cast in the test, or (b) add `static clearSharedDb(): void { ClaudeCodeManager.sharedDb = null; }` and replace the test's cast call with the clear method. Single small commit, no behavior change.
+- **resolved_by:**
+
+## FIND-SPRINT-007-10
+- **source:** TASK-575 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/streamParser/schemas.ts:6-10
+- **description:** The rewritten top-of-module JSDoc says "This module exports: `claudeStreamEventSchema` … `_typeCheck` — compile-time TS↔Zod drift bridge". Only `claudeStreamEventSchema` is actually `export`ed; `_typeCheck` is a module-local `const` used purely for its compile-time assignability check (see line 263, declared with `const` not `export const`). The prose technically misleads a reader skimming the header into thinking `_typeCheck` is part of the public surface. Functionally harmless — no caller would resolve a non-existent import — but the wording could read "This module declares" or split into "Exports:" and "Compile-time checks:" subsections.
+- **suggested_action:** Change line 6 from "This module exports:" to "This module declares:", or split into two bullets — "Exports: `claudeStreamEventSchema`" and "Compile-time check: `_typeCheck` — TS↔Zod drift bridge". Single-line documentation edit.
 - **resolved_by:**
 
 ## FIND-SPRINT-007-9
