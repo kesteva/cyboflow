@@ -1,8 +1,8 @@
 ---
 id: TASK-301
 idea_id: IDEA-007
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/mcpPermissionBridge.ts
   - main/src/services/permissionIpcServer.ts
@@ -18,27 +18,27 @@ files_readonly:
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
   - .soloflow/active/ideas/IDEA-007.md
 acceptance_criteria:
-  - criterion: "The MCP bridge source file is renamed from mcpPermissionBridge.ts to cyboflowPermissionBridge.ts and the legacy file no longer exists"
+  - criterion: The MCP bridge source file is renamed from mcpPermissionBridge.ts to cyboflowPermissionBridge.ts and the legacy file no longer exists
     verification: "test ! -e main/src/services/mcpPermissionBridge.ts && test -f main/src/services/cyboflowPermissionBridge.ts"
-  - criterion: "The MCP permission IPC server file is renamed from permissionIpcServer.ts to cyboflowPermissionIpcServer.ts"
+  - criterion: The MCP permission IPC server file is renamed from permissionIpcServer.ts to cyboflowPermissionIpcServer.ts
     verification: "test ! -e main/src/services/permissionIpcServer.ts && test -f main/src/services/cyboflowPermissionIpcServer.ts"
-  - criterion: "The standalone bridge builder is renamed from build-mcp-bridge.js to build-cyboflow-permission-bridge.js and outputs cyboflowPermissionBridgeStandalone.js"
+  - criterion: The standalone bridge builder is renamed from build-mcp-bridge.js to build-cyboflow-permission-bridge.js and outputs cyboflowPermissionBridgeStandalone.js
     verification: "test ! -e main/build-mcp-bridge.js && test -f main/build-cyboflow-permission-bridge.js && grep -q 'cyboflowPermissionBridgeStandalone.js' main/build-cyboflow-permission-bridge.js"
   - criterion: "Socket path uses ~/.cyboflow/sockets/cyboflow-permissions-<pid>.sock"
     verification: "grep -n 'cyboflow-permissions-' main/src/services/cyboflowPermissionIpcServer.ts && grep -nE 'getCyboflowSubdirectory\\(.sockets.\\)|join\\(.*\\.cyboflow.*sockets' main/src/services/cyboflowPermissionIpcServer.ts"
   - criterion: "MCP server identifies itself as 'cyboflow-permissions' (not 'crystal-permissions')"
     verification: "grep -n \"'cyboflow-permissions'\" main/src/services/cyboflowPermissionBridge.ts main/src/services/mcpPermissionServer.ts main/build-cyboflow-permission-bridge.js && ! grep -rn 'crystal-permissions' main/src/ main/build-cyboflow-permission-bridge.js package.json"
-  - criterion: "Claude is spawned with --permission-prompt-tool mcp__cyboflow-permissions__approve_permission (not crystal-permissions)"
+  - criterion: Claude is spawned with --permission-prompt-tool mcp__cyboflow-permissions__approve_permission (not crystal-permissions)
     verification: "grep -n 'mcp__cyboflow-permissions__approve_permission' main/src/services/panels/claude/claudeCodeManager.ts && ! grep -n 'mcp__crystal-permissions__' main/src/services/panels/claude/claudeCodeManager.ts"
   - criterion: "The .mcp.json injected for Claude registers the server under the key 'cyboflow-permissions'"
     verification: "grep -n '\"cyboflow-permissions\"' main/src/services/panels/claude/claudeCodeManager.ts && ! grep -n '\"crystal-permissions\"' main/src/services/panels/claude/claudeCodeManager.ts"
   - criterion: "package.json asarUnpack lists the new bridge filenames and no longer references mcpPermissionBridge*"
     verification: "grep -n 'cyboflowPermissionBridge' package.json && ! grep -n 'mcpPermissionBridge' package.json"
-  - criterion: "main/src/index.ts and main/src/services/cliManagerFactory.ts import the renamed module and reference the new socket env"
+  - criterion: main/src/index.ts and main/src/services/cliManagerFactory.ts import the renamed module and reference the new socket env
     verification: "grep -n 'cyboflowPermissionIpcServer' main/src/index.ts && ! grep -n 'permissionIpcServer' main/src/index.ts"
-  - criterion: "Sweep grep finds zero residual identifiers in main/ source (excluding the .backup file and docs/.soloflow)"
+  - criterion: Sweep grep finds zero residual identifiers in main/ source (excluding the .backup file and docs/.soloflow)
     verification: "! grep -rn --include='*.ts' --include='*.js' --include='*.json' -E 'crystal-permissions|mcpPermissionBridge|crystal-mcp-' main/src/ main/build-cyboflow-permission-bridge.js package.json"
-  - criterion: "TypeScript compilation of the main process succeeds with the renamed modules"
+  - criterion: TypeScript compilation of the main process succeeds with the renamed modules
     verification: "pnpm run build:main exits with status 0"
 depends_on: []
 estimated_complexity: medium
@@ -47,7 +47,6 @@ test_strategy:
   needed: false
   justification: "Pure rename / string-literal sweep. The build:main typecheck plus the AC grep sweep is the verification; no behavioral change to test. End-to-end coverage of the bridge flow is added in TASK-302's tests."
 ---
-
 # Rename mcpPermissionBridge to cyboflowPermissionBridge (Identity Sweep)
 
 ## Objective

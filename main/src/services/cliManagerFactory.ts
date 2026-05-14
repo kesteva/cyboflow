@@ -209,7 +209,6 @@ export class CliManagerFactory {
         requiredEnvVars: [],
         optionalEnvVars: [
           'ANTHROPIC_API_KEY',
-          'MCP_SOCKET_PATH',
           'MCP_DEBUG'
         ],
         requiredConfigKeys: [],

@@ -12,7 +12,7 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { PermissionIpcServer } from './services/permissionIpcServer';
+import { CyboflowPermissionIpcServer } from './services/cyboflowPermissionIpcServer';
 import { VersionChecker } from './services/versionChecker';
 import { StravuAuthManager } from './services/stravuAuthManager';
 import { StravuNotebookService } from './services/stravuNotebookService';
@@ -29,6 +29,14 @@ import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
+import { Orchestrator } from './orchestrator/Orchestrator';
+import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
+import { ApprovalRouter } from './orchestrator/approvalRouter';
+import { EventEmitter } from 'node:events';
+import { appRouter } from './orchestrator/trpc/router';
+import { createContext } from './orchestrator/trpc/context';
+import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
+import type { DatabaseLike } from './orchestrator/types';
 import * as fs from 'fs';
 
 export let mainWindow: BrowserWindow | null = null;
@@ -56,6 +64,7 @@ function setAppTitle() {
   return title;
 }
 let taskQueue: TaskQueue | null = null;
+let orchestrator: Orchestrator | null = null;
 
 // Service instances
 let configManager: ConfigManager;
@@ -69,7 +78,7 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let permissionIpcServer: PermissionIpcServer | null;
+let cyboflowPermissionIpcServer: CyboflowPermissionIpcServer | null;
 let versionChecker: VersionChecker;
 let stravuAuthManager: StravuAuthManager;
 let stravuNotebookService: StravuNotebookService;
@@ -554,19 +563,19 @@ async function initializeServices() {
 
   // Start permission IPC server
   console.log('[Main] Initializing Permission IPC server...');
-  permissionIpcServer = new PermissionIpcServer();
+  cyboflowPermissionIpcServer = new CyboflowPermissionIpcServer();
   console.log('[Main] Starting Permission IPC server...');
 
   let permissionIpcPath: string | null = null;
   try {
-    await permissionIpcServer.start();
-    permissionIpcPath = permissionIpcServer.getSocketPath();
+    await cyboflowPermissionIpcServer.start();
+    permissionIpcPath = cyboflowPermissionIpcServer.getSocketPath();
     console.log('[Main] Permission IPC server started successfully');
     console.log('[Main] Permission IPC socket path:', permissionIpcPath);
   } catch (error) {
     console.error('[Main] Failed to start Permission IPC server:', error);
     console.error('[Main] Permission-based MCP will be disabled');
-    permissionIpcServer = null;
+    cyboflowPermissionIpcServer = null;
   }
 
   // Create worktree manager with configManager and analyticsManager
@@ -673,6 +682,40 @@ app.whenReady().then(async () => {
   await createWindow();
   console.log('[Main] Window created successfully');
 
+  // Wire tRPC orchestrator after BrowserWindow is available
+  {
+    const runQueues = new RunQueueRegistry();
+    // Inline adapter: expose the narrow DatabaseLike surface by delegating to
+    // the underlying better-sqlite3 handle.  Using getDb() avoids the
+    // type-erasure cast (as unknown as DatabaseLike) that previously bypassed
+    // the structural check and would have thrown at runtime if any orchestrator
+    // code called db.prepare() or db.transaction().
+    const db: DatabaseLike = {
+      prepare: (sql) => databaseService.getDb().prepare(sql),
+      transaction: (fn) => databaseService.getDb().transaction(fn),
+    };
+    // Logger adapter: Logger class satisfies info/warn/error but does not
+    // declare `debug`. Provide an inline adapter that satisfies LoggerLike.
+    const loggerLike: import('./orchestrator/types').LoggerLike = {
+      info: (msg: string) => logger.info(msg),
+      warn: (msg: string) => logger.warn(msg),
+      error: (msg: string) => logger.error(msg),
+      debug: (msg: string) => logger.info(`[debug] ${msg}`),
+    };
+    orchestrator = new Orchestrator({ db, logger: loggerLike, eventBus: new EventEmitter(), runQueues });
+    await orchestrator.start();
+    if (mainWindow) {
+      attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
+    }
+    console.log('[Main] Orchestrator started and tRPC IPC handler attached');
+
+    // Wire ApprovalRouter after the RunQueueRegistry is live.
+    // The socketReply closures are provided per-request by CyboflowPermissionIpcServer
+    // (passed directly to requestApproval), so no factory is needed here.
+    ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    console.log('[Main] ApprovalRouter initialized');
+  }
+
   // Track app lifecycle events
   try {
     const currentVersion = app.getVersion();
@@ -766,6 +809,13 @@ app.on('before-quit', async (event) => {
     return;
   }
   
+  // Stop orchestrator (drains run queues)
+  if (orchestrator) {
+    console.log('[Main] Stopping orchestrator...');
+    await orchestrator.stop();
+    console.log('[Main] Orchestrator stopped');
+  }
+
   // Cleanup all sessions and terminate child processes
   if (sessionManager) {
     console.log('[Main] Cleaning up sessions and terminating child processes...');
@@ -800,9 +850,9 @@ app.on('before-quit', async (event) => {
   }
 
   // Stop permission IPC server
-  if (permissionIpcServer) {
+  if (cyboflowPermissionIpcServer) {
     console.log('[Main] Stopping permission IPC server...');
-    await permissionIpcServer.stop();
+    await cyboflowPermissionIpcServer.stop();
     console.log('[Main] Permission IPC server stopped');
   }
   

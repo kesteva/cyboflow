@@ -1,8 +1,8 @@
 ---
 id: TASK-305
 idea_id: IDEA-007
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/index.ts
@@ -17,13 +17,14 @@ acceptance_criteria:
     verification: "grep -nE 'recoverStaleAwaitingReview|recoverOnBoot' main/src/orchestrator/approvalRouter.ts && grep -nE \"status\\s*=\\s*'failed'\" main/src/orchestrator/approvalRouter.ts && grep -nE \"app_restart\" main/src/orchestrator/approvalRouter.ts"
   - criterion: "recoverStaleAwaitingReview also transitions any approvals rows with status='pending' that belong to those runs to status='canceled' (so the audit log is consistent)"
     verification: "grep -nE 'recoverStaleAwaitingReview' main/src/orchestrator/approvalRouter.ts -A 30 | grep -E \"UPDATE approvals\" | grep -E \"status\\s*=\\s*'canceled'\""
-  - criterion: "main/src/index.ts initializeServices() calls ApprovalRouter.getInstance().recoverStaleAwaitingReview() AFTER databaseService.initialize() and BEFORE cyboflowPermissionIpcServer.start()"
+  - criterion: main/src/index.ts initializeServices() calls ApprovalRouter.getInstance().recoverStaleAwaitingReview() AFTER databaseService.initialize() and BEFORE cyboflowPermissionIpcServer.start()
     verification: "grep -nE 'recoverStaleAwaitingReview' main/src/index.ts"
   - criterion: "Unit test 'recoverStaleAwaitingReview transitions awaiting_review rows to failed' passes: seed 2 workflow_runs rows status='awaiting_review' and 1 row status='running'; call recovery; assert only the 2 are now 'failed' with reason='app_restart' and the 'running' row is untouched"
     verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0 with output mentioning 'recoverStaleAwaitingReview'"
   - criterion: "Unit test 'recoverStaleAwaitingReview cancels pending approvals for recovered runs' passes: seed an awaiting_review run with a pending approval; call recovery; assert the approval row is now status='canceled'"
     verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0 with output mentioning 'cancels pending approvals for recovered runs'"
-depends_on: [TASK-302]
+depends_on:
+  - TASK-302
 estimated_complexity: low
 epic: approval-router-and-permission-fix
 test_strategy:
@@ -31,13 +32,12 @@ test_strategy:
   justification: "Boot recovery is a write-once-at-startup migration over potentially user-critical state (a run that finished but lost its socket). Without tests, a bug here either (a) leaves stale awaiting_review rows the user sees and cannot resolve, or (b) marks running rows as failed by accident. Both are silent data corruption."
   targets:
     - behavior: "recoverStaleAwaitingReview transitions awaiting_review → failed with reason='app_restart'; does not touch other statuses"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "recoverStaleAwaitingReview cancels pending approvals for recovered runs (audit log stays consistent)"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: recoverStaleAwaitingReview cancels pending approvals for recovered runs (audit log stays consistent)
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
 ---
-
 # Boot-Time Recovery for Stale awaiting_review Rows
 
 ## Objective

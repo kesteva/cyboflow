@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
@@ -598,6 +599,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hashSessionId: (sessionId: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('analytics:hash-session-id', sessionId),
   },
 });
+
+// Wire trpc-electron's IPC bridge so the renderer can use the typed tRPC client.
+// Must be called in the preload script after contextBridge is set up.
+// Crystal's existing contextBridge surfaces above are preserved — this is additive.
+exposeElectronTRPC();
 
 // Expose electron event listeners and utilities for permission requests
 contextBridge.exposeInMainWorld('electron', {

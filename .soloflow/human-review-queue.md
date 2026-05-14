@@ -1,9 +1,9 @@
 ---
-pending_count: 3
+pending_count: 4
 buckets:
   decisions: 0
   actions: 0
-  testing: 3
+  testing: 4
   deferred_visual: 0
 items: []
 ---
@@ -48,6 +48,16 @@ _No items._
     - End-to-end Claude panel rendering after TASK-205 stub reduction
   level: goal_backward
   severity: high
+
+- task: TASK-255
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-255-plan.md
+  action: "Run pnpm dev to launch Electron, open DevTools console, and run trpcClient.cyboflow.runs.list.query({}). Confirm the returned error contains NOT_IMPLEMENTED (proves end-to-end IPC link is alive). Plan Implementation Step 7 documents this manual smoke as the e2e gate; the smoke-test global was correctly never committed."
+  blocked_checks:
+    - "AC6: renderer can call trpcClient.cyboflow.runs.list.query() and receive NOT_IMPLEMENTED through the IPC bridge"
+  level: requirements
+  severity: medium
 
 ## Deferred Visual
 
