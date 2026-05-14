@@ -29,6 +29,13 @@ import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
+import { Orchestrator } from './orchestrator/Orchestrator';
+import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
+import { EventEmitter } from 'node:events';
+import { appRouter } from './orchestrator/trpc/router';
+import { createContext } from './orchestrator/trpc/context';
+import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
+import type { DatabaseLike } from './orchestrator/types';
 import * as fs from 'fs';
 
 export let mainWindow: BrowserWindow | null = null;
@@ -56,6 +63,7 @@ function setAppTitle() {
   return title;
 }
 let taskQueue: TaskQueue | null = null;
+let orchestrator: Orchestrator | null = null;
 
 // Service instances
 let configManager: ConfigManager;
@@ -673,6 +681,26 @@ app.whenReady().then(async () => {
   await createWindow();
   console.log('[Main] Window created successfully');
 
+  // Wire tRPC orchestrator after BrowserWindow is available
+  {
+    const runQueues = new RunQueueRegistry();
+    const db = databaseService as unknown as DatabaseLike;
+    // Logger adapter: Logger class satisfies info/warn/error but does not
+    // declare `debug`. Provide an inline adapter that satisfies LoggerLike.
+    const loggerLike: import('./orchestrator/types').LoggerLike = {
+      info: (msg: string) => logger.info(msg),
+      warn: (msg: string) => logger.warn(msg),
+      error: (msg: string) => logger.error(msg),
+      debug: (msg: string) => logger.info(`[debug] ${msg}`),
+    };
+    orchestrator = new Orchestrator({ db, logger: loggerLike, eventBus: new EventEmitter(), runQueues });
+    await orchestrator.start();
+    if (mainWindow) {
+      attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
+    }
+    console.log('[Main] Orchestrator started and tRPC IPC handler attached');
+  }
+
   // Track app lifecycle events
   try {
     const currentVersion = app.getVersion();
@@ -766,6 +794,13 @@ app.on('before-quit', async (event) => {
     return;
   }
   
+  // Stop orchestrator (drains run queues)
+  if (orchestrator) {
+    console.log('[Main] Stopping orchestrator...');
+    await orchestrator.stop();
+    console.log('[Main] Orchestrator stopped');
+  }
+
   // Cleanup all sessions and terminate child processes
   if (sessionManager) {
     console.log('[Main] Cleaning up sessions and terminating child processes...');
