@@ -36,7 +36,7 @@ export function isTransitionAllowed(
   from: WorkflowRunStatus,
   to: WorkflowRunStatus,
 ): boolean {
-  return (ALLOWED_TRANSITIONS[from] as readonly WorkflowRunStatus[]).includes(to);
+  return ALLOWED_TRANSITIONS[from].includes(to);
 }
 
 /**
