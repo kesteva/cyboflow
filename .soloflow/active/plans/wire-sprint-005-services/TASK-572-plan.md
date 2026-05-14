@@ -1,11 +1,14 @@
 ---
 id: TASK-572
 title: Wire orphan pipeline classes into production (umbrella)
-status: ready
+status: in-flight
 epic: wire-sprint-005-services
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-005
-depends_on: [TASK-568, TASK-573, TASK-574]
+depends_on:
+  - TASK-568
+  - TASK-573
+  - TASK-574
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
 files_readonly:
@@ -28,36 +31,35 @@ acceptance_criteria:
     verification: "grep -nE 'new RawEventsSink|\\.attachToRouter\\(' main/src/services/panels/claude/claudeCodeManager.ts returns >= 1 match each."
   - criterion: "`CompletionDetector` is instantiated per run; `signalChildExited()` fires on PTY exit, `signalStdoutEof()` fires on stdout end, and `signalParserDrained()` fires after `parser.flush()` completes."
     verification: "grep -nE 'new CompletionDetector|signalChildExited\\(\\)|signalStdoutEof\\(\\)|signalParserDrained\\(\\)' main/src/services/panels/claude/claudeCodeManager.ts returns >= 4 matches across the spawn + onExit + drain paths."
-  - criterion: "End-to-end grep gate — every SPRINT-005 orphan class has at least one production callsite."
+  - criterion: End-to-end grep gate — every SPRINT-005 orphan class has at least one production callsite.
     verification: "Run `grep -rEn 'MessageProjection|CompletionDetector|RawEventsSink|assertTransitionAllowed|transitionToAwaitingReview|ClaudeStreamParser' main/src --include='*.ts' | grep -v __tests__ | grep -v 'streamParser/messageProjection.ts' | grep -v 'streamParser/completionDetector.ts' | grep -v 'streamParser/rawEventsSink.ts' | grep -v 'streamParser/streamParser.ts' | grep -v 'streamParser/index.ts' | grep -v 'cyboflow/stateMachine.ts' | grep -v 'cyboflow/transitions.ts'`. Result must include >= 1 hit for each of the 6 symbols: `MessageProjection`, `CompletionDetector`, `RawEventsSink`, `assertTransitionAllowed`, `transitionToAwaitingReview`, `ClaudeStreamParser`."
   - criterion: "The dependent child tasks have all landed: TASK-568 (B1 — MessageProjection in IPC), TASK-573 (B6 — assertTransitionAllowed in transitions.ts), TASK-574 (B7 — ILogger consolidation)."
     verification: "ls .soloflow/archive/done/wire-sprint-005-services/TASK-568-done.md .soloflow/archive/done/wire-sprint-005-services/TASK-573-done.md .soloflow/archive/done/wire-sprint-005-services/TASK-574-done.md returns 3 file paths with exit 0 (existence check). [If a child landed in a different epic folder, adjust the path accordingly.]"
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
-    verification: "Exit code 0 for both."
+    verification: Exit code 0 for both.
   - criterion: "A new session created via the UI produces rows in `raw_events` for each stream-json event from the Claude CLI; `select count(*) from raw_events where run_id = ?` is > 0 after a fresh session completes."
     verification: "Manual smoke: `pnpm dev`, create + run a session, then inspect the SQLite DB at `~/Library/Application Support/cyboflow/cyboflow.db` (macOS) with `sqlite3 cyboflow.db 'select event_type, count(*) from raw_events group by event_type;'` and confirm at least one row per active event_type."
 estimated_complexity: high
 test_strategy:
   needed: true
-  justification: "The new wiring threads through `claudeCodeManager.ts` (an actively-tested file with sibling test `main/src/services/__tests__/claudeCodeManagerPermissions.test.ts`). Wiring a parser+sink+detector into the spawn path can subtly break the existing permission-mode test by changing the constructor surface. A focused integration test of the wiring also locks the contract that future refactors must preserve."
+  justification: The new wiring threads through `claudeCodeManager.ts` (an actively-tested file with sibling test `main/src/services/__tests__/claudeCodeManagerPermissions.test.ts`). Wiring a parser+sink+detector into the spawn path can subtly break the existing permission-mode test by changing the constructor surface. A focused integration test of the wiring also locks the contract that future refactors must preserve.
   targets:
-    - behavior: "A spawn call instantiates ClaudeStreamParser+EventRouter+RawEventsSink+CompletionDetector and fed PTY data results in raw_events rows + UnifiedMessage emissions."
-      test_file: "main/src/services/__tests__/claudeCodeManagerWiring.test.ts"
+    - behavior: A spawn call instantiates ClaudeStreamParser+EventRouter+RawEventsSink+CompletionDetector and fed PTY data results in raw_events rows + UnifiedMessage emissions.
+      test_file: main/src/services/__tests__/claudeCodeManagerWiring.test.ts
       type: integration
     - behavior: "The existing claudeCodeManagerPermissions.test.ts continues to assert that permissionMode='ignore' throws (no constructor-shape regression)."
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
 prerequisites:
   - check: "grep -q 'better-sqlite3' main/package.json"
-    fix: "pnpm --filter main add better-sqlite3"
-    description: "RawEventsSink requires better-sqlite3; this should already be declared but the umbrella wiring will fail at runtime if not."
+    fix: pnpm --filter main add better-sqlite3
+    description: RawEventsSink requires better-sqlite3; this should already be declared but the umbrella wiring will fail at runtime if not.
     blocking: true
-  - check: "test -f main/src/database/migrations/006_cyboflow_schema.sql"
-    fix: "git log --oneline -- main/src/database/migrations/006_cyboflow_schema.sql"
+  - check: test -f main/src/database/migrations/006_cyboflow_schema.sql
+    fix: git log --oneline -- main/src/database/migrations/006_cyboflow_schema.sql
     description: "The raw_events table is created by 006_cyboflow_schema.sql; absent migration means the sink's INSERTs will fail."
     blocking: true
 ---
-
 # Wire orphan pipeline classes into production (umbrella)
 
 ## Problem
