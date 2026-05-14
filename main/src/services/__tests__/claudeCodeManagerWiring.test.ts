@@ -268,4 +268,86 @@ describe('ClaudeCodeManager pipeline wiring', () => {
     // Malformed lines produce null from JSONParser → no row written
     expect(count).toBe(0);
   });
+
+  // -------------------------------------------------------------------------
+  // AC-5: Degraded-mode — sharedDb is null, no RawEventsSink, no throw
+  // -------------------------------------------------------------------------
+
+  it('degraded mode (sharedDb=null): feeding data does not throw and writes zero raw_events rows', () => {
+    // Override the shared DB to null before this test's manager is used.
+    // The beforeEach already called setSharedDb(db), so we reset to null here.
+    ClaudeCodeManager.setSharedDb(null as unknown as Database.Database);
+
+    const { pty } = makeMockPty();
+    manager.callSetupProcessHandlers(pty, PANEL_ID, SESSION_ID);
+
+    // The pipeline is still created (parser + router + detector), sink is null.
+    expect(manager.hasPipeline(PANEL_ID)).toBe(true);
+
+    // Feeding JSON data must not throw even though there is no sink.
+    expect(() => {
+      manager.callParseCliOutput(SYSTEM_INIT_LINE, PANEL_ID, SESSION_ID);
+    }).not.toThrow();
+
+    // No raw_events rows because RawEventsSink was not attached.
+    const count = (db.prepare('SELECT count(*) as n FROM raw_events WHERE run_id = ?').get(PANEL_ID) as { n: number }).n;
+    expect(count).toBe(0);
+
+    // Restore the shared DB so afterEach cleanup succeeds.
+    ClaudeCodeManager.setSharedDb(db);
+  });
+
+  // -------------------------------------------------------------------------
+  // AC-6: Multi-panel pipeline isolation — two panels are independent
+  // -------------------------------------------------------------------------
+
+  it('two panels each get independent pipelines and events do not cross-contaminate', () => {
+    const PANEL_A = 'panel-a-isolation';
+    const PANEL_B = 'panel-b-isolation';
+    const SESSION_A = 'session-a-isolation';
+    const SESSION_B = 'session-b-isolation';
+
+    const { pty: ptyA } = makeMockPty();
+    const { pty: ptyB } = makeMockPty();
+
+    manager.callSetupProcessHandlers(ptyA, PANEL_A, SESSION_A);
+    manager.callSetupProcessHandlers(ptyB, PANEL_B, SESSION_B);
+
+    // Both panels should have independent pipeline entries.
+    expect(manager.hasPipeline(PANEL_A)).toBe(true);
+    expect(manager.hasPipeline(PANEL_B)).toBe(true);
+
+    // Feed one event through Panel A only.
+    manager.callParseCliOutput(SYSTEM_INIT_LINE, PANEL_A, SESSION_A);
+
+    // Panel A should have 1 raw_events row keyed by its runId (= panelId).
+    const rowsA = db.prepare('SELECT event_type FROM raw_events WHERE run_id = ?').all(PANEL_A) as Array<{ event_type: string }>;
+    expect(rowsA).toHaveLength(1);
+
+    // Panel B must have 0 rows — events do not leak across pipelines.
+    const countB = (db.prepare('SELECT count(*) as n FROM raw_events WHERE run_id = ?').get(PANEL_B) as { n: number }).n;
+    expect(countB).toBe(0);
+
+    // Clean up both panels so the afterEach does not leave dangling pipelines.
+    void manager.killProcess(PANEL_A);
+    void manager.killProcess(PANEL_B);
+  });
+
+  // -------------------------------------------------------------------------
+  // AC-7: cleanupPipeline is idempotent — killProcess called twice is safe
+  // -------------------------------------------------------------------------
+
+  it('calling killProcess twice does not throw (cleanupPipeline is idempotent)', async () => {
+    const { pty } = makeMockPty();
+    manager.callSetupProcessHandlers(pty, PANEL_ID, SESSION_ID);
+
+    expect(manager.hasPipeline(PANEL_ID)).toBe(true);
+
+    await manager.killProcess(PANEL_ID);
+    expect(manager.hasPipeline(PANEL_ID)).toBe(false);
+
+    // Second killProcess: pipeline is already gone, must not throw.
+    await expect(manager.killProcess(PANEL_ID)).resolves.toBeUndefined();
+    expect(manager.hasPipeline(PANEL_ID)).toBe(false);
+  });
 });
