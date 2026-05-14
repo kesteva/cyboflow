@@ -2,11 +2,10 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { app } from 'electron';
 import { PermissionManager } from './permissionManager';
-import { getCrystalSubdirectory } from '../utils/crystalDirectory';
+import { getCyboflowSubdirectory } from '../utils/crystalDirectory';
 
-export class PermissionIpcServer {
+export class CyboflowPermissionIpcServer {
   private server: net.Server | null = null;
   private clients: Map<string, net.Socket> = new Map();
   private socketPath: string;
@@ -16,7 +15,7 @@ export class PermissionIpcServer {
     // DMG apps can write to user's home directory
     let socketDir: string;
     try {
-      socketDir = getCrystalSubdirectory('sockets');
+      socketDir = getCyboflowSubdirectory('sockets');
       
       // Ensure the directory exists
       if (!fs.existsSync(socketDir)) {
@@ -32,7 +31,7 @@ export class PermissionIpcServer {
       socketDir = os.tmpdir();
     }
     
-    this.socketPath = path.join(socketDir, `crystal-permissions-${process.pid}.sock`);
+    this.socketPath = path.join(socketDir, `cyboflow-permissions-${process.pid}.sock`);
   }
 
   start(): Promise<void> {

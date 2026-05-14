@@ -15,7 +15,7 @@ export class MCPPermissionServer {
   constructor(sessionId: string) {
     this.sessionId = sessionId;
     this.server = new Server({
-      name: 'crystal-permissions',
+      name: 'cyboflow-permissions',
       version: '1.0.0'
     }, {
       capabilities: {

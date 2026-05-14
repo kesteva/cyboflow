@@ -102,8 +102,8 @@
     "asarUnpack": [
       "node_modules/**/*.node",
       "!node_modules/@anthropic-ai/claude-code/vendor/**",
-      "main/dist/services/mcpPermissionBridge.js",
-      "main/dist/services/mcpPermissionBridgeStandalone.js",
+      "main/dist/services/cyboflowPermissionBridge.js",
+      "main/dist/services/cyboflowPermissionBridgeStandalone.js",
       "main/dist/services/**/*.js"
     ],
     "afterSign": "build/afterSign.js",

@@ -19,7 +19,7 @@ const ipcPath = process.argv[3];
 
 if (!sessionId || !ipcPath) {
   console.error('[MCP Bridge] ERROR: Missing required arguments');
-  console.error('[MCP Bridge] Usage: node mcpPermissionBridge.js <sessionId> <ipcPath>');
+  console.error('[MCP Bridge] Usage: node cyboflowPermissionBridge.js <sessionId> <ipcPath>');
   process.exit(1);
 }
 
@@ -138,7 +138,7 @@ class SimpleMCPServer {
             tools: {}
           },
           serverInfo: {
-            name: 'crystal-permissions',
+            name: 'cyboflow-permissions',
             version: '1.0.0'
           }
         }
@@ -261,7 +261,7 @@ process.on('SIGINT', () => {
 `;
 
 // Write the standalone script
-const outputPath = path.join(__dirname, 'dist/main/src/services/mcpPermissionBridgeStandalone.js');
+const outputPath = path.join(__dirname, 'dist/main/src/services/cyboflowPermissionBridgeStandalone.js');
 const outputDir = path.dirname(outputPath);
 if (!fs.existsSync(outputDir)) {
   fs.mkdirSync(outputDir, { recursive: true });
