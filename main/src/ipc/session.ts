@@ -28,6 +28,14 @@ import type { SessionOutput } from '../types/session';
  * events, stream_event deltas) are filtered out. The persisted output timestamp
  * is used in place of MessageProjection's `new Date()` default so that UI
  * ordering reflects the actual run time.
+ *
+ * NOTE — legacy read path: this helper reads from session_outputs (written by
+ * the inline JSON-emit branch in claudeCodeManager.parseCliOutput). The parallel
+ * pipeline (ClaudeStreamParser -> EventRouter -> RawEventsSink -> raw_events
+ * table, also wired in claudeCodeManager) is the intended long-term read source
+ * once the renderer migrates from panels:get-json-messages to the
+ * EventRouter/tRPC path (Day-3 cutover — TBD task ID). Do NOT merge these
+ * paths until that migration lands.
  */
 export function projectStoredOutputs(
   outputs: SessionOutput[],
