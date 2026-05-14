@@ -41,6 +41,8 @@ export function attachOrchestratorTrpc({
   createIPCHandler({
     router,
     windows: [window],
+    // TODO(v2): forward opts.event to createContext so procedures can read the
+    // originating IpcMainInvokeEvent (e.g. for per-window auth-principal resolution).
     createContext: () => Promise.resolve(createContext()),
   });
 }

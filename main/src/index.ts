@@ -684,7 +684,15 @@ app.whenReady().then(async () => {
   // Wire tRPC orchestrator after BrowserWindow is available
   {
     const runQueues = new RunQueueRegistry();
-    const db = databaseService as unknown as DatabaseLike;
+    // Inline adapter: expose the narrow DatabaseLike surface by delegating to
+    // the underlying better-sqlite3 handle.  Using getDb() avoids the
+    // type-erasure cast (as unknown as DatabaseLike) that previously bypassed
+    // the structural check and would have thrown at runtime if any orchestrator
+    // code called db.prepare() or db.transaction().
+    const db: DatabaseLike = {
+      prepare: (sql) => databaseService.getDb().prepare(sql),
+      transaction: (fn) => databaseService.getDb().transaction(fn),
+    };
     // Logger adapter: Logger class satisfies info/warn/error but does not
     // declare `debug`. Provide an inline adapter that satisfies LoggerLike.
     const loggerLike: import('./orchestrator/types').LoggerLike = {
