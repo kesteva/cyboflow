@@ -77,7 +77,7 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let permissionIpcServer: CyboflowPermissionIpcServer | null;
+let cyboflowPermissionIpcServer: CyboflowPermissionIpcServer | null;
 let versionChecker: VersionChecker;
 let stravuAuthManager: StravuAuthManager;
 let stravuNotebookService: StravuNotebookService;
@@ -562,19 +562,19 @@ async function initializeServices() {
 
   // Start permission IPC server
   console.log('[Main] Initializing Permission IPC server...');
-  permissionIpcServer = new CyboflowPermissionIpcServer();
+  cyboflowPermissionIpcServer = new CyboflowPermissionIpcServer();
   console.log('[Main] Starting Permission IPC server...');
 
   let permissionIpcPath: string | null = null;
   try {
-    await permissionIpcServer.start();
-    permissionIpcPath = permissionIpcServer.getSocketPath();
+    await cyboflowPermissionIpcServer.start();
+    permissionIpcPath = cyboflowPermissionIpcServer.getSocketPath();
     console.log('[Main] Permission IPC server started successfully');
     console.log('[Main] Permission IPC socket path:', permissionIpcPath);
   } catch (error) {
     console.error('[Main] Failed to start Permission IPC server:', error);
     console.error('[Main] Permission-based MCP will be disabled');
-    permissionIpcServer = null;
+    cyboflowPermissionIpcServer = null;
   }
 
   // Create worktree manager with configManager and analyticsManager
@@ -843,9 +843,9 @@ app.on('before-quit', async (event) => {
   }
 
   // Stop permission IPC server
-  if (permissionIpcServer) {
+  if (cyboflowPermissionIpcServer) {
     console.log('[Main] Stopping permission IPC server...');
-    await permissionIpcServer.stop();
+    await cyboflowPermissionIpcServer.stop();
     console.log('[Main] Permission IPC server stopped');
   }
   
