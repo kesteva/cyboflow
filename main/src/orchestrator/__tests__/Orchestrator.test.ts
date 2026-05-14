@@ -118,6 +118,41 @@ describe('Orchestrator', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test: stop is a no-op when orchestrator is not running
+  // -------------------------------------------------------------------------
+  it('stop is a no-op when orchestrator has not been started', async () => {
+    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+
+    // Precondition: not yet started
+    expect(orchestrator.isRunning()).toBe(false);
+
+    // stop() should return immediately without logging or touching queues
+    await orchestrator.stop();
+
+    expect(orchestrator.isRunning()).toBe(false);
+
+    const stopMessages = logger.calls.map((c) => c.message);
+    expect(stopMessages).not.toContain('orchestrator.stop.begin');
+    expect(stopMessages).not.toContain('orchestrator.stop.complete');
+  });
+
+  // -------------------------------------------------------------------------
+  // Test: start() emits expected log message on first call
+  // -------------------------------------------------------------------------
+  it('start emits orchestrator.start info log on first call', async () => {
+    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+
+    await orchestrator.start();
+
+    const infoMessages = logger.calls
+      .filter((c) => c.level === 'info')
+      .map((c) => c.message);
+    expect(infoMessages).toContain('orchestrator.start');
+
+    await orchestrator.stop();
+  });
+
+  // -------------------------------------------------------------------------
   // Test: stop drains the run queue registry
   // -------------------------------------------------------------------------
   it('stop drains the run queue registry', async () => {
