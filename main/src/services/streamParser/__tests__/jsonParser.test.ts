@@ -8,13 +8,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { JSONParser } from '../jsonParser';
-import type { IWarnLogger } from '../jsonParser';
+import type { ILogger } from '../types';
 
 // ---------------------------------------------------------------------------
 // Logger spy factory
 // ---------------------------------------------------------------------------
 
-function makeLoggerSpy(): IWarnLogger & { warnCalls: string[] } {
+function makeLoggerSpy(): Pick<ILogger, 'warn'> & { warnCalls: string[] } {
   const warnCalls: string[] = [];
   return {
     warnCalls,
@@ -25,7 +25,7 @@ function makeLoggerSpy(): IWarnLogger & { warnCalls: string[] } {
 }
 
 describe('JSONParser', () => {
-  let logger: IWarnLogger & { warnCalls: string[] };
+  let logger: Pick<ILogger, 'warn'> & { warnCalls: string[] };
   let parser: JSONParser;
 
   beforeEach(() => {
@@ -95,12 +95,12 @@ describe('JSONParser', () => {
 
   it('never calls logger.error — warn-only contract for parse failures', () => {
     // Cast to extended type so we can spy on error
-    const strictLogger: IWarnLogger & { errorCalled: boolean } = {
+    const strictLogger: Pick<ILogger, 'warn'> & { errorCalled: boolean } = {
       errorCalled: false,
       warn: vi.fn() as (message: string) => void,
     };
-    // Attach an error spy as a side-channel (not part of IWarnLogger interface)
-    // We verify via the interface contract — IWarnLogger has no error method.
+    // Attach an error spy as a side-channel (not part of Pick<ILogger, 'warn'> interface)
+    // We verify via the interface contract — Pick<ILogger, 'warn'> has no error method.
     // The class must not call anything other than warn().
     const strictParser = new JSONParser(strictLogger);
     expect(() => strictParser.parse('broken')).not.toThrow();

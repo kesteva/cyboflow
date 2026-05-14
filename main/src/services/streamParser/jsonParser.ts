@@ -11,9 +11,6 @@
 
 import type { ILogger } from './types';
 
-/** @deprecated Use ILogger from './types' instead. */
-export type IWarnLogger = Pick<ILogger, 'warn'>;
-
 export class JSONParser {
   private readonly logger: Pick<ILogger, 'warn'> | undefined;
 
