@@ -6,8 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "tsc -w",
-    "build": "rimraf dist && tsc && npm run copy:assets && npm run bundle:mcp",
-    "bundle:mcp": "node build-cyboflow-permission-bridge.js",
+    "build": "rimraf dist && tsc && npm run copy:assets",
     "copy:assets": "mkdirp dist/main/src/database/migrations && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
