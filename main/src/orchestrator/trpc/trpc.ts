@@ -32,3 +32,15 @@ const isAuthed = t.middleware(({ ctx, next }) => {
 
 /** Procedure that requires an authenticated session (userId defined). */
 export const protectedProcedure = t.procedure.use(isAuthed);
+
+/**
+ * Throw a not-implemented placeholder for stub procedures. Every stub
+ * procedure body calls this so future epic tasks can grep for
+ * `throwNotImplemented` to find remaining stubs.
+ */
+export function throwNotImplemented(epicName: string): never {
+  throw new TRPCError({
+    code: 'METHOD_NOT_SUPPORTED',
+    message: `TODO: implemented in ${epicName} epic`,
+  });
+}

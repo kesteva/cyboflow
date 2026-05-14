@@ -1,29 +1,23 @@
 /**
  * cyboflow.workflows sub-router.
  *
- * All procedure bodies are deliberate NOT_IMPLEMENTED placeholders.
- * They will be filled in during the workflow-runs epic.
+ * All procedure bodies are deliberate not-implemented placeholders.
+ * They will be filled in during the workflow-runs epic — grep for
+ * `throwNotImplemented` to find every remaining stub.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
-import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
-import { router, protectedProcedure } from '../trpc';
-
-const NOT_IMPLEMENTED_MSG = 'TODO: implemented in workflow-runs epic';
+import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 
 export const workflowsRouter = router({
   /** List all workflows for the current user. */
   list: protectedProcedure
-    .query(() => {
-      throw new TRPCError({ code: 'NOT_IMPLEMENTED', message: NOT_IMPLEMENTED_MSG });
-    }),
+    .query(() => throwNotImplemented('workflow-runs')),
 
   /** Get a single workflow by ID. */
   get: protectedProcedure
     .input(z.object({ workflowId: z.string() }))
-    .query(() => {
-      throw new TRPCError({ code: 'NOT_IMPLEMENTED', message: NOT_IMPLEMENTED_MSG });
-    }),
+    .query(() => throwNotImplemented('workflow-runs')),
 });
