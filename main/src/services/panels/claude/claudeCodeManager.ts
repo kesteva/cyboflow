@@ -43,7 +43,6 @@ interface ClaudeSdkRun {
 
 /** Stub CliProcess shape that satisfies AbstractCliManager's processes map. */
 interface StubCliProcess {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- required to satisfy parent's Map<string, CliProcess> type; PTY is never accessed on SDK paths
   process: never;
   panelId: string;
   sessionId: string;
@@ -139,8 +138,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return {};
   }
 
-  protected async cleanupCliResources(sessionId: string): Promise<void> {
-    ApprovalRouter.getInstance().clearPendingForRun(sessionId);
+  protected async cleanupCliResources(_sessionId: string): Promise<void> {
+    // Approval cleanup is done in runSdkQuery's finally block via
+    // ApprovalRouter.getInstance().clearPendingForRun(panelId) — using panelId
+    // (the id under which requestApproval() was called) rather than sessionId.
+    // This override satisfies the abstract contract; future cleanup hooks go here.
   }
 
   protected async getCliEnvironment(_options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
@@ -309,7 +311,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
     } finally {
       this.cleanupPipeline(panelId);
-      await this.cleanupCliResources(sessionId);
+      // Clear pending approvals under panelId — the same id passed to requestApproval().
+      // cleanupCliResources takes sessionId (abstract contract) so we call the router directly here.
+      ApprovalRouter.getInstance().clearPendingForRun(panelId);
       this.processes.delete(panelId);
       this.sdkRuns.delete(panelId);
       this.emit('exit', {
@@ -336,11 +340,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
       },
       mcpServers: this.composeMcpServers(options),
       env: this.composeRunEnv(options),
-      hooks: {
-        PreToolUse: [{
-          hooks: [this.makePreToolUseHook(options.panelId)]
-        }]
-      }
+      // When permissionMode is 'ignore', omit PreToolUse entirely so every tool call
+      // is auto-allowed by the SDK — matching the pre-SDK "skip the bridge" behavior.
+      ...(options.permissionMode !== 'ignore' ? {
+        hooks: {
+          PreToolUse: [{
+            hooks: [this.makePreToolUseHook(options.panelId)]
+          }]
+        }
+      } : {})
     };
 
     if (options.model && options.model !== 'auto') {
@@ -360,7 +368,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   private composeSystemPromptAppend(options: ClaudeSpawnOptions): string | undefined {
     const dbSession = this.sessionManager.getDbSession(options.sessionId);
-    return this.buildSystemPromptAppend(dbSession ? { ...dbSession, project_id: dbSession.project_id } : { id: options.sessionId });
+    return this.buildSystemPromptAppend(dbSession ? { ...dbSession } : { id: options.sessionId });
   }
 
   /**
@@ -375,9 +383,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return mcpServers as Record<string, { type?: 'stdio'; command: string; args?: string[] }>;
   }
 
-  private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string> {
+  private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string | undefined> {
     const verbose = this.configManager?.getConfig()?.verbose;
     return {
+      ...process.env,
       CYBOFLOW_RUN_ID: options.panelId,
       ...(verbose ? { MCP_DEBUG: '1' } : {})
     };
