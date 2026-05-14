@@ -60,8 +60,11 @@ export class DatabaseService {
     // Ensure the directory exists before creating the database
     const dir = dirname(dbPath);
     mkdirSync(dir, { recursive: true });
-    
+
     this.db = new Database(dbPath);
+    // SQLite ignores FOREIGN KEY ... ON DELETE CASCADE unless this pragma is set.
+    // Applies per-connection; must run before any FK-bearing schema is queried.
+    this.db.pragma('foreign_keys = ON');
   }
 
   /**
