@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-008
-pending_count: 3
-last_updated: "2026-05-14T23:15:19.579Z"
+pending_count: 5
+last_updated: "2026-05-14T23:25:17.623Z"
 ---
 # Findings Queue
 
@@ -46,3 +46,21 @@ last_updated: "2026-05-14T23:15:19.579Z"
 - **description:** Two different IDs are passed as `runId` to ApprovalRouter depending on the codepath. The legacy bridge path (`cyboflowPermissionIpcServer.ts`) calls `requestApproval(sessionId, ...)` — runId = Crystal sessionId. The new SDK path (`claudeCodeManager.ts:394`) calls `requestApproval(panelId, ...)` — runId = panelId. Critically, in the same SDK file, `cleanupCliResources(sessionId)` calls `clearPendingForRun(sessionId)` — using a DIFFERENT id from what `requestApproval` was called with. Currently masked because `clearPendingForRun` is a documented stub (no-op), but when TASK-304 implements its full body, the SDK path will fail to clean up pending approvals on run termination because it's looking for entries under `sessionId` while they're indexed by `panelId`. ApprovalRouter's docstring also doesn't pin down which one is canonical, leaving the contract ambiguous for the next consumer.
 - **suggested_action:** Pick one canonical convention (panelId, since that matches workflow_runs.id semantics per the @cyboflow-hidden comment), update ApprovalRouter to document it, change `cyboflowPermissionIpcServer.ts` to pass panelId (the IPC bridge will be removed by TASK-580+ but the inconsistency should be fixed first or removed together), and in `claudeCodeManager.ts` change `cleanupCliResources` so it calls `clearPendingForRun(panelId)` not `clearPendingForRun(sessionId)`. Best aligned with TASK-304 (clearPendingForRun implementation) since the convention must be settled before that body is written.
 - **resolved_by:** TASK-590
+
+## FIND-SPRINT-008-5
+- **type:** cleanup
+- **source:** TASK-592 (executor)
+- **severity:** low
+- **status:** open
+- **location:** main/src/ipc/session.ts:34, main/src/services/__tests__/claudeCodeManagerWiring.test.ts:5,268
+- **description:** Stale JSDoc/inline comments still name ClaudeStreamParser and JSONParser after those symbols were deleted in TASK-590 and TASK-592. These are comment-only references (no symbol import or usage), so they do not break compilation or tests, but the AC-6 grep (exit 1) fires on them. Both files are outside TASK-592 files_owned (session.ts is files_readonly; claudeCodeManagerWiring.test.ts is unclaimed). A follow-up task should update or remove the stale comment text.
+- **suggested_action:** Remove or reword the legacy pipeline descriptions in both files to reflect the SDK-shaped event pipeline introduced in TASK-590.
+
+## FIND-SPRINT-008-6
+- **type:** cleanup
+- **source:** TASK-591 (executor)
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/cyboflowPermissionBridge.ts
+- **description:** cyboflowPermissionBridge.ts is now dead code: TASK-590 removed all callers and TASK-591 deleted the JS build artifact. tsc still emits dist/main/src/services/cyboflowPermissionBridge.js and .d.ts on every build. The file was intentionally left out of TASK-591 scope per the plan. Schedule deletion in a dead-code sweep sprint after TASK-595 confirms SDK substrate is fully operational.
+- **suggested_action:** Delete main/src/services/cyboflowPermissionBridge.ts in a follow-up dead-code sweep task. Also remove the glob main/dist/services/**/*.js from asarUnpack if it re-includes bridge outputs, or add a negation entry.
