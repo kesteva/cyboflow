@@ -1,8 +1,8 @@
 ---
 id: TASK-593
 idea: IDEA-014
-status: approved
-created: 2026-05-14T00:00:00Z
+status: ready
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/completionDetector.ts
   - main/src/services/streamParser/__tests__/completionDetector.test.ts
@@ -12,26 +12,27 @@ files_readonly:
   - main/src/services/__tests__/claudeCodeManagerWiring.test.ts
   - .soloflow/active/plans/claude-agent-sdk-migration/EPIC-claude-agent-sdk-migration.md
 acceptance_criteria:
-  - criterion: "main/src/services/streamParser/completionDetector.ts no longer exists on disk."
+  - criterion: main/src/services/streamParser/completionDetector.ts no longer exists on disk.
     verification: "test ! -e main/src/services/streamParser/completionDetector.ts; echo $?  # must print 0"
-  - criterion: "main/src/services/streamParser/__tests__/completionDetector.test.ts no longer exists on disk."
+  - criterion: main/src/services/streamParser/__tests__/completionDetector.test.ts no longer exists on disk.
     verification: "test ! -e main/src/services/streamParser/__tests__/completionDetector.test.ts; echo $?  # must print 0"
   - criterion: "main/src/services/streamParser/index.ts no longer re-exports CompletionDetector, CompletionPayload, or ForcedPayload."
     verification: "grep -nE 'CompletionDetector|CompletionPayload|ForcedPayload' main/src/services/streamParser/index.ts returns 0 matches (exit 1)."
   - criterion: "No file under main/ or shared/ references the deleted detector by class name, module name, or exported type."
     verification: "grep -rn 'completionDetector\\|CompletionDetector\\|CompletionPayload\\|ForcedPayload' main/ shared/ returns 0 matches (exit 1)."
   - criterion: "pnpm typecheck succeeds (no dangling imports, no missing-module errors)."
-    verification: "pnpm typecheck exits 0."
-  - criterion: "The streamParser-package test subset still passes (every test file under main/src/services/streamParser/__tests__/ that survives this task)."
-    verification: "pnpm --filter main test -- main/src/services/streamParser/__tests__/ exits 0."
-depends_on: [TASK-590, TASK-592]
+    verification: pnpm typecheck exits 0.
+  - criterion: The streamParser-package test subset still passes (every test file under main/src/services/streamParser/__tests__/ that survives this task).
+    verification: pnpm --filter main test -- main/src/services/streamParser/__tests__/ exits 0.
+depends_on:
+  - TASK-590
+  - TASK-592
 estimated_complexity: low
 epic: claude-agent-sdk-migration
 test_strategy:
   needed: false
   justification: "This task is a pure deletion of dead code (the file and its test) plus a 2-line barrel prune. No new behavior is introduced. Sibling tests in main/src/services/streamParser/__tests__/ exist but none of them import CompletionDetector, CompletionPayload, or ForcedPayload — they import sibling modules from '../<module>' directly, not via the barrel, and none of them assert on the detector's exports. The wiring test main/src/services/__tests__/claudeCodeManagerWiring.test.ts DOES reference CompletionDetector today, but updating it belongs to TASK-590 (the claudeCodeManager rewrite); if any reference survives at this task's pre-flight, that is a T590 escape and this task must halt rather than absorb the fix. Existing parser-subset test execution (AC verification) is the regression net for the barrel prune."
 ---
-
 # Delete CompletionDetector and verify SDK promise resolution replaced triple-gate watchdog
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-587
 idea: IDEA-014
-status: approved
+status: ready
 created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/package.json

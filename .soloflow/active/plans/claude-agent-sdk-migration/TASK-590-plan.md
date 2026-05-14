@@ -1,8 +1,8 @@
 ---
 id: TASK-590
 idea: IDEA-014
-status: approved
-created: 2026-05-14T00:00:00Z
+status: ready
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
 files_readonly:
@@ -36,28 +36,30 @@ acceptance_criteria:
     verification: "grep -nE 'findExecutableInPath|testClaudeCodeInDirectory|testClaudeCodeAvailability|claudeCodeTest' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches."
   - criterion: "All 8 parity SDK options are passed to query(): cwd, model (omit-for-auto), mcpServers, systemPrompt with preset:claude_code, includePartialMessages:true, resume (when continuing), hooks.PreToolUse, env."
     verification: "Open main/src/services/panels/claude/claudeCodeManager.ts and confirm that the literal options object passed to query() contains property keys: cwd, mcpServers, systemPrompt, includePartialMessages, hooks, env. Also confirm `model` is conditionally set when options.model && options.model !== 'auto', and `resume` is conditionally set when isResume===true. systemPrompt literal contains `type: 'preset'` and `preset: 'claude_code'`."
-  - criterion: "session_id is captured from the first SystemInitEvent and routed through the existing addPanelOutput auto-capture (no new direct sessionManager writes added)."
+  - criterion: session_id is captured from the first SystemInitEvent and routed through the existing addPanelOutput auto-capture (no new direct sessionManager writes added).
     verification: "Open the file and confirm that for every event yielded by the query iterator where event.type === 'system', the manager emits an `output` event with type: 'json' and data: event so AbstractAIPanelManager forwards it to sessionManager.addPanelOutput (which already extracts session_id from system/init per sessionManager.ts:849-858 and :935-959)."
-  - criterion: "PreToolUse hook invokes ApprovalRouter and translates ApprovalDecision to the SDK hookSpecificOutput shape."
+  - criterion: PreToolUse hook invokes ApprovalRouter and translates ApprovalDecision to the SDK hookSpecificOutput shape.
     verification: "grep -n 'ApprovalRouter' main/src/services/panels/claude/claudeCodeManager.ts shows the hook callback calling ApprovalRouter.getInstance().requestApproval(...); confirm the returned decision.behavior maps 'allow' -> { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: decision.updatedInput } } and 'deny' -> { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: decision.message } }."
-  - criterion: "continuePanel issues a fresh query() with options.resume set to the persisted session_id rather than spawning a process."
+  - criterion: continuePanel issues a fresh query() with options.resume set to the persisted session_id rather than spawning a process.
     verification: "Open continuePanel in the file and confirm it ultimately calls spawnCliProcess (or equivalent SDK-spawn helper) with isResume:true; confirm no process.kill / spawn / pty references remain in the continuePanel control flow."
-  - criterion: "MCP servers are passed inline as an object literal (no temp .json file written for the cyboflow-permissions server)."
+  - criterion: MCP servers are passed inline as an object literal (no temp .json file written for the cyboflow-permissions server).
     verification: "grep -nE 'mcp-config|setupMcpConfigurationSync|fs.writeFileSync.*mcp' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches for the cyboflow-permissions config writer."
   - criterion: "The bridge-spawn path is removed (no --permission-prompt-tool argv, no cyboflowPermissionBridge import or path computation)."
     verification: "grep -nE 'permission-prompt-tool|cyboflowPermissionBridge|build-cyboflow-permission-bridge' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches."
   - criterion: "Completion detection no longer uses CompletionDetector; the query() async iterator's natural termination triggers cleanup and the existing 'exit' event upstream."
     verification: "grep -n 'CompletionDetector' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches. Confirm that after the iterator completes the manager calls cleanupPipeline and emits an 'exit' event with the same payload shape AbstractAIPanelManager forwards (panelId, sessionId, exitCode, signal)."
-  - criterion: "pnpm typecheck passes."
+  - criterion: pnpm typecheck passes.
     verification: "Run `cd main && pnpm typecheck` and `pnpm typecheck` from repo root; both exit 0."
-depends_on: [TASK-587, TASK-588, TASK-589]
+depends_on:
+  - TASK-587
+  - TASK-588
+  - TASK-589
 estimated_complexity: high
 epic: claude-agent-sdk-migration
 test_strategy:
   needed: false
   justification: "Per the EPIC, task-skeleton scope, and IDEA prior-art notes, unit-test migration is explicitly out of scope for T4 and is owned by TASK-594. The existing sibling test files (main/src/services/__tests__/claudeCodeManagerWiring.test.ts and main/src/services/__tests__/claudeCodeManagerPermissions.test.ts) will break under this rewrite — that is the expected, scoped consequence T4 hands off to TASK-594. T4 is intentionally allowed to land with those tests temporarily red. Verification gate for T4 is `pnpm typecheck` plus a manual `pnpm dev` smoke from the executor; full red-to-green test parity is the explicit gate on TASK-594, which depends_on TASK-592 and TASK-593 specifically so the test rewrite happens against a settled new substrate. Spec-internal note: I read both sibling test files; both directly assert PTY-spawn / parseCliOutput / CompletionDetector behavior that is removed by this task — there is no surgical fix that keeps them green within T4's diff. The orchestrator should plan to land T4 with these two test files broken, and T4 -> T8 (TASK-594) is the unblock path."
 ---
-
 # Rewrite claudeCodeManager.ts to use SDK query() — all 8 parity options wired
 
 ## Objective
