@@ -25,11 +25,7 @@
 import type Database from 'better-sqlite3';
 import type { EventRouter } from './eventRouter';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-
-/** Minimal logger interface for WARN-level insert failures. */
-export interface IRawEventsSinkLogger {
-  warn(message: string): void;
-}
+import type { ILogger } from './types';
 
 /**
  * Derives the event_type string for storage.
@@ -49,7 +45,7 @@ function deriveEventType(event: ClaudeStreamEvent): string {
 
 export class RawEventsSink {
   private readonly db: Database.Database;
-  private readonly logger: IRawEventsSinkLogger | undefined;
+  private readonly logger: Pick<ILogger, 'warn'> | undefined;
   private readonly insertStmt: Database.Statement;
 
   /**
@@ -58,7 +54,7 @@ export class RawEventsSink {
    */
   private readonly teardowns = new Map<string, () => void>();
 
-  constructor(db: Database.Database, logger?: IRawEventsSinkLogger) {
+  constructor(db: Database.Database, logger?: Pick<ILogger, 'warn'>) {
     this.db = db;
     this.logger = logger;
 
