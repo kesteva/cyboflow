@@ -1,7 +1,7 @@
 ---
 id: TASK-568
-title: Wire MessageProjection into panels:get-json-messages IPC handler
-status: ready
+title: "Wire MessageProjection into panels:get-json-messages IPC handler"
+status: in-flight
 epic: wire-sprint-005-services
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-005
@@ -21,25 +21,23 @@ acceptance_criteria:
     verification: "grep -n 'MessageProjection' main/src/ipc/session.ts returns at least one match inside the handler body for 'panels:get-json-messages'; grep -n 'TypedEventNarrowing' main/src/ipc/session.ts returns at least one match in the same handler."
   - criterion: "Opening a session's Claude panel after a fresh run does not throw `TypeError: Cannot read properties of undefined (reading 'some')` in the renderer."
     verification: "Manual smoke: `pnpm dev`, create a session with a prompt, wait for output, open the Claude panel. cyboflow-frontend-debug.log contains no TypeError matching /Cannot read properties of undefined .*'some'/."
-  - criterion: "Every stored raw stream-json output is fed through `TypedEventNarrowing.narrow()` then `MessageProjection.project()` before the IPC returns; null results (events with no renderable content) are filtered out of the response array."
+  - criterion: Every stored raw stream-json output is fed through `TypedEventNarrowing.narrow()` then `MessageProjection.project()` before the IPC returns; null results (events with no renderable content) are filtered out of the response array.
     verification: "grep -nE 'narrow\\(|project\\(|filter\\(' main/src/ipc/session.ts returns matches inside the panels:get-json-messages handler block (lines ~869-923)."
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
-    verification: "Exit code 0 for both commands."
-depends_on: []
+    verification: Exit code 0 for both commands.
 estimated_complexity: medium
 test_strategy:
   needed: true
   justification: "The IPC handler currently has no direct unit test, and the wiring introduces a new data transform that the renderer depends on. A focused integration-style vitest test of the handler's projection pipeline locks the regression."
   targets:
     - behavior: "Stored raw system/init + assistant events are projected to UnifiedMessage[] with `.segments` populated."
-      test_file: "main/src/ipc/__tests__/sessionJsonMessages.test.ts"
+      test_file: main/src/ipc/__tests__/sessionJsonMessages.test.ts
       type: integration
     - behavior: "Events that project to null (e.g. user events with only tool_result blocks, stream_event deltas) are filtered out of the returned array."
-      test_file: "main/src/ipc/__tests__/sessionJsonMessages.test.ts"
+      test_file: main/src/ipc/__tests__/sessionJsonMessages.test.ts
       type: integration
 prerequisites: []
 ---
-
 # Wire MessageProjection into panels:get-json-messages IPC handler
 
 ## Problem

@@ -1,7 +1,7 @@
 ---
 id: TASK-574
 title: Consolidate streamParser logger interfaces into shared ILogger
-status: ready
+status: in-flight
 epic: wire-sprint-005-services
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-005
@@ -28,19 +28,18 @@ acceptance_criteria:
     verification: "grep -nE 'export interface ILogger' main/src/services/streamParser/types.ts returns 1 match; the interface body includes `warn(`, `info?(`, and `verbose?(`."
   - criterion: "Each of the six per-file logger interfaces is REMOVED from its origin file: `IWarnLogger` (jsonParser.ts), `IDebugLogger` (typedEventNarrowing.ts), `IStreamParserLogger` (streamParser.ts), `ICompletionDetectorLogger` (completionDetector.ts), `IRawEventsSinkLogger` (rawEventsSink.ts), `IMessageProjectionLogger` (messageProjection.ts). Each file's class constructor now accepts `ILogger | undefined` (or a narrower `Pick<ILogger, 'warn'>` alias) from the shared `./types` module."
     verification: "grep -nE 'export interface (IWarnLogger|IDebugLogger|IStreamParserLogger|ICompletionDetectorLogger|IRawEventsSinkLogger|IMessageProjectionLogger)' main/src/services/streamParser/ returns 0 matches across the streamParser directory."
-  - criterion: "The barrel export `main/src/services/streamParser/index.ts` exports `ILogger` from `./types` and no longer re-exports the six removed per-file logger types."
+  - criterion: The barrel export `main/src/services/streamParser/index.ts` exports `ILogger` from `./types` and no longer re-exports the six removed per-file logger types.
     verification: "grep -nE \"export type \\{ ILogger \\} from './types'\" main/src/services/streamParser/index.ts returns 1 match; grep -nE 'export type \\{ (IWarnLogger|IDebugLogger|IStreamParserLogger|ICompletionDetectorLogger|IRawEventsSinkLogger|IMessageProjectionLogger) \\}' main/src/services/streamParser/index.ts returns 0 matches."
   - criterion: "All sibling tests (`jsonParser.test.ts`, `typedEventNarrowing.test.ts`, `streamParser.test.ts`, `completionDetector.test.ts`, `rawEventsSink.test.ts`, `messageProjection.test.ts`) continue to pass without modification. Each test instantiates its class with an inline-object mock logger that satisfies the new `ILogger` shape (the existing inline mocks already satisfy the union)."
     verification: "`pnpm --filter main exec vitest run main/src/services/streamParser/__tests__/` exits 0."
   - criterion: "`pnpm typecheck` passes."
-    verification: "Exit code 0."
+    verification: Exit code 0.
 estimated_complexity: low
 test_strategy:
   needed: false
   justification: "This is a type-surface consolidation — no runtime behavior changes. Six sibling tests exist (jsonParser.test.ts, typedEventNarrowing.test.ts, streamParser.test.ts, completionDetector.test.ts, rawEventsSink.test.ts, messageProjection.test.ts). Each test already instantiates the class under test with an inline-object mock logger (e.g. `{ warn: vi.fn() }`). The new ILogger union is structurally compatible — `Pick<ILogger, 'warn'>` is exactly the shape those mocks already satisfy. Tests are guaranteed green if the type-surface change preserves: (1) parameter position of logger in each constructor (yes, last param in all 6), (2) optionality (yes, all 6 are optional). If a test fails after the refactor, it's a real bug not a mock-drift issue. Sibling-test scan satisfied: all 6 sibling tests are explicitly listed in files_readonly and the constructor surface is preserved by step 4's discipline."
 prerequisites: []
 ---
-
 # Consolidate streamParser logger interfaces
 
 ## Problem

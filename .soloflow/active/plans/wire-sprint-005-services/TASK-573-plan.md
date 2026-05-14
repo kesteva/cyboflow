@@ -1,7 +1,7 @@
 ---
 id: TASK-573
 title: Call assertTransitionAllowed before each SQL UPDATE in transitions.ts
-status: ready
+status: in-flight
 epic: wire-sprint-005-services
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-005
@@ -20,21 +20,20 @@ acceptance_criteria:
   - criterion: "The `transitions.test.ts` suite adds at least one test per direction that asserts an `IllegalTransitionError` is thrown when the in-process guard rejects, AND the SQL UPDATE was never reached (verified by row-state inspection — the row's status is unchanged)."
     verification: "grep -nE 'IllegalTransitionError' main/src/services/cyboflow/__tests__/transitions.test.ts returns >= 2 matches; the test file's `pnpm --filter main exec vitest run main/src/services/cyboflow/__tests__/transitions.test.ts` exits 0."
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
-    verification: "Exit code 0 for both."
+    verification: Exit code 0 for both.
 estimated_complexity: low
 test_strategy:
   needed: true
-  justification: "Sibling test `main/src/services/cyboflow/__tests__/transitions.test.ts` exists and is the canonical home for transitions behavior. New AC requires two new test cases (one per direction) covering the in-process guard firing BEFORE the SQL UPDATE."
+  justification: Sibling test `main/src/services/cyboflow/__tests__/transitions.test.ts` exists and is the canonical home for transitions behavior. New AC requires two new test cases (one per direction) covering the in-process guard firing BEFORE the SQL UPDATE.
   targets:
-    - behavior: "Calling `transitionToAwaitingReview` with a current status that the state-machine table forbids throws `IllegalTransitionError` and leaves the row unmodified."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+    - behavior: Calling `transitionToAwaitingReview` with a current status that the state-machine table forbids throws `IllegalTransitionError` and leaves the row unmodified.
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
-    - behavior: "Calling `transitionFromAwaitingReview` with a current status that the state-machine table forbids throws `IllegalTransitionError` and leaves the row unmodified."
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+    - behavior: Calling `transitionFromAwaitingReview` with a current status that the state-machine table forbids throws `IllegalTransitionError` and leaves the row unmodified.
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
 prerequisites: []
 ---
-
 # Call assertTransitionAllowed in transitions.ts
 
 ## Problem

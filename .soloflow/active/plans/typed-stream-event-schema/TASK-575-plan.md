@@ -1,11 +1,12 @@
 ---
 id: TASK-575
 title: Delete parseClaudeStreamEvent after pipeline wiring lands
-status: ready
+status: in-flight
 epic: typed-stream-event-schema
 source: compound/SPRINT-004-005
-source_sprint: SPRINT-004, SPRINT-005
-depends_on: [TASK-572]
+source_sprint: "SPRINT-004, SPRINT-005"
+depends_on:
+  - TASK-572
 files_owned:
   - main/src/services/streamParser/schemas.ts
   - main/src/services/streamParser/__tests__/schemas.test.ts
@@ -13,7 +14,7 @@ files_readonly:
   - main/src/services/streamParser/typedEventNarrowing.ts
   - main/src/services/streamParser/index.ts
 acceptance_criteria:
-  - criterion: "Pre-flight gate (must pass before edits) — `parseClaudeStreamEvent` has zero production callers."
+  - criterion: Pre-flight gate (must pass before edits) — `parseClaudeStreamEvent` has zero production callers.
     verification: "grep -rn 'parseClaudeStreamEvent' main/src --include='*.ts' | grep -v __tests__ | grep -v 'streamParser/schemas.ts' returns 0 matches."
   - criterion: "`parseClaudeStreamEvent` is removed from `main/src/services/streamParser/schemas.ts` (including its leading JSDoc, the function body, and the `console.warn` call inside it)."
     verification: "grep -n 'export function parseClaudeStreamEvent' main/src/services/streamParser/schemas.ts returns 0 matches; grep -n 'console.warn' main/src/services/streamParser/schemas.ts returns 0 matches."
@@ -22,17 +23,17 @@ acceptance_criteria:
   - criterion: "The doc comment at the top of `schemas.ts` is updated to reflect that runtime validation is provided by `TypedEventNarrowing.narrow()` (consumed via the streamParser barrel), not by a `parseClaudeStreamEvent` function in this file."
     verification: "grep -n 'parseClaudeStreamEvent' main/src/services/streamParser/schemas.ts returns 0 matches; the file's top-of-module JSDoc references `TypedEventNarrowing` instead."
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run main/src/services/streamParser/__tests__/schemas.test.ts` pass."
-    verification: "Exit code 0 for both."
+    verification: Exit code 0 for both.
 estimated_complexity: low
 test_strategy:
   needed: true
   justification: "The sibling test `schemas.test.ts` is the single consumer of `parseClaudeStreamEvent` and must be rewritten as part of this task — the old test surface dies with the function. The rewrite is functionally equivalent (same fixtures, same assertions, different entry point) but is mandatory."
   targets:
-    - behavior: "Each of the 11+ fixtures parses through `TypedEventNarrowing.narrow()` and produces the same narrowed event variant the old `parseClaudeStreamEvent` produced."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: Each of the 11+ fixtures parses through `TypedEventNarrowing.narrow()` and produces the same narrowed event variant the old `parseClaudeStreamEvent` produced.
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
     - behavior: "Malformed / unknown-discriminant input falls through to `{ kind: '__unknown__', raw }` via `narrow()`, matching the prior `parseClaudeStreamEvent` contract."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
 prerequisites:
   - check: "ls .soloflow/archive/done/wire-sprint-005-services/TASK-572-done.md 2>/dev/null"
@@ -40,7 +41,6 @@ prerequisites:
     description: "B8 is gated on B5: deleting parseClaudeStreamEvent before pipeline wiring lands would leave the legacy function as the only safeParse path, which is the opposite of the desired end state."
     blocking: true
 ---
-
 # Delete parseClaudeStreamEvent — eliminate dual safeParse implementations
 
 ## Problem
