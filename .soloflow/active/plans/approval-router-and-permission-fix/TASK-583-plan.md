@@ -1,7 +1,8 @@
 ---
 id: TASK-583
 idea: SPRINT-006-compound
-status: ready
+status: blocked
+blocked_reason: "Tightens socket file permissions (0o600). Under the SDK substrate, the socket file is created at startup but not used; tightening its perms has no live security benefit. Defer until IDEA-013 lands and the socket is back on the hot path. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
 created: 2026-05-14T00:00:00Z
 files_owned:

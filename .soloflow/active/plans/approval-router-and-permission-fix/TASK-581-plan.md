@@ -1,7 +1,8 @@
 ---
 id: TASK-581
 idea: SPRINT-006-compound
-status: ready
+status: blocked
+blocked_reason: "Adds zod validation at the IPC server's socket boundary. Under the SDK substrate (prototype), the socket is not on the hot path — validation has no live traffic to guard. Defer until IDEA-013 lands and the shell hook starts driving the socket again. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
 created: 2026-05-14T00:00:00Z
 files_owned:

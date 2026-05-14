@@ -1,7 +1,8 @@
 ---
 id: TASK-582
 idea: SPRINT-006-compound
-status: ready
+status: blocked
+blocked_reason: "Fixes IPC server init ordering relative to ApprovalRouter. Under the SDK substrate, the IPC server is wired but inactive (per EPIC portability note for IDEA-013), so init-ordering bugs have no observable effect. Defer until IDEA-013 lands. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
 created: 2026-05-14T00:00:00Z
 files_owned:
