@@ -9,9 +9,9 @@ files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
   - main/src/index.ts
   - main/src/orchestrator/__tests__/approvalRouter.test.ts
+  - main/src/services/cyboflowPermissionBridge.ts
 files_readonly:
   - main/src/services/permissionManager.ts
-  - main/src/services/cyboflowPermissionBridge.ts
   - main/src/database/database.ts
   - main/src/database/migrations/006_cyboflow_schema.sql
   - .soloflow/active/ideas/IDEA-004.md
