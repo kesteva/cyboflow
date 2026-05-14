@@ -6,14 +6,6 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-572": {
-      "status": "pending",
-      "depends_on": [
-        "TASK-568",
-        "TASK-573",
-        "TASK-574"
-      ]
-    },
     "TASK-575": {
       "status": "pending",
       "depends_on": [
