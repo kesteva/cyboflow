@@ -13,6 +13,7 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { randomUUID } from 'node:crypto';
 import type { ApprovalDecision } from '../orchestrator/approvalRouter';
 
 const sessionId = process.argv[2];
@@ -62,7 +63,7 @@ function connectToMainProcess() {
 
 async function requestPermission(toolName: string, input: Record<string, unknown>): Promise<ApprovalDecision> {
   return new Promise((resolve, reject) => {
-    const requestId = `${Date.now()}-${Math.random()}`;
+    const requestId = randomUUID();
     
     pendingRequests.set(requestId, (response) => {
       resolve(response);
