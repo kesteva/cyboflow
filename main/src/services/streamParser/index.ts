@@ -10,8 +10,6 @@
 
 export { TypedEventNarrowing } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
-export { CompletionDetector } from './completionDetector';
-export type { CompletionPayload, ForcedPayload } from './completionDetector';
 export { RawEventsSink } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
 export type { ILogger } from './types';
