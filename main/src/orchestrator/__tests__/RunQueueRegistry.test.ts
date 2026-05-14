@@ -128,6 +128,53 @@ describe('RunQueueRegistry', () => {
     expect(registry.has('run-X')).toBe(false);
   });
 
+  // (e) getOrCreate() is idempotent — same PQueue instance on repeated calls
+  it('getOrCreate() returns the same queue instance on repeated calls for the same runId', () => {
+    const registry = new RunQueueRegistry();
+    const q1 = registry.getOrCreate('run-idem');
+    const q2 = registry.getOrCreate('run-idem');
+    expect(q1).toBe(q2);
+    expect(registry.stats().runs).toBe(1);
+  });
+
+  // (f) stats() reports correct totalPending and totalActive counts
+  it('stats() reflects pending and active counts across queues', async () => {
+    const registry = new RunQueueRegistry();
+
+    const gateA = deferred();
+    const gateB = deferred();
+
+    const qA = registry.getOrCreate('run-S1');
+    const qB = registry.getOrCreate('run-S2');
+
+    // qA: one active task + one pending task
+    void qA.add(async () => { await gateA.promise; });
+    void qA.add(async () => { /* immediate */ });
+    // qB: one active task
+    void qB.add(async () => { await gateB.promise; });
+
+    // Yield to let the active tasks start
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const s = registry.stats();
+    expect(s.runs).toBe(2);
+    expect(s.totalActive).toBe(2); // one active in each queue
+    expect(s.totalPending).toBe(1); // second task in qA is waiting
+
+    gateA.resolve();
+    gateB.resolve();
+    await qA.onIdle();
+    await qB.onIdle();
+  });
+
+  // (g) delete() on an unknown runId is a no-op (does not throw)
+  it('delete() on a runId that does not exist resolves without error', async () => {
+    const registry = new RunQueueRegistry();
+    await expect(registry.delete('nonexistent')).resolves.toBeUndefined();
+    expect(registry.has('nonexistent')).toBe(false);
+  });
+
   // (d) drainAll() resolves only after every queue is idle
   it('drainAll() resolves only after all queues are idle', async () => {
     const registry = new RunQueueRegistry();
