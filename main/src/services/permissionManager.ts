@@ -1,3 +1,16 @@
+/**
+ * @deprecated DEAD CODE — scheduled for deletion in TASK-579
+ * (epic: crystal-cuts-and-rebrand). Zero production importers as of the
+ * claude-agent-sdk-migration EPIC; the production approval path runs through
+ * `main/src/orchestrator/approvalRouter.ts` and the canonical wire types live
+ * in `shared/types/approval.ts`.
+ *
+ * The `PermissionRequest` / `PermissionResponse` interfaces below are Crystal-
+ * era types and diverge from the canonical substrate-portable contract in
+ * `shared/types/approval.ts` — notably `PermissionRequest.sessionId` is the
+ * Crystal-era equivalent of `ApprovalRequest.runId`. They are intentionally
+ * NOT aligned here; this file's death (TASK-579) is the alignment.
+ */
 import { EventEmitter } from 'events';
 import { ipcMain } from 'electron';
 
