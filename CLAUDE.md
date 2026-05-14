@@ -14,7 +14,7 @@ Load these before doing non-trivial work; they own the details so this file can 
 
 ## `@cyboflow-hidden` Convention
 
-Code that is intentionally unreachable in cyboflow v1 (but preserved from the Crystal baseline for future re-enablement) is marked with `@cyboflow-hidden`. Do NOT delete such code; do NOT add the marker to actively-called code. See `docs/CODE-PATTERNS.md` for the annotation template and canonical examples (`main/src/services/worktreeManager.ts:472`, `frontend/src/components/SessionView.tsx:14`).
+Code that is intentionally unreachable in cyboflow v1 is marked with `@cyboflow-hidden` — either Crystal-baseline code preserved for future re-enablement OR a forward-looking placeholder awaiting a later integration task. Do NOT delete such code; do NOT add the marker to actively-called code. See `docs/CODE-PATTERNS.md` for the annotation template and canonical examples in both categories.
 
 ## Preserved Extension Points
 
