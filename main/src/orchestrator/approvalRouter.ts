@@ -34,21 +34,11 @@ import type { DatabaseLike } from './types';
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface ApprovalRequest {
-  /** UUID for the approvals row */
-  id: string;
-  /** workflow_runs.id */
-  runId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  timestamp: number;
-}
-
-export interface ApprovalDecision {
-  behavior: 'allow' | 'deny';
-  updatedInput?: Record<string, unknown>;
-  message?: string;
-}
+// Public approval contract — canonical home is shared/types/approval.ts.
+// Re-exported here so every existing consumer keeps `from '../orchestrator/approvalRouter'`
+// as its import path; that path remains backward-compatible by design.
+import type { ApprovalRequest, ApprovalDecision } from '../../../shared/types/approval';
+export type { ApprovalRequest, ApprovalDecision };
 
 // ---------------------------------------------------------------------------
 // Errors
