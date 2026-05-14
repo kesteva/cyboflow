@@ -45,6 +45,7 @@
     "postinstall": "electron-builder install-app-deps",
     "electron:rebuild": "pnpm exec electron-rebuild -f -w better-sqlite3 -m ./main",
     "setup": "pnpm install && pnpm run electron:rebuild && pnpm run build:main",
+    "smoke:sdk": "tsx scripts/sdk-smoke-probe.ts",
     "test": "playwright test",
     "test:ci": "playwright test --config=playwright.ci.config.ts",
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
@@ -69,13 +70,14 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
     "@playwright/test": "^1.52.0",
     "concurrently": "^9.1.0",
     "electron": "^37.6.0",
     "electron-builder": "^26.0.20",
-    "@electron/rebuild": "^4.0.1",
     "node-abi": "^4.14.0",
     "playwright": "^1.52.0",
+    "tsx": "^4.22.0",
     "vite-plugin-electron": "^0.29.0",
     "vite-plugin-electron-renderer": "^0.14.6",
     "wait-on": "^9.0.0"
