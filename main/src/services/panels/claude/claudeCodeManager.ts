@@ -204,8 +204,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const events: Array<{ panelId: string; sessionId: string; type: 'json' | 'stdout' | 'stderr'; data: unknown; timestamp: Date }> = [];
 
     // Feed the raw line through the pipeline parser (non-destructive: also feeds EventRouter/RawEventsSink).
-    // The existing emit-as-json path below is preserved in parallel until Day-3 migrates the
-    // renderer to consume from EventRouter via tRPC.
+    // The emit-as-json path below is preserved in parallel until Day-3 migrates the
+    // renderer to consume from EventRouter via tRPC (see projectStoredOutputs in
+    // main/src/ipc/session.ts, which is the current read-path consumer of session_outputs).
     const pipeline = this.pipelines.get(panelId);
     if (pipeline) {
       pipeline.parser.feed(data);
