@@ -11,7 +11,7 @@ originating_ideas: [IDEA-014]
 
 Replace the `claude -p --output-format stream-json` subprocess substrate with the `@anthropic-ai/claude-agent-sdk` Node.js library as the runtime for cyboflow's Claude panel. Product surfaces (review queue, panels, worktrees, runs, settings, renderer subscribers) do NOT change — what changes is the plumbing between cyboflow's main process and the Claude agent loop.
 
-Driven by the 2026-06-15 Anthropic billing change (see memory note `anthropic_sdk_billing_change_june_2026.md` and IDEA-014). Post-cutover `-p` and the SDK draw from the same Agent SDK credit bucket, so this is purely an engineering-robustness play with zero economic delta. A parity spike against `docs.claude.com/en/api/agent-sdk` verified direct SDK equivalents for all 8 capabilities cyboflow currently uses, with three strict improvements:
+**This is the prototype substrate.** The `-p` subprocess path is a dead end and is not being further invested in. v1 prototype completes ON the SDK, not on `-p`. Subscription-billing preservation is addressed post-prototype by IDEA-013 (interactive-shell pivot), not by continuing `-p` development. Both `-p` and SDK draw from the same Agent SDK credit bucket post-2026-06-15, so this migration is economically neutral for the prototype phase; SDK gives strictly better engineering ergonomics (typed events, in-process hooks, no PATH discovery, no `electron:rebuild` foot-gun for the Claude panel) at zero economic cost relative to `-p`. A parity spike against `docs.claude.com/en/api/agent-sdk` verified direct SDK equivalents for all 8 capabilities cyboflow currently uses, with three strict improvements:
 
 1. In-process permission gating via `hooks.PreToolUse` — no MCP bridge process, no Unix socket round-trip.
 2. Inline `mcpServers` object literal — no `.mcp.json` temp file.
@@ -21,7 +21,7 @@ Target SDK version: `@anthropic-ai/claude-agent-sdk` ≥ 0.2.x (current at parit
 
 ## Portability invariant
 
-A future pivot to interactive `claude` (IDEA-013, contingent on post-launch unit economics) needs the **same orchestrator-side tool-approval protocol**, just over a different transport (shell hook in `.claude/settings.json` posting to a Unix socket, instead of an in-process callback). To keep that pivot cheap, this EPIC defines an `ApprovalRouter` interface (`shared/types/approval.ts`) with strict `ApprovalRequest` / `ApprovalResponse` schemas. `permissionManager.ts` and the review-queue UI consume ONLY this interface, never the substrate. The SDK `PreToolUse` callback is one transport adapter; the legacy MCP bridge (being deleted by this EPIC) was another; a future shell hook would be a third, dropping into the same router with zero downstream churn.
+The post-prototype pivot to interactive `claude` (IDEA-013) needs the **same orchestrator-side tool-approval protocol**, just over a different transport (shell hook in `.claude/settings.json` posting to a Unix socket, instead of an in-process callback). To keep that pivot cheap, this EPIC defines an `ApprovalRouter` interface (`shared/types/approval.ts`) with strict `ApprovalRequest` / `ApprovalResponse` schemas. `permissionManager.ts` and the review-queue UI consume ONLY this interface, never the substrate. The SDK `PreToolUse` callback is one transport adapter; the legacy MCP bridge (being deleted by this EPIC) was another; the IDEA-013 shell hook will be a third, dropping into the same router with zero downstream churn. This is a planned sequencing — SDK first to complete the prototype, IDEA-013 second to preserve subscription billing — not a hedge against a contingent pivot.
 
 Other substrate-portable surfaces preserved verbatim — must survive this migration intact and remain usable under a future interactive pivot:
 
@@ -63,8 +63,8 @@ Other substrate-portable surfaces preserved verbatim — must survive this migra
 
 ### Out of scope
 
-- Interactive-shell pivot (IDEA-013) — separate EPIC, gated on post-launch unit economics. This EPIC preserves the portability hooks but does not implement the interactive transport.
-- Multi-provider support (IDEA-015) — separate EPIC, sequences after this one. The `ApprovalRouter` interface from this EPIC is the foundation per-provider permission gates will plug into.
+- Interactive-shell pivot (IDEA-013) — separate EPIC, sequenced AFTER this one as the post-prototype subscription-preservation step. This EPIC preserves the portability hooks (IPC server + ApprovalRouter interface) so IDEA-013 lands as a transport swap rather than an un-deletion.
+- Multi-provider support (IDEA-015) — separate EPIC, sequences after IDEA-013. The `ApprovalRouter` interface from this EPIC is the foundation per-provider permission gates will plug into.
 - Changes to `AbstractCliManager`, `node-pty`, or the terminal panel — those stay.
 - Changes to the review queue UI, tRPC routes, run/session DB schema, worktree manager, settings, panel persistence, or renderer subscribers — all substrate-independent, all stay.
 - Adopting the SDK's native `WorktreeCreate` / `WorktreeRemove` hooks (flagged as bonus in the parity spike). cyboflow's worktree manager is independent; that integration is a follow-up EPIC.
