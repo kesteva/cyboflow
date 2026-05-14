@@ -20,12 +20,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-
-/** Minimal logger interface consumed by CompletionDetector. */
-export interface ICompletionDetectorLogger {
-  info(message: string): void;
-  warn(message: string): void;
-}
+import type { ILogger } from './types';
 
 /** Payload emitted with the 'complete' event (clean shutdown). */
 export interface CompletionPayload {
@@ -43,7 +38,7 @@ export interface ForcedPayload {
 export class CompletionDetector extends EventEmitter {
   private readonly runId: string;
   private readonly watchdogMs: number;
-  private readonly logger: ICompletionDetectorLogger | undefined;
+  private readonly logger: ILogger | undefined;
 
   // --- Gate flags ---
   private childExited: boolean = false;
@@ -58,7 +53,7 @@ export class CompletionDetector extends EventEmitter {
   constructor(
     runId: string,
     watchdogMs: number = 30_000,
-    logger?: ICompletionDetectorLogger,
+    logger?: ILogger,
   ) {
     super();
     this.runId = runId;
@@ -129,7 +124,7 @@ export class CompletionDetector extends EventEmitter {
         this.watchdogTimer = undefined;
       }
       this.emitted = true;
-      this.logger?.info(
+      this.logger?.info?.(
         `[completionDetector] run ${this.runId} complete (all_signals)`,
       );
       const payload: CompletionPayload = {

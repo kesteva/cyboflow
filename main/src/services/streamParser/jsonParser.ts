@@ -9,15 +9,15 @@
  * the event loop."
  */
 
-/** Minimal logger interface consumed by JSONParser (avoids importing Logger directly). */
-export interface IWarnLogger {
-  warn(message: string): void;
-}
+import type { ILogger } from './types';
+
+/** @deprecated Use ILogger from './types' instead. */
+export type IWarnLogger = Pick<ILogger, 'warn'>;
 
 export class JSONParser {
-  private readonly logger: IWarnLogger | undefined;
+  private readonly logger: Pick<ILogger, 'warn'> | undefined;
 
-  constructor(logger?: IWarnLogger) {
+  constructor(logger?: Pick<ILogger, 'warn'>) {
     this.logger = logger;
   }
 

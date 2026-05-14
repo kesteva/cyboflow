@@ -11,13 +11,14 @@
  * races cannot be truly reproduced in a single-threaded vitest run.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   transitionToAwaitingReview,
   transitionFromAwaitingReview,
   TransitionRejectedError,
 } from '../transitions';
+import { IllegalTransitionError } from '../stateMachine';
 
 // ---------------------------------------------------------------------------
 // Inline schema DDL (mirrors 006_cyboflow_schema.sql from TASK-152)
@@ -222,6 +223,56 @@ describe('transitions', () => {
       expect(e.details.expectedStatus).toBe('running');
       expect(e.details.runId).toBe(RUN_ID);
     });
+
+    // -----------------------------------------------------------------------
+    // Case (g): In-process guard rejects transitionToAwaitingReview
+    //
+    // The assertTransitionAllowed guard is forced to throw IllegalTransitionError
+    // via a spy. This verifies the guard fires BEFORE the SQL UPDATE — the DB
+    // row remains unchanged and no approval row is inserted, confirming the
+    // SQL never ran.
+    // -----------------------------------------------------------------------
+
+    it('(g) in-process guard: throws IllegalTransitionError before SQL UPDATE when assertTransitionAllowed rejects', async () => {
+      const stateMachine = await import('../stateMachine');
+      const guardSpy = vi.spyOn(stateMachine, 'assertTransitionAllowed').mockImplementationOnce(
+        (from, to, runId) => {
+          throw new IllegalTransitionError(from, to, runId);
+        },
+      );
+
+      seedRun(db, 'running');
+
+      expect(() =>
+        transitionToAwaitingReview(db, {
+          runId: RUN_ID,
+          approvalId: APPROVAL_ID,
+          toolName: 'bash',
+          toolInputJson: '{"cmd":"ls"}',
+          toolUseId: 'tu-guard-to-001',
+          rationale: null,
+        }),
+      ).toThrow(IllegalTransitionError);
+
+      // Guard must have been called with the correct static args
+      expect(guardSpy).toHaveBeenCalledWith('running', 'awaiting_review', RUN_ID);
+
+      // Row must still be 'running' — the SQL UPDATE was never reached
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(run.status).toBe('running');
+
+      // No approval row was inserted
+      const count = (
+        db
+          .prepare('SELECT COUNT(*) as cnt FROM approvals WHERE id = ?')
+          .get(APPROVAL_ID) as { cnt: number }
+      ).cnt;
+      expect(count).toBe(0);
+
+      guardSpy.mockRestore();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -383,6 +434,54 @@ describe('transitions', () => {
         .get(APPROVAL_ID) as { status: string; decided_by: string | null };
       expect(approval.status).toBe('timed_out');
       expect(approval.decided_by).toBeNull();
+    });
+
+    // -----------------------------------------------------------------------
+    // Case (h): In-process guard rejects transitionFromAwaitingReview
+    //
+    // The assertTransitionAllowed guard is forced to throw IllegalTransitionError
+    // via a spy. This verifies the guard fires BEFORE the SQL UPDATE — the DB
+    // row remains unchanged and the approval row is untouched, confirming the
+    // SQL never ran.
+    // -----------------------------------------------------------------------
+
+    it('(h) in-process guard: throws IllegalTransitionError before SQL UPDATE when assertTransitionAllowed rejects', async () => {
+      const stateMachine = await import('../stateMachine');
+      const guardSpy = vi.spyOn(stateMachine, 'assertTransitionAllowed').mockImplementationOnce(
+        (from, to, runId) => {
+          throw new IllegalTransitionError(from, to, runId);
+        },
+      );
+
+      seedRun(db, 'awaiting_review');
+      seedApproval(db, 'pending');
+
+      expect(() =>
+        transitionFromAwaitingReview(db, {
+          runId: RUN_ID,
+          approvalId: APPROVAL_ID,
+          decision: 'approved',
+          decidedBy: 'user',
+        }),
+      ).toThrow(IllegalTransitionError);
+
+      // Guard must have been called with the correct static args
+      expect(guardSpy).toHaveBeenCalledWith('awaiting_review', 'running', RUN_ID);
+
+      // Row must still be 'awaiting_review' — the SQL UPDATE was never reached
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(run.status).toBe('awaiting_review');
+
+      // Approval row must be unchanged (still pending)
+      const approval = db
+        .prepare('SELECT status, decided_at FROM approvals WHERE id = ?')
+        .get(APPROVAL_ID) as { status: string; decided_at: string | null };
+      expect(approval.status).toBe('pending');
+      expect(approval.decided_at).toBeNull();
+
+      guardSpy.mockRestore();
     });
   });
 });
