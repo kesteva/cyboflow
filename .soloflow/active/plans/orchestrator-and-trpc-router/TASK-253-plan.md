@@ -2,8 +2,8 @@
 id: TASK-253
 idea: IDEA-006
 idea_id: IDEA-006
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/Orchestrator.ts
   - main/src/orchestrator/types.ts
@@ -20,15 +20,17 @@ acceptance_criteria:
     verification: "grep -nE 'class Orchestrator|async start\\(|async stop\\(' main/src/orchestrator/Orchestrator.ts shows the class declaration and both lifecycle methods"
   - criterion: "Orchestrator constructor takes injected dependencies: { db: DatabaseLike; logger: LoggerLike; eventBus: EventEmitter; runQueues: RunQueueRegistry } — all interfaces, NO concrete imports from main/src/services/* and NO 'electron' imports"
     verification: "grep -nE \"from ['\\\"]electron['\\\"]|from ['\\\"]\\.\\./services\" main/src/orchestrator/Orchestrator.ts returns 0 matches; the constructor signature lists the four named dependencies"
-  - criterion: "main/src/orchestrator/types.ts defines DatabaseLike and LoggerLike interfaces narrow enough to mock in unit tests (no Electron / better-sqlite3 / fs imports in the type file)"
+  - criterion: main/src/orchestrator/types.ts defines DatabaseLike and LoggerLike interfaces narrow enough to mock in unit tests (no Electron / better-sqlite3 / fs imports in the type file)
     verification: "grep -nE \"from ['\\\"]electron['\\\"]|from ['\\\"]better-sqlite3['\\\"]|from ['\\\"]fs\" main/src/orchestrator/types.ts returns 0 matches; the file exports DatabaseLike and LoggerLike type/interface declarations"
-  - criterion: "start() is idempotent (a second call while running is a no-op) and stop() drains the RunQueueRegistry via runQueues.drainAll() before resolving"
+  - criterion: start() is idempotent (a second call while running is a no-op) and stop() drains the RunQueueRegistry via runQueues.drainAll() before resolving
     verification: "Inspect the Orchestrator.test.ts case 'stop drains the run queue registry' and case 'start is idempotent' both pass"
   - criterion: "Unit test in main/src/orchestrator/__tests__/Orchestrator.test.ts constructs an Orchestrator with fully in-memory mocks (no real DB, no Electron) and asserts start()/stop() succeed — proves the standalone-testability invariant"
     verification: "Run pnpm --filter main test -- Orchestrator and confirm test 'instantiates with in-memory dependencies' passes"
   - criterion: "Standalone-typecheck invariant: the orchestrator module compiles without an electron module being present in node_modules — verified by a tsc invocation scoped to main/src/orchestrator/ that excludes external types"
     verification: "Run `npx tsc --noEmit --project main/tsconfig.json --listFiles 2>&1 | grep '/orchestrator/' | grep -E 'node_modules/(electron|better-sqlite3)' | wc -l` and confirm 0 — no orchestrator file pulls in electron or better-sqlite3 types transitively"
-depends_on: [TASK-251, TASK-252]
+depends_on:
+  - TASK-251
+  - TASK-252
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
@@ -36,16 +38,15 @@ test_strategy:
   justification: "The standalone-typecheck invariant is the load-bearing discipline of this epic — the orchestrator must be testable in isolation so v2 team-tier extraction is an IPC-link swap, not a refactor. A test that instantiates it with in-memory mocks is the lowest-cost proof of that invariant."
   targets:
     - behavior: "Orchestrator instantiates with in-memory DatabaseLike and LoggerLike mocks (no electron, no better-sqlite3) and start()/stop() resolve without error"
-      test_file: "main/src/orchestrator/__tests__/Orchestrator.test.ts"
-      type: "unit"
-    - behavior: "start() called twice without an intervening stop() is a no-op on the second call"
-      test_file: "main/src/orchestrator/__tests__/Orchestrator.test.ts"
-      type: "unit"
-    - behavior: "stop() awaits runQueues.drainAll() before resolving"
-      test_file: "main/src/orchestrator/__tests__/Orchestrator.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/__tests__/Orchestrator.test.ts
+      type: unit
+    - behavior: start() called twice without an intervening stop() is a no-op on the second call
+      test_file: main/src/orchestrator/__tests__/Orchestrator.test.ts
+      type: unit
+    - behavior: stop() awaits runQueues.drainAll() before resolving
+      test_file: main/src/orchestrator/__tests__/Orchestrator.test.ts
+      type: unit
 ---
-
 # Orchestrator Class with start()/stop() and No Electron Imports
 
 ## Objective

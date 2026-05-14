@@ -2,8 +2,8 @@
 id: TASK-252
 idea: IDEA-006
 idea_id: IDEA-006
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/RunQueueRegistry.ts
   - main/src/orchestrator/__tests__/RunQueueRegistry.test.ts
@@ -22,30 +22,30 @@ acceptance_criteria:
   - criterion: "A no-recursive-enqueue rule is documented as a top-of-file JSDoc comment block: 'Status-change events flow via EventEmitter, NOT by re-entering the queue.'"
     verification: "grep -n 'no-recursive-enqueue' main/src/orchestrator/RunQueueRegistry.ts shows at least one match and the surrounding JSDoc block references the EventEmitter contract"
   - criterion: "Unit tests in main/src/orchestrator/__tests__/RunQueueRegistry.test.ts cover: (a) two enqueues for the same runId run sequentially, (b) two enqueues for different runIds run concurrently, (c) delete(runId) drains the queue before removing it from the map, (d) drainAll() resolves only after every queue is idle"
-    verification: "Run pnpm --filter main test -- RunQueueRegistry and confirm all four named test cases pass"
-  - criterion: "TypeScript exhaustive typecheck on main/ does not regress"
-    verification: "pnpm --filter main typecheck exits 0"
-depends_on: [TASK-251]
+    verification: Run pnpm --filter main test -- RunQueueRegistry and confirm all four named test cases pass
+  - criterion: TypeScript exhaustive typecheck on main/ does not regress
+    verification: pnpm --filter main typecheck exits 0
+depends_on:
+  - TASK-251
 estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "RunQueueRegistry is the load-bearing serialization primitive for every state mutation in the orchestrator. Its correctness around drain-on-delete and per-runId concurrency must be locked by tests before TASK-253 builds on it."
+  justification: RunQueueRegistry is the load-bearing serialization primitive for every state mutation in the orchestrator. Its correctness around drain-on-delete and per-runId concurrency must be locked by tests before TASK-253 builds on it.
   targets:
     - behavior: "Two tasks enqueued for runId='A' execute strictly sequentially (second starts only after first resolves)"
-      test_file: "main/src/orchestrator/__tests__/RunQueueRegistry.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/__tests__/RunQueueRegistry.test.ts
+      type: unit
     - behavior: "Tasks enqueued for runId='A' and runId='B' execute concurrently (no cross-run blocking)"
-      test_file: "main/src/orchestrator/__tests__/RunQueueRegistry.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/__tests__/RunQueueRegistry.test.ts
+      type: unit
     - behavior: "delete('A') awaits queue.onIdle() before removing the map entry; an in-flight task for 'A' completes before the entry is gone"
-      test_file: "main/src/orchestrator/__tests__/RunQueueRegistry.test.ts"
-      type: "unit"
-    - behavior: "drainAll() resolves only after every per-run queue is idle"
-      test_file: "main/src/orchestrator/__tests__/RunQueueRegistry.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/__tests__/RunQueueRegistry.test.ts
+      type: unit
+    - behavior: drainAll() resolves only after every per-run queue is idle
+      test_file: main/src/orchestrator/__tests__/RunQueueRegistry.test.ts
+      type: unit
 ---
-
 # Per-Run PQueue Registry Keyed by runId
 
 ## Objective

@@ -2,8 +2,8 @@
 id: TASK-254
 idea: IDEA-006
 idea_id: IDEA-006
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/context.ts
   - main/src/orchestrator/trpc/trpc.ts
@@ -38,34 +38,34 @@ acceptance_criteria:
   - criterion: "main/src/orchestrator/trpc/throttle.ts exports throttleAsyncIterator<T>(source: AsyncIterable<T>, hz: number): AsyncGenerator<T> that coalesces source events to at most hz emissions per second; the cyboflow.events.onStreamEvent subscription wraps its source iterator with throttleAsyncIterator(source, 60)"
     verification: "grep -n 'throttleAsyncIterator' main/src/orchestrator/trpc/throttle.ts main/src/orchestrator/trpc/routers/events.ts shows the export and the usage; grep -n 'hz' main/src/orchestrator/trpc/throttle.ts shows the rate parameter"
   - criterion: "Throttle unit tests prove: (a) at 60Hz, 1000 source events over 1 simulated second produce 60 ± 5 emissions; (b) the latest event wins (coalescing semantics, not dropping)"
-    verification: "Run pnpm --filter main test -- throttle and confirm both test cases pass"
+    verification: Run pnpm --filter main test -- throttle and confirm both test cases pass
   - criterion: "Router shape test asserts (via tRPC's createCaller) that appRouter.cyboflow.runs.list exists and throws NOT_IMPLEMENTED; appRouter.cyboflow.approvals.listPending exists and throws NOT_IMPLEMENTED; the router type-checks under typeof appRouter"
     verification: "Run pnpm --filter main test -- router and confirm test 'router exposes cyboflow namespace with NOT_IMPLEMENTED placeholders' passes"
-  - criterion: "AppRouter type is re-exported from shared/types/trpc.ts so the frontend can import it without crossing the main/ boundary directly"
+  - criterion: AppRouter type is re-exported from shared/types/trpc.ts so the frontend can import it without crossing the main/ boundary directly
     verification: "grep -n 'AppRouter' shared/types/trpc.ts shows a type re-export from the main orchestrator router"
-  - criterion: "Zero electron imports across main/src/orchestrator/trpc/ — standalone-typecheck invariant continues to hold"
+  - criterion: Zero electron imports across main/src/orchestrator/trpc/ — standalone-typecheck invariant continues to hold
     verification: "grep -rnE \"from ['\\\"]electron['\\\"]\" main/src/orchestrator/trpc/ returns 0 matches"
-depends_on: [TASK-253]
+depends_on:
+  - TASK-253
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
   justification: "The throttle is the documented memory-leak mitigation for tRPC v11 subscriptions under high event rates (e.g., long Bash output). Its coalescing semantics and rate must be locked by tests because a regression here is invisible in normal use but catastrophic during the 1-day self-host bar. The router shape test gates the contract that downstream code (TASK-255, the renderer IPC link wiring) will subscribe to."
   targets:
-    - behavior: "throttleAsyncIterator emits at most 60 events per second when the source produces 1000 events per second"
-      test_file: "main/src/orchestrator/trpc/__tests__/throttle.test.ts"
-      type: "unit"
+    - behavior: throttleAsyncIterator emits at most 60 events per second when the source produces 1000 events per second
+      test_file: main/src/orchestrator/trpc/__tests__/throttle.test.ts
+      type: unit
     - behavior: "throttleAsyncIterator coalesces — when multiple source events occur within one 1/60s tick, the latest event is emitted (not the first, not all of them, not dropped silently)"
-      test_file: "main/src/orchestrator/trpc/__tests__/throttle.test.ts"
-      type: "unit"
-    - behavior: "appRouter.cyboflow.runs.list (and analogous procedures) return NOT_IMPLEMENTED via createCaller"
-      test_file: "main/src/orchestrator/trpc/__tests__/router.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/trpc/__tests__/throttle.test.ts
+      type: unit
+    - behavior: appRouter.cyboflow.runs.list (and analogous procedures) return NOT_IMPLEMENTED via createCaller
+      test_file: main/src/orchestrator/trpc/__tests__/router.test.ts
+      type: unit
     - behavior: "createContext() returns { userId: 'local' } and the protectedProcedure middleware accepts it"
-      test_file: "main/src/orchestrator/trpc/__tests__/router.test.ts"
-      type: "unit"
+      test_file: main/src/orchestrator/trpc/__tests__/router.test.ts
+      type: unit
 ---
-
 # tRPC Router Skeleton, Auth Context, and 60Hz Throttle
 
 ## Objective

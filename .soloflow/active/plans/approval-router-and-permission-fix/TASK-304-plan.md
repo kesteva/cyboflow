@@ -1,8 +1,8 @@
 ---
 id: TASK-304
 idea_id: IDEA-007
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/services/panels/claude/claudeCodeManager.ts
@@ -17,7 +17,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "ApprovalRouter.clearPendingForRun(runId) iterates every entry where pending.request.runId === runId, calls socketReply({behavior:'deny', message:'Run terminated'}) for each, calls clearTimeout(entry.timeoutHandle), updates each approvals row to status='canceled', and removes the entry from the pending map"
     verification: "grep -nE 'clearPendingForRun\\(runId' main/src/orchestrator/approvalRouter.ts -A 25 | grep -E \"behavior:\\s*'deny'\" && grep -nE 'clearPendingForRun' main/src/orchestrator/approvalRouter.ts -A 25 | grep -E 'clearTimeout' && grep -nE 'clearPendingForRun' main/src/orchestrator/approvalRouter.ts -A 25 | grep -E \"status\\s*=\\s*'canceled'\""
-  - criterion: "claudeCodeManager.cleanupCliResources calls ApprovalRouter.getInstance().clearPendingForRun(sessionId) BEFORE any PTY-kill logic and awaits it (no fire-and-forget)"
+  - criterion: claudeCodeManager.cleanupCliResources calls ApprovalRouter.getInstance().clearPendingForRun(sessionId) BEFORE any PTY-kill logic and awaits it (no fire-and-forget)
     verification: "grep -n 'await ApprovalRouter\\.getInstance().clearPendingForRun' main/src/services/panels/claude/claudeCodeManager.ts"
   - criterion: "main/src/index.ts before-quit handler awaits a global ApprovalRouter.clearAllPending() that calls clearPendingForRun for every runId in the pending map, with all deny replies completing before app.exit"
     verification: "grep -nE 'clearAllPending|clearPendingForRun' main/src/index.ts | grep -E 'before-quit|will-quit|app\\.on'"
@@ -25,7 +25,9 @@ acceptance_criteria:
     verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0 with test output mentioning 'clearPendingForRun sends deny on socket for each entry'"
   - criterion: "Unit test 'clearAllPending denies across multiple runIds' passes; sets up 3 pending approvals across 2 runIds, calls clearAllPending, asserts 3 deny socket writes and all entries removed"
     verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0 with output mentioning 'clearAllPending denies across multiple runIds'"
-depends_on: [TASK-302, TASK-303]
+depends_on:
+  - TASK-302
+  - TASK-303
 estimated_complexity: medium
 epic: approval-router-and-permission-fix
 test_strategy:
@@ -33,16 +35,15 @@ test_strategy:
   justification: "clearPendingForRun has three side effects that must all fire in order (socket deny, timer clear, DB update) and any omission causes a class of bugs from 'hung PTY' (no socket deny) to 'duplicate socket write' (no timer clear) to 'stale awaiting_review row' (no DB update). Unit tests assert all three side effects per entry."
   targets:
     - behavior: "clearPendingForRun with 2 pending approvals for the same runId sends 2 deny socket writes, clears 2 timers, marks 2 approvals rows status='canceled'"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "clearPendingForRun for runId='r1' leaves pending approvals for runId='r2' untouched"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "clearAllPending denies all pending across all runIds; pending map ends empty"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: clearAllPending denies all pending across all runIds; pending map ends empty
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
 ---
-
 # clearPendingForRun and clearAllPending (Clean Shutdown Semantics)
 
 ## Objective

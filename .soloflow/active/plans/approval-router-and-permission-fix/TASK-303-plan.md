@@ -1,8 +1,8 @@
 ---
 id: TASK-303
 idea_id: IDEA-007
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/orchestrator/__tests__/approvalRouter.test.ts
@@ -19,11 +19,12 @@ acceptance_criteria:
     verification: "Unit test 'expires after 60min with socket deny' asserts the socketReply mock was called with { behavior: 'deny', ... } when the test fake-timer advances 60 minutes"
   - criterion: "When the timeout fires, the approvals row transitions to status='expired' and workflow_runs stays in awaiting_review until Claude itself yields (matching the deny semantics in TASK-302)"
     verification: "Unit test asserts approvals.status === 'expired' after timer fires; workflow_runs.status remains 'awaiting_review'"
-  - criterion: "Calling respond() before the timeout fires cancels the timer (no leaked timers)"
+  - criterion: Calling respond() before the timeout fires cancels the timer (no leaked timers)
     verification: "grep -nE 'clearTimeout' main/src/orchestrator/approvalRouter.ts && unit test asserts that after a normal respond() call followed by jest.advanceTimersByTime(60*60*1000+1000), the socketReply mock is invoked exactly once (from respond, not also from the timeout)"
   - criterion: "Test suite passes: pnpm --filter @cyboflow/main test approvalRouter exits 0 with the new timeout test cases visible in output"
     verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0 and the output mentions 'expires after 60min' and 'clears timer on respond'"
-depends_on: [TASK-302]
+depends_on:
+  - TASK-302
 estimated_complexity: medium
 epic: approval-router-and-permission-fix
 test_strategy:
@@ -31,16 +32,15 @@ test_strategy:
   justification: "The 60-min timeout is §5.7's non-negotiable failure-mode mitigation and the #1 inherited bug from risks research §4. Without explicit fake-timer tests the timer code is invisible to CI; a regression that drops the deny socket reply would only surface after a real 60-min user wait."
   targets:
     - behavior: "60-min timeout fires deny on socket and marks approvals row expired"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "Normal respond() before timeout cancels the timer; no duplicate socket writes"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: Normal respond() before timeout cancels the timer; no duplicate socket writes
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "Timeout fires when respond() never arrives; pending entry is removed from the map"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: Timeout fires when respond() never arrives; pending entry is removed from the map
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
 ---
-
 # 60-Minute Timeout Per Pending Approval (Deny on Socket)
 
 ## Objective

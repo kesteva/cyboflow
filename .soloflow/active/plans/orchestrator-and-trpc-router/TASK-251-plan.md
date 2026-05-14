@@ -2,8 +2,8 @@
 id: TASK-251
 idea: IDEA-006
 idea_id: IDEA-006
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/package.json
   - package.json
@@ -16,14 +16,14 @@ files_readonly:
 acceptance_criteria:
   - criterion: "main/package.json declares trpc-electron@0.1.2, @trpc/server in a v11 range that includes PR #6161, @trpc/client matching @trpc/server major, superjson, p-queue, and zod (peer of trpc) as dependencies"
     verification: "grep -E '\"(trpc-electron|@trpc/server|@trpc/client|superjson|p-queue|zod)\"' main/package.json shows all 6 entries with the expected version pins"
-  - criterion: "Root package.json declares the same trpc-electron/@trpc/server/@trpc/client/superjson/p-queue/zod entries with matching versions so the Electron build picks them up at runtime"
+  - criterion: Root package.json declares the same trpc-electron/@trpc/server/@trpc/client/superjson/p-queue/zod entries with matching versions so the Electron build picks them up at runtime
     verification: "diff <(node -e 'const m=require(\"./main/package.json\").dependencies;const r=require(\"./package.json\").dependencies;[\"trpc-electron\",\"@trpc/server\",\"@trpc/client\",\"superjson\",\"p-queue\",\"zod\"].forEach(k=>console.log(k,m[k]===r[k]?\"=\":\"MISMATCH\",m[k],r[k]))') /dev/null | grep -v '= ' shows no MISMATCH lines"
   - criterion: "Implementation Step 1 records the exact @trpc/server published version that contains PR #6161 (verified against the linked GitHub PR status before pinning); the pin in package.json is >= that version"
     verification: "Read package.json's @trpc/server pin and confirm against the version recorded in the plan's Implementation Step 1 output (e.g. PR #6161 merged in commit X, first released in @trpc/server@vY.Z.W per https://github.com/trpc/trpc/pull/6161 — paste version into the commit message)"
-  - criterion: "pnpm install runs cleanly with no peer-dep warnings for the newly added packages and no native rebuild errors"
+  - criterion: pnpm install runs cleanly with no peer-dep warnings for the newly added packages and no native rebuild errors
     verification: "Run pnpm install from repo root; exit 0 and the output does not contain 'WARN' lines mentioning trpc, p-queue, superjson, or zod"
-  - criterion: "TypeScript typechecks across the workspace after install with the new transitive types resolved"
-    verification: "pnpm typecheck exits 0"
+  - criterion: TypeScript typechecks across the workspace after install with the new transitive types resolved
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: orchestrator-and-trpc-router
@@ -33,10 +33,9 @@ test_strategy:
 prerequisites:
   - check: "command -v pnpm >/dev/null"
     fix: "corepack enable && corepack prepare pnpm@10.11.1 --activate"
-    description: "Repo uses pnpm@10.11.1 (see packageManager field in package.json); without it install will refuse"
+    description: Repo uses pnpm@10.11.1 (see packageManager field in package.json); without it install will refuse
     blocking: true
 ---
-
 # Install tRPC v11 + trpc-electron + p-queue + superjson Dependencies
 
 ## Objective
