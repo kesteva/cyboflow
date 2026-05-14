@@ -1,7 +1,8 @@
 ---
 id: TASK-580
 idea: SPRINT-006-compound
-status: ready
+status: blocked
+blocked_reason: "Hardens the Unix-socket transport between the bridge subprocess and the IPC server. Under the now-decided plan (IDEA-014 SDK substrate completes the prototype), the socket is not on the hot path. The IPC server stays wired up per the EPIC's portability note so this task remains a one-task pivot once IDEA-013 (post-prototype interactive-shell support) lands and the socket is back in use. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
 created: 2026-05-14T00:00:00Z
 files_owned:
