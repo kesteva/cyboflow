@@ -8,17 +8,12 @@
 
 import { claudeStreamEventSchema } from './schemas';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-
-/** Minimal debug-level logger interface. */
-export interface IDebugLogger {
-  /** Optional: log a low-verbosity diagnostic message. */
-  verbose?(message: string): void;
-}
+import type { ILogger } from './types';
 
 export class TypedEventNarrowing {
-  private readonly logger: IDebugLogger | undefined;
+  private readonly logger: Pick<ILogger, 'verbose'> | undefined;
 
-  constructor(logger?: IDebugLogger) {
+  constructor(logger?: Pick<ILogger, 'verbose'>) {
     this.logger = logger;
   }
 

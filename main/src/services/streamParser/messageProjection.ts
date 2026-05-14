@@ -21,15 +21,11 @@
 
 import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactEvent, AssistantEvent, UserEvent, ResultEvent } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
-
-/** Minimal logger interface for MessageProjection. */
-export interface IMessageProjectionLogger {
-  warn(message: string): void;
-}
+import type { ILogger } from './types';
 
 export class MessageProjection {
   private readonly runId: string;
-  private readonly logger: IMessageProjectionLogger | undefined;
+  private readonly logger: Pick<ILogger, 'warn'> | undefined;
 
   // Instance state — mirrors the 3-pass accumulators in the old transformer.
   private messageIdCounter = 0;
@@ -40,7 +36,7 @@ export class MessageProjection {
   /** Map from tool_use_id → ToolCall (built when we see assistant/tool_use blocks). */
   private allToolCalls = new Map<string, ToolCall>();
 
-  constructor(runId: string, logger?: IMessageProjectionLogger) {
+  constructor(runId: string, logger?: Pick<ILogger, 'warn'>) {
     this.runId = runId;
     this.logger = logger;
   }

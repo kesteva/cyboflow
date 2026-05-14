@@ -10,15 +10,11 @@
 
 export { LineBufferer } from './lineBufferer';
 export { JSONParser } from './jsonParser';
-export type { IWarnLogger } from './jsonParser';
 export { TypedEventNarrowing } from './typedEventNarrowing';
-export type { IDebugLogger } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
 export { ClaudeStreamParser } from './streamParser';
-export type { IStreamParserLogger } from './streamParser';
 export { CompletionDetector } from './completionDetector';
-export type { ICompletionDetectorLogger, CompletionPayload, ForcedPayload } from './completionDetector';
+export type { CompletionPayload, ForcedPayload } from './completionDetector';
 export { RawEventsSink } from './rawEventsSink';
-export type { IRawEventsSinkLogger } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
-export type { IMessageProjectionLogger } from './messageProjection';
+export type { ILogger } from './types';
