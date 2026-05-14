@@ -1,8 +1,8 @@
 ---
 id: TASK-302
 idea_id: IDEA-007
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/services/cyboflowPermissionIpcServer.ts
@@ -27,15 +27,16 @@ acceptance_criteria:
     verification: "grep -nE \"WHERE id\\s*=\\s*\\?\\s+AND status\\s*=\\s*'awaiting_review'\" main/src/orchestrator/approvalRouter.ts && grep -nE 'changes\\s*[>=]+\\s*0|info\\.changes' main/src/orchestrator/approvalRouter.ts"
   - criterion: "ApprovalRouter mutations run inside the per-run p-queue: requestApproval/respond bodies are submitted via a `queue.add(...)` call obtained from a per-run queue registry"
     verification: "grep -nE 'p-queue|PQueue|queueForRun|perRunQueue' main/src/orchestrator/approvalRouter.ts && grep -nE '\\.add\\(' main/src/orchestrator/approvalRouter.ts"
-  - criterion: "cyboflowPermissionIpcServer.ts no longer imports PermissionManager; it calls ApprovalRouter for inbound permission-request messages"
+  - criterion: cyboflowPermissionIpcServer.ts no longer imports PermissionManager; it calls ApprovalRouter for inbound permission-request messages
     verification: "! grep -n 'PermissionManager' main/src/services/cyboflowPermissionIpcServer.ts && grep -n 'ApprovalRouter' main/src/services/cyboflowPermissionIpcServer.ts"
-  - criterion: "claudeCodeManager.ts no longer imports PermissionManager; cleanup hook calls ApprovalRouter.clearPendingForRun (stub OK; full body in TASK-304)"
+  - criterion: claudeCodeManager.ts no longer imports PermissionManager; cleanup hook calls ApprovalRouter.clearPendingForRun (stub OK; full body in TASK-304)
     verification: "! grep -n 'PermissionManager' main/src/services/panels/claude/claudeCodeManager.ts && grep -n 'clearPendingForRun' main/src/services/panels/claude/claudeCodeManager.ts"
   - criterion: "Unit test suite for approvalRouter passes: (1) requestApproval inserts an approvals row with status='pending' and transitions workflow_runs to awaiting_review under a single transaction; (2) a respond call after the run has been canceled (status set to 'canceled' between requestApproval and respond) returns changes=0 and does NOT send allow on the socket; (3) the per-run queue serializes two concurrent requestApproval calls for the same runId"
-    verification: "pnpm --filter @cyboflow/main test approvalRouter exits 0; the test output lists at least the three named cases"
+    verification: pnpm --filter @cyboflow/main test approvalRouter exits 0; the test output lists at least the three named cases
   - criterion: "Main process typecheck succeeds with no references to PermissionManager outside the deprecated file (which remains on disk for the parallel epic that ultimately deletes it) — i.e., no production import path resolves to permissionManager.ts"
     verification: "pnpm run typecheck exits 0; grep -rn --include='*.ts' \"from '.*permissionManager'\" main/src/ returns no matches outside main/src/services/permissionManager.ts itself"
-depends_on: [TASK-301]
+depends_on:
+  - TASK-301
 estimated_complexity: high
 epic: approval-router-and-permission-fix
 test_strategy:
@@ -43,19 +44,18 @@ test_strategy:
   justification: "ApprovalRouter is the load-bearing primitive of the review queue. The status-guard race condition, the transaction atomicity, and the per-run queue serialization are exactly the invariants the design doc calls non-negotiable. Each invariant must have a dedicated test case because they cannot be eyeballed in code review."
   targets:
     - behavior: "requestApproval inserts an approvals row (status='pending') and updates workflow_runs to status='awaiting_review' in a single transaction; verify both rows present after the call"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "respond after run is canceled: arrange a workflow_runs row with status='canceled' before respond fires; assert the UPDATE returns changes=0 and the socket-reply callback (mocked) is not invoked with behavior='allow'"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "Two concurrent requestApproval calls for the same runId are serialized by the per-run p-queue; ordering preserved; no overlapping transaction errors"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: Two concurrent requestApproval calls for the same runId are serialized by the per-run p-queue; ordering preserved; no overlapping transaction errors
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "respond with behavior='deny' updates the approvals row to status='rejected' and does NOT change workflow_runs.status (run stays in awaiting_review until Claude exits the tool call; design doc §5.7 is explicit on this)"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
 ---
-
 # Implement ApprovalRouter Replacing PermissionManager
 
 ## Objective
