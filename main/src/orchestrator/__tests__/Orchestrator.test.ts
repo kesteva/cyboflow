@@ -166,8 +166,7 @@ describe('Orchestrator', () => {
     const q = runQueues.getOrCreate('run-drain-test');
     void q.add(async () => {
       await gate.promise;
-      taskFinished = false; // initially false
-      taskFinished = true;  // set to true once gate resolves
+      taskFinished = true;
     });
 
     // stop() calls drainAll() — it must wait for the task
