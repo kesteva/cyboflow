@@ -1,7 +1,7 @@
 /**
  * Unit tests for ApprovalRouter.
  *
- * Four cases per the test_strategy in the TASK-302 plan:
+ * Five cases per the test_strategy in the TASK-302 plan + TASK-302 code-review:
  *
  * 1. requestApproval inserts an approvals row (status='pending') and updates
  *    workflow_runs to status='awaiting_review' in a single transaction.
@@ -14,6 +14,9 @@
  *
  * 4. respond with behavior='deny' updates approvals.status='rejected' and does
  *    NOT change workflow_runs.status (stays in awaiting_review).
+ *
+ * 5. Two concurrent respond(id, deny) calls — socketReply invoked exactly once
+ *    (exactly-once contract, TASK-302 code-review fix).
  *
  * All tests use an in-memory better-sqlite3 instance and a real PQueue per
  * runId so transaction semantics and queue serialization are exercised
@@ -325,5 +328,64 @@ describe('ApprovalRouter', () => {
       .prepare("SELECT status FROM workflow_runs WHERE id = ?")
       .get(runId) as { status: string };
     expect(runAfterDeny.status).toBe('awaiting_review');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 5: Two concurrent respond(id, deny) calls — socketReply exactly once
+  //         (TASK-302 code-review fix: reservation must happen inside the queue)
+  // -------------------------------------------------------------------------
+  it('two concurrent respond(deny) calls invoke socketReply exactly once', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-005';
+    seedRun(db, runId, 'running');
+
+    // Start the approval request.
+    const approvalPromise = router.requestApproval(runId, 'shell', { cmd: 'rm -rf /' }, socketReply);
+
+    // Wait for the transaction to commit so the approval is in pending.
+    await qf.getOrCreate(runId).onIdle();
+
+    // Retrieve the approvalId.
+    const approvalId = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string }).id;
+
+    // Fire TWO concurrent respond(deny) calls without awaiting either.
+    // One must win; the other must be a silent no-op (not throw, not double-call).
+    const [result1, result2] = await Promise.allSettled([
+      router.respond(approvalId, { behavior: 'deny', message: 'concurrent-1' }),
+      router.respond(approvalId, { behavior: 'deny', message: 'concurrent-2' }),
+    ]);
+
+    // Both settle — the second may resolve (silent no-op) or reject if it hits
+    // the fast-path guard before the first even starts.  Either is acceptable;
+    // what matters is that socketReply was called exactly once.
+    // If the second respond() raced past the fast-path guard and entered the
+    // queue, it finds the entry already deleted and returns as a no-op (fulfilled).
+    // If the first respond() completed before the second even called pending.get(),
+    // the second hits the fast-path and throws ApprovalNotFoundError (rejected).
+    // Assert that at least one settled as fulfilled.
+    const fulfilledCount = [result1, result2].filter((r) => r.status === 'fulfilled').length;
+    expect(fulfilledCount).toBeGreaterThanOrEqual(1);
+
+    // The load-bearing assertion: socketReply must have been called exactly once.
+    expect(socketReply).toHaveBeenCalledTimes(1);
+    expect(socketReply.mock.calls[0][0].behavior).toBe('deny');
+
+    // The approvals row must be 'rejected'.
+    const approval = db
+      .prepare("SELECT status FROM approvals WHERE id = ?")
+      .get(approvalId) as { status: string };
+    expect(approval.status).toBe('rejected');
+
+    // Await the original requestApproval promise — should resolve with 'deny'.
+    const finalDecision = await approvalPromise;
+    expect(finalDecision.behavior).toBe('deny');
   });
 });
