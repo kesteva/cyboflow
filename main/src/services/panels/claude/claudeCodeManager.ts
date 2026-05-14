@@ -332,8 +332,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     // --- Completion/forced listeners ---
     detector.on('complete', (payload: CompletionPayload) => {
-      // Pre-flight: verify the 'running -> completed' transition is legal before cleanup.
-      // Fail-soft: no workflow_runs row exists yet (panelId placeholder), so we catch any error.
+      // Compile-time legality check: assertTransitionAllowed is a pure lookup in
+      // ALLOWED_TRANSITIONS and does NOT query the DB. With hardcoded literal args
+      // ('running' -> 'completed' is a valid pair), this call never throws in practice.
+      // The try/catch is retained as a belt-and-suspenders guard against future
+      // refactors that change the literals; it is not a row-existence guard.
       try {
         assertTransitionAllowed('running', 'completed', payload.runId);
       } catch (err) {
