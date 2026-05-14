@@ -2,7 +2,7 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { PermissionManager } from './permissionManager';
+import { ApprovalRouter, type ApprovalDecision } from '../orchestrator/approvalRouter';
 import { getCyboflowSubdirectory } from '../utils/crystalDirectory';
 
 export class CyboflowPermissionIpcServer {
@@ -49,34 +49,42 @@ export class CyboflowPermissionIpcServer {
         client.on('data', async (data) => {
           try {
             const message = JSON.parse(data.toString());
-            
+
             if (message.type === 'permission-request') {
+              // TODO: at integration time, map sessionId → runId via the workflow-runs
+              // registry owned by the workflow-runs-and-day3-gate epic.  For now the
+              // caller passes whatever ID the bridge subprocess was spawned with; that
+              // value is used directly as the runId.
               const { requestId, sessionId, toolName, input } = message;
-              
-              
-              try {
-                // Request permission from the frontend
-                const response = await PermissionManager.getInstance().requestPermission(
-                  sessionId,
-                  toolName,
-                  input
-                );
-                
-                // Send response back to MCP bridge
+
+              // Build the socketReply closure here where client + requestId are in scope.
+              // This closure is passed directly to requestApproval, which stores it alongside
+              // the pending entry and invokes it exactly once in respond().
+              const socketReply = (decision: ApprovalDecision) => {
                 client.write(JSON.stringify({
                   type: 'permission-response',
                   requestId,
-                  response
+                  response: decision,
                 }));
+              };
+
+              try {
+                await ApprovalRouter.getInstance().requestApproval(
+                  sessionId,
+                  toolName,
+                  input,
+                  socketReply,
+                );
               } catch (error) {
-                // Send error response
+                // Send error response back to the bridge on any failure (including
+                // RunNotRunningError when the run is no longer in 'running' state).
                 client.write(JSON.stringify({
                   type: 'permission-response',
                   requestId,
                   response: {
                     behavior: 'deny',
-                    message: error instanceof Error ? error.message : 'Permission denied'
-                  }
+                    message: error instanceof Error ? error.message : 'Permission denied',
+                  },
                 }));
               }
             }

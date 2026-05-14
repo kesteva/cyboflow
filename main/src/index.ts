@@ -31,6 +31,7 @@ import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
+import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { EventEmitter } from 'node:events';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -707,6 +708,12 @@ app.whenReady().then(async () => {
       attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
     }
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
+
+    // Wire ApprovalRouter after the RunQueueRegistry is live.
+    // The socketReply closures are provided per-request by CyboflowPermissionIpcServer
+    // (passed directly to requestApproval), so no factory is needed here.
+    ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    console.log('[Main] ApprovalRouter initialized');
   }
 
   // Track app lifecycle events
