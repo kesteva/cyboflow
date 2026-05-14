@@ -2,6 +2,7 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { randomUUID } from 'node:crypto';
 import { ApprovalRouter, type ApprovalDecision } from '../orchestrator/approvalRouter';
 import { getCyboflowSubdirectory } from '../utils/crystalDirectory';
 
@@ -42,7 +43,7 @@ export class CyboflowPermissionIpcServer {
       }
 
       this.server = net.createServer((client) => {
-        const clientId = `${Date.now()}-${Math.random()}`;
+        const clientId = randomUUID();
         this.clients.set(clientId, client);
         
 
