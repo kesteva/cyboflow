@@ -106,20 +106,28 @@ in application order.
 
 ### `@cyboflow-hidden` annotation
 
-Mark preserved-but-disconnected code (kept for future re-enablement) at the top of the file
-(whole-component case) or immediately above the first function of the disconnected group
-(partial-file case). Always include a one-sentence re-enable hint pointing at the call site
-to restore.
+Mark intentionally-unreachable code at the top of the file (whole-component case) or
+immediately above the first function of the disconnected group (partial-file case).
+Always include a one-sentence re-enable hint pointing at the call site (or upstream
+caller / epic for forward-looking placeholders) to restore.
+
+Two valid categories:
+1. **Crystal-preserved** — code kept from the `stravu/crystal` baseline, disabled in v1.
+2. **Forward-looking placeholder** — fresh cyboflow code unwired until a later sprint's
+   integration task lands (e.g. satisfies a grep gate for a Day-N epic).
 
 ```
 // @cyboflow-hidden: <what is unreachable> in cyboflow v1.
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical examples:** `main/src/services/worktreeManager.ts:472` (method-group),
-  `frontend/src/components/SessionView.tsx:14` (import-line)
+- **Canonical examples (Crystal-preserved):** `main/src/services/worktreeManager.ts:472`
+  (method-group), `frontend/src/components/SessionView.tsx:14` (import-line)
+- **Canonical example (forward-looking placeholder):**
+  `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
+  (Day-3 ApprovalRouter integration point)
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
-  preserved-but-inactive surfaces.
+  inactive surfaces (both categories).
 
 ## Build & Packaging
 
