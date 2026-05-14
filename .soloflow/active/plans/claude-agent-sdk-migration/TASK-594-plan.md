@@ -1,8 +1,8 @@
 ---
 id: TASK-594
 idea: IDEA-014
-status: approved
-created: 2026-05-14T00:00:00Z
+status: ready
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/__tests__/schemas.test.ts
   - main/src/services/streamParser/__tests__/eventRouter.test.ts
@@ -18,49 +18,50 @@ files_readonly:
   - main/src/services/streamParser/rawEventsSink.ts
   - main/src/services/streamParser/typedEventNarrowing.ts
 acceptance_criteria:
-  - criterion: "No surviving test file under main/src/services/streamParser/__tests__/ imports fixtures from disk."
+  - criterion: No surviving test file under main/src/services/streamParser/__tests__/ imports fixtures from disk.
     verification: "grep -rn -E \"loadFixture|readFixture|__fixtures__|readFileSync\" main/src/services/streamParser/__tests__/ returns 0 matches"
-  - criterion: "schemas.test.ts is migrated to SDK-mock inputs constructed inline (or via the shared factories helper); it no longer reads any JSON fixture from disk."
+  - criterion: schemas.test.ts is migrated to SDK-mock inputs constructed inline (or via the shared factories helper); it no longer reads any JSON fixture from disk.
     verification: "grep -nE \"loadFixture|readFileSync|__fixtures__\" main/src/services/streamParser/__tests__/schemas.test.ts returns 0 matches AND the file is non-empty"
-  - criterion: "typedEventNarrowing.test.ts is migrated to SDK-mock inputs constructed inline (or via the shared factories helper); it no longer reads any JSON fixture from disk."
+  - criterion: typedEventNarrowing.test.ts is migrated to SDK-mock inputs constructed inline (or via the shared factories helper); it no longer reads any JSON fixture from disk.
     verification: "grep -nE \"loadFixture|readFileSync|__fixtures__\" main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts returns 0 matches AND the file is non-empty"
   - criterion: "A shared factories module exists at __tests__/sdkMockFactories.ts and exports factory functions for the canonical message shapes used by schemas.test.ts and typedEventNarrowing.test.ts (systemInit, systemApiRetry, systemCompact, assistant, userStringContent, userArrayContent, resultSuccess, resultErrorMaxTurns, resultErrorMaxBudgetUsd, resultErrorDuringExecution, streamEvent)."
     verification: "test -f main/src/services/streamParser/__tests__/sdkMockFactories.ts AND grep -cE \"^export function (systemInit|systemApiRetry|systemCompact|assistant|userStringContent|userArrayContent|resultSuccess|resultErrorMaxTurns|resultErrorMaxBudgetUsd|resultErrorDuringExecution|streamEvent)\\b\" main/src/services/streamParser/__tests__/sdkMockFactories.ts returns 11"
-  - criterion: "All surviving parser test suites pass green."
+  - criterion: All surviving parser test suites pass green.
     verification: "pnpm test -- main/src/services/streamParser/__tests__/ exits 0; the run lists schemas.test.ts, eventRouter.test.ts, messageProjection.test.ts, rawEventsSink.test.ts, and typedEventNarrowing.test.ts as PASS"
-  - criterion: "Workspace typecheck succeeds."
-    verification: "pnpm typecheck exits 0"
-  - criterion: "Workspace lint succeeds (no `any` regressions introduced by the factory helper)."
-    verification: "pnpm lint exits 0"
-  - criterion: "The byte-stream-validation subset of schemas.test.ts is deleted; the substrate-portable describe blocks are preserved verbatim."
+  - criterion: Workspace typecheck succeeds.
+    verification: pnpm typecheck exits 0
+  - criterion: Workspace lint succeeds (no `any` regressions introduced by the factory helper).
+    verification: pnpm lint exits 0
+  - criterion: The byte-stream-validation subset of schemas.test.ts is deleted; the substrate-portable describe blocks are preserved verbatim.
     verification: "Open schemas.test.ts and confirm: describe('SystemInitEvent'), describe('SystemApiRetryEvent'), describe('SystemCompactEvent'), describe('AssistantEvent'), describe('UserEvent'), describe('ResultEvent'), describe('StreamEvent'), describe('UnknownStreamEvent fallback'), describe('passthrough'), and describe('exhaustive union coverage') blocks all still exist; no new describe blocks have been added."
-depends_on: [TASK-592, TASK-593]
+depends_on:
+  - TASK-592
+  - TASK-593
 estimated_complexity: medium
 epic: claude-agent-sdk-migration
 test_strategy:
   needed: true
   justification: "The test suite IS the deliverable for this task. The surviving parser tests must continue to exercise the substrate-independent invariants (variant narrowing, event routing, message projection, raw-events persistence) against inline SDK-mock inputs after the fixture-on-disk pattern is removed."
   targets:
-    - behavior: "Variant narrowing across all 7 wire variants + passthrough + catch-all + assertNever exhaustive coverage continues to pass with inline SDK-mock inputs."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+    - behavior: Variant narrowing across all 7 wire variants + passthrough + catch-all + assertNever exhaustive coverage continues to pass with inline SDK-mock inputs.
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
     - behavior: "TypedEventNarrowing.narrow() round-trips system/init, assistant/tool_use, result/success, unknown discriminants, and passthrough fields with inline SDK-mock inputs."
-      test_file: "main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts"
+      test_file: main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts
       type: unit
     - behavior: "Per-runId fanout isolation, teardown, clearRun, and re-attach semantics remain green."
-      test_file: "main/src/services/streamParser/__tests__/eventRouter.test.ts"
+      test_file: main/src/services/streamParser/__tests__/eventRouter.test.ts
       type: unit
-    - behavior: "MessageProjection.project() output parity across 21 cases remains green."
-      test_file: "main/src/services/streamParser/__tests__/messageProjection.test.ts"
+    - behavior: MessageProjection.project() output parity across 21 cases remains green.
+      test_file: main/src/services/streamParser/__tests__/messageProjection.test.ts
       type: unit
     - behavior: "RawEventsSink happy-path persistence, fail-soft on INSERT error, unknown-variant column mapping, dispose teardown, re-attach idempotence, and large-payload preservation remain green."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
-    - behavior: "Shared factory functions produce objects that satisfy the existing ClaudeStreamEvent discriminated union (compile-time check via typecheck)."
-      test_file: "main/src/services/streamParser/__tests__/sdkMockFactories.ts"
+    - behavior: Shared factory functions produce objects that satisfy the existing ClaudeStreamEvent discriminated union (compile-time check via typecheck).
+      test_file: main/src/services/streamParser/__tests__/sdkMockFactories.ts
       type: unit
 ---
-
 # Migrate surviving stream-parser tests to SDK-mock fixtures
 
 ## Objective

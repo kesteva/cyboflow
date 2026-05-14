@@ -1,8 +1,8 @@
 ---
 id: TASK-595
 idea: IDEA-014
-status: approved
-created: 2026-05-14T00:00:00Z
+status: ready
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - docs/sdk-migration-smoke-results.md
   - docs/screenshots/sdk-migration/.gitkeep
@@ -18,12 +18,12 @@ files_readonly:
   - cyboflow-frontend-debug.log
 acceptance_criteria:
   - criterion: "docs/sdk-migration-smoke-results.md exists and contains a checklist of all 9 EPIC success signals, each with PASS / FAIL / N/A status and concrete evidence (log excerpt, screenshot path, or command output)."
-    verification: "test -f docs/sdk-migration-smoke-results.md && for n in 1 2 3 4 5 6 7 8 9; do grep -E \"^(### |- ).*\\b$n\\b\" docs/sdk-migration-smoke-results.md > /dev/null || { echo missing $n; exit 1; }; done"
+    verification: "\"test -f docs/sdk-migration-smoke-results.md && for n in 1 2 3 4 5 6 7 8 9; do grep -E \\\"^("
   - criterion: "Every line in the 9-point checklist resolves to PASS, or to FAIL/N-A with a linked follow-up task spec stub in the same document."
     verification: "grep -E '^- \\*\\*(Signal [0-9]|S[0-9])' docs/sdk-migration-smoke-results.md | grep -Eiv '(PASS|FAIL|N/A)' | wc -l | grep -q '^[[:space:]]*0$' ; for f in $(grep -oE 'FAIL' docs/sdk-migration-smoke-results.md); do grep -q 'Follow-up:' docs/sdk-migration-smoke-results.md; done"
-  - criterion: "Document records the PATH-isolation method used (either `mv $(which claude) /tmp/claude.bak` or a per-process `PATH=` filter) AND records that `pnpm dev` started cleanly under that isolation."
+  - criterion: Document records the PATH-isolation method used (either `mv $(which claude) /tmp/claude.bak` or a per-process `PATH=` filter) AND records that `pnpm dev` started cleanly under that isolation.
     verification: "grep -E '(PATH-isolation|PATH isolation|which claude|/tmp/claude.bak)' docs/sdk-migration-smoke-results.md && grep -E '(pnpm dev|dev launch).*(clean|success|no error)' docs/sdk-migration-smoke-results.md"
-  - criterion: "Document confirms `@anthropic-ai/claude-agent-sdk` is the substrate by quoting the `main/package.json` dependency line and a backend-log line proving SDK init ran in-process."
+  - criterion: Document confirms `@anthropic-ai/claude-agent-sdk` is the substrate by quoting the `main/package.json` dependency line and a backend-log line proving SDK init ran in-process.
     verification: "grep -E '\"@anthropic-ai/claude-agent-sdk\"' docs/sdk-migration-smoke-results.md && grep -E '(SDK init|claude-agent-sdk|sdk query)' docs/sdk-migration-smoke-results.md"
   - criterion: "Document cites at least two screenshot file paths under `docs/screenshots/sdk-migration/` — one for the panel UI streaming a response, one for the review queue receiving an intercepted tool call."
     verification: "ls docs/screenshots/sdk-migration/ | grep -E '(panel|stream)' && ls docs/screenshots/sdk-migration/ | grep -E '(review|approval|intercept)' && grep -E 'docs/screenshots/sdk-migration/' docs/sdk-migration-smoke-results.md | wc -l | awk '$1 >= 2 {exit 0} {exit 1}'"
@@ -37,29 +37,30 @@ prerequisites:
     description: "T9 cannot smoke-test the SDK substrate if T1's `pnpm add` step never landed."
     blocking: true
   - check: "test ! -f main/build-cyboflow-permission-bridge.js"
-    fix: "Complete TASK-591."
+    fix: Complete TASK-591.
     description: "EPIC success-signal #5 requires `build-cyboflow-permission-bridge.js` be deleted."
     blocking: true
   - check: "test ! -f main/src/services/streamParser/lineBufferer.ts && test ! -f main/src/services/streamParser/jsonParser.ts && test ! -f main/src/services/streamParser/streamParser.ts && test ! -f main/src/services/streamParser/completionDetector.ts"
-    fix: "Complete TASK-592 and TASK-593."
+    fix: Complete TASK-592 and TASK-593.
     description: "EPIC success-signal #6 requires these four files be deleted."
     blocking: true
   - check: "command -v claude > /dev/null && which claude || true"
-    fix: "Informational only."
+    fix: Informational only.
     description: "Smoke step 1 needs to either move or filter the `claude` binary out of PATH to satisfy success-signal #4."
     blocking: false
   - check: "test -n \"$ANTHROPIC_API_KEY\" || test -d \"$HOME/.config/claude\" || test -d \"$HOME/.claude\""
     fix: "Export ANTHROPIC_API_KEY or log in via the SDK's auth flow."
-    description: "The SDK requires authenticated credentials."
+    description: The SDK requires authenticated credentials.
     blocking: true
-depends_on: [TASK-591, TASK-594]
+depends_on:
+  - TASK-591
+  - TASK-594
 estimated_complexity: medium
 epic: claude-agent-sdk-migration
 test_strategy:
   needed: false
   justification: "This task IS the test. No new unit / component / integration code is added; the results document is the artifact and the verifier consumes the document plus the cited screenshots and log excerpts. Every files_owned path is non-executable documentation. The directory-level sibling-test scan against docs/ and docs/screenshots/sdk-migration/ returns no matches. Modifying documentation cannot affect a test-id, accessibility label, exported behavior, or mock shape. Running pnpm test from step 13 is sufficient to confirm no regression in the broader suite."
 ---
-
 # Integration smoke test: end-to-end SDK migration verification
 
 ## Objective

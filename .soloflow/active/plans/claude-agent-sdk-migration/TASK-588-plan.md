@@ -1,8 +1,8 @@
 ---
 id: TASK-588
 idea: IDEA-014
-status: approved
-created: 2026-05-14T00:00:00Z
+status: ready
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - shared/types/approval.ts
   - main/src/orchestrator/approvalRouter.ts
@@ -26,11 +26,11 @@ acceptance_criteria:
     verification: "grep -rn \"from ['\\\"]\\.\\./orchestrator/approvalRouter['\\\"]\" main/src/services main/src/orchestrator/__tests__ returns at least 3 matches AND none of those files' import lines were modified by this task (git diff TASK-588 commit shows no changes to those file paths)"
   - criterion: "main/src/services/permissionManager.ts either imports from shared/types/approval.ts OR contains a documented divergence note in a file-header comment block referencing 'shared/types/approval.ts' as the canonical substrate-portable contract"
     verification: "grep -E \"from ['\\\"].*shared/types/approval['\\\"]\" main/src/services/permissionManager.ts returns at least 1 match OR head -20 main/src/services/permissionManager.ts | grep -q 'shared/types/approval'"
-  - criterion: "pnpm --filter main typecheck exits 0 — no consumer of ApprovalRequest/ApprovalDecision breaks"
+  - criterion: pnpm --filter main typecheck exits 0 — no consumer of ApprovalRequest/ApprovalDecision breaks
     verification: "cd main && pnpm typecheck exits 0"
-  - criterion: "pnpm --filter main lint exits 0 — no unused-import or no-explicit-any violations introduced"
+  - criterion: pnpm --filter main lint exits 0 — no unused-import or no-explicit-any violations introduced
     verification: "cd main && pnpm lint exits 0"
-  - criterion: "Existing main/src/orchestrator/__tests__/approvalRouter.test.ts passes unmodified (case count unchanged from pre-task baseline)"
+  - criterion: Existing main/src/orchestrator/__tests__/approvalRouter.test.ts passes unmodified (case count unchanged from pre-task baseline)
     verification: "cd main && pnpm test -- approvalRouter exits 0; record case count in done report and confirm it matches the pre-task baseline (run once before starting the task to capture baseline)"
 depends_on: []
 estimated_complexity: low
@@ -39,7 +39,6 @@ test_strategy:
   needed: false
   justification: "This is a pure type-relocation refactor. The canonical types move from `main/src/orchestrator/approvalRouter.ts` to a new `shared/types/approval.ts`, and `approvalRouter.ts` re-exports them so consumers' import surface is unchanged. Behavior is byte-identical. Sibling-test scan: ran the directory-level scan for every file in files_owned per refiner rule 5b. (a) `shared/types/` has no `__tests__/` subdirectory and no `.test.ts` siblings (verified via `Glob shared/types/__tests__/*` → no files; `Glob shared/types/*.test.ts` → no files). (b) `main/src/orchestrator/__tests__/` contains `approvalRouter.test.ts` — this test IS the regression gate for ApprovalRouter and runs UNCHANGED as part of the AC `pnpm test -- approvalRouter exits 0`. It is named in `files_readonly` (not modified, only executed). (c) `main/src/services/__tests__/` contains `claudeCodeManagerPermissions.test.ts` and `claudeCodeManagerWiring.test.ts`; neither imports `PermissionManager` nor `permissionManager.ts` (verified at plan time — TASK-579-plan.md AC and SPRINT-006-findings record `permissionManager.ts` as having zero live importers in production code). The existing `approvalRouter.test.ts` (executed via the AC) is sufficient regression coverage: it imports `ApprovalDecision` via the `approvalRouter` re-export path, so a broken re-export surfaces as a test-import failure. `pnpm typecheck` is the primary structural gate; the existing test is the primary behavioral gate."
 ---
-
 # Extract ApprovalRequest / ApprovalDecision into shared/types/approval.ts
 
 ## Objective
