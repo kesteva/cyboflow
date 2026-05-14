@@ -46,7 +46,7 @@ Why it matters: OpenAI's subscription model for Codex / agentic usage is less re
 
 ## Grounding
 
-Not yet grounded — run `/soloflow:planner IDEA-015` to refine and ground. Sequencing: do not start until the IDEA-013 vs IDEA-014 architecture decision has been made for the Anthropic-Claude path — the Codex integration mirrors whichever shape that lands on (interactive-TUI style or SDK-native).
+Not yet grounded — run `/soloflow:planner IDEA-015` to refine and ground. Sequencing: this is no longer blocked on an IDEA-013-vs-IDEA-014 architecture decision (that's been made — SDK first to complete the prototype, IDEA-013 second to preserve subscription billing). IDEA-015 sequences AFTER IDEA-013 lands, so the Codex integration mirrors the same dual-substrate shape (SDK-style for the structured-UI tier, interactive-TUI-style for the subscription-billing tier) the Claude panel will already have. The `ApprovalRouter` interface from IDEA-014 (TASK-588) is the foundation per-provider permission gates plug into.
 
 ## Slices
 
@@ -83,4 +83,4 @@ See `assumptions[]` in frontmatter.
 
 ## Sequencing
 
-Partly contingent on the outcome of IDEA-013 / IDEA-014 — if cyboflow ends up SDK-native (IDEA-014), the Codex integration is also SDK-style; if cyboflow ends up driving interactive TUIs (IDEA-013), the Codex integration is interactive-TUI-style. Do not start until the Claude-panel architecture is settled.
+Sequences AFTER IDEA-013. The Claude panel will have both substrates (SDK from IDEA-014, interactive TUI from IDEA-013) — the Codex integration mirrors both, exposing the same provider-tier choice (SDK-style for richer UI, interactive-TUI-style for permissive subscription billing where the provider supports it). Don't start until IDEA-013 is integrated so the dual-substrate pattern is established and the abstraction can generalize cleanly.
