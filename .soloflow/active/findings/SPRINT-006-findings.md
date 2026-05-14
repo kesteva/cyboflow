@@ -1,10 +1,30 @@
 ---
 sprint: SPRINT-006
-pending_count: 1
-last_updated: "2026-05-13T19:05:00Z"
+pending_count: 3
+last_updated: "2026-05-13T19:45:00Z"
 ---
 
 # Findings Queue
+
+## FIND-SPRINT-006-3
+- **source:** TASK-253 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/Orchestrator.test.ts:132-136
+- **description:** In the "stop drains the run queue registry" test, the task body writes `taskFinished = false; taskFinished = true;` — the first assignment is dead because the outer-scope `let taskFinished = false;` already provides that initial value. The inline `// initially false` comment is misleading, since the read at line 142 happens BEFORE the task runs (the gate is still locked), not while the task is mid-execution. The test passes, but the intent of the dead write is unclear and a future reader may "fix" it incorrectly.
+- **suggested_action:** Drop the `taskFinished = false; // initially false` line so the task body is just `taskFinished = true;`. The outer initialization already guarantees the pre-state.
+- **resolved_by:**
+
+## FIND-SPRINT-006-2
+- **source:** TASK-253 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/Orchestrator.ts:72-75
+- **description:** `Orchestrator.ts` re-exports `RunQueueRegistry`, `EventEmitter`, and the `OrchestratorDeps` type at the bottom of the file as a "caller convenience." No call sites currently consume these re-exports (verified by grep across `main/src/` — there are no imports from `'./orchestrator/Orchestrator'` other than direct class imports in tests). The convenience is speculative and adds two extra public surface symbols (`EventEmitter`, `RunQueueRegistry`) that callers can already import from their canonical locations. If a caller wires `OrchestratorDeps` from a single import, that's the only re-export that earns its keep.
+- **suggested_action:** When TASK-254/255 wires the orchestrator from `main/src/index.ts`, either delete the unused `EventEmitter` / `RunQueueRegistry` re-exports or confirm them by use. The `OrchestratorDeps` re-export is fine — it lives next to its consumer.
+- **resolved_by:**
 
 ## FIND-SPRINT-006-1
 - **source:** TASK-251 (code-reviewer)
