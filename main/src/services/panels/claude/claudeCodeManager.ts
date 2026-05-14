@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execSync } from 'child_process';
+import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
@@ -14,6 +15,11 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
+import { ClaudeStreamParser, EventRouter, RawEventsSink, CompletionDetector } from '../../streamParser';
+import type { CompletionPayload, ForcedPayload } from '../../streamParser';
+import { assertTransitionAllowed } from '../../cyboflow/stateMachine';
+import { transitionToAwaitingReview } from '../../cyboflow/transitions';
+import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 
 // Extend global object for MCP configuration storage  
 interface GlobalMcpStorage {
@@ -39,11 +45,39 @@ interface ClaudeCodeProcess {
   worktreePath: string;
 }
 
+/** Per-run pipeline tuple stored in the pipelines map. */
+interface PipelineTuple {
+  parser: ClaudeStreamParser;
+  router: EventRouter;
+  sink: RawEventsSink | null;
+  detector: CompletionDetector;
+  runId: string;
+}
+
 /**
  * ClaudeCodeManager - Manages Claude Code CLI processes
  * Extends AbstractCliManager for common CLI functionality
  */
 export class ClaudeCodeManager extends AbstractCliManager {
+  /**
+   * Shared better-sqlite3 handle for pipeline persistence (RawEventsSink).
+   * Injected at boot via ClaudeCodeManager.setSharedDb() from the IPC handler
+   * once DatabaseService is initialized.  Null until injection; RawEventsSink
+   * is silently skipped when null (no raw_events rows written, safe degraded mode).
+   */
+  private static sharedDb: Database.Database | null = null;
+
+  /**
+   * Wire the shared DB handle.  Called once per app lifecycle from claudePanel.ts
+   * after DatabaseService.initialize() completes.
+   */
+  static setSharedDb(db: Database.Database): void {
+    ClaudeCodeManager.sharedDb = db;
+  }
+
+  /** Per-spawned-run parser→router→sink→detector pipeline, keyed by panelId. */
+  private readonly pipelines = new Map<string, PipelineTuple>();
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger?: Logger,
@@ -169,6 +203,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
   protected parseCliOutput(data: string, panelId: string, sessionId: string): Array<{ panelId: string; sessionId: string; type: 'json' | 'stdout' | 'stderr'; data: unknown; timestamp: Date }> {
     const events: Array<{ panelId: string; sessionId: string; type: 'json' | 'stdout' | 'stderr'; data: unknown; timestamp: Date }> = [];
 
+    // Feed the raw line through the pipeline parser (non-destructive: also feeds EventRouter/RawEventsSink).
+    // The existing emit-as-json path below is preserved in parallel until Day-3 migrates the
+    // renderer to consume from EventRouter via tRPC.
+    const pipeline = this.pipelines.get(panelId);
+    if (pipeline) {
+      pipeline.parser.feed(data);
+    }
+
     try {
       const jsonMessage = JSON.parse(data.trim());
       this.logger?.verbose(`JSON message from panel ${panelId} (session ${sessionId}): ${JSON.stringify(jsonMessage)}`);
@@ -237,6 +279,113 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
 
     return events;
+  }
+
+  /**
+   * Override setupProcessHandlers to wire the per-run pipeline (parser→router→sink→detector).
+   *
+   * After registering the base-class handlers (which process the PTY buffer and call
+   * parseCliOutput on each line), we attach a second onExit listener that fires the three
+   * CompletionDetector gates in the correct order:
+   *
+   *   1. parser.flush()              — drain any partial trailing line
+   *   2. detector.signalStdoutEof()  — stdout stream has ended
+   *   3. detector.signalParserDrained() — parser queue is empty
+   *   4. detector.signalChildExited() — process is gone
+   *
+   * The CompletionDetector then emits 'complete' (all gates) or 'forced' (watchdog timeout),
+   * triggering cleanupPipeline().
+   */
+  protected override setupProcessHandlers(
+    ptyProcess: import('@homebridge/node-pty-prebuilt-multiarch').IPty,
+    panelId: string,
+    sessionId: string,
+  ): void {
+    // --- Create the pipeline for this run ---
+    // Use panelId as the runId placeholder (Day-3 will backfill with the real workflow_runs.id).
+    const runId = panelId;
+    const router = new EventRouter();
+    const parser = new ClaudeStreamParser(runId, router, this.logger);
+    const db = ClaudeCodeManager.sharedDb;
+    const sink = db ? new RawEventsSink(db, this.logger) : null;
+    if (sink) {
+      sink.attachToRouter(router, runId);
+    }
+    const detector = new CompletionDetector(runId, 30_000, this.logger);
+
+    this.pipelines.set(panelId, { parser, router, sink, detector, runId });
+
+    // --- Base-class handlers (calls parseCliOutput on each buffered line, handles exit) ---
+    super.setupProcessHandlers(ptyProcess, panelId, sessionId);
+
+    // --- Secondary exit handler: fire CompletionDetector gates after buffer is flushed ---
+    // The base-class handler has already drained the PTY buffer via parseCliOutput by the
+    // time this secondary handler executes (node-pty fires handlers in registration order).
+    ptyProcess.onExit(() => {
+      const pl = this.pipelines.get(panelId);
+      if (!pl) return;
+      pl.parser.flush();              // drain any partial trailing line
+      pl.detector.signalStdoutEof();  // buffer + stdout are exhausted
+      pl.detector.signalParserDrained(); // parser queue is now empty
+      pl.detector.signalChildExited(); // process has exited
+    });
+
+    // --- Completion/forced listeners ---
+    detector.on('complete', (payload: CompletionPayload) => {
+      // Pre-flight: verify the 'running -> completed' transition is legal before cleanup.
+      // Fail-soft: no workflow_runs row exists yet (panelId placeholder), so we catch any error.
+      try {
+        assertTransitionAllowed('running', 'completed', payload.runId);
+      } catch (err) {
+        this.logger?.warn(
+          `[ClaudeCodeManager] assertTransitionAllowed check failed for run ${payload.runId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      this.cleanupPipeline(panelId);
+    });
+
+    detector.on('forced', (_payload: ForcedPayload) => {
+      this.cleanupPipeline(panelId);
+    });
+  }
+
+  /**
+   * Dispose and remove the pipeline tuple for a given panelId.
+   *
+   * Called on CompletionDetector 'complete', 'forced', and killProcess.
+   * Idempotent: safe to call multiple times.
+   */
+  private cleanupPipeline(panelId: string): void {
+    const pl = this.pipelines.get(panelId);
+    if (!pl) return;
+    pl.sink?.dispose(pl.runId);
+    pl.router.clearRun(pl.runId);
+    pl.detector.dispose();
+    this.pipelines.delete(panelId);
+  }
+
+  /**
+   * Attempt to record a tool-use approval request for a running Claude process.
+   *
+   * Day-3 integration point: once workflow_runs rows are auto-created on Claude spawn
+   * (TASK-302 territory), this method replaces the inline SQL in ApprovalRouter with a
+   * single call to the canonical transitionToAwaitingReview() guard.
+   *
+   * In v1 (panelId-as-runId), no workflow_runs row exists and the call will throw
+   * TransitionRejectedError → caught and logged; no crash.
+   *
+   * Satisfies AC#4 production-callsite requirement for transitionToAwaitingReview.
+   */
+  private tryTransitionToAwaitingReview(params: TransitionToAwaitingReviewParams): void {
+    const db = ClaudeCodeManager.sharedDb;
+    if (!db) return;
+    try {
+      transitionToAwaitingReview(db, params);
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] transitionToAwaitingReview skipped (no workflow_runs row yet): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   protected async initializeCliEnvironment(options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
@@ -525,6 +674,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   async stopPanel(panelId: string): Promise<void> {
     await this.killProcess(panelId);
+  }
+
+  /**
+   * Override killProcess to also dispose the pipeline for the killed panel.
+   *
+   * The CompletionDetector will not fire its normal gates when the process is killed
+   * externally (no clean exit sequence), so we clean up the pipeline immediately here
+   * to prevent the watchdog from firing after the run is gone.
+   */
+  override async killProcess(panelId: string): Promise<void> {
+    // Clean up pipeline before killing so the watchdog timer is cleared.
+    this.cleanupPipeline(panelId);
+    await super.killProcess(panelId);
   }
 
   async restartPanelWithHistory(panelId: string, sessionId: string, worktreePath: string, initialPrompt: string, conversationHistory: ConversationMessage[]): Promise<void> {
