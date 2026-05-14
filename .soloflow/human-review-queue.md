@@ -1,9 +1,9 @@
 ---
-pending_count: 4
+pending_count: 5
 buckets:
   decisions: 0
   actions: 0
-  testing: 4
+  testing: 5
   deferred_visual: 0
 items: []
 ---
@@ -58,6 +58,16 @@ _No items._
     - "AC6: renderer can call trpcClient.cyboflow.runs.list.query() and receive NOT_IMPLEMENTED through the IPC bridge"
   level: requirements
   severity: medium
+
+- task: TASK-568
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-568-plan.md
+  action: "Manual smoke test for AC-2: run `pnpm dev`, create a session with a prompt, wait for output, open the Claude panel. Verify `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/. This task fixes FIND-SPRINT-005-9; final confirmation requires a live Electron run that the verifier cannot perform."
+  blocked_checks:
+    - AC-2 manual Claude-panel smoke test (no renderer TypeError after MessageProjection wiring)
+  level: requirements
+  severity: high
 
 ## Deferred Visual
 
