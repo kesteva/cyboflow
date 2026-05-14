@@ -284,5 +284,5 @@ export type ClaudeStreamEvent =
  * `default` branch as its handler.
  */
 export function assertNever(x: never): never {
-  throw new Error('Unhandled stream event variant: ' + JSON.stringify(x));
+  throw new Error(`Unhandled stream event variant: ${(x as { type?: unknown })?.type ?? '<no-type>'}`);
 }
