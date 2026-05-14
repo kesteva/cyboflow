@@ -89,6 +89,8 @@ main/*.db
 test-results/
 playwright-report/
 test-report/
+.playwright-mcp/
+smoke-test.png
 
 # Temporary test files
 test-file.txt
