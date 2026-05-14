@@ -5,14 +5,7 @@
     "started": "2026-05-14T11:01:12.000Z",
     "execution_mode": "parallel"
   },
-  "tasks": {
-    "TASK-575": {
-      "status": "pending",
-      "depends_on": [
-        "TASK-572"
-      ]
-    }
-  },
+  "tasks": {},
   "playwright_target": {
     "kind": "electron",
     "evidence": "electron in package.json",
