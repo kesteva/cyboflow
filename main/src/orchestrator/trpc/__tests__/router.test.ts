@@ -26,7 +26,7 @@ import { appRouter } from '../router';
 // ---------------------------------------------------------------------------
 
 function isNotImplemented(err: unknown): boolean {
-  return err instanceof TRPCError && err.code === 'NOT_IMPLEMENTED';
+  return err instanceof TRPCError && err.code === 'METHOD_NOT_SUPPORTED';
 }
 
 /**
@@ -118,10 +118,10 @@ describe('appRouter (createCaller)', () => {
   it('protectedProcedure accepts a context with userId defined (no UNAUTHORIZED)', async () => {
     // All procedures use protectedProcedure; if any threw UNAUTHORIZED we
     // would have seen it in the tests above. This test makes the intent
-    // explicit by asserting the error code is NOT_IMPLEMENTED, not UNAUTHORIZED.
+    // explicit by asserting the error code is METHOD_NOT_SUPPORTED, not UNAUTHORIZED.
     const err = await caller.cyboflow.runs.list({}).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TRPCError);
-    expect((err as TRPCError).code).toBe('NOT_IMPLEMENTED');
+    expect((err as TRPCError).code).toBe('METHOD_NOT_SUPPORTED');
     expect((err as TRPCError).code).not.toBe('UNAUTHORIZED');
   });
 });
