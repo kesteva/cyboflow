@@ -704,9 +704,12 @@ app.whenReady().then(async () => {
     };
     orchestrator = new Orchestrator({ db, logger: loggerLike, eventBus: new EventEmitter(), runQueues });
     await orchestrator.start();
-    if (mainWindow) {
-      attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
+    if (!mainWindow) {
+      throw new Error(
+        'mainWindow is null after createWindow — cannot attach orchestrator tRPC bridge'
+      );
     }
+    attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
     // Wire ApprovalRouter after the RunQueueRegistry is live.
