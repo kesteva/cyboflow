@@ -8,7 +8,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { testClaudeCodeAvailability, testClaudeCodeInDirectory } from '../../../utils/claudeCodeTest';
 import { findExecutableInPath } from '../../../utils/shellPath';
-import { PermissionManager } from '../../permissionManager';
+import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { getCrystalDirectory } from '../../../utils/crystalDirectory';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
@@ -264,8 +264,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   protected async cleanupCliResources(sessionId: string): Promise<void> {
-    // Clear any pending permission requests
-    PermissionManager.getInstance().clearPendingRequests(sessionId);
+    // Clear any pending approvals for this run.
+    // Full body (deny in-flight approvals, write DB rows, close sockets) lands in TASK-304.
+    ApprovalRouter.getInstance().clearPendingForRun(sessionId);
 
     // Clean up MCP config file if it exists
     const mcpConfigPath = globalThis[`mcp_config_${sessionId}`];
