@@ -12,7 +12,7 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { PermissionIpcServer } from './services/permissionIpcServer';
+import { CyboflowPermissionIpcServer } from './services/cyboflowPermissionIpcServer';
 import { VersionChecker } from './services/versionChecker';
 import { StravuAuthManager } from './services/stravuAuthManager';
 import { StravuNotebookService } from './services/stravuNotebookService';
@@ -77,7 +77,7 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let permissionIpcServer: PermissionIpcServer | null;
+let permissionIpcServer: CyboflowPermissionIpcServer | null;
 let versionChecker: VersionChecker;
 let stravuAuthManager: StravuAuthManager;
 let stravuNotebookService: StravuNotebookService;
@@ -562,7 +562,7 @@ async function initializeServices() {
 
   // Start permission IPC server
   console.log('[Main] Initializing Permission IPC server...');
-  permissionIpcServer = new PermissionIpcServer();
+  permissionIpcServer = new CyboflowPermissionIpcServer();
   console.log('[Main] Starting Permission IPC server...');
 
   let permissionIpcPath: string | null = null;

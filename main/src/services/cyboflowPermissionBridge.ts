@@ -21,7 +21,7 @@ const ipcPath = process.argv[3];
 
 if (!sessionId || !ipcPath) {
   console.error('[MCP Bridge] ERROR: Missing required arguments');
-  console.error('[MCP Bridge] Usage: node mcpPermissionBridge.js <sessionId> <ipcPath>');
+  console.error('[MCP Bridge] Usage: node cyboflowPermissionBridge.js <sessionId> <ipcPath>');
   process.exit(1);
 }
 
@@ -91,7 +91,7 @@ async function main() {
   await new Promise(resolve => setTimeout(resolve, 100));
   
   const server = new Server({
-    name: 'crystal-permissions',
+    name: 'cyboflow-permissions',
     version: '1.0.0'
   }, {
     capabilities: {

@@ -77,3 +77,11 @@ export function getCrystalDirectory(): string {
 export function getCrystalSubdirectory(...subPaths: string[]): string {
   return join(getCrystalDirectory(), ...subPaths);
 }
+
+/**
+ * Alias for getCrystalSubdirectory using Cyboflow naming.
+ * The data-directory flip (~/.crystal → ~/.cyboflow) is handled by the
+ * crystal-cuts-and-rebrand epic; this re-export lets Cyboflow-branded
+ * modules import a consistently-named symbol today.
+ */
+export const getCyboflowSubdirectory = getCrystalSubdirectory;

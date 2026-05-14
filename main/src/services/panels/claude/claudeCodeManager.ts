@@ -143,7 +143,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'approve';
       const effectiveMode = permissionMode || defaultMode;
       if (effectiveMode === 'approve' && this.permissionIpcPath) {
-        args.push('--permission-prompt-tool', 'mcp__crystal-permissions__approve_permission', '--allowedTools', 'mcp__crystal-permissions__approve_permission');
+        args.push('--permission-prompt-tool', 'mcp__cyboflow-permissions__approve_permission', '--allowedTools', 'mcp__cyboflow-permissions__approve_permission');
       }
     }
 
@@ -246,9 +246,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const systemEnv = await this.getSystemEnvironment();
     
     // Initialize environment with MCP-specific variables
+    // Socket path is passed via argv[3] to the bridge, not env vars (see cyboflowPermissionBridge.ts argv parsing).
     const env: { [key: string]: string } = {
-      // Ensure MCP-related environment variables are preserved
-      MCP_SOCKET_PATH: this.permissionIpcPath || '',
       // Add debug mode for MCP if verbose logging is enabled
       ...(this.configManager?.getConfig()?.verbose ? { MCP_DEBUG: '1' } : {})
     };
@@ -672,8 +671,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private async setupMcpConfigurationSync(sessionId: string): Promise<string> {
     // Create MCP config for permission approval
     let mcpBridgePath = app.isPackaged
-      ? path.join(__dirname, 'mcpPermissionBridgeStandalone.js')
-      : path.join(__dirname, 'mcpPermissionBridge.js');
+      ? path.join(__dirname, 'cyboflowPermissionBridgeStandalone.js')
+      : path.join(__dirname, 'cyboflowPermissionBridge.js');
 
     // Use a directory without spaces for better compatibility
     let tempDir: string;
@@ -707,7 +706,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         throw new Error(`Failed to read MCP bridge script from ASAR: ${error}`);
       }
 
-      const tempScriptPath = path.join(tempDir, `mcpPermissionBridge-${sessionId}.js`);
+      const tempScriptPath = path.join(tempDir, `cyboflowPermissionBridge-${sessionId}.js`);
       try {
         fs.writeFileSync(tempScriptPath, scriptContent);
         fs.chmodSync(tempScriptPath, 0o755);
@@ -728,7 +727,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
     }
 
-    const mcpConfigPath = path.join(tempDir, `crystal-mcp-${sessionId}.json`);
+    const mcpConfigPath = path.join(tempDir, `cyboflow-mcp-${sessionId}.json`);
 
     // Try to find node executable
     let nodePath = 'node';
@@ -801,8 +800,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
       "mcpServers": {
         // Include base project MCP servers first
         ...baseProjectMcp.mcpServers,
-        // Crystal's permission server takes precedence (added last)
-        "crystal-permissions": {
+        // Cyboflow's permission server takes precedence (added last)
+        "cyboflow-permissions": {
           "command": mcpCommand,
           "args": mcpArgs
         }
