@@ -1,10 +1,10 @@
 ---
-pending_count: 6
+pending_count: 7
 buckets:
   decisions: 0
   actions: 0
   testing: 6
-  deferred_visual: 0
+  deferred_visual: 1
 items: []
 ---
 # Human Review Queue
@@ -81,4 +81,12 @@ _No items._
 
 ## Deferred Visual
 
-_No items._
+- sprint: SPRINT-007
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  action: "Live Electron end-of-sprint smoke. Prereq: run `pnpm electron:rebuild` (resolves better-sqlite3 NODE_MODULE_VERSION 137 vs 136 mismatch that crashed Electron during the SPRINT-007 verifier run). Then `pnpm dev`, create a session, run a prompt, open the Claude panel, and confirm `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/ and the panel renders messages. This is the load-bearing cross-task confirmation for SPRINT-007 (TASK-568 + TASK-572 jointly resolve FIND-SPRINT-005-9). Overlaps the existing per-task entries for TASK-568 and TASK-572 — running this one flow satisfies both."
+  blocked_checks:
+    - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
+  level: requirements
+  severity: high
