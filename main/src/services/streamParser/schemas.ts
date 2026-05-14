@@ -149,15 +149,6 @@ const userEventSchema = z.object({
 // Result variant schemas (subtype-discriminated into four siblings)
 // ---------------------------------------------------------------------------
 
-/**
- * All valid subtype literals for the result event.
- * Used for documentation and potential future validation helpers.
- * The four sibling schemas below each pin a single z.literal so that
- * z.discriminatedUnion('subtype', [...]) can dispatch in O(1).
- */
-const resultSubtypeEnum = z.enum(['success', 'error_max_turns', 'error_max_budget_usd', 'error_during_execution']);
-void resultSubtypeEnum; // referenced as documentation; siblings use z.literal for perf
-
 /** Shared fields present on every result variant. */
 const resultBaseFields = {
   type: z.literal('result'),
