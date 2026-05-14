@@ -930,6 +930,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     try {
       console.log(`[IPC] panels:get-json-messages called for panel: ${panelId}`);
 
+      const panelValidation = validatePanelExists(panelId);
+      if (!panelValidation.valid) {
+        logValidationFailure('panels:get-json-messages', panelValidation);
+        return createValidationError(panelValidation);
+      }
+
       if (!sessionManager.getPanelOutputs) {
         console.error('[IPC] Panel-based output methods not available on sessionManager');
         return { success: false, error: 'Panel-based output methods not available' };
