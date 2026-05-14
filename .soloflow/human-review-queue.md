@@ -1,9 +1,9 @@
 ---
-pending_count: 5
+pending_count: 6
 buckets:
   decisions: 0
   actions: 0
-  testing: 5
+  testing: 6
   deferred_visual: 0
 items: []
 ---
@@ -68,6 +68,16 @@ _No items._
     - AC-2 manual Claude-panel smoke test (no renderer TypeError after MessageProjection wiring)
   level: requirements
   severity: high
+
+- task: TASK-572
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-572-plan.md
+  action: "Manual smoke test of raw_events population: run pnpm dev, create+run a Claude Code session, then inspect ~/Library/Application Support/cyboflow/cyboflow.db (macOS) with sqlite3 cyboflow.db \"select event_type, count(*) from raw_events group by event_type;\". Confirm at least one row per active stream-json event_type (system, assistant, result, etc.). This validates AC#7 end-to-end (parser feed → router dispatch → sink persistence)"
+  blocked_checks:
+    - "AC#7 — sqlite raw_events smoke after fresh session"
+  level: requirements
+  severity: medium
 
 ## Deferred Visual
 
