@@ -55,12 +55,18 @@
     "@anthropic-ai/claude-code": "^2.0.0",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@trpc/client": ">=11.0.0 <12.0.0",
+    "@trpc/server": ">=11.0.0 <12.0.0",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
     "electron-updater": "^6.6.8",
     "glob": "^11.0.0",
+    "p-queue": "^7.4.1",
     "posthog-node": "^5.11.2",
-    "web-streams-polyfill": "^3.3.3"
+    "superjson": "^2.2.1",
+    "trpc-electron": "0.1.2",
+    "web-streams-polyfill": "^3.3.3",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
