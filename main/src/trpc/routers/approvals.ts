@@ -1,11 +1,9 @@
 /**
  * cyboflow.approvals sub-router — TASK-406 additions.
  *
- * This module exports `approveRestOfRunRouter`, a tRPC router fragment that
- * adds the `approveRestOfRun` mutation to the approvals namespace.  The
- * fragment is merged into the main approvalsRouter (at
- * main/src/orchestrator/trpc/routers/approvals.ts) during the approval-router
- * epic integration once that epic finalises.
+ * This module exports the approveRestOfRunHandler function — consumed by the
+ * orchestrator's approvalsRouter.approveRestOfRun mutation once ctx.db is
+ * wired (approval-router epic).
  *
  * In the interim the module is self-contained and directly testable: the unit
  * tests in main/src/trpc/__tests__/approvals.test.ts import and call the
@@ -13,8 +11,6 @@
  *
  * Standalone-typecheck invariant: no imports from 'electron'.
  */
-import { z } from 'zod';
-import { router, publicProcedure } from '../index';
 import { withLock } from '../../utils/mutex';
 import type { ApproveRestOfRunResult } from '../../../../shared/types/approvals';
 
@@ -83,28 +79,3 @@ export async function approveRestOfRunHandler(
     return { decided };
   });
 }
-
-/**
- * tRPC router fragment containing the `approveRestOfRun` mutation.
- *
- * Merge into the main approvalsRouter to expose this mutation under
- * `cyboflow.approvals.approveRestOfRun`.
- *
- * NOTE: In the current stub context the procedure does not have access to
- * `ctx.db` (the DB is not yet wired into the tRPC context — that lands in the
- * approval-router epic).  The unit tests exercise `approveRestOfRunHandler`
- * directly with an injected DB instance.
- */
-export const approveRestOfRunRouter = router({
-  approveRestOfRun: publicProcedure
-    .input(z.object({ runId: z.string() }))
-    .mutation(async ({ input }): Promise<ApproveRestOfRunResult> => {
-      // TODO(approval-router epic): replace with ctx.db once wired into context.
-      // For now, log and return 0 — the unit tests exercise the handler directly.
-      console.log(
-        `[approvals.approveRestOfRun] STUB — runId=${input.runId}; ` +
-        `full impl (ctx.db wired) lands in the approval-router epic`,
-      );
-      return { decided: 0 };
-    }),
-});

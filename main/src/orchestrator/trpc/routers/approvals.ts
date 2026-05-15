@@ -100,8 +100,9 @@ export const approvalsRouter = router({
     .input(z.object({ runId: z.string() }))
     .mutation(async ({ input, ctx }): Promise<ApproveRestOfRunResult> => {
       void ctx;
-      // TODO(approval-router epic): replace stub with approveRestOfRunHandler(ctx.db, input.runId)
-      // once ctx.db is wired into the tRPC context.
+      // TODO(approval-router epic): once ctx.db is wired, delegate to:
+      //   import { approveRestOfRunHandler } from '../../../trpc/routers/approvals';
+      //   return approveRestOfRunHandler(ctx.db, input.runId);
       console.log(`[approvals.approveRestOfRun] STUB — runId=${input.runId}`);
       return { decided: 0 };
     }),
