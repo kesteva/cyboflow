@@ -88,8 +88,9 @@ describe('pureReplaceAll', () => {
   });
 
   it('returns a new array even when items are identical', () => {
-    const result = pureReplaceAll([A], [A]);
-    expect(result).not.toBe([A]); // reference inequality
+    const replacement = [A];
+    const result = pureReplaceAll([], replacement);
+    expect(result).not.toBe(replacement); // reference inequality between input and output
     expect(result).toHaveLength(1);
   });
 });
