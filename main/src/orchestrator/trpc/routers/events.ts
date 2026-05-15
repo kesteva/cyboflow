@@ -11,7 +11,6 @@ import { z } from 'zod';
 import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { throttleAsyncIterator } from '../throttle';
 import type { ApprovalCreatedEvent, ApprovalDecidedEvent } from '../../../../../shared/types/approvals';
-import { dockBadgeService } from '../../../services/dockBadgeService';
 
 // ---------------------------------------------------------------------------
 // Placeholder event types — swapped out in stream-parser-to-main epic.
@@ -132,8 +131,8 @@ export const eventsRouter = router({
    */
   setBadgeCount: publicProcedure
     .input(z.object({ count: z.number().int().min(0) }))
-    .mutation(({ input }) => {
-      dockBadgeService.setBadgeCount(input.count);
+    .mutation(({ input, ctx }) => {
+      ctx.setDockBadge(input.count);
       return { ok: true };
     }),
 

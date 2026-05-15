@@ -81,7 +81,13 @@ describe('attachOrchestratorTrpc', () => {
     expect(call.createContext).toBeDefined();
     const fakeEvent = {} as Parameters<NonNullable<typeof call.createContext>>[0];
     const ctx = await call.createContext!(fakeEvent);
-    expect(ctx).toEqual(createContext());
+    // Check shape rather than deep equality: setDockBadge is a callback
+    // (function reference) that differs per createContext() invocation, so
+    // toEqual would fail on function identity. Assert the scalar fields match
+    // and that setDockBadge is present and callable.
+    const expected = createContext();
+    expect(ctx.userId).toBe(expected.userId);
+    expect(typeof ctx.setDockBadge).toBe('function');
   });
 
   it('passes distinct window instances independently', () => {
