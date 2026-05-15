@@ -364,7 +364,7 @@ function App() {
         {activeProjectId !== null && !useLegacyCrystalView ? (
           <div className="flex flex-col flex-1 overflow-hidden">
             <div
-              className="flex justify-end px-4 py-1 border-b border-border"
+              className="flex justify-end px-4 py-1 border-b border-border-primary"
               style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             >
               <button
@@ -383,7 +383,7 @@ function App() {
           <div className="flex flex-col flex-1 overflow-hidden">
             {useLegacyCrystalView && (
               <div
-                className="flex justify-end px-4 py-1 border-b border-border"
+                className="flex justify-end px-4 py-1 border-b border-border-primary"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
               >
                 <button

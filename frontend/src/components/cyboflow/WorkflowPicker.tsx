@@ -93,7 +93,7 @@ export function WorkflowPicker({ projectId }: WorkflowPickerProps) {
       <button
         onClick={handleStartRun}
         disabled={selectedId === null || isLoading}
-        className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         Start Run
       </button>
