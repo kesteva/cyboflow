@@ -5,17 +5,29 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import ReviewQueueView from '../ReviewQueueView';
 import { ErrorBoundary } from '../ErrorBoundary';
 import type { Approval } from '../../../../shared/types/approvals';
+import type { QueueItem } from '../../utils/reviewQueueSelectors';
 
 // Mutable state shared between mock factory and test helpers
 let mockQueue: Approval[] = [];
 const mockInit = vi.fn();
 
-// Mock the reviewQueueStore module
+// Default view: map each approval to a single non-blocking QueueItem
+function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
+  return {
+    blocking: [],
+    normal: mockQueue.map(a => ({ kind: 'single' as const, approval: a, isBlocking: false })),
+  };
+}
+
+// Mock the reviewQueueStore module — expose both useReviewQueueStore and useReviewQueueView
 vi.mock('../../stores/reviewQueueStore', () => {
   const useReviewQueueStore = (selector: (s: { queue: Approval[]; init: () => void }) => unknown) =>
     selector({ queue: mockQueue, init: mockInit });
   useReviewQueueStore.getState = () => ({ queue: mockQueue, init: mockInit });
-  return { useReviewQueueStore };
+  return {
+    useReviewQueueStore,
+    useReviewQueueView: () => buildView(),
+  };
 });
 
 // Mock useReviewQueueKeyboard — ReviewQueueView.tsx imports this hook which in
@@ -25,12 +37,12 @@ vi.mock('../../hooks/useReviewQueueKeyboard', () => ({
   useReviewQueueKeyboard: () => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
 }));
 
-// Mock PendingApprovalCard stub so tests don't depend on TASK-403.
-// ReviewQueueView imports as named export { PendingApprovalCard }.
+// Mock PendingApprovalCard — accepts the new `item: QueueItem` prop shape.
 vi.mock('../PendingApprovalCard', () => ({
-  PendingApprovalCard: ({ approval }: { approval: Approval }) => (
-    <div data-testid="pending-approval-card">{approval.toolName}</div>
-  ),
+  PendingApprovalCard: ({ item }: { item: QueueItem }) => {
+    const toolName = item.kind === 'single' ? item.approval.toolName : item.toolName;
+    return <div data-testid="pending-approval-card">{toolName}</div>;
+  },
 }));
 
 describe('ReviewQueueView', () => {
@@ -88,6 +100,14 @@ describe('ReviewQueueView', () => {
     ];
     render(<ReviewQueueView />);
     expect(screen.queryByText('No pending approvals')).not.toBeInTheDocument();
+  });
+
+  it('renders "Pending" section header when queue is non-empty', () => {
+    mockQueue = [
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+    ];
+    render(<ReviewQueueView />);
+    expect(screen.getByText('Pending')).toBeInTheDocument();
   });
 });
 

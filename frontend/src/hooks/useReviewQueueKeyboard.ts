@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { trpc } from '../trpc/client';
-import type { Approval } from '../../../shared/types/approvals';
+import type { QueueItem } from '../utils/reviewQueueSelectors';
 
 /**
  * Provides Vim/Superhuman-style keyboard triage for the review queue.
@@ -11,15 +11,18 @@ import type { Approval } from '../../../shared/types/approvals';
  * <input>, <textarea>, or contenteditable element.
  *
  * Key map:
- *   j — focus next approval (clamps at last item)
- *   k — focus previous approval (clamps at first item)
- *   y — approve the currently focused approval
- *   n — reject the currently focused approval
+ *   j — focus next item (clamps at last item)
+ *   k — focus previous item (clamps at first item)
+ *   y — approve the currently focused item (all members if a group)
+ *   n — reject the currently focused item (all members if a group)
  *
  * Meta / Ctrl / Alt modifier combinations are ignored so as not to collide
  * with OS shortcuts (Cmd-K, Ctrl-N, etc.).
+ *
+ * For group items, y/n issue one mutation per member via Promise.all (batched).
+ * TASK-406 will replace this with a single atomic per-run mutation.
  */
-export function useReviewQueueKeyboard(queue: Approval[]): {
+export function useReviewQueueKeyboard(queue: QueueItem[]): {
   focusedIndex: number;
   setFocusedIndex: (i: number) => void;
 } {
@@ -63,27 +66,38 @@ export function useReviewQueueKeyboard(queue: Approval[]): {
           break;
         case 'y':
           event.preventDefault();
-          // Read the current focusedIndex directly from the closure-captured
-          // queue; we call setFocusedIndex in functional form for j/k, but for
-          // y/n we need the current value so we use a state ref pattern via a
-          // local capture.  The queue reference is captured from the outer
-          // scope — always current because the effect re-runs on queue changes.
           setFocusedIndex(currentIndex => {
-            const approval = queue[currentIndex];
-            if (approval !== undefined) {
-              void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id });
+            const focused = queue[currentIndex];
+            if (focused !== undefined) {
+              if (focused.kind === 'single') {
+                void trpc.cyboflow.approvals.approve.mutate({ approvalId: focused.approval.id });
+              } else {
+                void Promise.all(
+                  focused.items.map((a) =>
+                    trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id }),
+                  ),
+                );
+              }
             }
-            return currentIndex; // leave focusedIndex unchanged
+            return currentIndex;
           });
           break;
         case 'n':
           event.preventDefault();
           setFocusedIndex(currentIndex => {
-            const approval = queue[currentIndex];
-            if (approval !== undefined) {
-              void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id });
+            const focused = queue[currentIndex];
+            if (focused !== undefined) {
+              if (focused.kind === 'single') {
+                void trpc.cyboflow.approvals.reject.mutate({ approvalId: focused.approval.id });
+              } else {
+                void Promise.all(
+                  focused.items.map((a) =>
+                    trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id }),
+                  ),
+                );
+              }
             }
-            return currentIndex; // leave focusedIndex unchanged
+            return currentIndex;
           });
           break;
         default:
