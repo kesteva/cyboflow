@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Options, HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
@@ -377,10 +377,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Reads .mcp.json and ~/.claude.json from the base project directory.
    * The cyboflow-permissions MCP server is replaced by the PreToolUse hook.
    */
-  private composeMcpServers(options: ClaudeSpawnOptions): Record<string, { type?: 'stdio'; command: string; args?: string[] }> {
+  private composeMcpServers(options: ClaudeSpawnOptions): Record<string, McpServerConfig> {
     const { mcpServers } = this.getBaseProjectMcpServers(options.sessionId);
-    // Cast to the SDK's McpServerConfig shape — base project servers use stdio.
-    return mcpServers as Record<string, { type?: 'stdio'; command: string; args?: string[] }>;
+    return mcpServers as Record<string, McpServerConfig>;
   }
 
   private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string | undefined> {
