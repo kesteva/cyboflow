@@ -52,21 +52,44 @@ const groupItem: QueueItem = {
   isBlocking: false,
 };
 
+// Fixture for the approveRestOfRun test — 3-item group all from run-X.
+const runXApprovals: Approval[] = Array.from({ length: 3 }, (_, i) => ({
+  id: `run-x-id-${i}`,
+  runId: 'run-X',
+  workflowName: 'run-x workflow',
+  toolName: 'Bash',
+  payloadPreview: 'echo hello',
+  rationale: null,
+  createdAt: new Date(Date.now() - 120_000).toISOString(),
+  status: 'pending' as const,
+}));
+
+const groupItemRunX: QueueItem = {
+  kind: 'group',
+  runId: 'run-X',
+  toolName: 'Bash',
+  payloadSignature: 'echo hello',
+  items: runXApprovals,
+  isBlocking: false,
+};
+
 // ---------------------------------------------------------------------------
 // tRPC mock
 // ---------------------------------------------------------------------------
 
-const { mockApproveMutate, mockRejectMutate } = vi.hoisted(() => ({
-  mockApproveMutate: vi.fn().mockResolvedValue(undefined),
-  mockRejectMutate:  vi.fn().mockResolvedValue(undefined),
+const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate } = vi.hoisted(() => ({
+  mockApproveMutate:          vi.fn().mockResolvedValue(undefined),
+  mockRejectMutate:           vi.fn().mockResolvedValue(undefined),
+  mockApproveRestOfRunMutate: vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       approvals: {
-        approve: { mutate: mockApproveMutate },
-        reject:  { mutate: mockRejectMutate  },
+        approve:           { mutate: mockApproveMutate          },
+        reject:            { mutate: mockRejectMutate           },
+        approveRestOfRun:  { mutate: mockApproveRestOfRunMutate },
       },
     },
   },
@@ -265,15 +288,15 @@ describe('PendingApprovalCard — group variant', () => {
     expect(screen.getByText('Reject')).toBeInTheDocument();
   });
 
-  it('Approve calls approve.mutate once per group member', async () => {
+  it('Approve calls approveRestOfRun.mutate with the group runId — not per-item approve', async () => {
     render(<PendingApprovalCard item={groupItem} />);
     fireEvent.click(screen.getByText('Approve'));
     await waitFor(() => {
-      expect(mockApproveMutate).toHaveBeenCalledTimes(7);
+      expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
     });
-    for (let i = 0; i < 7; i++) {
-      expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: `group-id-${i}` });
-    }
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-group' });
+    // Per-item approve must NOT be called for a group card.
+    expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 
   it('Reject calls reject.mutate once per group member', async () => {
@@ -293,5 +316,16 @@ describe('PendingApprovalCard — group variant', () => {
   it('does not show "blocked" badge when isBlocking is false', () => {
     render(<PendingApprovalCard item={groupItem} />);
     expect(screen.queryByText(/blocked/)).not.toBeInTheDocument();
+  });
+
+  // TASK-406: group card with 3 items from run-X → Approve calls approveRestOfRun once with runId
+  it('group card with 3 items from run-X → Approve calls approveRestOfRun({ runId: run-X }) exactly once', async () => {
+    render(<PendingApprovalCard item={groupItemRunX} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-X' });
+    expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 });
