@@ -9,7 +9,6 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { CyboflowPermissionIpcServer } from './services/cyboflowPermissionIpcServer';
 import { VersionChecker } from './services/versionChecker';
 import { StravuAuthManager } from './services/stravuAuthManager';
 import { StravuNotebookService } from './services/stravuNotebookService';
@@ -75,7 +74,6 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let cyboflowPermissionIpcServer: CyboflowPermissionIpcServer | null;
 let versionChecker: VersionChecker;
 let stravuAuthManager: StravuAuthManager;
 let stravuNotebookService: StravuNotebookService;
@@ -558,23 +556,6 @@ async function initializeServices() {
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  // Start permission IPC server
-  console.log('[Main] Initializing Permission IPC server...');
-  cyboflowPermissionIpcServer = new CyboflowPermissionIpcServer();
-  console.log('[Main] Starting Permission IPC server...');
-
-  let permissionIpcPath: string | null = null;
-  try {
-    await cyboflowPermissionIpcServer.start();
-    permissionIpcPath = cyboflowPermissionIpcServer.getSocketPath();
-    console.log('[Main] Permission IPC server started successfully');
-    console.log('[Main] Permission IPC socket path:', permissionIpcPath);
-  } catch (error) {
-    console.error('[Main] Failed to start Permission IPC server:', error);
-    console.error('[Main] Permission-based MCP will be disabled');
-    cyboflowPermissionIpcServer = null;
-  }
-
   // Create worktree manager with configManager and analyticsManager
   worktreeManager = new WorktreeManager(configManager, analyticsManager);
 
@@ -587,13 +568,13 @@ async function initializeServices() {
   // Initialize CLI manager factory
   cliManagerFactory = CliManagerFactory.getInstance(logger, configManager);
 
-  // Create default CLI manager (Claude) with permission IPC path
+  // Create default CLI manager (Claude). Permission gating runs in-process
+  // via the SDK's PreToolUse hook → ApprovalRouter (TASK-590).
   // Skip validation during startup - tools will be validated when actually used
   defaultCliManager = await cliManagerFactory.createManager('claude', {
     sessionManager,
     logger,
     configManager,
-    additionalOptions: { permissionIpcPath },
     skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
   gitDiffManager = new GitDiffManager(logger, analyticsManager);
@@ -710,8 +691,9 @@ app.whenReady().then(async () => {
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
     // Wire ApprovalRouter after the RunQueueRegistry is live.
-    // The socketReply closures are provided per-request by CyboflowPermissionIpcServer
-    // (passed directly to requestApproval), so no factory is needed here.
+    // Permission decisions are produced in-process by the SDK PreToolUse hook
+    // (claudeCodeManager.makePreToolUseHook), so no per-request socket-reply
+    // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
     console.log('[Main] ApprovalRouter initialized');
   }
@@ -849,13 +831,6 @@ app.on('before-quit', async (event) => {
     await taskQueue.close();
   }
 
-  // Stop permission IPC server
-  if (cyboflowPermissionIpcServer) {
-    console.log('[Main] Stopping permission IPC server...');
-    await cyboflowPermissionIpcServer.stop();
-    console.log('[Main] Permission IPC server stopped');
-  }
-  
   // Stop version checker
   if (versionChecker) {
     versionChecker.stopPeriodicCheck();
