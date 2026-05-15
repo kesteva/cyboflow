@@ -51,6 +51,11 @@ to a canonical example — read those for the actual implementation.
 - **Use it for:** All IPC calls from renderer to main. Do not call `window.electron` directly
   from components — go through this module.
 - **Canonical example:** Any store in `frontend/src/stores/`
+- **Exception — `frontend/src/utils/cyboflowApi.ts`:** temporary parallel surface for the
+  cyboflow workflow domain pending the epic-6 transport decision (raw IPC vs tRPC). Do NOT
+  add new channels here, do NOT copy this module pattern into other domains, and do NOT
+  deepen its surface — extend `api.ts` (`API.cyboflow.*`) or wait for the tRPC routers.
+  Once epic 6 lands, `cyboflowApi.ts` is deleted or replaced by a tRPC client wrapper.
 
 ### `frontend/src/utils/migrateLocalStorageKey`
 
