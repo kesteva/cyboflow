@@ -125,25 +125,19 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
   // -- Reducers -------------------------------------------------------------
 
   addApproval: (approval) => {
-    set((state) => {
-      if (state.queue.some((a) => a.id === approval.id)) {
-        // Idempotent: already present — no-op
-        return state;
-      }
-      const next = [...state.queue, approval];
-      syncBadge(next);
-      return { queue: next };
-    });
+    const state = get();
+    if (state.queue.some((a) => a.id === approval.id)) return;
+    const next = [...state.queue, approval];
+    set({ queue: next });
+    syncBadge(next);
   },
 
   removeApproval: (id) => {
-    set((state) => {
-      const next = state.queue.filter((a) => a.id !== id);
-      // No-op if nothing was removed (length unchanged)
-      if (next.length === state.queue.length) return state;
-      syncBadge(next);
-      return { queue: next };
-    });
+    const state = get();
+    const next = state.queue.filter((a) => a.id !== id);
+    if (next.length === state.queue.length) return;
+    set({ queue: next });
+    syncBadge(next);
   },
 
   replaceAll: (items) => {
