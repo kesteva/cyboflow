@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { fireEvent } from '@testing-library/dom';
+import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { Approval } from '../../../../shared/types/approvals';
 
 // ---------------------------------------------------------------------------
@@ -40,10 +41,10 @@ import { useReviewQueueKeyboard } from '../useReviewQueueKeyboard';
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function makeApproval(id: string): Approval {
+function makeApproval(id: string, runId = 'run-1'): Approval {
   return {
     id,
-    runId: 'run-1',
+    runId,
     workflowName: 'Test Workflow',
     toolName: 'Bash',
     payloadPreview: 'echo hello',
@@ -53,7 +54,22 @@ function makeApproval(id: string): Approval {
   };
 }
 
-const QUEUE_3 = [makeApproval('a'), makeApproval('b'), makeApproval('c')];
+function singleItem(id: string, isBlocking = false): QueueItem {
+  return { kind: 'single', approval: makeApproval(id), isBlocking };
+}
+
+function groupItem(ids: string[], runId = 'run-1'): QueueItem {
+  return {
+    kind: 'group',
+    runId,
+    toolName: 'Bash',
+    payloadSignature: 'npm test',
+    items: ids.map(id => makeApproval(id, runId)),
+    isBlocking: false,
+  };
+}
+
+const QUEUE_3 = [singleItem('a'), singleItem('b'), singleItem('c')];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,7 +128,7 @@ describe('useReviewQueueKeyboard — j/k navigation', () => {
   });
 });
 
-describe('useReviewQueueKeyboard — y/n mutations', () => {
+describe('useReviewQueueKeyboard — y/n mutations on single items', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -142,6 +158,31 @@ describe('useReviewQueueKeyboard — y/n mutations', () => {
   });
 });
 
+describe('useReviewQueueKeyboard — y/n mutations on group items', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('y on a group item calls approve.mutate for each member', () => {
+    const queue: QueueItem[] = [groupItem(['g1', 'g2', 'g3'])];
+    renderHook(() => useReviewQueueKeyboard(queue));
+    act(() => { press('y'); });
+    expect(mockApproveMutate).toHaveBeenCalledTimes(3);
+    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g1' });
+    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g2' });
+    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g3' });
+  });
+
+  it('n on a group item calls reject.mutate for each member', () => {
+    const queue: QueueItem[] = [groupItem(['r1', 'r2'])];
+    renderHook(() => useReviewQueueKeyboard(queue));
+    act(() => { press('n'); });
+    expect(mockRejectMutate).toHaveBeenCalledTimes(2);
+    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r1' });
+    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r2' });
+  });
+});
+
 describe('useReviewQueueKeyboard — input-element guard', () => {
   let inputEl: HTMLInputElement;
 
@@ -159,8 +200,6 @@ describe('useReviewQueueKeyboard — input-element guard', () => {
     const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3));
     inputEl.focus();
 
-    // Fire keydown on the input itself — the event bubbles to window, and the
-    // hook reads event.target which will be the input element.
     act(() => {
       fireEvent.keyDown(inputEl, { key: 'j', bubbles: true });
     });

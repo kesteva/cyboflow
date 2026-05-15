@@ -22,7 +22,10 @@
  * `replaceAll` is always atomic — it wipes the queue before inserting.
  */
 import { create } from 'zustand';
+import { useState, useEffect } from 'react';
 import type { Approval } from '../../../shared/types/approvals';
+import type { QueueItem } from '../utils/reviewQueueSelectors';
+import { selectQueueView } from '../utils/reviewQueueSelectors';
 import { trpc } from '../utils/trpcClient';
 
 // ---------------------------------------------------------------------------
@@ -182,6 +185,31 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
     };
   },
 }));
+
+// ---------------------------------------------------------------------------
+// Derived view hook
+// ---------------------------------------------------------------------------
+
+const VIEW_REFRESH_INTERVAL_MS = 30_000;
+
+/**
+ * Returns the current queue transformed by selectQueueView (sorted, partitioned
+ * into blocking vs normal, and grouped by repeated signature within each section).
+ *
+ * Re-evaluates every 30 seconds so the blocking-threshold badge updates as
+ * items age, without recomputing on every keystroke.
+ */
+export function useReviewQueueView(): { blocking: QueueItem[]; normal: QueueItem[] } {
+  const queue = useReviewQueueStore((s) => s.queue);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => { setNow(Date.now()); }, VIEW_REFRESH_INTERVAL_MS);
+    return () => { clearInterval(id); };
+  }, []);
+
+  return selectQueueView(queue, now);
+}
 
 // ---------------------------------------------------------------------------
 // Pure reducer exports for unit testing

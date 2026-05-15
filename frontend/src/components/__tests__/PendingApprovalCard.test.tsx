@@ -1,16 +1,17 @@
+// @vitest-environment jsdom
 /**
- * Tests for PendingApprovalCard and the approvalFormatters utilities.
+ * Tests for PendingApprovalCard (and the approvalFormatters utilities).
  *
- * Pure-function tests (formatAge, truncatePayload) run under any vitest
- * environment. Component tests require jsdom + @testing-library/react and
- * are guarded so they degrade gracefully if those aren't available.
- *
- * Runner: pnpm --filter main exec vitest run (once frontend vitest config is
- * added in a follow-up sprint).
+ * The component renders a QueueItem (either kind: 'single' or kind: 'group').
+ * Pure-function tests (formatAge, truncatePayload) run without DOM rendering.
+ * Component tests use @testing-library/react + jsdom.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom';
 import { formatAge, truncatePayload } from '../../utils/approvalFormatters';
 import type { Approval } from '../../../../shared/types/approvals';
+import type { QueueItem } from '../../utils/reviewQueueSelectors';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -26,6 +27,50 @@ const baseApproval: Approval = {
   createdAt: new Date(Date.now() - 120_000).toISOString(), // 2 minutes ago
   status: 'pending',
 };
+
+const singleItem: QueueItem = { kind: 'single', approval: baseApproval, isBlocking: false };
+
+const blockingSingleItem: QueueItem = { kind: 'single', approval: baseApproval, isBlocking: true };
+
+const groupApprovals: Approval[] = Array.from({ length: 7 }, (_, i) => ({
+  id: `group-id-${i}`,
+  runId: 'run-group',
+  workflowName: 'Bulk Bash run',
+  toolName: 'Bash',
+  payloadPreview: 'npm test',
+  rationale: null,
+  createdAt: new Date(Date.now() - 120_000).toISOString(),
+  status: 'pending' as const,
+}));
+
+const groupItem: QueueItem = {
+  kind: 'group',
+  runId: 'run-group',
+  toolName: 'Bash',
+  payloadSignature: 'npm test',
+  items: groupApprovals,
+  isBlocking: false,
+};
+
+// ---------------------------------------------------------------------------
+// tRPC mock
+// ---------------------------------------------------------------------------
+
+const { mockApproveMutate, mockRejectMutate } = vi.hoisted(() => ({
+  mockApproveMutate: vi.fn().mockResolvedValue(undefined),
+  mockRejectMutate:  vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      approvals: {
+        approve: { mutate: mockApproveMutate },
+        reject:  { mutate: mockRejectMutate  },
+      },
+    },
+  },
+}));
 
 // ---------------------------------------------------------------------------
 // Unit tests: formatAge
@@ -93,31 +138,8 @@ describe('truncatePayload', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Component tests: PendingApprovalCard
-//
-// These tests mock the trpc client and use @testing-library/react (jsdom).
-// They are written to the spec and will run once the frontend vitest config
-// includes the jsdom environment and testing-library is installed.
+// Unit tests: formatAge integration with fixture
 // ---------------------------------------------------------------------------
-
-/**
- * Mock the trpc client module before importing the component so the
- * component never touches the real IPC bridge during tests.
- */
-
-const mockApproveMutate = vi.fn().mockResolvedValue(undefined);
-const mockRejectMutate  = vi.fn().mockResolvedValue(undefined);
-
-vi.mock('../../trpc/client', () => ({
-  trpc: {
-    cyboflow: {
-      approvals: {
-        approve: { mutate: mockApproveMutate },
-        reject:  { mutate: mockRejectMutate  },
-      },
-    },
-  },
-}));
 
 describe('PendingApprovalCard — unit behaviour (no DOM)', () => {
   beforeEach(() => {
@@ -125,7 +147,6 @@ describe('PendingApprovalCard — unit behaviour (no DOM)', () => {
   });
 
   it('formatAge integration: baseApproval.createdAt 2 min ago → "2m"', () => {
-    // Verify the formatter produces the correct string for the fixture timestamp.
     const age = formatAge(baseApproval.createdAt);
     expect(age).toBe('2m');
   });
@@ -144,8 +165,133 @@ describe('PendingApprovalCard — unit behaviour (no DOM)', () => {
   });
 });
 
-// Note: Full DOM rendering tests (all five context fields visible, Approve
-// button click invokes approve mutation, rationale absent when null) require
-// @testing-library/react + jsdom environment. They are deferred until the
-// frontend vitest configuration is wired (follow-up infrastructure task).
-// The mock above is already in place so those tests can be added trivially.
+// ---------------------------------------------------------------------------
+// Component tests: PendingApprovalCard — single variant
+// ---------------------------------------------------------------------------
+
+// Import after mock is set up
+import { PendingApprovalCard } from '../PendingApprovalCard';
+
+describe('PendingApprovalCard — single variant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders the tool name', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+  });
+
+  it('renders the workflow name', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.getByText('Refactor auth module')).toBeInTheDocument();
+  });
+
+  it('renders the rationale when present', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.getByText('Checking what changed in auth before patching.')).toBeInTheDocument();
+  });
+
+  it('does not render a rationale element when rationale is null', () => {
+    const noRationaleItem: QueueItem = {
+      kind: 'single',
+      approval: { ...baseApproval, rationale: null },
+      isBlocking: false,
+    };
+    render(<PendingApprovalCard item={noRationaleItem} />);
+    expect(screen.queryByText(/Checking/)).not.toBeInTheDocument();
+  });
+
+  it('renders the Approve and Reject buttons', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.getByText('Approve')).toBeInTheDocument();
+    expect(screen.getByText('Reject')).toBeInTheDocument();
+  });
+
+  it('Approve button calls approve.mutate with the approval id', async () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'fixture-id' });
+    });
+  });
+
+  it('Reject button calls reject.mutate with the approval id', async () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'fixture-id' });
+    });
+  });
+
+  it('does not show "blocked" badge when isBlocking is false', () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    expect(screen.queryByText(/blocked/)).not.toBeInTheDocument();
+  });
+
+  it('shows "blocked Nm" badge when isBlocking is true', () => {
+    render(<PendingApprovalCard item={blockingSingleItem} />);
+    expect(screen.getByText(/blocked/)).toBeInTheDocument();
+  });
+
+  it('applies focus ring class when isFocused is true', () => {
+    const { container } = render(<PendingApprovalCard item={singleItem} isFocused={true} />);
+    expect(container.firstChild).toHaveClass('ring-2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Component tests: PendingApprovalCard — group variant
+// ---------------------------------------------------------------------------
+
+describe('PendingApprovalCard — group variant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders "Bash (×7 in this run)" as the header', () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    expect(screen.getByText('Bash (×7 in this run)')).toBeInTheDocument();
+  });
+
+  it('renders the count via the × symbol', () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    expect(screen.getByText(/×7/)).toBeInTheDocument();
+  });
+
+  it('renders Approve and Reject buttons', () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    expect(screen.getByText('Approve')).toBeInTheDocument();
+    expect(screen.getByText('Reject')).toBeInTheDocument();
+  });
+
+  it('Approve calls approve.mutate once per group member', async () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledTimes(7);
+    });
+    for (let i = 0; i < 7; i++) {
+      expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: `group-id-${i}` });
+    }
+  });
+
+  it('Reject calls reject.mutate once per group member', async () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(mockRejectMutate).toHaveBeenCalledTimes(7);
+    });
+  });
+
+  it('shows "blocked Nm" badge when isBlocking is true', () => {
+    const blockingGroup: QueueItem = { ...groupItem, isBlocking: true };
+    render(<PendingApprovalCard item={blockingGroup} />);
+    expect(screen.getByText(/blocked/)).toBeInTheDocument();
+  });
+
+  it('does not show "blocked" badge when isBlocking is false', () => {
+    render(<PendingApprovalCard item={groupItem} />);
+    expect(screen.queryByText(/blocked/)).not.toBeInTheDocument();
+  });
+});
