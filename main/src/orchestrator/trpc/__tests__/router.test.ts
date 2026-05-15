@@ -60,9 +60,22 @@ async function callSubscription(
 // ---------------------------------------------------------------------------
 
 describe('createContext', () => {
-  it("returns { userId: 'local' }", () => {
+  it("returns an object with userId: 'local'", () => {
     const ctx = createContext();
-    expect(ctx).toEqual({ userId: 'local' });
+    expect(ctx.userId).toBe('local');
+  });
+
+  it('includes a setDockBadge no-op when no deps are provided', () => {
+    const ctx = createContext();
+    // The default setDockBadge should be a callable no-op (does not throw).
+    expect(() => ctx.setDockBadge(0)).not.toThrow();
+  });
+
+  it('uses the injected setDockBadge when provided', () => {
+    const calls: number[] = [];
+    const ctx = createContext({ setDockBadge: (count) => calls.push(count) });
+    ctx.setDockBadge(3);
+    expect(calls).toEqual([3]);
   });
 });
 
