@@ -19,6 +19,7 @@ import {
   systemInit,
   systemApiRetry,
   systemCompact,
+  systemCompactBoundary,
   assistant,
   userStringContent,
   userArrayContent,
@@ -112,6 +113,26 @@ describe('SystemCompactEvent', () => {
       throw new Error('Expected SystemCompactEvent');
     }
     expect(event.subtype).toBe('compact');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SystemCompactBoundaryEvent (SDK-only variant)
+// ---------------------------------------------------------------------------
+
+describe('SystemCompactBoundaryEvent', () => {
+  it('narrows compact_boundary to system/compact_boundary with compact_metadata intact', () => {
+    const raw = systemCompactBoundary();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    if (event.type !== 'system' || event.subtype !== 'compact_boundary') {
+      throw new Error('Expected SystemCompactBoundaryEvent');
+    }
+    expect(event.compact_metadata.trigger).toBe('auto');
+    expect(event.compact_metadata.pre_tokens).toBe(90000);
   });
 });
 
@@ -374,6 +395,7 @@ describe('exhaustive union coverage', () => {
       [systemInit(), 'system/init'],
       [systemApiRetry(), 'system/api_retry'],
       [systemCompact(), 'system/compact'],
+      [systemCompactBoundary(), 'system/compact_boundary'],
       [assistant(), 'assistant'],
       [userStringContent(), 'user'],
       [userArrayContent(), 'user'],

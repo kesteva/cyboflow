@@ -17,6 +17,7 @@ import type {
   SystemInitEvent,
   SystemApiRetryEvent,
   SystemCompactEvent,
+  SystemCompactBoundaryEvent,
   AssistantEvent,
   UserEvent,
   ResultEvent,
@@ -65,6 +66,21 @@ export function systemCompact(overrides: Partial<SystemCompactEvent> = {}): Syst
     subtype: 'compact',
     session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     summary: 'Context was compacted. Previous conversation summarized to free context window space.',
+    ...overrides,
+  };
+}
+
+export function systemCompactBoundary(
+  overrides: Partial<SystemCompactBoundaryEvent> = {},
+): SystemCompactBoundaryEvent {
+  return {
+    type: 'system',
+    subtype: 'compact_boundary',
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    compact_metadata: {
+      trigger: 'auto',
+      pre_tokens: 90000,
+    },
     ...overrides,
   };
 }
