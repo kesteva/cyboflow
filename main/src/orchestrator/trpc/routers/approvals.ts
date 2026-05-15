@@ -2,16 +2,17 @@
  * cyboflow.approvals sub-router.
  *
  * Provides the typed tRPC contract for the renderer's reviewQueueStore:
- *   - listPending  : query    → Approval[] (full-state sync source)
- *   - approve      : mutation → { success: true } (stub — full impl in approval-router epic)
- *   - reject       : mutation → { success: true } (stub — full impl in approval-router epic)
+ *   - listPending       : query    → Approval[] (full-state sync source)
+ *   - approve           : mutation → { success: true } (stub — full impl in approval-router epic)
+ *   - reject            : mutation → { success: true } (stub — full impl in approval-router epic)
+ *   - approveRestOfRun  : mutation → { decided: number } (TASK-406 — per-run batch approve)
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
-import type { Approval } from '../../../../../shared/types/approvals';
+import type { Approval, ApproveRestOfRunResult } from '../../../../../shared/types/approvals';
 
 export const approvalsRouter = router({
   /**
@@ -75,5 +76,33 @@ export const approvalsRouter = router({
       void ctx;
       console.log(`[approvals.reject] STUB — approvalId=${input.approvalId}`);
       return { success: true };
+    }),
+
+  // NO global approve-all exists in v1 — deliberate omission per IDEA-009 slice 8.
+  // Rationale: global approve-all maps to the highest-harm failure mode (accidental
+  // bulk-delete during prune+sprint queue clearing). The per-run scoping below is
+  // safe because the user has context about what one run is doing.
+  // See: user-needs research §5; risks research §10.
+
+  /**
+   * Approve all pending approval gates for the given run.
+   *
+   * Scoped to a single run — never affects approvals from other runs.
+   * Best-effort: if one approval update fails, iteration continues and the
+   * count reflects only the successfully approved items.
+   *
+   * Delegates to `approveRestOfRunHandler` in main/src/trpc/routers/approvals.ts
+   * once `ctx.db` is wired into context (approval-router epic).  For now,
+   * returns a stub { decided: 0 } — the handler function is directly
+   * exercised by unit tests with an injected DB instance.
+   */
+  approveRestOfRun: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .mutation(async ({ input, ctx }): Promise<ApproveRestOfRunResult> => {
+      void ctx;
+      // TODO(approval-router epic): replace stub with approveRestOfRunHandler(ctx.db, input.runId)
+      // once ctx.db is wired into the tRPC context.
+      console.log(`[approvals.approveRestOfRun] STUB — runId=${input.runId}`);
+      return { decided: 0 };
     }),
 });
