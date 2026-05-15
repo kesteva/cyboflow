@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import ReviewQueueView from '../ReviewQueueView';
@@ -16,9 +18,17 @@ vi.mock('../../stores/reviewQueueStore', () => {
   return { useReviewQueueStore };
 });
 
-// Mock PendingApprovalCard stub so tests don't depend on TASK-403
+// Mock useReviewQueueKeyboard — ReviewQueueView.tsx imports this hook which in
+// turn imports the real trpc client (Electron IPC bridge). Mocking it here
+// keeps the test self-contained.
+vi.mock('../../hooks/useReviewQueueKeyboard', () => ({
+  useReviewQueueKeyboard: () => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
+}));
+
+// Mock PendingApprovalCard stub so tests don't depend on TASK-403.
+// ReviewQueueView imports as named export { PendingApprovalCard }.
 vi.mock('../PendingApprovalCard', () => ({
-  default: ({ approval }: { approval: Approval }) => (
+  PendingApprovalCard: ({ approval }: { approval: Approval }) => (
     <div data-testid="pending-approval-card">{approval.toolName}</div>
   ),
 }));
@@ -41,9 +51,9 @@ describe('ReviewQueueView', () => {
 
   it('renders one card per approval in queue', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', toolName: 'Bash', input: {}, timestamp: 1 },
-      { id: '2', runId: 'run-1', toolName: 'Read', input: {}, timestamp: 2 },
-      { id: '3', runId: 'run-1', toolName: 'Write', input: {}, timestamp: 3 },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+      { id: '3', runId: 'run-1', workflowName: 'wf', toolName: 'Write', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
     ];
     render(<ReviewQueueView />);
     const cards = screen.getAllByTestId('pending-approval-card');
@@ -65,8 +75,8 @@ describe('ReviewQueueView', () => {
 
   it('shows correct pending count in header when queue is populated', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', toolName: 'Bash', input: {}, timestamp: 1 },
-      { id: '2', runId: 'run-1', toolName: 'Read', input: {}, timestamp: 2 },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
     ];
     render(<ReviewQueueView />);
     expect(screen.getByText('2 pending')).toBeInTheDocument();
@@ -74,7 +84,7 @@ describe('ReviewQueueView', () => {
 
   it('does not render "No pending approvals" when queue is populated', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', toolName: 'Bash', input: {}, timestamp: 1 },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
     ];
     render(<ReviewQueueView />);
     expect(screen.queryByText('No pending approvals')).not.toBeInTheDocument();
