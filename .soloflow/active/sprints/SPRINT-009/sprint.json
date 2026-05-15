@@ -5,11 +5,7 @@
     "started": "2026-05-15T04:26:36Z",
     "execution_mode": "serial"
   },
-  "tasks": {
-    "TASK-355": {
-      "status": "pending"
-    }
-  },
+  "tasks": {},
   "playwright_target": {
     "kind": "electron",
     "evidence": "electron in package.json",
