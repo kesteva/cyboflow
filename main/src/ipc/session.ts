@@ -30,8 +30,8 @@ import type { SessionOutput } from '../types/session';
  * ordering reflects the actual run time.
  *
  * NOTE — legacy read path: this helper reads from session_outputs (written by
- * the inline JSON-emit branch in claudeCodeManager.parseCliOutput). The parallel
- * pipeline (ClaudeStreamParser -> EventRouter -> RawEventsSink -> raw_events
+ * the SDK event-forward branch in claudeCodeManager.runSdkQuery). The parallel
+ * pipeline (SDK query() iterator -> EventRouter -> RawEventsSink -> raw_events
  * table, also wired in claudeCodeManager) is the intended long-term read source
  * once the renderer migrates from panels:get-json-messages to the
  * EventRouter/tRPC path (Day-3 cutover — TBD task ID). Do NOT merge these

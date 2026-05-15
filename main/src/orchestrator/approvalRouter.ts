@@ -34,21 +34,11 @@ import type { DatabaseLike } from './types';
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface ApprovalRequest {
-  /** UUID for the approvals row */
-  id: string;
-  /** workflow_runs.id */
-  runId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  timestamp: number;
-}
-
-export interface ApprovalDecision {
-  behavior: 'allow' | 'deny';
-  updatedInput?: Record<string, unknown>;
-  message?: string;
-}
+// Public approval contract — canonical home is shared/types/approval.ts.
+// Re-exported here so every existing consumer keeps `from '../orchestrator/approvalRouter'`
+// as its import path; that path remains backward-compatible by design.
+import type { ApprovalRequest, ApprovalDecision } from '../../../shared/types/approval';
+export type { ApprovalRequest, ApprovalDecision };
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -113,8 +103,9 @@ export class ApprovalRouter extends EventEmitter {
 
   /**
    * Initialize (or replace) the singleton instance.
-   * Called once at boot from main/src/index.ts after the RunQueueRegistry and
-   * CyboflowPermissionIpcServer are ready.
+   * Called once at boot from main/src/index.ts after the RunQueueRegistry is
+   * ready. Permission decisions arrive via the SDK PreToolUse hook in
+   * claudeCodeManager.makePreToolUseHook (TASK-590).
    */
   static initialize(
     db: DatabaseLike,
@@ -129,7 +120,7 @@ export class ApprovalRouter extends EventEmitter {
       throw new Error(
         'ApprovalRouter has not been initialized. ' +
         'Call ApprovalRouter.initialize() from main/src/index.ts ' +
-        'after the RunQueueRegistry and CyboflowPermissionIpcServer are ready.',
+        'after the RunQueueRegistry is ready.',
       );
     }
     return ApprovalRouter.instance;
@@ -163,10 +154,11 @@ export class ApprovalRouter extends EventEmitter {
    * @param runId        - workflow_runs.id
    * @param toolName     - The tool name Claude is requesting permission for.
    * @param input        - The tool call's input arguments.
-   * @param socketReply  - Closure that writes the decision back to the bridge
-   *                       socket.  Passed directly by the caller (e.g.
-   *                       CyboflowPermissionIpcServer) where the socket is in
-   *                       scope.  Invoked exactly once by respond().
+   * @param socketReply  - Closure invoked exactly once by respond() to convey
+   *                       the decision back to the caller. Under the SDK
+   *                       PreToolUse path this is a no-op (the caller awaits
+   *                       the returned promise directly), kept for backward
+   *                       compatibility with any future transport adapter.
    */
   async requestApproval(
     runId: string,
@@ -333,13 +325,14 @@ export class ApprovalRouter extends EventEmitter {
    * socket connections) lands in TASK-304.  For now this is a documented
    * no-op that satisfies the import surface required by claudeCodeManager.ts.
    */
-  clearPendingForRun(runId: string): void {
+  clearPendingForRun(_runId: string): void {
     // TODO(TASK-304): Implement full clearPendingForRun body:
     //   1. Find all pending entries for runId.
     //   2. Write a synthetic deny response to each socket.
     //   3. Update approvals.status = 'rejected' for each row.
     //   4. Remove entries from this.pending.
-    console.warn(`[ApprovalRouter] clearPendingForRun(${runId}) called — stub, no-op until TASK-304`);
+    // Silent no-op until then — TASK-590 calls this on every Claude run
+    // termination via runSdkQuery's finally block.
   }
 
   /**
