@@ -1,32 +1,36 @@
 /**
- * Fixture-driven unit tests for TypedEventNarrowing.narrow() (TASK-575).
+ * Unit tests for TypedEventNarrowing.narrow() (TASK-575).
  *
- * Each fixture under __fixtures__/ is loaded and round-tripped through the
- * narrower. Tests assert variant narrowing, subtype literals, tool_result.content
- * shape duality, .passthrough() field preservation, catch-all behavior on
- * malformed input, and compile-time exhaustive switch coverage via assertNever.
+ * Each test constructs a typed SDK-mock object via the shared factory helpers
+ * in sdkMockFactories.ts and round-trips it through the narrower. Tests assert
+ * variant narrowing, subtype literals, tool_result.content shape duality,
+ * .passthrough() field preservation, catch-all behavior on malformed input,
+ * and compile-time exhaustive switch coverage via assertNever.
  *
- * All fixtures in this suite are synthetic (no claude CLI capture performed).
- * See __fixtures__/README.md for full fixture inventory and re-capture instructions.
+ * All mock objects are synthetic inline values (no on-disk fixture files).
+ * See sdkMockFactories.ts for the canonical mock shapes and field values.
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { TypedEventNarrowing } from '../typedEventNarrowing';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import { assertNever } from '../../../../../shared/types/claudeStream';
+import {
+  systemInit,
+  systemApiRetry,
+  systemCompact,
+  assistant,
+  userStringContent,
+  userArrayContent,
+  resultSuccess,
+  resultErrorMaxTurns,
+  resultErrorMaxBudgetUsd,
+  resultErrorDuringExecution,
+  streamEvent,
+} from './sdkMockFactories';
 
 // Shared narrower — no logger (silent narrow, same never-throw contract)
 const narrower = new TypedEventNarrowing();
-
-// ---------------------------------------------------------------------------
-// Fixture loader helper
-// ---------------------------------------------------------------------------
-
-function loadFixture(name: string): unknown {
-  return JSON.parse(readFileSync(join(__dirname, '..', '__fixtures__', name), 'utf-8'));
-}
 
 // ---------------------------------------------------------------------------
 // SystemInitEvent
@@ -34,7 +38,7 @@ function loadFixture(name: string): unknown {
 
 describe('SystemInitEvent', () => {
   it('parses system_init.json and narrows to system/init with all required fields', () => {
-    const raw = loadFixture('system_init.json');
+    const raw = systemInit();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -53,7 +57,7 @@ describe('SystemInitEvent', () => {
   });
 
   it('system_init.json exposes permissionMode in camelCase (wire-spec exception), not permission_mode', () => {
-    const raw = loadFixture('system_init.json');
+    const raw = systemInit();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -71,7 +75,7 @@ describe('SystemInitEvent', () => {
 
 describe('SystemApiRetryEvent', () => {
   it('parses system_api_retry.json and narrows to system/api_retry with numeric retry fields', () => {
-    const raw = loadFixture('system_api_retry.json');
+    const raw = systemApiRetry();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -97,7 +101,7 @@ describe('SystemCompactEvent', () => {
     // NOTE: Crystal's ClaudeMessageTransformer uses 'context_compacted' internally,
     // but the actual wire discriminant is 'compact' per research §1. This test
     // pins the wire literal so that any CLI update changing the wire value fails loudly.
-    const raw = loadFixture('system_compact.json');
+    const raw = systemCompact();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -117,7 +121,7 @@ describe('SystemCompactEvent', () => {
 
 describe('AssistantEvent', () => {
   it('parses assistant.json and narrows to assistant with mixed content array (text + tool_use)', () => {
-    const raw = loadFixture('assistant.json');
+    const raw = assistant();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -145,7 +149,7 @@ describe('AssistantEvent', () => {
 
 describe('UserEvent', () => {
   it('parses user_string_content.json — tool_result.content is a plain string', () => {
-    const raw = loadFixture('user_string_content.json');
+    const raw = userStringContent();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -163,7 +167,7 @@ describe('UserEvent', () => {
   });
 
   it('parses user_array_content.json — tool_result.content is an array of {type, text} objects', () => {
-    const raw = loadFixture('user_array_content.json');
+    const raw = userArrayContent();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -187,7 +191,7 @@ describe('UserEvent', () => {
 
 describe('ResultEvent', () => {
   it('parses result_success.json and asserts subtype === "success"', () => {
-    const raw = loadFixture('result_success.json');
+    const raw = resultSuccess();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -202,7 +206,7 @@ describe('ResultEvent', () => {
   });
 
   it('parses result_error_max_turns.json and asserts subtype === "error_max_turns"', () => {
-    const raw = loadFixture('result_error_max_turns.json');
+    const raw = resultErrorMaxTurns();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -217,7 +221,7 @@ describe('ResultEvent', () => {
   });
 
   it('parses result_error_max_budget_usd.json and asserts subtype === "error_max_budget_usd"', () => {
-    const raw = loadFixture('result_error_max_budget_usd.json');
+    const raw = resultErrorMaxBudgetUsd();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -232,7 +236,7 @@ describe('ResultEvent', () => {
   });
 
   it('parses result_error_during_execution.json and asserts subtype === "error_during_execution"', () => {
-    const raw = loadFixture('result_error_during_execution.json');
+    const raw = resultErrorDuringExecution();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -253,7 +257,7 @@ describe('ResultEvent', () => {
 
 describe('StreamEvent', () => {
   it('parses stream_event.json and narrows to stream_event with nested event.type string', () => {
-    const raw = loadFixture('stream_event.json');
+    const raw = streamEvent();
     const event = narrower.narrow(raw);
 
     if ('kind' in event) {
@@ -264,7 +268,7 @@ describe('StreamEvent', () => {
       throw new Error('Expected StreamEvent');
     }
     expect(typeof event.event.type).toBe('string');
-    // Fixture uses content_block_delta — confirm it's a real stream event type
+    // Factory uses content_block_delta — confirm it's a real stream event type
     expect(event.event.type).toBe('content_block_delta');
   });
 });
@@ -318,8 +322,7 @@ describe('passthrough', () => {
   it('preserves an unknown field (future_unannounced_field) when added to a known fixture', () => {
     // Mutate a copy of system_init to add a hypothetical future field.
     // The Zod schema uses .passthrough() so unknown fields are carried through.
-    const raw = loadFixture('system_init.json') as Record<string, unknown>;
-    const mutated = { ...raw, future_unannounced_field: 'lorem' };
+    const mutated = { ...systemInit(), future_unannounced_field: 'lorem' };
 
     expect(() => narrower.narrow(mutated)).not.toThrow();
     const event = narrower.narrow(mutated);
@@ -364,26 +367,25 @@ describe('exhaustive union coverage', () => {
       }
     }
 
-    // Run summarize against every loaded fixture and assert non-empty return values.
+    // Run summarize against every factory and assert non-empty return values.
     // The runtime assertion is incidental; the load-bearing check is the assertNever
     // call that only typechecks if the union is fully covered.
-    const fixtures: Array<[string, string]> = [
-      ['system_init.json', 'system/init'],
-      ['system_api_retry.json', 'system/api_retry'],
-      ['system_compact.json', 'system/compact'],
-      ['assistant.json', 'assistant'],
-      ['user_string_content.json', 'user'],
-      ['user_array_content.json', 'user'],
-      ['result_success.json', 'result/success'],
-      ['result_error_max_turns.json', 'result/error_max_turns'],
-      ['result_error_max_budget_usd.json', 'result/error_max_budget_usd'],
-      ['result_error_during_execution.json', 'result/error_during_execution'],
-      ['stream_event.json', 'stream_event'],
+    const fixtures: Array<[ClaudeStreamEvent, string]> = [
+      [systemInit(), 'system/init'],
+      [systemApiRetry(), 'system/api_retry'],
+      [systemCompact(), 'system/compact'],
+      [assistant(), 'assistant'],
+      [userStringContent(), 'user'],
+      [userArrayContent(), 'user'],
+      [resultSuccess(), 'result/success'],
+      [resultErrorMaxTurns(), 'result/error_max_turns'],
+      [resultErrorMaxBudgetUsd(), 'result/error_max_budget_usd'],
+      [resultErrorDuringExecution(), 'result/error_during_execution'],
+      [streamEvent(), 'stream_event'],
     ];
 
-    for (const [filename, expectedSummary] of fixtures) {
-      const raw = loadFixture(filename);
-      const event = narrower.narrow(raw);
+    for (const [mockEvent, expectedSummary] of fixtures) {
+      const event = narrower.narrow(mockEvent);
       const summary = summarize(event);
       expect(summary.length).toBeGreaterThan(0);
       expect(summary).toBe(expectedSummary);

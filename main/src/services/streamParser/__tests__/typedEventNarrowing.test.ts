@@ -3,24 +3,17 @@
  *
  * Covers: known event types narrow to their tagged variant; unknown
  * discriminants fall through to { kind: '__unknown__', raw }; no throws;
- * passthrough fields survive; the system/init and assistant/tool_use fixtures
+ * passthrough fields survive; the system/init and assistant/tool_use factories
  * are used as real-world inputs.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { TypedEventNarrowing } from '../typedEventNarrowing';
-
-// ---------------------------------------------------------------------------
-// Fixture loader helper
-// ---------------------------------------------------------------------------
-
-function loadFixture(name: string): unknown {
-  return JSON.parse(
-    readFileSync(join(__dirname, '..', '__fixtures__', name), 'utf-8'),
-  );
-}
+import {
+  systemInit,
+  assistant,
+  resultSuccess,
+} from './sdkMockFactories';
 
 describe('TypedEventNarrowing', () => {
   let narrower: TypedEventNarrowing;
@@ -30,11 +23,11 @@ describe('TypedEventNarrowing', () => {
   });
 
   // -------------------------------------------------------------------------
-  // system/init fixture — narrows to SystemInitEvent
+  // system/init factory — narrows to SystemInitEvent
   // -------------------------------------------------------------------------
 
   it('narrows system_init.json to system/init variant', () => {
-    const raw = loadFixture('system_init.json');
+    const raw = systemInit();
     const event = narrower.narrow(raw);
 
     expect('kind' in event).toBe(false);
@@ -48,11 +41,11 @@ describe('TypedEventNarrowing', () => {
   });
 
   // -------------------------------------------------------------------------
-  // assistant/tool_use fixture — narrows to AssistantEvent
+  // assistant/tool_use factory — narrows to AssistantEvent
   // -------------------------------------------------------------------------
 
   it('narrows assistant.json (with tool_use block) to assistant variant', () => {
-    const raw = loadFixture('assistant.json');
+    const raw = assistant();
     const event = narrower.narrow(raw);
 
     expect('kind' in event).toBe(false);
@@ -105,8 +98,7 @@ describe('TypedEventNarrowing', () => {
   // -------------------------------------------------------------------------
 
   it('preserves unknown/extra fields on a known variant (.passthrough() contract)', () => {
-    const raw = loadFixture('system_init.json') as Record<string, unknown>;
-    const withExtra = { ...raw, future_unannounced_field: 'test-value' };
+    const withExtra = { ...systemInit(), future_unannounced_field: 'test-value' };
 
     const event = narrower.narrow(withExtra);
     expect('kind' in event).toBe(false);
@@ -114,11 +106,11 @@ describe('TypedEventNarrowing', () => {
   });
 
   // -------------------------------------------------------------------------
-  // result/success fixture
+  // result/success factory
   // -------------------------------------------------------------------------
 
   it('narrows result_success.json to result/success variant', () => {
-    const raw = loadFixture('result_success.json');
+    const raw = resultSuccess();
     const event = narrower.narrow(raw);
 
     expect('kind' in event).toBe(false);
@@ -134,7 +126,7 @@ describe('TypedEventNarrowing', () => {
   // -------------------------------------------------------------------------
 
   it('produces consistent results across multiple calls (no internal state)', () => {
-    const raw = loadFixture('system_init.json');
+    const raw = systemInit();
     const e1 = narrower.narrow(raw);
     const e2 = narrower.narrow(raw);
     expect(e1).toEqual(e2);
