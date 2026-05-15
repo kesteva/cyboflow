@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Button } from './ui/Button';
 import { formatAge, truncatePayload } from '../utils/approvalFormatters';
 import { trpc } from '../trpc/client';
+import type { Approval } from '../../../shared/types/approvals';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
 
 interface PendingApprovalCardProps {
@@ -9,6 +10,90 @@ interface PendingApprovalCardProps {
   /** When true, renders a visible focus ring for keyboard-navigation highlighting. */
   isFocused?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Internal subcomponent — shared card chrome
+// ---------------------------------------------------------------------------
+
+interface CardChromeProps {
+  /** The approval whose metadata (workflowName, createdAt, rationale, payload) drives the card. */
+  representative: Approval;
+  /** Label shown in the header, e.g. "Bash" or "Bash (×7 in this run)". */
+  label: string;
+  /** When true, renders the "blocked Nm" badge. */
+  isBlocking: boolean;
+  /** When true, Approve/Reject buttons are disabled (mutation in flight). */
+  busy: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+  isFocused: boolean;
+}
+
+function CardChrome({
+  representative,
+  label,
+  isBlocking,
+  busy,
+  onApprove,
+  onReject,
+  isFocused,
+}: CardChromeProps): React.ReactElement {
+  const focusClass = isFocused
+    ? ' ring-2 ring-interactive'
+    : ' focus-within:ring-2 focus-within:ring-interactive';
+
+  const truncated = truncatePayload(representative.payloadPreview);
+
+  return (
+    <div
+      data-approval-id={representative.id}
+      role="listitem"
+      className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${focusClass}`}
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="text-xs text-text-muted">{representative.workflowName}</span>
+        <span className="text-sm font-semibold text-text-primary">{label}</span>
+        {isBlocking && (
+          <span className="ml-1 text-xs font-medium text-status-error">
+            blocked {formatAge(representative.createdAt)}
+          </span>
+        )}
+        <span className="ml-auto text-xs text-text-muted">{formatAge(representative.createdAt)}</span>
+      </div>
+
+      {representative.rationale != null && representative.rationale !== '' && (
+        <p className="text-xs italic text-text-muted my-2">{representative.rationale}</p>
+      )}
+
+      <pre className="text-xs font-mono bg-bg-tertiary px-2 py-1 rounded overflow-hidden">
+        {truncated.text}{truncated.truncated && '…'}
+      </pre>
+
+      <div className="flex gap-2 mt-3">
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={onApprove}
+        >
+          Approve
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={onReject}
+        >
+          Reject
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Public component
+// ---------------------------------------------------------------------------
 
 /**
  * Card for a single pending approval gate (or a group of repeated approvals)
@@ -25,151 +110,63 @@ interface PendingApprovalCardProps {
 export function PendingApprovalCard({ item, isFocused = false }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
-  const focusClass = isFocused
-    ? ' ring-2 ring-interactive'
-    : ' focus-within:ring-2 focus-within:ring-interactive';
-
   if (item.kind === 'group') {
     const { toolName, items, isBlocking } = item;
     const representative = items[0];
-    const truncated = truncatePayload(representative.payloadPreview);
+    const label = `${toolName} (×${items.length} in this run)`;
 
-    async function handleGroupApprove(): Promise<void> {
+    function handleApprove(): void {
       setBusy(true);
-      try {
-        await Promise.all(
-          items.map((a) => trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id })),
-        );
-      } finally {
-        setBusy(false);
-      }
+      void Promise.all(
+        items.map((a) => trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id })),
+      ).finally(() => { setBusy(false); });
     }
 
-    async function handleGroupReject(): Promise<void> {
+    function handleReject(): void {
       setBusy(true);
-      try {
-        await Promise.all(
-          items.map((a) => trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id })),
-        );
-      } finally {
-        setBusy(false);
-      }
+      void Promise.all(
+        items.map((a) => trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id })),
+      ).finally(() => { setBusy(false); });
     }
 
     return (
-      <div
-        data-approval-id={representative.id}
-        role="listitem"
-        className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${focusClass}`}
-      >
-        <div className="flex items-baseline gap-2">
-          <span className="text-xs text-text-muted">{representative.workflowName}</span>
-          <span className="text-sm font-semibold text-text-primary">
-            {toolName} (×{items.length} in this run)
-          </span>
-          {isBlocking && (
-            <span className="ml-1 text-xs font-medium text-status-error">
-              blocked {formatAge(representative.createdAt)}
-            </span>
-          )}
-          <span className="ml-auto text-xs text-text-muted">{formatAge(representative.createdAt)}</span>
-        </div>
-
-        {representative.rationale != null && representative.rationale !== '' && (
-          <p className="text-xs italic text-text-muted my-2">{representative.rationale}</p>
-        )}
-
-        <pre className="text-xs font-mono bg-bg-tertiary px-2 py-1 rounded overflow-hidden">
-          {truncated.text}{truncated.truncated && '…'}
-        </pre>
-
-        <div className="flex gap-2 mt-3">
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={busy}
-            onClick={() => { void handleGroupApprove(); }}
-          >
-            Approve
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() => { void handleGroupReject(); }}
-          >
-            Reject
-          </Button>
-        </div>
-      </div>
+      <CardChrome
+        representative={representative}
+        label={label}
+        isBlocking={isBlocking}
+        busy={busy}
+        onApprove={handleApprove}
+        onReject={handleReject}
+        isFocused={isFocused}
+      />
     );
   }
 
   // kind === 'single'
   const { approval, isBlocking } = item;
-  const truncated = truncatePayload(approval.payloadPreview);
+  const label = approval.toolName;
 
-  async function handleApprove(): Promise<void> {
+  function handleApprove(): void {
     setBusy(true);
-    try {
-      await trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id });
-    } finally {
-      setBusy(false);
-    }
+    void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id })
+      .finally(() => { setBusy(false); });
   }
 
-  async function handleReject(): Promise<void> {
+  function handleReject(): void {
     setBusy(true);
-    try {
-      await trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id });
-    } finally {
-      setBusy(false);
-    }
+    void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id })
+      .finally(() => { setBusy(false); });
   }
 
   return (
-    <div
-      data-approval-id={approval.id}
-      role="listitem"
-      className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${focusClass}`}
-    >
-      <div className="flex items-baseline gap-2">
-        <span className="text-xs text-text-muted">{approval.workflowName}</span>
-        <span className="text-sm font-semibold text-text-primary">{approval.toolName}</span>
-        {isBlocking && (
-          <span className="ml-1 text-xs font-medium text-status-error">
-            blocked {formatAge(approval.createdAt)}
-          </span>
-        )}
-        <span className="ml-auto text-xs text-text-muted">{formatAge(approval.createdAt)}</span>
-      </div>
-
-      {approval.rationale != null && approval.rationale !== '' && (
-        <p className="text-xs italic text-text-muted my-2">{approval.rationale}</p>
-      )}
-
-      <pre className="text-xs font-mono bg-bg-tertiary px-2 py-1 rounded overflow-hidden">
-        {truncated.text}{truncated.truncated && '…'}
-      </pre>
-
-      <div className="flex gap-2 mt-3">
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={busy}
-          onClick={() => { void handleApprove(); }}
-        >
-          Approve
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={busy}
-          onClick={() => { void handleReject(); }}
-        >
-          Reject
-        </Button>
-      </div>
-    </div>
+    <CardChrome
+      representative={approval}
+      label={label}
+      isBlocking={isBlocking}
+      busy={busy}
+      onApprove={handleApprove}
+      onReject={handleReject}
+      isFocused={isFocused}
+    />
   );
 }
