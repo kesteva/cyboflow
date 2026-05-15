@@ -1,13 +1,25 @@
 import { useEffect } from 'react';
 import { useReviewQueueStore } from '../stores/reviewQueueStore';
-import PendingApprovalCard from './PendingApprovalCard';
+import { PendingApprovalCard } from './PendingApprovalCard';
+import { useReviewQueueKeyboard } from '../hooks/useReviewQueueKeyboard';
 
 export default function ReviewQueueView() {
   const queue = useReviewQueueStore(s => s.queue);
+  const { focusedIndex } = useReviewQueueKeyboard(queue);
 
   useEffect(() => {
     useReviewQueueStore.getState().init();
   }, []);
+
+  // Scroll the focused card into view whenever focusedIndex changes.
+  useEffect(() => {
+    const focused = queue[focusedIndex];
+    if (focused !== undefined) {
+      document
+        .querySelector(`[data-approval-id="${focused.id}"]`)
+        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [focusedIndex, queue]);
 
   return (
     <div className="w-[360px] h-full flex flex-col border-r border-border-primary bg-bg-secondary overflow-y-auto">
@@ -21,8 +33,12 @@ export default function ReviewQueueView() {
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          {queue.map(a => (
-            <PendingApprovalCard key={a.id} approval={a} />
+          {queue.map((a, i) => (
+            <PendingApprovalCard
+              key={a.id}
+              approval={a}
+              isFocused={i === focusedIndex}
+            />
           ))}
         </div>
       )}
