@@ -18,11 +18,13 @@ import type { Approval } from '../../../../shared/types/approvals';
 
 const baseApproval: Approval = {
   id: 'fixture-id',
+  runId: 'run-fixture-id',
   workflowName: 'Refactor auth module',
   toolName: 'Bash',
   payloadPreview: 'git diff HEAD~1 -- src/auth.ts',
   rationale: 'Checking what changed in auth before patching.',
   createdAt: new Date(Date.now() - 120_000).toISOString(), // 2 minutes ago
+  status: 'pending',
 };
 
 // ---------------------------------------------------------------------------
