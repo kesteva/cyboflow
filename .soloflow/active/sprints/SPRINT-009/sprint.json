@@ -6,11 +6,18 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-351": { "status": "pending" },
-    "TASK-352": { "status": "pending" },
-    "TASK-353": { "status": "pending" },
-    "TASK-354": { "status": "pending" },
-    "TASK-355": { "status": "pending" }
+    "TASK-352": {
+      "status": "pending"
+    },
+    "TASK-353": {
+      "status": "pending"
+    },
+    "TASK-354": {
+      "status": "pending"
+    },
+    "TASK-355": {
+      "status": "pending"
+    }
   },
   "playwright_target": {
     "kind": "electron",
