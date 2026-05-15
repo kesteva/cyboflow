@@ -323,13 +323,14 @@ export class ApprovalRouter extends EventEmitter {
    * socket connections) lands in TASK-304.  For now this is a documented
    * no-op that satisfies the import surface required by claudeCodeManager.ts.
    */
-  clearPendingForRun(runId: string): void {
+  clearPendingForRun(_runId: string): void {
     // TODO(TASK-304): Implement full clearPendingForRun body:
     //   1. Find all pending entries for runId.
     //   2. Write a synthetic deny response to each socket.
     //   3. Update approvals.status = 'rejected' for each row.
     //   4. Remove entries from this.pending.
-    console.warn(`[ApprovalRouter] clearPendingForRun(${runId}) called — stub, no-op until TASK-304`);
+    // Silent no-op until then — TASK-590 calls this on every Claude run
+    // termination via runSdkQuery's finally block.
   }
 
   /**
