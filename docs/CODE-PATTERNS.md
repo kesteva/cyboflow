@@ -57,6 +57,13 @@ to a canonical example — read those for the actual implementation.
   deepen its surface — extend `api.ts` (`API.cyboflow.*`) or wait for the tRPC routers.
   Once epic 6 lands, `cyboflowApi.ts` is deleted or replaced by a tRPC client wrapper.
 
+### `frontend/src/utils/trpcClient`
+
+- **Path:** `frontend/src/utils/trpcClient.ts`
+- **Use it for:** All tRPC calls from the renderer. Import as `import { trpc } from '<relative>/utils/trpcClient'`.
+- **Why single-source:** tRPC v11 subscriptions register IPC listeners per `createTRPCProxyClient` instance — a second instance (or re-export shim) causes duplicate event delivery.
+- **Canonical example:** `frontend/src/stores/reviewQueueStore.ts`
+
 ### `frontend/src/utils/migrateLocalStorageKey`
 
 - **Path:** `frontend/src/utils/migrateLocalStorageKey.ts`
