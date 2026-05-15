@@ -13,5 +13,10 @@ export default defineConfig({
     assetsDir: 'assets',
     // Copy public files to dist
     copyPublicDir: true
-  }
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+  },
 });
