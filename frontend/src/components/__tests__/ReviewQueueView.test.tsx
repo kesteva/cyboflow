@@ -52,6 +52,33 @@ describe('ReviewQueueView', () => {
     expect(screen.getByText('Read')).toBeInTheDocument();
     expect(screen.getByText('Write')).toBeInTheDocument();
   });
+
+  it('renders "Review Queue" heading text', () => {
+    render(<ReviewQueueView />);
+    expect(screen.getByText('Review Queue')).toBeInTheDocument();
+  });
+
+  it('shows "0 pending" count in header when queue is empty', () => {
+    render(<ReviewQueueView />);
+    expect(screen.getByText('0 pending')).toBeInTheDocument();
+  });
+
+  it('shows correct pending count in header when queue is populated', () => {
+    mockQueue = [
+      { id: '1', runId: 'run-1', toolName: 'Bash', input: {}, timestamp: 1 },
+      { id: '2', runId: 'run-1', toolName: 'Read', input: {}, timestamp: 2 },
+    ];
+    render(<ReviewQueueView />);
+    expect(screen.getByText('2 pending')).toBeInTheDocument();
+  });
+
+  it('does not render "No pending approvals" when queue is populated', () => {
+    mockQueue = [
+      { id: '1', runId: 'run-1', toolName: 'Bash', input: {}, timestamp: 1 },
+    ];
+    render(<ReviewQueueView />);
+    expect(screen.queryByText('No pending approvals')).not.toBeInTheDocument();
+  });
 });
 
 describe('ErrorBoundary with ReviewQueueView fallback', () => {
