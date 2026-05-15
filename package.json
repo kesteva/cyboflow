@@ -50,7 +50,8 @@
     "test:ci": "playwright test --config=playwright.ci.config.ts",
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
     "test:ui": "playwright test --ui",
-    "test:headed": "playwright test --headed"
+    "test:headed": "playwright test --headed",
+    "test:gate": "pnpm --filter main exec vitest run --config ../vitest.config.gate.ts"
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
