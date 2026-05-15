@@ -381,11 +381,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return mcpServers as Record<string, McpServerConfig>;
   }
 
-  private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string | undefined> {
+  private composeRunEnv(_options: ClaudeSpawnOptions): Record<string, string | undefined> {
     const verbose = this.configManager?.getConfig()?.verbose;
     return {
       ...process.env,
-      CYBOFLOW_RUN_ID: options.panelId,
       ...(verbose ? { MCP_DEBUG: '1' } : {})
     };
   }
