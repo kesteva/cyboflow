@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { trpc } from '../trpc/client';
+import { trpc } from '../utils/trpcClient';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
 
 /**
