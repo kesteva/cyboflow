@@ -63,3 +63,18 @@ export interface ApprovalDecidedEvent {
   /** Final status after the decision. */
   decision: 'approved' | 'rejected' | 'expired';
 }
+
+/**
+ * Input type for the `cyboflow.approvals.approveRestOfRun` mutation.
+ *
+ * Scoped to a single run — never affects approvals from other runs.
+ */
+export type ApproveRestOfRunInput = { runId: string };
+
+/**
+ * Result type for the `cyboflow.approvals.approveRestOfRun` mutation.
+ *
+ * `decided` is the count of pending approvals that were approved in this call.
+ * Returns 0 (not an error) if the run has no pending approvals.
+ */
+export type ApproveRestOfRunResult = { decided: number };
