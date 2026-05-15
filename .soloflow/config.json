@@ -5,5 +5,10 @@
   },
   "git": {
     "branch_per_run": "always"
+  },
+  "compound": {
+    "skeptic": {
+      "auto_accept_verdicts": true
+    }
   }
 }
