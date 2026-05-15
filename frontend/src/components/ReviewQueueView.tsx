@@ -19,7 +19,7 @@ export default function ReviewQueueView() {
         .querySelector(`[data-approval-id="${focused.id}"]`)
         ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
-  }, [focusedIndex, queue]);
+  }, [focusedIndex]);
 
   return (
     <div className="w-[360px] h-full flex flex-col border-r border-border-primary bg-bg-secondary overflow-y-auto">

@@ -47,7 +47,7 @@ export function PendingApprovalCard({ approval, isFocused = false }: PendingAppr
     <div
       data-approval-id={approval.id}
       role="listitem"
-      className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${isFocused ? ' ring-2 ring-accent-primary' : ' focus-within:ring-2 focus-within:ring-accent-primary'}`}
+      className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${isFocused ? ' ring-2 ring-interactive' : ' focus-within:ring-2 focus-within:ring-interactive'}`}
     >
       {/* Header: workflow name + tool name + age */}
       <div className="flex items-baseline gap-2">
