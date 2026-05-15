@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-010
-pending_count: 10
-last_updated: "2026-05-15T17:30:00.000Z"
+pending_count: 12
+last_updated: "2026-05-15T18:16:25.660Z"
 ---
 # Findings Queue
 
@@ -130,3 +130,50 @@ last_updated: "2026-05-15T17:30:00.000Z"
 - **location:** frontend/src/hooks/useReviewQueueKeyboard.ts
 - **description:** Claimed to refactor useReviewQueueKeyboard to accept QueueItem[] instead of Approval[]. Required to meet AC: ReviewQueueView passes grouped QueueItem list to the keyboard hook, and the hook must handle group approve/reject via batched Promise.all. Plan step 5 explicitly calls for this refactor in TASK-405.
 - **resolved_by:** verifier — plan-prescribed: TASK-405-plan.md files_owned line 12 lists frontend/src/hooks/useReviewQueueKeyboard.ts, and Implementation Step 5 explicitly authorizes "change the hook to accept QueueItem[] and have its y/n handlers do the per-item batched mutate when the focused item is a group. This is a small refactor of TASK-404's hook — make the change in this task as it's part of the grouping integration." Not actually a deviation.
+
+## FIND-SPRINT-010-14
+- **type:** scope_deviation
+- **source:** TASK-406 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/approvals.ts
+- **description:** TASK-254 claims this file but is archived/done. TASK-406 plan requires adding approveRestOfRun mutation to the AppRouter type for typecheck to pass. Edited file directly since TASK-254 has no active worktree and is functionally complete. Claim script returned conflict due to stale in-flight status in plan file.
+- **resolved_by:** verifier — AC-prescribed: AC#1 ("`cyboflow.approvals.approveRestOfRun` tRPC mutation exists") plus the test_strategy item for the frontend group-card calling `trpc.cyboflow.approvals.approveRestOfRun.mutate(...)` together require the mutation to be reachable through the orchestrator AppRouter (the actual served router) for frontend typecheck and the group-approve test to pass. Wiring it in `main/src/orchestrator/trpc/routers/approvals.ts` (where `approvalsRouter` is composed into the cyboflow router at `router.ts:17`) is the minimum-diff path to satisfy this. Stale TASK-254 claim is a tooling artifact, not a real concurrency conflict.
+
+## FIND-SPRINT-010-15
+- **type:** scope_deviation
+- **source:** TASK-407 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/events.ts
+- **description:** TASK-407 plan listed main/src/trpc/routers/events.ts in files_owned, but the actual events router lives at main/src/orchestrator/trpc/routers/events.ts. Attempted to claim via claim-file.js but got conflict_with: TASK-254 (stale — TASK-254 is archived/done per git log). Added setBadgeCount mutation directly to the orchestrator events router, which is the correct canonical location for cyboflow.events.setBadgeCount. The plan-specified path main/src/trpc/routers/events.ts does not exist and would require wiring into the app router (also claimed by stale TASK-254). Stale claim in claim-file registry is a tooling artifact, not a real concurrency conflict.
+- **resolved_by:** verifier — plan-prescribed by intent: Plan Step 2 explicitly says "Wire it under the existing cyboflow router as `cyboflow.events.setBadgeCount`" and provides the exact mutation snippet. The cited path `main/src/trpc/routers/events.ts` does not exist (main/src/trpc/ is a re-export shim); the orchestrator events router is the only producer of `cyboflow.events.*`, so editing it is the only way to satisfy the plan's intent. Not a real deviation — the plan author named a non-existent file.
+
+## FIND-SPRINT-010-16
+- **type:** anti-pattern
+- **source:** TASK-407 (verifier)
+- **severity:** medium
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/events.ts:6-14
+- **description:** The events router file's own docstring declares "Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3', or main/src/services/*." (ROADMAP-001 §6.3 — the orchestrator subtree must be extractable to a standalone Node process for the team-tier v2 target). The new `import { dockBadgeService } from '../../../services/dockBadgeService';` line directly violates the invariant — `dockBadgeService` imports `electron`. TypeScript does not enforce the invariant today (no separate tsconfig project gate), so `pnpm typecheck` passes, but the orchestrator extraction goal is now blocked at this file until the dep is inverted. Plan Step 2 authorized putting `setBadgeCount` here, but the plan did not account for the standalone invariant declared in the very file it directed edits to.
+- **suggested_action:** Invert the dependency: expose a `setDockBadge` callback on the orchestrator deps interface (OrchestratorDeps in main/src/orchestrator/types.ts), inject `dockBadgeService.setBadgeCount` from main/src/index.ts when constructing the Orchestrator, and have the events router call `ctx.deps.setDockBadge(input.count)` instead of importing the concrete service. Alternative: move setBadgeCount out of the orchestrator router and back to a new main/src/trpc/routers/dock.ts wired into a separate non-orchestrator sub-router. Either approach restores the invariant. Compounder should propose whichever fits the team-tier extraction plan better.
+- **resolved_by:** TASK-407
+
+## FIND-SPRINT-010-17
+- **type:** anti-pattern
+- **source:** TASK-407 (verifier)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/reviewQueueStore.ts:127-147
+- **description:** `syncBadge(next)` is called inside the `set((state) => { ... })` callback for both `addApproval` and `removeApproval`. Zustand setters are expected to be pure functions of (state) → new state; firing side effects (tRPC mutations) inside them means React 18+ StrictMode (enabled in frontend/src/main.tsx per FIND-SPRINT-010-4) will invoke the setter twice in dev and fire two tRPC mutations per state change. The mutations are idempotent (setting badge=3 twice is harmless), so functionally OK, but the pattern is brittle: any future Zustand middleware that retries setters (e.g. persist with rehydration, devtools time-travel) will multiply the side effect. The `replaceAll` reducer (line 149) calls syncBadge OUTSIDE the setter — that's the correct pattern.
+- **suggested_action:** Move syncBadge out of the set() callback for addApproval/removeApproval. Idiom: compute the `next` array, call set({ queue: next }), then call syncBadge(next) — same as replaceAll already does. Also makes the three reducers structurally consistent.
+
+## FIND-SPRINT-010-18
+- **type:** bug
+- **source:** TASK-407 (code-reviewer)
+- **severity:** low
+- **status:** open
+- **location:** main/src/index.ts:762-764
+- **description:** The new `app.on('before-quit', () => dockBadgeService.setBadgeCount(0))` is registered before the existing `app.on('before-quit', async (event) => …)` handler that conditionally calls `event.preventDefault()` when archive tasks are in progress. Node fires `before-quit` listeners in registration order, so the badge is cleared FIRST, then the second handler may cancel the quit by showing the "Archive Tasks In Progress" dialog. If the user picks "Wait", the app keeps running with a now-cleared dock badge while pending approvals are still in the queue. The badge stays at 0 until the next addApproval/removeApproval/replaceAll mutation re-syncs it — meaning an idle queue (no further mutations) will display an incorrect 0 badge indefinitely until the user clicks an approval, reloads, or quits. Low severity because (a) the archive-tasks-in-progress + pending-approvals + Wait-chosen combination is rare, and (b) any subsequent mutation self-heals. But the fix is one line.
+- **suggested_action:** Either (a) move the dock-clear call inside the existing async handler AFTER the `event.preventDefault()` branch returns, so it only runs when the app is actually quitting; OR (b) gate the dock-clear on `app.on('will-quit', …)` (fires after all preventDefault checks have passed); OR (c) re-sync the badge from `useReviewQueueStore.getState().queue.length` if the second handler cancels the quit. Option (b) is the simplest — `will-quit` is the Electron-idiomatic event for "the app is definitely going to exit now."
+- **resolved_by:** 
