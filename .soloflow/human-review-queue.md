@@ -1,9 +1,9 @@
 ---
-pending_count: 8
+pending_count: 9
 buckets:
   decisions: 0
   actions: 0
-  testing: 7
+  testing: 8
   deferred_visual: 1
 items: []
 ---
@@ -90,6 +90,20 @@ _No items._
     - "EPIC success Signals 1, 2, 3, 9 (UI-driven verification)"
   level: requirements
   severity: high
+
+- task: TASK-354
+  type: action_required
+  bucket: testing
+  dedup_key: visual_web_unavailable
+  plan_ref: .soloflow/active/plans/workflow-runs-and-day3-gate/TASK-354-plan.md
+  action: "Verifier could not run web visual verification despite visual_web=true. The Electron renderer dev server (http://localhost:4521) was not running during verification (connection refused). To verify the WorkflowPicker/RunView/CyboflowRoot UI: run `pnpm dev` in one shell, then `pnpm test` (Playwright spec tests/cyboflow-picker.spec.ts) in another, or open the running renderer and confirm the workflow select with 5 options appears when a project is selected."
+  blocked_checks:
+    - Level 2 visual_web verification of WorkflowPicker rendering 5 options
+    - Level 2 visual_web verification of Start Run + CyboflowRoot mount
+  level: visual
+  severity: medium
+  created_at: "2026-05-15T06:37:20.926Z"
+  updated_at: "2026-05-15T06:37:20.926Z"
 
 ## Deferred Visual
 
