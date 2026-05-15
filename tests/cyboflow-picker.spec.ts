@@ -1,15 +1,16 @@
 /**
  * Cyboflow workflow-picker smoke spec.
  *
- * Exercises the WorkflowPicker and CyboflowRoot components at the Playwright
- * level.  These tests run against the renderer at http://localhost:4521 (set
- * in playwright.config.ts as baseURL) and require:
+ * Exercises the WorkflowPicker, RunView, and CyboflowRoot components at the
+ * Playwright level.  These tests run against the renderer at
+ * http://localhost:4521 (set in playwright.config.ts as baseURL) and require:
  *   - `pnpm dev` (or the test harness equivalent) to be running
  *   - At least one project configured so the app renders CyboflowRoot
  *     instead of the welcome / no-project fallback
  *
  * Acceptance criteria covered:
  *   AC1/2 — WorkflowPicker renders with a select element; Start Run button present
+ *   AC3   — RunView shows "No active run" placeholder before any run is started
  *   AC4   — CyboflowRoot is mounted in App.tsx (verified by checking for the
  *            aria-label on the workflow select)
  */
@@ -85,5 +86,27 @@ test.describe('CyboflowRoot / WorkflowPicker', () => {
 
     const startBtn = page.locator('button:has-text("Start Run")');
     await expect(startBtn).toBeVisible({ timeout: 5_000 });
+  });
+
+  /**
+   * AC3 — RunView shows "No active run" placeholder before any run is started.
+   *
+   * When CyboflowRoot is rendered and cyboflowStore.activeRunId is null (the
+   * initial state), RunView renders a <div> containing the text "No active run".
+   */
+  test('RunView shows "No active run" placeholder before a run is started', async ({ page }) => {
+    await navigateAndDismissDialogs(page);
+
+    const select = page.locator('select[aria-label="Select workflow"]');
+    const hasSelect = await select.isVisible({ timeout: 5_000 }).catch(() => false);
+    if (!hasSelect) {
+      test.skip(true, 'No active project found; CyboflowRoot is not rendered');
+      return;
+    }
+
+    // The RunView placeholder is visible immediately because no run has been
+    // started (activeRunId is null on fresh load).
+    const placeholder = page.locator('text=No active run');
+    await expect(placeholder).toBeVisible({ timeout: 5_000 });
   });
 });
