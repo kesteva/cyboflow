@@ -17,6 +17,34 @@ import type { WorkflowRegistry } from './workflowRegistry';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { McpConfigWriter } from './mcpConfigWriter';
+
+/**
+ * Provides the Unix socket path that the orchestrator IPC server listens on.
+ * In production, this is the real `permissionIpcServer.getSocketPath()`.
+ * In tests, a stub returns a canned string.
+ */
+export interface OrchSocketProvider {
+  getSocketPath(): string;
+}
+
+/**
+ * Resolves the absolute path to the bundled cyboflowPermissionBridge.js.
+ * In production, this handles ASAR extraction and dev vs packaged build differences.
+ * In tests, a stub returns a canned path.
+ */
+export interface BridgeScriptResolver {
+  getScriptPath(): string;
+}
+
+/**
+ * Resolves the path to the node executable.
+ * In production, delegates to findExecutableInPath('node') with a fallback ladder.
+ * In tests, a stub returns a canned path.
+ */
+export interface NodeResolver {
+  getNodePath(): Promise<string>;
+}
 
 export class RunLauncher {
   constructor(
@@ -24,6 +52,10 @@ export class RunLauncher {
     private readonly workflowRegistry: WorkflowRegistry,
     private readonly worktreeManager: WorktreeManager,
     private readonly logger: LoggerLike,
+    private readonly mcpConfigWriter?: McpConfigWriter,
+    private readonly orchSocketProvider?: OrchSocketProvider,
+    private readonly bridgeScriptResolver?: BridgeScriptResolver,
+    private readonly nodeResolver?: NodeResolver,
   ) {}
 
   /**
@@ -51,6 +83,26 @@ export class RunLauncher {
       workflow.name,
       runId,
     );
+
+    // Write the per-run .mcp.json into the worktree so Claude can discover
+    // the cyboflow-permissions bridge.  Only executed when all four collaborators
+    // are injected (they are optional to preserve backward-compat with existing
+    // tests and call-sites that pre-date this task).
+    if (
+      this.mcpConfigWriter &&
+      this.orchSocketProvider &&
+      this.bridgeScriptResolver &&
+      this.nodeResolver
+    ) {
+      const nodeExecutablePath = await this.nodeResolver.getNodePath();
+      await this.mcpConfigWriter.writeForRun({
+        runId,
+        worktreePath,
+        orchSocketPath: this.orchSocketProvider.getSocketPath(),
+        bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
+        nodeExecutablePath,
+      });
+    }
 
     this.db
       .prepare(
