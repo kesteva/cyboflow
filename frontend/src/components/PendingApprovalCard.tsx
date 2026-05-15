@@ -6,6 +6,8 @@ import type { Approval } from '../../../shared/types/approvals';
 
 interface PendingApprovalCardProps {
   approval: Approval;
+  /** When true, renders a visible focus ring for keyboard-navigation highlighting. */
+  isFocused?: boolean;
 }
 
 /**
@@ -18,7 +20,7 @@ interface PendingApprovalCardProps {
  * Carries data-approval-id and role="listitem" for keyboard-nav targeting
  * (TASK-404).
  */
-export function PendingApprovalCard({ approval }: PendingApprovalCardProps): React.ReactElement {
+export function PendingApprovalCard({ approval, isFocused = false }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
   const truncated = truncatePayload(approval.payloadPreview);
@@ -45,7 +47,7 @@ export function PendingApprovalCard({ approval }: PendingApprovalCardProps): Rea
     <div
       data-approval-id={approval.id}
       role="listitem"
-      className="px-4 py-3 border-b border-border-primary hover:bg-surface-hover focus-within:ring-2 focus-within:ring-accent-primary cursor-default"
+      className={`px-4 py-3 border-b border-border-primary hover:bg-surface-hover cursor-default${isFocused ? ' ring-2 ring-accent-primary' : ' focus-within:ring-2 focus-within:ring-accent-primary'}`}
     >
       {/* Header: workflow name + tool name + age */}
       <div className="flex items-baseline gap-2">
