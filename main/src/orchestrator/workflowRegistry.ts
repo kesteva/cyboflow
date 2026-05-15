@@ -12,23 +12,8 @@
  */
 import { readFileSync } from 'fs';
 import { randomUUID } from 'crypto';
-import type { LoggerLike } from './types';
+import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, SoloFlowWorkflowName } from '../../../shared/types/workflows';
-
-// ---------------------------------------------------------------------------
-// DatabaseLike surface required by WorkflowRegistry
-// ---------------------------------------------------------------------------
-
-interface PreparedStatement {
-  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-  get(...params: unknown[]): unknown;
-  all(...params: unknown[]): unknown[];
-}
-
-interface DatabaseLike {
-  prepare(sql: string): PreparedStatement;
-  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T;
-}
 
 // ---------------------------------------------------------------------------
 // Descriptor types
