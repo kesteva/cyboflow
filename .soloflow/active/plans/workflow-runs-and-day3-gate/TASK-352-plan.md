@@ -1,8 +1,8 @@
 ---
 id: TASK-352
 idea: IDEA-008
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/worktreeManager.ts
   - main/src/orchestrator/runLauncher.ts
@@ -22,14 +22,15 @@ acceptance_criteria:
   - criterion: "When `ensureGitignoreEntry(projectPath)` runs against a project whose `.gitignore` does NOT contain `.cyboflow/worktrees/`, the line `.cyboflow/worktrees/` is appended (with a trailing newline)"
     verification: "Test `runLauncher.test.ts > ensureGitignoreEntry > appends entry when missing`: create temp dir with .gitignore containing only 'node_modules'; call ensureGitignoreEntry; read .gitignore; assert it now contains '.cyboflow/worktrees/'."
   - criterion: "When `.gitignore` already contains `.cyboflow/worktrees/` (with or without a trailing slash, exact line match), the function does NOT append a duplicate"
-    verification: "Test `ensureGitignoreEntry > idempotent when entry present`: pre-seed .gitignore with '.cyboflow/worktrees/\\n'; call ensureGitignoreEntry; assert file content is unchanged (no duplicate appended)."
+    verification: "Test `ensureGitignoreEntry > idempotent when entry present`: pre-seed .gitignore with '.cyboflow/worktrees/\n'; call ensureGitignoreEntry; assert file content is unchanged (no duplicate appended)."
   - criterion: "When `.gitignore` does not exist, `ensureGitignoreEntry` creates it with the single line `.cyboflow/worktrees/`"
-    verification: "Test `ensureGitignoreEntry > creates .gitignore when missing`: temp dir with no .gitignore; call function; assert file exists with content '.cyboflow/worktrees/\\n'."
+    verification: "Test `ensureGitignoreEntry > creates .gitignore when missing`: temp dir with no .gitignore; call function; assert file exists with content '.cyboflow/worktrees/\n'."
   - criterion: "`RunLauncher.launch(workflowId)` orchestrates: workflowRegistry.createRun → ensureGitignoreEntry → createDeterministicWorktree → UPDATE workflow_runs with worktree_path and branch_name. After launch, workflow_runs row has non-null worktree_path and branch_name."
     verification: "Test `runLauncher.test.ts > launch > updates workflow_runs row with worktree metadata`: spy on createDeterministicWorktree and workflowRegistry; call launch; assert workflow_runs row in DB has worktree_path matching the scheme and branch_name matching `cyboflow/<workflow>/<runId8>`."
   - criterion: "Worktree creation uses `withLock('worktree-create-<projectPath>-<runId8>')` to prevent concurrent creates from clashing on the same path"
     verification: "grep -n \"withLock\\(\\s*[\\`'\\\"]worktree-create\" main/src/services/worktreeManager.ts returns at least 1 match in or near the new `createDeterministicWorktree` method body."
-depends_on: [TASK-351]
+depends_on:
+  - TASK-351
 estimated_complexity: medium
 epic: workflow-runs-and-day3-gate
 test_strategy:
@@ -37,19 +38,18 @@ test_strategy:
   justification: "Deterministic naming is a load-bearing invariant (queue groups, branch cleanup commands assume the scheme); .gitignore mutation has three branches (missing file, missing entry, entry present) each of which must be exact; the orchestration sequence in RunLauncher.launch is what wires every downstream task — a regression here breaks the whole pipeline."
   targets:
     - behavior: "createDeterministicWorktree path matches the cyboflow/<workflow>/<runId8> scheme"
-      test_file: "main/src/services/__tests__/worktreeManager.test.ts"
+      test_file: main/src/services/__tests__/worktreeManager.test.ts
       type: unit
-    - behavior: "createDeterministicWorktree creates the matching git branch"
-      test_file: "main/src/services/__tests__/worktreeManager.test.ts"
+    - behavior: createDeterministicWorktree creates the matching git branch
+      test_file: main/src/services/__tests__/worktreeManager.test.ts
       type: integration
-    - behavior: "ensureGitignoreEntry covers append / idempotent / create-new cases"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: ensureGitignoreEntry covers append / idempotent / create-new cases
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "RunLauncher.launch updates workflow_runs row with worktree_path and branch_name"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch updates workflow_runs row with worktree_path and branch_name
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
 ---
-
 # Deterministic Worktree Naming and .gitignore Auto-Write
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-354
 idea: IDEA-008
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/WorkflowPicker.tsx
   - frontend/src/components/cyboflow/RunView.tsx
@@ -27,28 +27,28 @@ acceptance_criteria:
     verification: "grep -n 'CyboflowRoot' frontend/src/App.tsx returns at least 1 match. The component is rendered (not just imported)."
   - criterion: "`cyboflowApi` module exposes typed wrappers `listWorkflows({ projectId })`, `startRun({ workflowId, projectId })`, `subscribeToStreamEvents({ runId, onEvent })`, `approveRun({ runId, approvalId, decision })`. The last is the hook the day-3 gate test calls directly."
     verification: "grep -n 'export' frontend/src/utils/cyboflowApi.ts returns at least 4 named exports: listWorkflows, startRun, subscribeToStreamEvents, approveRun."
-  - criterion: "The frontend does NOT add a hard dependency on `trpc-electron` or `@trpc/client` if those have not yet been installed (epic 6 owns that install). The cyboflowApi wrapper transparently routes through the existing `window.electron`/IPC channels until tRPC lands."
+  - criterion: The frontend does NOT add a hard dependency on `trpc-electron` or `@trpc/client` if those have not yet been installed (epic 6 owns that install). The cyboflowApi wrapper transparently routes through the existing `window.electron`/IPC channels until tRPC lands.
     verification: "grep -rn '@trpc/client\\|trpc-electron' frontend/src/ returns 0 matches (or only matches in files NOT in this task's files_owned). The cyboflowApi uses the existing IPC pattern from frontend/src/utils/api.ts."
   - criterion: "The store exposes selectors `useCyboflowStore(s => s.activeRunId)` and `useCyboflowStore(s => s.streamEvents)`; the streamEvents array grows when events arrive via the subscription"
-    verification: "Read frontend/src/stores/cyboflowStore.ts; assert `activeRunId` and `streamEvents` are declared in the state interface; assert there is an `appendStreamEvent(event)` action that pushes onto streamEvents."
-depends_on: [TASK-353]
+    verification: Read frontend/src/stores/cyboflowStore.ts; assert `activeRunId` and `streamEvents` are declared in the state interface; assert there is an `appendStreamEvent(event)` action that pushes onto streamEvents.
+depends_on:
+  - TASK-353
 estimated_complexity: medium
 epic: workflow-runs-and-day3-gate
 test_strategy:
   needed: true
   justification: "The minimal frontend is the visible end-to-end smoke for the orchestrator: if the picker can't list workflows or the run view can't show events, the day-3 gate can't be demoed. A small behavioral test per component (picker renders 5 options + start triggers API) catches regressions cheaply; full UX testing is Phase 2's review-queue-ui epic."
   targets:
-    - behavior: "WorkflowPicker renders 5 options and start button triggers cyboflowApi.startRun"
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowPicker.test.tsx"
+    - behavior: WorkflowPicker renders 5 options and start button triggers cyboflowApi.startRun
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowPicker.test.tsx
       type: component
-    - behavior: "RunView shows placeholder when no run is active and event log when run is active"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+    - behavior: RunView shows placeholder when no run is active and event log when run is active
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
-    - behavior: "cyboflowStore.appendStreamEvent grows the streamEvents array"
-      test_file: "frontend/src/stores/__tests__/cyboflowStore.test.ts"
+    - behavior: cyboflowStore.appendStreamEvent grows the streamEvents array
+      test_file: frontend/src/stores/__tests__/cyboflowStore.test.ts
       type: unit
 ---
-
 # Minimal Frontend: Workflow Picker + Run Start + Single Run View
 
 ## Objective

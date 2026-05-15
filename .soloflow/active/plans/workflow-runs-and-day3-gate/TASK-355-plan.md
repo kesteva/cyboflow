@@ -1,8 +1,8 @@
 ---
 id: TASK-355
 idea: IDEA-008
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - tests/cyboflow-day3-gate.spec.ts
   - tests/fixtures/cyboflow-day3-gate/sprint-prompt.md
@@ -35,31 +35,31 @@ acceptance_criteria:
     verification: "Read the test body: `beforeEach` and `afterEach` (or `beforeAll`/`afterAll`) hooks create and clean up a temp dir with git init and clean up DB. grep -n 'git init\\|fs.rm\\|fsExtra.remove' tests/cyboflow-day3-gate.spec.ts returns at least 2 matches across setup and teardown."
   - criterion: "`tests/helpers/cyboflowTestHarness.ts` exposes a `launchPair(workflowA, workflowB, projectPath)` helper that returns `{ runIdA, runIdB, waitForAwaitingReview(runId), approveRun(runId, decision), getStatus(runId), getStreamEvents(runId) }` — the harness is the only file that touches the orchestrator internals, so the test body itself stays declarative."
     verification: "Read tests/helpers/cyboflowTestHarness.ts; assert the exported `launchPair` function signature matches; grep -n 'waitForAwaitingReview\\|approveRun\\|getStatus' tests/helpers/cyboflowTestHarness.ts returns at least 3 matches."
-depends_on: [TASK-354]
+depends_on:
+  - TASK-354
 estimated_complexity: high
 epic: workflow-runs-and-day3-gate
 test_strategy:
   needed: true
   justification: "This task IS the test. Per the IDEA description and design doc §7, this is THE EXPLICIT MILESTONE TEST — if it passes the fork-path bet is validated; if it fails the greenfield reset is on the table. The test is the deliverable, not a side artifact."
   targets:
-    - behavior: "two runs in different workflows can be paused on tool-use approvals and approved in any order"
-      test_file: "tests/cyboflow-day3-gate.spec.ts"
+    - behavior: two runs in different workflows can be paused on tool-use approvals and approved in any order
+      test_file: tests/cyboflow-day3-gate.spec.ts
       type: integration
 prerequisites:
   - check: "command -v claude >/dev/null 2>&1"
     fix: "Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code/overview"
-    description: "Day-3 gate test spawns real Claude Code processes; without the CLI the test skips (does not fail) but the gate is not actually verified."
+    description: Day-3 gate test spawns real Claude Code processes; without the CLI the test skips (does not fail) but the gate is not actually verified.
     blocking: false
   - check: "command -v git >/dev/null 2>&1"
     fix: "Install git via Xcode command line tools: xcode-select --install"
-    description: "Test creates a temp git repo via `git init`; git is also required by WorktreeManager."
+    description: Test creates a temp git repo via `git init`; git is also required by WorktreeManager.
     blocking: true
   - check: "test -f main/dist/services/mcpPermissionBridge.js || test -f main/src/services/mcpPermissionBridge.ts"
     fix: "Run `pnpm build:main` to compile the main process, or ensure mcpPermissionBridge.ts exists in source"
     description: "The per-run .mcp.json references the bridge script path; if the build artifact (or, for dev, the source) is missing, Claude cannot spawn the bridge and the gate cannot run."
     blocking: true
 ---
-
 # Day-3 Gate Test: Two Parallel Runs, Approve Out of Order
 
 ## Objective

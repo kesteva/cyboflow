@@ -1,8 +1,8 @@
 ---
 id: TASK-353
 idea: IDEA-008
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpConfigWriter.ts
   - main/src/orchestrator/__tests__/mcpConfigWriter.test.ts
@@ -27,27 +27,27 @@ acceptance_criteria:
     verification: "Test `runLauncher.test.ts > launch > writes per-run mcp config after worktree created`: spy on McpConfigWriter.writeForRun; call launch; assert the spy was called with { runId, worktreePath, orchSocketPath: 'stub-socket-path', bridgeScriptPath: ... } AFTER worktreeManager.createDeterministicWorktree resolved."
   - criterion: "The .mcp.json filename is exactly `.mcp.json` at worktree root (not in a temp dir, not in `~/.cyboflow/`) — this is the per-run scoping mechanism"
     verification: "grep -n \"'\\.mcp\\.json'\\|\\\"\\.mcp\\.json\\\"\" main/src/orchestrator/mcpConfigWriter.ts returns at least 1 match; the path is joined against the worktreePath argument, not against os.homedir() or os.tmpdir()."
-depends_on: [TASK-352]
+depends_on:
+  - TASK-352
 estimated_complexity: medium
 epic: workflow-runs-and-day3-gate
 test_strategy:
   needed: true
   justification: "The .mcp.json contract is what Claude reads to discover the permission bridge — any drift in keys, env vars, or argv structure silently breaks the day-3 gate (Claude would either not load the bridge or load the wrong one). Strict-mcp-config inclusion is a security invariant per ecosystem research §6. Each shape is verified directly."
   targets:
-    - behavior: "writeForRun writes .mcp.json at worktree root with cyboflow-permissions server entry"
-      test_file: "main/src/orchestrator/__tests__/mcpConfigWriter.test.ts"
+    - behavior: writeForRun writes .mcp.json at worktree root with cyboflow-permissions server entry
+      test_file: main/src/orchestrator/__tests__/mcpConfigWriter.test.ts
       type: unit
     - behavior: "writeForRun args match bridge subprocess signature ([scriptPath, runId, socketPath])"
-      test_file: "main/src/orchestrator/__tests__/mcpConfigWriter.test.ts"
+      test_file: main/src/orchestrator/__tests__/mcpConfigWriter.test.ts
       type: unit
-    - behavior: "writeForRun env vars CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET are populated"
-      test_file: "main/src/orchestrator/__tests__/mcpConfigWriter.test.ts"
+    - behavior: writeForRun env vars CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET are populated
+      test_file: main/src/orchestrator/__tests__/mcpConfigWriter.test.ts
       type: unit
-    - behavior: "RunLauncher.launch invokes writeForRun after worktree creation"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch invokes writeForRun after worktree creation
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
 ---
-
 # Per-Run .mcp.json with cyboflow-permissions Bridge + --strict-mcp-config
 
 ## Objective

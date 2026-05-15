@@ -1,8 +1,8 @@
 ---
 id: TASK-351
 idea: IDEA-008
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/workflowRegistry.ts
   - main/src/orchestrator/__tests__/workflowRegistry.test.ts
@@ -37,20 +37,19 @@ test_strategy:
   needed: true
   justification: "Frontmatter parsing has explicit branches (key present, key absent, file missing); idempotency must be verified; snapshot semantics on createRun is a behavioral invariant the day-3 gate depends on."
   targets:
-    - behavior: "seed inserts five workflows with correct names"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: seed inserts five workflows with correct names
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "seed is idempotent"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: seed is idempotent
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "frontmatter permission_mode parsing covers present / absent / file-missing cases"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: frontmatter permission_mode parsing covers present / absent / file-missing cases
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "createRun snapshots permission_mode onto workflow_runs row"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: createRun snapshots permission_mode onto workflow_runs row
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
 ---
-
 # Workflow Registry Seeded with 5 SoloFlow Workflows
 
 ## Objective
