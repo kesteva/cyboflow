@@ -111,15 +111,14 @@ export function PendingApprovalCard({ item, isFocused = false }: PendingApproval
   const [busy, setBusy] = useState(false);
 
   if (item.kind === 'group') {
-    const { toolName, items, isBlocking } = item;
+    const { runId, toolName, items, isBlocking } = item;
     const representative = items[0];
     const label = `${toolName} (×${items.length} in this run)`;
 
     function handleApprove(): void {
       setBusy(true);
-      void Promise.all(
-        items.map((a) => trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id })),
-      ).finally(() => { setBusy(false); });
+      void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId })
+        .finally(() => { setBusy(false); });
     }
 
     function handleReject(): void {
