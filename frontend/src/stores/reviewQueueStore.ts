@@ -167,7 +167,7 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
     trpc.cyboflow.approvals.listPending
       .query()
       .then((items) => {
-        replaceAll(items as Approval[]);
+        replaceAll(items);
         setConnectionStatus('connected');
       })
       .catch((err: unknown) => {
