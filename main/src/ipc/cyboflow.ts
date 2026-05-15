@@ -1,0 +1,171 @@
+/**
+ * IPC handlers for the cyboflow orchestrator subsystem.
+ *
+ * Channels registered here:
+ *   cyboflow:listWorkflows  — list (and auto-seed) workflows for a project
+ *   cyboflow:startRun       — launch a new workflow run
+ *   cyboflow:approveRun     — approve / deny an approval request (stub; epic 7)
+ *
+ * Collaborators (WorkflowRegistry, RunLauncher) are constructed lazily on
+ * first call using the injected AppServices.  When epic 6 (orchestrator-and-
+ * trpc-router) lands, replace the lazy-init blocks with proper singletons
+ * instantiated during app startup.
+ */
+import { IpcMain } from 'electron';
+import * as os from 'os';
+import * as path from 'path';
+import type { AppServices } from './types';
+import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
+import { RunLauncher } from '../orchestrator/runLauncher';
+import type { LoggerLike } from '../orchestrator/types';
+
+// ---------------------------------------------------------------------------
+// Module-level lazy singletons (reset on each hot-reload in dev; fine for prod)
+// ---------------------------------------------------------------------------
+
+let _workflowRegistry: WorkflowRegistry | null = null;
+let _runLauncher: RunLauncher | null = null;
+
+/**
+ * Build a LoggerLike from AppServices.logger (which may be undefined or a
+ * Logger instance whose method signatures don't fully match LoggerLike).
+ * Falls back to a console-based shim.
+ */
+function makeLoggerLike(services: AppServices): LoggerLike {
+  if (!services.logger) {
+    return {
+      info:  (msg, ctx) => console.info(msg, ctx ?? ''),
+      warn:  (msg, ctx) => console.warn(msg, ctx ?? ''),
+      error: (msg, ctx) => console.error(msg, ctx ?? ''),
+      debug: (msg, ctx) => console.debug(msg, ctx ?? ''),
+    };
+  }
+  // The Logger class exposes info/warn/error but not debug, and its signatures
+  // only accept (message: string, error?: Error).  Wrap to satisfy LoggerLike.
+  const logger = services.logger;
+  return {
+    info:  (msg) => logger.info(msg),
+    warn:  (msg) => logger.warn(msg),
+    error: (msg) => logger.error(msg),
+    debug: (msg) => console.debug(msg),
+  };
+}
+
+function getWorkflowRegistry(services: AppServices): WorkflowRegistry {
+  if (!_workflowRegistry) {
+    // WorkflowRegistry expects a DatabaseLike (narrow interface with .prepare / .transaction).
+    // DatabaseService wraps better-sqlite3 internally; getDb() exposes the raw handle that
+    // satisfies DatabaseLike.
+    _workflowRegistry = new WorkflowRegistry(
+      services.databaseService.getDb(),
+      makeLoggerLike(services),
+    );
+  }
+  return _workflowRegistry;
+}
+
+function getRunLauncher(services: AppServices): RunLauncher {
+  if (!_runLauncher) {
+    _runLauncher = new RunLauncher(
+      services.databaseService.getDb(),
+      getWorkflowRegistry(services),
+      services.worktreeManager,
+      makeLoggerLike(services),
+      // MCP collaborators (orchSocketProvider, bridgeScriptResolver, nodeResolver)
+      // are intentionally omitted here; those are wired in epic 6.
+    );
+  }
+  return _runLauncher;
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices): void {
+  /**
+   * cyboflow:listWorkflows
+   *
+   * Args: { projectId: number }
+   * Returns: { success: true, data: WorkflowRow[] } | { success: false, error: string }
+   *
+   * Auto-seeds the 5 SoloFlow workflow rows when the project has no registered
+   * workflows.  Uses INSERT OR IGNORE semantics so re-seeding is idempotent.
+   */
+  ipcMain.handle(
+    'cyboflow:listWorkflows',
+    async (_event, args: { projectId: number }) => {
+      try {
+        const { projectId } = args;
+        const registry = getWorkflowRegistry(services);
+
+        let workflows = registry.listByProject(projectId);
+
+        if (workflows.length === 0) {
+          // Auto-seed the 5 SoloFlow defaults, resolving paths from $HOME.
+          const homeDir = os.homedir();
+          const descriptors = DEFAULT_SOLOFLOW_WORKFLOWS.map((wf) => ({
+            name: wf.name,
+            path: path.join(homeDir, wf.pathFromHome),
+          }));
+          registry.seed(projectId, descriptors);
+          workflows = registry.listByProject(projectId);
+        }
+
+        return { success: true, data: workflows };
+      } catch (error) {
+        console.error('[cyboflow:listWorkflows] error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'listWorkflows failed',
+        };
+      }
+    },
+  );
+
+  /**
+   * cyboflow:startRun
+   *
+   * Args: { workflowId: number, projectId: number }
+   * Returns: { success: true, data: { runId, worktreePath, branchName } }
+   *        | { success: false, error: string }
+   */
+  ipcMain.handle(
+    'cyboflow:startRun',
+    async (_event, args: { workflowId: number; projectId: number }) => {
+      try {
+        const { workflowId, projectId } = args;
+
+        // Resolve project path via sessionManager (the canonical project store).
+        const project = services.sessionManager.getProjectById(projectId);
+        if (!project) {
+          return { success: false, error: `Project ${projectId} not found` };
+        }
+
+        const launcher = getRunLauncher(services);
+        const { runId, worktreePath, branchName } = await launcher.launch(
+          workflowId,
+          project.path,
+        );
+
+        return { success: true, data: { runId, worktreePath, branchName } };
+      } catch (error) {
+        console.error('[cyboflow:startRun] error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'startRun failed',
+        };
+      }
+    },
+  );
+
+  /**
+   * cyboflow:approveRun  (NOT_IMPLEMENTED stub)
+   *
+   * Epic 7 wires the real approval flow.  The day-3 gate test (TASK-355)
+   * bypasses this IPC channel and drives the orchestrator directly.
+   */
+  ipcMain.handle('cyboflow:approveRun', async () => {
+    return { success: false, error: 'NOT_IMPLEMENTED: cyboflow:approveRun is pending epic 7' };
+  });
+}
