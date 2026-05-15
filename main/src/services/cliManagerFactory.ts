@@ -171,17 +171,11 @@ export class CliManagerFactory {
       sessionManager: unknown,
       logger?: Logger,
       configManager?: ConfigManager,
-      additionalOptions?: unknown
     ) => {
-      // Extract Claude-specific options
-      const options = additionalOptions as Record<string, unknown> | undefined;
-      const permissionIpcPath = options?.permissionIpcPath || null;
-      
       return new ClaudeCodeManager(
         sessionManager as SessionManager,
         logger,
         configManager,
-        (typeof permissionIpcPath === 'string' ? permissionIpcPath : null) as string | null
       );
     };
 
