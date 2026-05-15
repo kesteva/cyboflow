@@ -45,6 +45,7 @@
     "postinstall": "electron-builder install-app-deps",
     "electron:rebuild": "pnpm exec electron-rebuild -f -w better-sqlite3 -m ./main",
     "setup": "pnpm install && pnpm run electron:rebuild && pnpm run build:main",
+    "smoke:sdk": "tsx scripts/sdk-smoke-probe.ts",
     "test": "playwright test",
     "test:ci": "playwright test --config=playwright.ci.config.ts",
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
@@ -52,7 +53,6 @@
     "test:headed": "playwright test --headed"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.0.0",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@trpc/client": ">=11.0.0 <12.0.0",
@@ -65,17 +65,17 @@
     "posthog-node": "^5.11.2",
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
-    "web-streams-polyfill": "^3.3.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
     "@playwright/test": "^1.52.0",
     "concurrently": "^9.1.0",
     "electron": "^37.6.0",
     "electron-builder": "^26.0.20",
-    "@electron/rebuild": "^4.0.1",
     "node-abi": "^4.14.0",
     "playwright": "^1.52.0",
+    "tsx": "^4.22.0",
     "vite-plugin-electron": "^0.29.0",
     "vite-plugin-electron-renderer": "^0.14.6",
     "wait-on": "^9.0.0"
@@ -92,7 +92,6 @@
       "frontend/dist/**/*",
       "package.json",
       "node_modules/**/*",
-      "!node_modules/@anthropic-ai/claude-code/vendor/**/*.jar",
       "build/**/*",
       "LICENSE"
     ],
@@ -101,9 +100,6 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/**/*.node",
-      "!node_modules/@anthropic-ai/claude-code/vendor/**",
-      "main/dist/services/cyboflowPermissionBridge.js",
-      "main/dist/services/cyboflowPermissionBridgeStandalone.js",
       "main/dist/services/**/*.js"
     ],
     "afterSign": "build/afterSign.js",
@@ -114,9 +110,6 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "signIgnore": [
-        "node_modules/@anthropic-ai/claude-code/vendor/.*\\.jar$"
-      ],
       "notarize": true,
       "target": [
         {
@@ -125,7 +118,7 @@
         }
       ],
       "artifactName": "${productName}-${version}-macOS-universal.${ext}",
-      "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib,@anthropic-ai/claude-code/vendor/**/*}"
+      "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib}"
     },
     "publish": {
       "provider": "github",

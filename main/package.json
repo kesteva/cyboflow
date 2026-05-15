@@ -6,8 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "tsc -w",
-    "build": "rimraf dist && tsc && npm run copy:assets && npm run bundle:mcp",
-    "bundle:mcp": "node build-cyboflow-permission-bridge.js",
+    "build": "rimraf dist && tsc && npm run copy:assets",
     "copy:assets": "mkdirp dist/main/src/database/migrations && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
@@ -16,7 +15,7 @@
     "test:coverage": "vitest --coverage"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.0.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.141",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@trpc/client": ">=11.0.0 <12.0.0",
