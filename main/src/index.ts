@@ -760,10 +760,10 @@ app.on('window-all-closed', () => {
   }
 });
 
-// Clear the dock badge immediately on quit so it does not linger after
-// the app process exits. This is a best-effort call: if the badge was
-// already 0 or app.dock is unavailable, setBadgeCount is a no-op.
-app.on('before-quit', () => {
+// Clear the dock badge on `will-quit` (fires only after all `before-quit`
+// preventDefault opportunities have passed, so the badge does not zero
+// while the app is still running due to a cancelled quit).
+app.on('will-quit', () => {
   dockBadgeService.setBadgeCount(0);
 });
 
