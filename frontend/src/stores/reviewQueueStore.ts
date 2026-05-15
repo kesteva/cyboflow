@@ -93,6 +93,28 @@ export interface ReviewQueueState {
 }
 
 // ---------------------------------------------------------------------------
+// Badge sync helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Push the current queue length to the main process so it can update the
+ * macOS dock badge.
+ *
+ * Called after every queue mutation (addApproval, removeApproval, replaceAll)
+ * AND inside init() after the full-state resync so the badge re-derives from
+ * authoritative data on every tRPC reconnect.
+ *
+ * Failures are swallowed: a badge update failure (e.g. tRPC temporarily
+ * disconnected) must never crash a reducer. We log at warn level so it shows
+ * up in backend debug logs without alarming the user.
+ */
+function syncBadge(queue: Approval[]): void {
+  trpc.cyboflow.events.setBadgeCount.mutate({ count: queue.length }).catch((err: unknown) => {
+    console.warn('[reviewQueueStore] syncBadge failed (badge may be stale):', err);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -108,7 +130,9 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
         // Idempotent: already present — no-op
         return state;
       }
-      return { queue: [...state.queue, approval] };
+      const next = [...state.queue, approval];
+      syncBadge(next);
+      return { queue: next };
     });
   },
 
@@ -117,12 +141,15 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
       const next = state.queue.filter((a) => a.id !== id);
       // No-op if nothing was removed (length unchanged)
       if (next.length === state.queue.length) return state;
+      syncBadge(next);
       return { queue: next };
     });
   },
 
   replaceAll: (items) => {
-    set({ queue: [...items] });
+    const next = [...items];
+    syncBadge(next);
+    set({ queue: next });
   },
 
   setConnectionStatus: (status) => {
