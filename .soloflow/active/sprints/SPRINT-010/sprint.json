@@ -5,12 +5,7 @@
     "started": "2026-05-15T14:27:30Z",
     "execution_mode": "parallel"
   },
-  "tasks": {
-    "TASK-407": {
-      "status": "in_progress",
-      "started": "2026-05-15T17:39:40.562Z"
-    }
-  },
+  "tasks": {},
   "playwright_target": {
     "kind": "electron",
     "evidence": "electron in package.json",
