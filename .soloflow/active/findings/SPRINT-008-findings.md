@@ -1,9 +1,20 @@
 ---
 sprint: SPRINT-008
-pending_count: 5
-last_updated: "2026-05-14T23:25:17.623Z"
+pending_count: 6
+last_updated: "2026-05-14T23:32:30.000Z"
 ---
 # Findings Queue
+
+## FIND-SPRINT-008-7
+- **source:** TASK-593 (verifier)
+- **type:** claude-md
+- **severity:** low
+- **status:** open
+- **location:** .soloflow/active/plans/claude-agent-sdk-migration/TASK-593-plan.md (AC-4 verification command)
+- **description:** AC-4's verification command `grep -rn 'completionDetector\|CompletionDetector\|CompletionPayload\|ForcedPayload' main/ shared/ returns 0 matches (exit 1)` walks the build-artifact directory `main/dist/` (gitignored but not excluded from grep). Even though TASK-593 cleanly deletes the source and prunes the barrel, the literal command returns 16+ matches against compiled `.js`/`.d.ts`/`.js.map` artifacts in `main/dist/`. The verifier must manually re-run with `--exclude-dir=dist` to see the true source-tree state. Better convention for plan-authored grep ACs in this repo: include `--exclude-dir=dist --exclude-dir=node_modules` in the command literal, or scope to `main/src shared/` instead of `main/ shared/`. This convention should be added to .soloflow plan-author guidance (or CLAUDE.md) so future deletion-task plans don't trip the verifier on this same false-positive pattern.
+- **suggested_action:** Document the `--exclude-dir=dist --exclude-dir=node_modules` (or `main/src` scoping) convention for grep-based AC verification commands in the soloflow plan-author skill / CLAUDE.md.
+
+## Pre-existing findings below
 
 - override: gating-prereqs
   task: TASK-595
