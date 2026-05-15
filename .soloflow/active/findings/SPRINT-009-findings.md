@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-009
-pending_count: 4
-last_updated: "2026-05-14T23:30:00.000Z"
+pending_count: 6
+last_updated: "2026-05-15T00:11:00.000Z"
 ---
 # Findings Queue
 
@@ -77,4 +77,24 @@ Override decision: continue without gating TASK-355. If the bridge is somehow no
 - **location:** main/src/ipc/cyboflow.ts:34-52
 - **description:** `makeLoggerLike()` wraps the Logger class to satisfy LoggerLike but **drops the `context` argument entirely** in the info/warn/error/debug branches (it only forwards `msg`). The orchestrator (RunLauncher, WorkflowRegistry) calls `this.logger.info('RunLauncher: run started', { runId, workflowId, worktreePath, branchName })` — when invoked via this IPC path, all that structured context is silently discarded; only the bare message reaches the Logger. Runs launched from tests (which inject a real LoggerLike) get the full context; runs launched from the IPC handler do not. This is a logging-fidelity gap, not a correctness bug.
 - **suggested_action:** Either (a) extend `Logger.info/warn/error` to accept an optional `context?: Record<string, unknown>` and serialise it (e.g. JSON.stringify) into the log line, then forward it from `makeLoggerLike`, or (b) format the context inline in the shim: `(msg, ctx) => logger.info(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg)`. Option (b) is the smaller change.
+- **resolved_by:** 
+
+## FIND-SPRINT-009-8
+- **source:** TASK-355 (verifier)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** tests/helpers/cyboflowTestHarness.ts:279-283 (creation), :397-412 (teardown — missing rmSync of the workflow-fixture tmp dir)
+- **description:** `launchPair` calls `fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-wf-'))` to host the seeded workflow .md files but `teardown()` never removes that directory — only the per-test project dir (created in the spec's `beforeAll` and rm'd in `afterAll`) and the in-memory DB are cleaned. After two consecutive `pnpm test:gate` runs, four `cyboflow-gate-wf-*` dirs remained under `$TMPDIR` (3 carried over from prior local runs + 1 from the most recent run), each holding two ~30-byte .md files. The OS will purge `os.tmpdir()` on its own schedule, so this is not a correctness bug, but every gate-test invocation leaks one tmp dir + two files. No AC mandates fixture cleanup so this is a non-blocker; flagged as a small-change ergonomic improvement.
+- **suggested_action:** Track the workflow-fixture tmp dir as a private field on the harness (e.g. `private workflowFixturesDir: string | null = null;`), set it inside `launchPair`, and add `if (this.workflowFixturesDir) fs.rmSync(this.workflowFixturesDir, { recursive: true, force: true });` to the start of `teardown()`. Single small change; keeps the test fully hermetic.
+- **resolved_by:** 
+
+## FIND-SPRINT-009-9
+- **source:** TASK-355 (verifier)
+- **type:** claude-md
+- **severity:** low
+- **status:** open
+- **location:** .soloflow/active/plans/workflow-runs-and-day3-gate/TASK-355-plan.md:23 (AC#1 verification clause), :87 (Implementation Step 1 prose)
+- **description:** Two minor plan-vs-code drifts that did not change verdict, but would confuse a future verifier or executor reading the plan in isolation. (1) AC#1 verification text says "The test body uses both `workflows: 'sprint'` AND `workflows: 'prune'` strings literally." The actual harness API surface (also defined in the plan's Step 1 skeleton) uses `workflowA: SoloFlowWorkflowName; workflowB: SoloFlowWorkflowName;` — singular keys. The strict literal `workflows: 'sprint'` does NOT appear in the test (and shouldn't, given the API). The intent (both workflow names appear as quoted literals) is met. (2) Implementation Step 1 says `approveRun` "calls the ApprovalRouter directly (`approvalRouter.decide(runId, approvalId, 'allow' | 'deny')`)" but the actual ApprovalRouter API method is `respond(approvalId, decision)` (see main/src/orchestrator/approvalRouter.ts:248). The harness correctly uses `respond` — the plan text references a non-existent `decide` method. Both are plan-quality issues, not code defects. Surfacing because future tasks in this epic will likely reuse the harness contract description.
+- **suggested_action:** Compounder may amend the plan template (or the day-3 gate plan archive) to (a) restate AC#1 verification as "both `'sprint'` and `'prune'` appear as quoted string literals in the test body" — drops the misleading `workflows:` key prefix; (b) replace `approvalRouter.decide` with `approvalRouter.respond` to match the ApprovalRouter public API. Lowest-friction fix at compound time.
 - **resolved_by:** 
