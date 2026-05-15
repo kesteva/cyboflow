@@ -8,7 +8,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
-import { router, protectedProcedure } from '../trpc';
+import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { throttleAsyncIterator } from '../throttle';
 import type { ApprovalCreatedEvent, ApprovalDecidedEvent } from '../../../../../shared/types/approvals';
 
@@ -119,6 +119,23 @@ function eventToAsyncIterable<T>(
 // ---------------------------------------------------------------------------
 
 export const eventsRouter = router({
+  /**
+   * Update the macOS dock badge to reflect the current pending-approval count.
+   *
+   * Called from the renderer's reviewQueueStore after every queue mutation
+   * (addApproval, removeApproval, replaceAll) so the badge stays in sync
+   * with the visible queue without requiring a main-process queue mirror.
+   *
+   * Uses publicProcedure: the dock badge is a local UI affordance; no session
+   * auth is required for a renderer→main local IPC call.
+   */
+  setBadgeCount: publicProcedure
+    .input(z.object({ count: z.number().int().min(0) }))
+    .mutation(({ input, ctx }) => {
+      ctx.setDockBadge(input.count);
+      return { ok: true };
+    }),
+
   /**
    * Subscribe to stream events for a specific run.
    *
