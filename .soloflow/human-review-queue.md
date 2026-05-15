@@ -1,9 +1,9 @@
 ---
-pending_count: 10
+pending_count: 9
 buckets:
   decisions: 0
-  actions: 2
-  testing: 7
+  actions: 0
+  testing: 8
   deferred_visual: 1
 items: []
 ---
@@ -15,37 +15,7 @@ _No items._
 
 ## Actions
 
-- task: TASK-588
-  type: action_required
-  bucket: actions
-  dedup_key: better_sqlite3_node_module_version_mismatch
-  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-588-plan.md
-  action: "Run `pnpm electron:rebuild` from the repo root to rebuild better-sqlite3 against the current Node ABI (NODE_MODULE_VERSION 127 vs prebuilt 137). After rebuild, re-run `cd main && pnpm test -- approvalRouter` — TASK-588 leaves the case count at 8 (same as pre-task baseline), and a clean rebuild should turn the 8 collected-but-erroring tests into 8 passing tests. This env defect is documented in CLAUDE.md and pre-dates TASK-588 (identical failure reproduces on main pre-commit)."
-  blocked_checks:
-    - "AC#7 — pnpm test -- approvalRouter exits 0 (currently exits non-zero because better-sqlite3 throws before any test body runs)"
-    - "AC-6 — streamParser/__tests__/rawEventsSink.test.ts (8 tests) fails on better-sqlite3 NODE_MODULE_VERSION mismatch, unrelated to TASK-593"
-    - "AC#5 — rawEventsSink.test.ts (8 tests) failing on better-sqlite3 prebuilt ABI mismatch (NODE_MODULE_VERSION 136 vs 127)"
-  level: ground_truth
-  severity: high
-  created_at: "2026-05-14T22:48:33.048Z"
-  updated_at: "2026-05-15T01:37:53.798Z"
-  affected_tasks:
-    - TASK-588
-    - TASK-593
-    - TASK-594
-
-- task: TASK-593
-  type: action_required
-  bucket: actions
-  dedup_key: streamparser_fixtures_missing
-  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-593-plan.md
-  action: "AC-6 for TASK-593 also fails on schemas.test.ts and typedEventNarrowing.test.ts because main/src/services/streamParser/__fixtures__/ contains only README.md (no JSON wire-format fixtures). This is TASK-594 scope (regenerate fixtures against Claude Agent SDK wire format). After TASK-594 lands, re-run `pnpm --filter main exec vitest run src/services/streamParser/__tests__/` and confirm the 19 ENOENT failures across schemas.test.ts and typedEventNarrowing.test.ts flip from FAIL to PASS. Pre-existed at parent commit bfce232 — not introduced by TASK-593."
-  blocked_checks:
-    - "AC-6 — streamParser/__tests__/schemas.test.ts and typedEventNarrowing.test.ts fail with ENOENT on __fixtures__/*.json"
-  level: ground_truth
-  severity: medium
-  created_at: "2026-05-15T00:03:08.674Z"
-  updated_at: "2026-05-15T00:03:08.674Z"
+_No items._
 
 ## Testing
 
@@ -121,6 +91,20 @@ _No items._
   level: requirements
   severity: high
 
+- task: TASK-354
+  type: action_required
+  bucket: testing
+  dedup_key: visual_web_unavailable
+  plan_ref: .soloflow/active/plans/workflow-runs-and-day3-gate/TASK-354-plan.md
+  action: "Verifier could not run web visual verification despite visual_web=true. The Electron renderer dev server (http://localhost:4521) was not running during verification (connection refused). To verify the WorkflowPicker/RunView/CyboflowRoot UI: run `pnpm dev` in one shell, then `pnpm test` (Playwright spec tests/cyboflow-picker.spec.ts) in another, or open the running renderer and confirm the workflow select with 5 options appears when a project is selected."
+  blocked_checks:
+    - Level 2 visual_web verification of WorkflowPicker rendering 5 options
+    - Level 2 visual_web verification of Start Run + CyboflowRoot mount
+  level: visual
+  severity: medium
+  created_at: "2026-05-15T06:37:20.926Z"
+  updated_at: "2026-05-15T06:37:20.926Z"
+
 ## Deferred Visual
 
 - sprint: SPRINT-007
@@ -132,3 +116,41 @@ _No items._
     - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
   level: requirements
   severity: high
+
+## Overridden
+
+- task: TASK-593
+  type: overridden
+  bucket: actions
+  dedup_key: streamparser_fixtures_missing
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-593-plan.md
+  action: "AC-6 for TASK-593 also fails on schemas.test.ts and typedEventNarrowing.test.ts because main/src/services/streamParser/__fixtures__/ contains only README.md (no JSON wire-format fixtures). This is TASK-594 scope (regenerate fixtures against Claude Agent SDK wire format). After TASK-594 lands, re-run `pnpm --filter main exec vitest run src/services/streamParser/__tests__/` and confirm the 19 ENOENT failures across schemas.test.ts and typedEventNarrowing.test.ts flip from FAIL to PASS. Pre-existed at parent commit bfce232 — not introduced by TASK-593."
+  blocked_checks:
+    - "AC-6 — streamParser/__tests__/schemas.test.ts and typedEventNarrowing.test.ts fail with ENOENT on __fixtures__/*.json"
+  level: ground_truth
+  severity: medium
+  created_at: "2026-05-15T00:03:08.674Z"
+  updated_at: "2026-05-15T00:03:08.674Z"
+  override: "Deferred ground-truth check blocked on TASK-594 (stream parser fixture authoring), which is unrelated to the workflow-runs-and-day3-gate epic. Will be resolved when TASK-594 lands."
+  override_at: "2026-05-15T04:26:25.559Z"
+
+- task: TASK-588
+  type: overridden
+  bucket: actions
+  dedup_key: better_sqlite3_node_module_version_mismatch
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-588-plan.md
+  action: "Run `pnpm electron:rebuild` from the repo root to rebuild better-sqlite3 against the current Node ABI (NODE_MODULE_VERSION 127 vs prebuilt 137). After rebuild, re-run `cd main && pnpm test -- approvalRouter` — TASK-588 leaves the case count at 8 (same as pre-task baseline), and a clean rebuild should turn the 8 collected-but-erroring tests into 8 passing tests. This env defect is documented in CLAUDE.md and pre-dates TASK-588 (identical failure reproduces on main pre-commit)."
+  blocked_checks:
+    - "AC#7 — pnpm test -- approvalRouter exits 0 (currently exits non-zero because better-sqlite3 throws before any test body runs)"
+    - "AC-6 — streamParser/__tests__/rawEventsSink.test.ts (8 tests) fails on better-sqlite3 NODE_MODULE_VERSION mismatch, unrelated to TASK-593"
+    - "AC#5 — rawEventsSink.test.ts (8 tests) failing on better-sqlite3 prebuilt ABI mismatch (NODE_MODULE_VERSION 136 vs 127)"
+  level: ground_truth
+  severity: high
+  created_at: "2026-05-14T22:48:33.048Z"
+  updated_at: "2026-05-15T01:37:53.798Z"
+  affected_tasks:
+    - TASK-588
+    - TASK-593
+    - TASK-594
+  override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
+  override_at: "2026-05-15T04:26:22.959Z"

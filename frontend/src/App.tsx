@@ -4,6 +4,7 @@ import { useNotifications } from './hooks/useNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
+import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
 import Help from './components/Help';
 import Welcome from './components/Welcome';
@@ -17,6 +18,7 @@ import { DiscordPopup } from './components/DiscordPopup';
 import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
+import { useNavigationStore } from './stores/navigationStore';
 import { API } from './utils/api';
 import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
@@ -51,9 +53,13 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
+  // Toggle between the new CyboflowRoot view and the legacy Crystal SessionView.
+  // Default is the new Cyboflow view; the legacy toggle lets users fall back.
+  const [useLegacyCrystalView, setUseLegacyCrystalView] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
+  const { activeProjectId } = useNavigationStore();
   
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
   useEffect(() => {
@@ -345,14 +351,53 @@ function App() {
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
         </div>
-        <Sidebar 
+        <Sidebar
           onHelpClick={() => setIsHelpOpen(true)}
           onAboutClick={() => setIsAboutOpen(true)}
           onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
           width={sidebarWidth}
           onResize={startResize}
         />
-        <SessionView />
+        {/* Primary content area: CyboflowRoot when a project is active, else SessionView.
+            The "Legacy Crystal view" toggle lets users fall back to the Crystal surface.
+            Deeper UI surgery is deferred to the crystal-cuts-and-rebrand epic. */}
+        {activeProjectId !== null && !useLegacyCrystalView ? (
+          <div className="flex flex-col flex-1 overflow-hidden">
+            <div
+              className="flex justify-end px-4 py-1 border-b border-border-primary"
+              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            >
+              <button
+                onClick={() => setUseLegacyCrystalView(true)}
+                className="text-xs text-text-secondary hover:text-text-primary"
+                title="Switch back to the legacy Crystal session view"
+              >
+                Legacy Crystal view
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <CyboflowRoot projectId={activeProjectId} />
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col flex-1 overflow-hidden">
+            {useLegacyCrystalView && (
+              <div
+                className="flex justify-end px-4 py-1 border-b border-border-primary"
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+              >
+                <button
+                  onClick={() => setUseLegacyCrystalView(false)}
+                  className="text-xs text-text-secondary hover:text-text-primary"
+                  title="Switch to the new Cyboflow view"
+                >
+                  Cyboflow view
+                </button>
+              </div>
+            )}
+            <SessionView />
+          </div>
+        )}
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
         <AnalyticsConsentDialog
           isOpen={isAnalyticsConsentOpen}

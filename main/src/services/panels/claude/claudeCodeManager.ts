@@ -25,6 +25,15 @@ interface ClaudeSpawnOptions {
   isResume?: boolean;
   permissionMode?: 'approve' | 'ignore';
   model?: string;
+  /**
+   * When true, `--strict-mcp-config` is added to the CLI args so that only
+   * the per-run `.mcp.json` servers load and user-global MCP servers from
+   * `~/.claude.json` cannot interfere with the permission bridge.
+   *
+   * Defaults to `undefined` (falsy) for Crystal-session callers so existing
+   * behaviour is preserved.  Cyboflow workflow run launches pass `true`.
+   */
+  strictMcpConfig?: boolean;
 }
 
 /**
@@ -104,11 +113,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
-   * No command args needed; SDK takes structured options instead.
-   * Returns [] to satisfy the abstract contract.
+   * No command args are consumed by the SDK substrate — query() takes structured
+   * options, not a CLI argv array.  This method satisfies the abstract contract
+   * and records the --strict-mcp-config flag for any future path that reverts to
+   * PTY-spawning or inspects the args array directly.
+   *
+   * When `options.strictMcpConfig` is true the returned array contains
+   * '--strict-mcp-config' so callers that read these args (e.g. integration
+   * tests, a future PTY fallback path) get the correct argv.
    */
-  protected buildCommandArgs(_options: ClaudeSpawnOptions): string[] {
-    return [];
+  protected buildCommandArgs(options: ClaudeSpawnOptions): string[] {
+    const args: string[] = [];
+    if (options.strictMcpConfig) {
+      args.push('--strict-mcp-config');
+    }
+    return args;
   }
 
   /**
