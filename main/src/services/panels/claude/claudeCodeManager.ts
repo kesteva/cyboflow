@@ -12,7 +12,6 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink } from '../../streamParser';
-import { assertTransitionAllowed } from '../../cyboflow/stateMachine';
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
