@@ -1,8 +1,8 @@
 ---
 id: TASK-402
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueueView.tsx
   - frontend/src/components/__tests__/ReviewQueueView.test.tsx
@@ -23,11 +23,12 @@ acceptance_criteria:
     verification: "grep -n 'Review queue error' frontend/src/App.tsx returns one match (the fallback string passed to ErrorBoundary)"
   - criterion: "Empty-state UI shows 'No pending approvals' text when queue.length === 0"
     verification: "grep -n 'No pending approvals' frontend/src/components/ReviewQueueView.tsx returns a match"
-  - criterion: "Component calls reviewQueueStore.init() once on mount"
+  - criterion: Component calls reviewQueueStore.init() once on mount
     verification: "grep -n 'init\\(\\)\\|useEffect' frontend/src/components/ReviewQueueView.tsx returns a useEffect that invokes init exactly once (empty deps array)"
-  - criterion: "Layout reserves a fixed-width left rail (320-400px) for the queue; the rail is independent of the existing Sidebar component (which stays as-is)"
+  - criterion: Layout reserves a fixed-width left rail (320-400px) for the queue; the rail is independent of the existing Sidebar component (which stays as-is)
     verification: "grep -n 'w-\\[3\\|w-\\[4\\|width:' frontend/src/components/ReviewQueueView.tsx returns a Tailwind width class or inline style; visual inspection confirms the rail is always visible"
-depends_on: [TASK-401]
+depends_on:
+  - TASK-401
 estimated_complexity: medium
 epic: review-queue-ui
 test_strategy:
@@ -35,16 +36,15 @@ test_strategy:
   justification: "Component has branching render paths (empty, populated, error fallback) and a lifecycle effect — render tests catch regressions cheaply"
   targets:
     - behavior: "Renders 'No pending approvals' when queue is empty"
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "Renders one card per approval in queue"
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+    - behavior: Renders one card per approval in queue
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
     - behavior: "ErrorBoundary custom fallback shows 'Review queue error — restart app' on simulated child throw"
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
 ---
-
 # ReviewQueueView Shell + Always-Visible Left Rail + ErrorBoundary Wrap
 
 ## Objective
