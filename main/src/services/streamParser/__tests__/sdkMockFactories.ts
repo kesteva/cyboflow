@@ -288,6 +288,20 @@ export function resultErrorDuringExecution(overrides: Partial<ResultEvent> = {})
   };
 }
 
+export function resultErrorMaxStructuredOutputRetries(
+  overrides: Partial<ResultEvent> = {},
+): ResultEvent {
+  return {
+    type: 'result',
+    subtype: 'error_max_structured_output_retries',
+    is_error: true,
+    duration_ms: 4321,
+    num_turns: 1,
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // StreamEvent variant
 // ---------------------------------------------------------------------------

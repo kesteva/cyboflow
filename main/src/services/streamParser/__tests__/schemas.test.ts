@@ -27,6 +27,7 @@ import {
   resultErrorMaxTurns,
   resultErrorMaxBudgetUsd,
   resultErrorDuringExecution,
+  resultErrorMaxStructuredOutputRetries,
   streamEvent,
 } from './sdkMockFactories';
 
@@ -270,6 +271,20 @@ describe('ResultEvent', () => {
     expect(event.subtype).toBe('error_during_execution');
     expect(event.is_error).toBe(true);
   });
+
+  it('narrows error_max_structured_output_retries to result/error_max_structured_output_retries (SDK-only)', () => {
+    const raw = resultErrorMaxStructuredOutputRetries();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    if (event.type !== 'result') {
+      throw new Error('Expected ResultEvent');
+    }
+    expect(event.subtype).toBe('error_max_structured_output_retries');
+    expect(event.is_error).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -403,6 +418,7 @@ describe('exhaustive union coverage', () => {
       [resultErrorMaxTurns(), 'result/error_max_turns'],
       [resultErrorMaxBudgetUsd(), 'result/error_max_budget_usd'],
       [resultErrorDuringExecution(), 'result/error_during_execution'],
+      [resultErrorMaxStructuredOutputRetries(), 'result/error_max_structured_output_retries'],
       [streamEvent(), 'stream_event'],
     ];
 
