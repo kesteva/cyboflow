@@ -273,10 +273,13 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   // Implementation
   // ---------------------------------------------------------------------------
 
+  let workflowFixturesDir: string | null = null;
+
   const harness: CyboflowTestHarness = {
     async launchPair({ projectPath, workflowA, workflowB, promptA, promptB }) {
       // Write minimal workflow .md files to temp paths (no permission_mode frontmatter → default)
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-wf-'));
+      workflowFixturesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-wf-'));
+      const tmpDir = workflowFixturesDir;
       const wfPathA = path.join(tmpDir, `${workflowA}.md`);
       const wfPathB = path.join(tmpDir, `${workflowB}.md`);
       fs.writeFileSync(wfPathA, `# ${workflowA} workflow\n`, 'utf-8');
@@ -403,6 +406,12 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
       }
       await Promise.all(abortPromises);
       activeRuns.clear();
+
+      // Clean up workflow-fixture tmp dir created in launchPair
+      if (workflowFixturesDir) {
+        fs.rmSync(workflowFixturesDir, { recursive: true, force: true });
+        workflowFixturesDir = null;
+      }
 
       // Reset the ApprovalRouter singleton so subsequent test runs start clean
       ApprovalRouter._resetForTesting();
