@@ -1,6 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { mkdir } from 'fs/promises';
 import { getShellPath } from '../utils/shellPath';
 import { withLock } from '../utils/mutex';
@@ -69,52 +69,44 @@ export class WorktreeManager {
     }
   }
 
-  async createWorktree(projectPath: string, name: string, branch?: string, baseBranch?: string, worktreeFolder?: string): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
-    return await withLock(`worktree-create-${projectPath}-${name}`, async () => {
-      
-      const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder);
-      const worktreePath = join(baseDir, name);
-      const branchName = branch || name;
-    
-
+  /**
+   * Private helper: execute the git-worktree-add sequence for a given path and branch.
+   * Both `createWorktree` and `createDeterministicWorktree` delegate here so the
+   * git logic is not duplicated.
+   */
+  private async _createAtPath(
+    projectPath: string,
+    worktreePath: string,
+    branchName: string,
+    baseBranch?: string,
+  ): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
     try {
       // First check if this is a git repository
-      let isGitRepo = false;
       try {
         await execWithShellPath(`git rev-parse --is-inside-work-tree`, { cwd: projectPath });
-        isGitRepo = true;
-      } catch (error) {
+      } catch {
         // Initialize git repository
         await execWithShellPath(`git init`, { cwd: projectPath });
       }
 
       // Clean up any existing worktree directory first
       try {
-        // Use cross-platform approach without shell redirection
-        try {
-          await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
-        } catch {
-          // Ignore cleanup errors
-        }
+        await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
       } catch {
         // Ignore cleanup errors
       }
 
       // Check if the repository has any commits
-      let hasCommits = false;
       try {
         await execWithShellPath(`git rev-parse HEAD`, { cwd: projectPath });
-        hasCommits = true;
-      } catch (error) {
+      } catch {
         // Repository has no commits yet, create initial commit
-        // Use cross-platform approach without shell operators
         try {
           await execWithShellPath(`git add -A`, { cwd: projectPath });
         } catch {
           // Ignore add errors (no files to add)
         }
         await execWithShellPath(`git commit -m "Initial commit" --allow-empty`, { cwd: projectPath });
-        hasCommits = true;
       }
 
       // Check if branch already exists
@@ -130,11 +122,11 @@ export class WorktreeManager {
       // Capture the base commit before creating worktree
       let baseCommit: string;
       let actualBaseBranch: string;
-      
+
       if (branchExists) {
         // Use existing branch
         await execWithShellPath(`git worktree add "${worktreePath}" ${branchName}`, { cwd: projectPath });
-        
+
         // Get the commit this branch is based on
         baseCommit = (await execWithShellPath(`git rev-parse ${branchName}`, { cwd: projectPath })).stdout.trim();
         actualBaseBranch = branchName;
@@ -142,7 +134,7 @@ export class WorktreeManager {
         // Create new branch from specified base branch (or current HEAD if not specified)
         const baseRef = baseBranch || 'HEAD';
         actualBaseBranch = baseBranch || 'HEAD';
-        
+
         // Verify that the base branch exists if specified
         if (baseBranch) {
           try {
@@ -151,13 +143,13 @@ export class WorktreeManager {
             throw new Error(`Base branch '${baseBranch}' does not exist`);
           }
         }
-        
+
         // Capture the base commit before creating the worktree
         baseCommit = (await execWithShellPath(`git rev-parse ${baseRef}`, { cwd: projectPath })).stdout.trim();
-        
+
         await execWithShellPath(`git worktree add -b ${branchName} "${worktreePath}" ${baseRef}`, { cwd: projectPath });
       }
-      
+
       console.log(`[WorktreeManager] Worktree created successfully at: ${worktreePath}`);
 
       // Track worktree creation
@@ -168,10 +160,46 @@ export class WorktreeManager {
       }
 
       return { worktreePath, baseCommit, baseBranch: actualBaseBranch };
-      } catch (error) {
-        console.error(`[WorktreeManager] Failed to create worktree:`, error);
-        throw new Error(`Failed to create worktree: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    } catch (error) {
+      console.error(`[WorktreeManager] Failed to create worktree:`, error);
+      throw new Error(`Failed to create worktree: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async createWorktree(projectPath: string, name: string, branch?: string, baseBranch?: string, worktreeFolder?: string): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
+    return await withLock(`worktree-create-${projectPath}-${name}`, async () => {
+      const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder);
+      const worktreePath = join(baseDir, name);
+      const branchName = branch || name;
+      return await this._createAtPath(projectPath, worktreePath, branchName, baseBranch);
+    });
+  }
+
+  /**
+   * Create a worktree using deterministic, sortable naming:
+   *   - worktree path: `<projectPath>/.cyboflow/worktrees/<workflowName>/<runId8>`
+   *   - git branch:    `cyboflow/<workflowName>/<runId8>`
+   *
+   * where `runId8` = first 8 characters of `runId`.
+   *
+   * A named mutex (`worktree-create-<projectPath>-<runId8>`) guards against
+   * concurrent creates targeting the same path.
+   */
+  async createDeterministicWorktree(
+    projectPath: string,
+    workflowName: string,
+    runId: string,
+    baseBranch?: string,
+  ): Promise<{ worktreePath: string; branchName: string; baseCommit: string; baseBranch: string }> {
+    const runId8 = runId.slice(0, 8);
+    const branchName = `cyboflow/${workflowName}/${runId8}`;
+    const worktreePath = join(projectPath, '.cyboflow', 'worktrees', workflowName, runId8);
+
+    return await withLock(`worktree-create-${projectPath}-${runId8}`, async () => {
+      // Ensure parent directory exists before git creates the worktree leaf
+      await mkdir(dirname(worktreePath), { recursive: true });
+      const result = await this._createAtPath(projectPath, worktreePath, branchName, baseBranch);
+      return { ...result, branchName };
     });
   }
 
