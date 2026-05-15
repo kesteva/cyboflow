@@ -39,3 +39,31 @@ CREATE INDEX IF NOT EXISTS idx_session_outputs_session_id ON session_outputs(ses
 CREATE INDEX IF NOT EXISTS idx_session_outputs_timestamp ON session_outputs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id ON conversation_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_timestamp ON conversation_messages(timestamp);
+
+-- Workflow registry: seeded with five SoloFlow workflow definitions
+CREATE TABLE IF NOT EXISTS workflows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  workflow_path TEXT NOT NULL,
+  permission_mode TEXT NOT NULL DEFAULT 'default',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(project_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
+
+-- Workflow runs: one row per execution attempt
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  workflow_id INTEGER NOT NULL,
+  project_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  permission_mode_snapshot TEXT NOT NULL,
+  worktree_path TEXT,
+  branch_name TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
