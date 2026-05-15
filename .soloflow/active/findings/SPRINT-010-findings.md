@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-010
 pending_count: 10
-last_updated: "2026-05-15T17:45:00.000Z"
+last_updated: "2026-05-15T17:30:00.000Z"
 ---
 # Findings Queue
 
@@ -121,3 +121,12 @@ last_updated: "2026-05-15T17:45:00.000Z"
 - **description:** The y/n branches use `setFocusedIndex(currentIndex => { ...; return currentIndex; })` to read the current focusedIndex from the closure-captured queue without changing state. This abuses the functional-setState API as a state-read primitive — React will still enqueue a state update and run the Object.is bail-out check. The 5-line inline justification comment exists because the pattern is non-obvious. The standard idiom is a ref synced via effect (`const indexRef = useRef(focusedIndex); useEffect(() => { indexRef.current = focusedIndex; }, [focusedIndex]);`) which is briefer, intent-revealing, and avoids the no-op enqueue. Same scope: the keydown effect re-binds the window listener on every queue mutation because `queue` is in its dep array — pinning queue in a ref and using `[]` for the listener effect would be cleaner.
 - **suggested_action:** Refactor to use refs for both focusedIndex (so y/n can read it directly) and queue (so the listener registers once per mount). Drop the in-branch explanatory comment when the code becomes self-documenting.
 - **resolved_by:** 
+
+## FIND-SPRINT-010-13
+- **type:** scope_deviation
+- **source:** TASK-405 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/hooks/useReviewQueueKeyboard.ts
+- **description:** Claimed to refactor useReviewQueueKeyboard to accept QueueItem[] instead of Approval[]. Required to meet AC: ReviewQueueView passes grouped QueueItem list to the keyboard hook, and the hook must handle group approve/reject via batched Promise.all. Plan step 5 explicitly calls for this refactor in TASK-405.
+- **resolved_by:** verifier — plan-prescribed: TASK-405-plan.md files_owned line 12 lists frontend/src/hooks/useReviewQueueKeyboard.ts, and Implementation Step 5 explicitly authorizes "change the hook to accept QueueItem[] and have its y/n handlers do the per-item batched mutate when the focused item is a group. This is a small refactor of TASK-404's hook — make the change in this task as it's part of the grouping integration." Not actually a deviation.
