@@ -1,6 +1,3 @@
-// Load ReadableStream polyfill before any other imports
-import './polyfills/readablestream';
-
 import { app, BrowserWindow, ipcMain, shell, dialog, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
 import { TaskQueue } from './services/taskQueue';
