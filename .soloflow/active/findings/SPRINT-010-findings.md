@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-010
-pending_count: 9
-last_updated: "2026-05-15T15:35:00.000Z"
+pending_count: 10
+last_updated: "2026-05-15T17:45:00.000Z"
 ---
 # Findings Queue
 
@@ -91,4 +91,33 @@ last_updated: "2026-05-15T15:35:00.000Z"
 - **location:** package.json:60-61
 - **description:** Plan AC6 requires "pinned versions" of `@trpc/server`/`@trpc/client` to ensure the v11 subscription leak fix (PR #6161) is present. The package.json uses range `>=11.0.0 <12.0.0`, not a pin. The pnpm lockfile currently resolves to 11.17.0 (well past the fix), so this is functionally fine TODAY, but a fresh install in a different env or after a `pnpm install --force` without lockfile could pull an earlier 11.x. Tightening to `^11.17.0` or exact `11.17.0` would honor AC6 more defensibly.
 - **suggested_action:** Change `"@trpc/server": ">=11.0.0 <12.0.0"` and `"@trpc/client": ">=11.0.0 <12.0.0"` to `"^11.17.0"` (or exact `"11.17.0"` for true pinning). Note: this changes only the manifest range, not the resolved version.
+- **resolved_by:** 
+
+## FIND-SPRINT-010-10
+- **type:** scope_deviation
+- **source:** TASK-404 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/__tests__/ReviewQueueView.test.tsx
+- **description:** Claimed to fix test breakage caused by ReviewQueueView.tsx importing the new useReviewQueueKeyboard hook. The test did not mock the hook, causing trpc-electron initialization error. Required to keep the suite green after the ReviewQueueView change.
+- **resolved_by:** verifier — plan-prescribed: TASK-404-plan.md files_owned line 11 lists frontend/src/components/__tests__/ReviewQueueView.test.tsx; not actually a deviation. Also AC-prescribed: keeping the existing suite green is required by the test-strategy baseline.
+
+## FIND-SPRINT-010-11
+- **type:** bug
+- **source:** TASK-404 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/__tests__/PendingApprovalCard.test.tsx:19
+- **description:** Pre-existing TypeScript error: baseApproval fixture is missing required Approval fields runId and status. Discovered during TASK-404 typecheck run. File is owned by TASK-406 which should fix this fixture.
+- **suggested_action:** Update baseApproval to include runId: string and status: pending|approved|rejected|expired fields matching the Approval interface in shared/types/approvals.ts
+- **resolved_by:** verifier — status-sync: TASK-404 (commit d208b10 added runId: 'run-fixture-id' and status: 'pending' to baseApproval fixture; typecheck now passes). AC-prescribed: pnpm typecheck must pass as ground-truth, and TASK-404 modified PendingApprovalCard.tsx which is the SUT for this test file.
+
+## FIND-SPRINT-010-12
+- **type:** improvement
+- **source:** TASK-404 (code-reviewer)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/hooks/useReviewQueueKeyboard.ts:55-90
+- **description:** The y/n branches use `setFocusedIndex(currentIndex => { ...; return currentIndex; })` to read the current focusedIndex from the closure-captured queue without changing state. This abuses the functional-setState API as a state-read primitive — React will still enqueue a state update and run the Object.is bail-out check. The 5-line inline justification comment exists because the pattern is non-obvious. The standard idiom is a ref synced via effect (`const indexRef = useRef(focusedIndex); useEffect(() => { indexRef.current = focusedIndex; }, [focusedIndex]);`) which is briefer, intent-revealing, and avoids the no-op enqueue. Same scope: the keydown effect re-binds the window listener on every queue mutation because `queue` is in its dep array — pinning queue in a ref and using `[]` for the listener effect would be cleaner.
+- **suggested_action:** Refactor to use refs for both focusedIndex (so y/n can read it directly) and queue (so the listener registers once per mount). Drop the in-branch explanatory comment when the code becomes self-documenting.
 - **resolved_by:** 
