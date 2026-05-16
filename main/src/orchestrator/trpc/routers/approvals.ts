@@ -10,6 +10,7 @@
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
+import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { Approval, ApproveRestOfRunResult } from '../../../../../shared/types/approvals';
@@ -103,7 +104,13 @@ export const approvalsRouter = router({
       // TODO(approval-router epic): once ctx.db is wired, delegate to:
       //   import { approveRestOfRunHandler } from '../../../trpc/routers/approvals';
       //   return approveRestOfRunHandler(ctx.db, input.runId);
-      console.log(`[approvals.approveRestOfRun] STUB — runId=${input.runId}`);
-      return { decided: 0 };
+      //
+      // Until then, throw NOT_IMPLEMENTED so the group-card Approve click
+      // surfaces a visible UI error instead of silently no-op'ing while the
+      // subscription stream optimistically removes cards (FIND-SPRINT-011-8).
+      throw new TRPCError({
+        code: 'NOT_IMPLEMENTED',
+        message: `approveRestOfRun is not wired yet (approval-router epic). runId=${input.runId}`,
+      });
     }),
 });
