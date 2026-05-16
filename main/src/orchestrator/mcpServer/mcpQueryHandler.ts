@@ -74,13 +74,13 @@ export class McpQueryHandler {
     try {
       switch (msg.type) {
         case 'mcp-list-pending-approvals':
-          await this.handleListPendingApprovals(msg, client);
+          this.handleListPendingApprovals(msg, client);
           break;
         case 'mcp-get-run':
-          await this.handleGetRun(msg, client);
+          this.handleGetRun(msg, client);
           break;
         case 'mcp-submit-checkpoint':
-          await this.handleSubmitCheckpoint(msg, client);
+          this.handleSubmitCheckpoint(msg, client);
           break;
         default: {
           // TypeScript exhaustiveness helper — cast so the switch compiles even
@@ -113,123 +113,93 @@ export class McpQueryHandler {
   // Message handlers
   // --------------------------------------------------------------------------
 
-  private async handleListPendingApprovals(
+  private handleListPendingApprovals(
     msg: Extract<McpQueryMessage, { type: 'mcp-list-pending-approvals' }>,
     client: net.Socket,
-  ): Promise<void> {
-    try {
-      const stmt = this.db.prepare(
-        `SELECT id, run_id, tool_name, tool_input_json, created_at
-           FROM approvals
-          WHERE status = 'pending'
-          ORDER BY created_at ASC`,
-      );
-      const rows = stmt.all() as ApprovalRow[];
+  ): void {
+    const stmt = this.db.prepare(
+      `SELECT id, run_id, tool_name, tool_input_json, created_at
+         FROM approvals
+        WHERE status = 'pending'
+        ORDER BY created_at ASC`,
+    );
+    const rows = stmt.all() as ApprovalRow[];
 
-      const approvals = rows.map((row) => ({
-        approval_id: row.id,
-        run_id: row.run_id,
-        tool_name: row.tool_name,
-        input: (() => {
-          try {
-            return JSON.parse(row.tool_input_json) as unknown;
-          } catch {
-            return row.tool_input_json;
-          }
-        })(),
-        created_at: row.created_at,
-      }));
+    const approvals = rows.map((row) => ({
+      approval_id: row.id,
+      run_id: row.run_id,
+      tool_name: row.tool_name,
+      input: (() => {
+        try {
+          return JSON.parse(row.tool_input_json) as unknown;
+        } catch {
+          console.warn(
+            `[Cyboflow MCP Query] tool_input_json parse failed for approval ${row.id} — returning raw string`,
+          );
+          return row.tool_input_json;
+        }
+      })(),
+      created_at: row.created_at,
+    }));
 
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { approvals },
-      });
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      console.error(`[Cyboflow MCP Query] mcp-list-pending-approvals error:`, err);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error,
-      });
-    }
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { approvals },
+    });
   }
 
-  private async handleGetRun(
+  private handleGetRun(
     msg: Extract<McpQueryMessage, { type: 'mcp-get-run' }>,
     client: net.Socket,
-  ): Promise<void> {
-    try {
-      const stmt = this.db.prepare(
-        `SELECT * FROM workflow_runs WHERE id = ?`,
-      );
-      const row = stmt.get(msg.targetRunId) as Record<string, unknown> | undefined;
+  ): void {
+    const stmt = this.db.prepare(
+      `SELECT * FROM workflow_runs WHERE id = ?`,
+    );
+    const row = stmt.get(msg.targetRunId) as Record<string, unknown> | undefined;
 
-      if (!row) {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error: 'not_found',
-        });
-        return;
-      }
-
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { run: row },
-      });
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      console.error(`[Cyboflow MCP Query] mcp-get-run error:`, err);
+    if (!row) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: false,
-        error,
+        error: 'not_found',
       });
+      return;
     }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { run: row },
+    });
   }
 
-  private async handleSubmitCheckpoint(
+  private handleSubmitCheckpoint(
     msg: Extract<McpQueryMessage, { type: 'mcp-submit-checkpoint' }>,
     client: net.Socket,
-  ): Promise<void> {
-    try {
-      const now = new Date().toISOString();
-      const payload = JSON.stringify({
-        label: msg.label,
-        note: msg.note ?? null,
-        submitted_via: 'mcp',
-      });
+  ): void {
+    const now = new Date().toISOString();
+    const payload = JSON.stringify({
+      label: msg.label,
+      note: msg.note ?? null,
+      submitted_via: 'mcp',
+    });
 
-      const stmt = this.db.prepare(
-        `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
-         VALUES (?, 'cyboflow_checkpoint', ?, ?)`,
-      );
-      const result = stmt.run(msg.runId, payload, now);
+    const stmt = this.db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
+       VALUES (?, 'cyboflow_checkpoint', ?, ?)`,
+    );
+    const result = stmt.run(msg.runId, payload, now);
 
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { checkpoint_id: result.lastInsertRowid },
-      });
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      console.error(`[Cyboflow MCP Query] mcp-submit-checkpoint error:`, err);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error,
-      });
-    }
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { checkpoint_id: result.lastInsertRowid },
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -237,6 +207,6 @@ export class McpQueryHandler {
   // --------------------------------------------------------------------------
 
   private writeResponse(client: net.Socket, response: McpQueryResponse): void {
-    client.write(JSON.stringify(response));
+    client.write(JSON.stringify(response) + '\n');
   }
 }

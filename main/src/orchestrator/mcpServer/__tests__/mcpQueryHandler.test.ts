@@ -167,6 +167,9 @@ describe('McpQueryHandler', () => {
 
       await handler.handleMessage(msg, socket);
 
+      // Wire-protocol contract: newline-delimited framing
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
       const response = parseLastWrite(writes);
       expect(response.type).toBe('mcp-query-response');
       expect(response.requestId).toBe('req-1');
@@ -231,6 +234,9 @@ describe('McpQueryHandler', () => {
 
       await handler.handleMessage(msg, socket);
 
+      // Wire-protocol contract: newline-delimited framing
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
       const response = parseLastWrite(writes);
       expect(response.type).toBe('mcp-query-response');
       expect(response.requestId).toBe('req-4');
@@ -277,6 +283,9 @@ describe('McpQueryHandler', () => {
       };
 
       await handler.handleMessage(msg, socket);
+
+      // Wire-protocol contract: newline-delimited framing
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
@@ -374,6 +383,9 @@ describe('McpQueryHandler', () => {
 
       // Must not throw
       await expect(handler.handleMessage(msg, socket)).resolves.toBeUndefined();
+
+      // Wire-protocol contract: newline-delimited framing
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
 
       const response = parseLastWrite(writes);
       expect(response.type).toBe('mcp-query-response');
