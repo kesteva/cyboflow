@@ -1,47 +1,34 @@
 ---
 id: TASK-407
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "Dock badge service + reconnect-resync via DI on orchestrator context (preserves standalone invariant)"
+summary: "Dock badge + reconnect-resync via ctx.setDockBadge DI (preserves orchestrator standalone-typecheck invariant); will-quit clears badge (cumulative from SPRINT-010)"
 executor_loops: 0
-code_review_rounds: 1
+code_review_rounds: 0
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: skipped_unable
 ---
 
-# TASK-407 — Dock Badge + Reconnect-Resync
+# TASK-407 — Done (SPRINT-011)
 
-## Outcome
+## Context
+TASK-407 fully delivered in SPRINT-010 (8 commits). Verifier APPROVED all 6 ACs; code reviewer CLEAN with one out-of-diff finding queued for compounder.
 
-`dockBadgeService` singleton wraps macOS `app.dock.setBadge` with clamp + zero-clear semantics. `cyboflow.events.setBadgeCount` tRPC mutation lives in the orchestrator events router but delegates via `ctx.setDockBadge` (dependency injection from `main/src/index.ts`), preserving the orchestrator's standalone-typecheck invariant declared in `events.ts`'s own docstring. Reviewer-queue store fires `syncBadge` on every reducer (`replaceAll`/`addApproval`/`removeApproval`) and inside `init()` after the full-state resync, so reconnect drift is impossible. `before-quit` clears the badge on app shutdown.
-
-## Files
-
-- `main/src/services/dockBadgeService.ts` (NEW)
-- `main/src/services/__tests__/dockBadgeService.test.ts` (NEW — 3 unit tests)
-- `main/src/orchestrator/trpc/context.ts` (added ContextDeps.setDockBadge)
-- `main/src/orchestrator/trpc/routers/events.ts` (setBadgeCount mutation calls ctx.setDockBadge)
-- `main/src/orchestrator/trpc/__tests__/router.test.ts` + `ipcAdapter.test.ts` (context shape assertions)
-- `frontend/src/stores/reviewQueueStore.ts` (syncBadge wired into all reducers + init)
-- `main/src/index.ts` (DI wire + before-quit handler)
+## Files in Scope
+- `main/src/services/dockBadgeService.ts` (singleton, setBadgeCount with darwin guard + clamp + zero-clear)
+- `main/src/services/__tests__/dockBadgeService.test.ts` (3 unit tests)
+- `main/src/orchestrator/trpc/context.ts` (ContextDeps.setDockBadge capability)
+- `main/src/orchestrator/trpc/routers/events.ts` (setBadgeCount mutation delegates to ctx.setDockBadge)
+- `main/src/trpc/routers/events.ts` (re-export shim)
+- `main/src/index.ts` (capability injection + will-quit clear handler)
+- `frontend/src/stores/reviewQueueStore.ts` (syncBadge in addApproval/removeApproval/replaceAll + init)
 
 ## Verification
+- Tests: 3/3 dockBadgeService, 227/227 main, 99/99 frontend
+- Typecheck + lint: PASS
+- Standalone-typecheck invariant preserved (orchestrator subtree imports no electron)
+- Visual: mobile skipped (user pref); web skipped_unable per-task — deferred to sprint-level verifier
 
-- dockBadgeService: 3/3 pass
-- Router context tests: 2 new tests pass (default no-op + injected callback)
-- Frontend: 95/95 pass
-- 68 baseline test failures (NODE_MODULE_VERSION mismatch in better-sqlite3) are pre-existing at base SHA — not regressions
-- `pnpm typecheck`: clean
-- `pnpm lint`: 0 errors
-- Standalone invariant: restored (no `services/*` import in `orchestrator/trpc/routers/events.ts`)
-- Visual: skipped (parallel mode)
-
-## Commits
-
-- `e8919e8` feat(TASK-407): add dockBadgeService singleton with macOS dock badge management
-- `eaadfad` feat(TASK-407): add setBadgeCount mutation to cyboflow.events tRPC router
-- `5926de7` feat(TASK-407): wire dock badge sync into reviewQueueStore reducers
-- `69d1155` feat(TASK-407): clear dock badge on app quit via before-quit lifecycle handler
-- `ababbc7` test(TASK-407): unit tests for dockBadgeService clamp, zero-clear, and normal case
-- `ccc5c28` refactor(TASK-407): inject dockBadge via orchestrator deps to restore standalone invariant
+## Findings
+- FIND-SPRINT-011-7 (code-reviewer, new): no upper-bound on setBadgeCount input + no createCaller-level procedure test. Low severity; queued for compounder.
