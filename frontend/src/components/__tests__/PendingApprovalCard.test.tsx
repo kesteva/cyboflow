@@ -83,7 +83,7 @@ const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate } = vi.h
   mockApproveRestOfRunMutate: vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
-vi.mock('../../trpc/client', () => ({
+vi.mock('../../utils/trpcClient', () => ({
   trpc: {
     cyboflow: {
       approvals: {

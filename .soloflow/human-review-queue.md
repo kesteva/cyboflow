@@ -100,10 +100,14 @@ _No items._
   blocked_checks:
     - Level 2 visual_web verification of WorkflowPicker rendering 5 options
     - Level 2 visual_web verification of Start Run + CyboflowRoot mount
+    - Level 2 visual verification for web (review queue keyboard focus ring + scroll-into-view)
   level: visual
   severity: medium
   created_at: "2026-05-15T06:37:20.926Z"
-  updated_at: "2026-05-15T06:37:20.926Z"
+  updated_at: "2026-05-16T02:29:12.567Z"
+  affected_tasks:
+    - TASK-354
+    - TASK-404
 
 ## Deferred Visual
 
