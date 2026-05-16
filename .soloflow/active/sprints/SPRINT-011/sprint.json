@@ -1,7 +1,7 @@
 {
   "sprint": {
     "id": "SPRINT-011",
-    "status": "active",
+    "status": "complete",
     "started": "2026-05-15T07:30:00.000Z",
     "execution_mode": "serial"
   },
