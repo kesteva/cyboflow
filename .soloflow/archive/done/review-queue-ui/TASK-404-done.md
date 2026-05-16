@@ -1,46 +1,44 @@
 ---
 id: TASK-404
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "Keyboard navigation hook (j/k/y/n) + visible focus ring in ReviewQueueView"
-executor_loops: 0
+summary: "Keyboard nav (j/k/y/n) hook + visible focus ring + scroll-into-view; fix StrictMode double-mutation via useRef pattern and add afterEach(cleanup) to vitest setup"
+executor_loops: 1
 code_review_rounds: 1
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: skipped_unable
 ---
 
-# TASK-404 — Keyboard Navigation: j/k/y/n + Visible Focus
+# TASK-404 — Done (SPRINT-011)
 
-## Outcome
+## Context
 
-Implemented `useReviewQueueKeyboard` hook with window-level keydown listener supporting `j` (next), `k` (previous), `y` (approve), `n` (reject). ReviewQueueView consumes the hook; PendingApprovalCard receives `isFocused` prop and applies `ring-2 ring-interactive`. Auto-scroll fires on `[focusedIndex]` only. Modifier-key + input-element guards prevent collisions. Empty-queue case is a no-op.
+TASK-404 was largely shipped in SPRINT-010 (commits 9f34704, 1ffecc3, d208b10). SPRINT-011 closed two real-world correctness gaps surfaced by the code reviewer + verifier:
 
-## Files
+1. **Impure state updater under React.StrictMode (round-2, commit 380158e):** `y`/`n` handlers used `setFocusedIndex(currentIndex => { void trpc...mutate(...); return currentIndex; })` to read the latest focused index, but StrictMode invokes updater functions twice in dev — doubling mutation IPC traffic. Refactored to `focusedIndexRef` + `queueRef` so the keydown handler reads via refs and mutations fire outside state-updater scope. Added 3 StrictMode regression tests wrapping `renderHook` in `<React.StrictMode>` asserting single-fire behavior.
 
-- `frontend/src/hooks/useReviewQueueKeyboard.ts` (new)
-- `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts` (new — 16 unit tests, all green)
-- `frontend/src/components/ReviewQueueView.tsx` (hook consumption, scrollIntoView effect)
-- `frontend/src/components/PendingApprovalCard.tsx` (optional isFocused prop, ring style)
-- `frontend/src/components/__tests__/ReviewQueueView.test.tsx` (added hook mock)
-- `frontend/src/components/__tests__/PendingApprovalCard.test.tsx` (fixed pre-existing Approval-fixture typecheck)
+2. **Test-listener leak (round-3, commit b722b59):** `frontend/src/test/setup.ts` didn't register `afterEach(cleanup)`, so renderHook mounts accumulated window keydown listeners across tests, inflating mutation call counts in adjacent test suites. Added the canonical RTL cleanup. Resolved verifier finding FIND-SPRINT-011-4.
+
+## Files in Scope
+- `frontend/src/hooks/useReviewQueueKeyboard.ts` (ref-based handler, ergonomic empty deps for listener effect)
+- `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts` (21 tests including 3 StrictMode regressions)
+- `frontend/src/components/ReviewQueueView.tsx` (focusedIndex consumer + scrollIntoView)
+- `frontend/src/components/PendingApprovalCard.tsx` (isFocused ring)
+- `frontend/src/test/setup.ts` (afterEach(cleanup) — out of files_owned, but verifier-prescribed unblocker)
+
+## SPRINT-011 Commits
+- `380158e fix(TASK-404): eliminate impure state-updater side effects in y/n handlers`
+- `b722b59 fix(TASK-404): add afterEach(cleanup) to vitest setup — unblocks hook listener tests`
 
 ## Verification
-
-- Frontend tests: 5 files, 53 tests pass
-- Main tests: 22 files, 219 tests pass
-- `pnpm typecheck`: clean
-- `pnpm lint`: 0 errors
-- Visual: skipped (parallel mode)
-
-## Commits
-
-- `9f34704` feat(TASK-404): add useReviewQueueKeyboard hook with j/k/y/n navigation
-- `1ffecc3` test(TASK-404): add useReviewQueueKeyboard unit tests; fix ReviewQueueView test
-- `d208b10` fix(TASK-404): apply code-review feedback (focus ring class + scroll-effect deps)
+- Tests: 21/21 hook file, 99/99 frontend, typecheck + lint clean
+- Visual: mobile skipped (user pref); web skipped_unable per-task — deferred to sprint-level verifier (Step 3.5)
 
 ## Findings
-
-- FIND-SPRINT-010-10 (scope deviation: ReviewQueueView.test.tsx): resolved — file is in `files_owned`.
-- FIND-SPRINT-010-11 (pre-existing PendingApprovalCard fixture typecheck): resolved — fixture extended with required fields.
-- FIND-SPRINT-010-12 (functional-setState-as-read pattern in y/n branches): open, minor follow-up.
+- Resolved: FIND-SPRINT-011-4 (vitest-setup afterEach cleanup) — fixed in b722b59
+- Open (queued for compounder):
+  - FIND-SPRINT-011-1 (canonical/shim directionality vs CODE-PATTERNS.md doc)
+  - FIND-SPRINT-011-2 (orphan re-export shims at main/src/trpc/routers/{approvals,events}.ts)
+  - FIND-SPRINT-011-3 (group-y hook fans out per-item approve.mutate vs card's approveRestOfRun)
+  - FIND-SPRINT-011-5 (dev-server-not-running operational gap for per-task web visual verify)
