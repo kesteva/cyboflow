@@ -1,35 +1,31 @@
 ---
 id: TASK-403
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "PendingApprovalCard with full Approval context (workflow, tool, payload preview, rationale, age, Approve/Reject buttons wired to tRPC mutations); formatAge + truncatePayload utilities"
+summary: "PendingApprovalCard + approvalFormatters fully implemented (cumulative from SPRINT-010); CardChrome refactor + group variant from TASK-405/406 already in place"
 executor_loops: 0
 code_review_rounds: 0
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: skipped_unable
 ---
 
-# TASK-403 — Done
+# TASK-403 — Done (SPRINT-011)
 
-## What landed
+## Context
 
-- **`frontend/src/utils/approvalFormatters.ts`** — pure functions: `formatAge(createdAt)` (`<1m`, `Nm`, `Nh`, `Nd` buckets), `truncatePayload(payload, maxLen=200)` returning `{ text, truncated }`.
-- **`frontend/src/components/PendingApprovalCard.tsx`** — full card UI: workflow name + tool name + age header row; conditional rationale in muted italic; `<pre>`-wrapped truncated payload; Approve / Reject `<Button>`s wired to `trpc.cyboflow.approvals.{approve,reject}.mutate`; busy-state disables both during in-flight mutation; `data-approval-id` + `role="listitem"` for keyboard-nav targeting (TASK-404).
-- **`frontend/src/components/__tests__/PendingApprovalCard.test.tsx`** — 12 unit + integration tests (5 formatAge, 4 truncatePayload, 3 component-level). DOM-render tests scaffolded but deferred pending jsdom merge from sibling TASK-402.
+TASK-403 work landed in SPRINT-010 and was extended by sibling TASK-405 (CardChrome extraction, blocking-pin) and TASK-406 (group variant with approveRestOfRun). Verifier APPROVED all 6 ACs; code reviewer CLEAN with one queued out-of-diff finding (FIND-SPRINT-011-3, see below).
 
-## PARALLEL-STUB files (overwritten at merge by canonical owners)
-
-- `shared/types/approvals.ts` (owned by TASK-401)
-- `frontend/src/trpc/client.ts` (owned by TASK-401)
-
-Both carry `PARALLEL-STUB:` marker at line 1.
+## Files in Scope
+- `frontend/src/components/PendingApprovalCard.tsx` (single + group variants, CardChrome, role=listitem, data-approval-id, focus ring, busy state)
+- `frontend/src/utils/approvalFormatters.ts` (formatAge + truncatePayload pure helpers)
+- `frontend/src/components/__tests__/PendingApprovalCard.test.tsx` (30 tests)
 
 ## Verification
+- Tests: 96/96 frontend, 30/30 PendingApprovalCard.test.tsx
+- Typecheck: PASS
+- Lint: PASS
+- Visual: mobile skipped (user pref); web skipped_unable per-task (sprint-level verifier handles)
 
-- pnpm test:unit:frontend: PASS 16/16 (12 TASK-403 + 4 pre-existing)
-- pnpm typecheck: clean
-
-## Visual
-
-Skipped per parallel-mode protocol.
+## Findings Queued
+- FIND-SPRINT-011-3 (code-reviewer, out-of-diff): `useReviewQueueKeyboard.ts:74-80` still uses per-item `approve.mutate` for groups while the mouse path now uses `approveRestOfRun`. Originally framed as a TASK-406 follow-up but TASK-406 only updated the card. Compounder candidate.
