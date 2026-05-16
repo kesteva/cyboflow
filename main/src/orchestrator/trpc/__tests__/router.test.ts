@@ -134,6 +134,22 @@ describe('appRouter (createCaller)', () => {
     ).rejects.toSatisfy(isNotImplemented);
   });
 
+  it('cyboflow.events.setBadgeCount forwards count to ctx.setDockBadge', async () => {
+    const captured: number[] = [];
+    const localCaller = appRouter.createCaller(
+      createContext({ setDockBadge: (n) => captured.push(n) }),
+    );
+    const result = await localCaller.cyboflow.events.setBadgeCount({ count: 7 });
+    expect(result).toEqual({ ok: true });
+    expect(captured).toEqual([7]);
+  });
+
+  it('cyboflow.events.setBadgeCount rejects counts above the upper bound', async () => {
+    await expect(
+      caller.cyboflow.events.setBadgeCount({ count: 10000 }),
+    ).rejects.toThrow();
+  });
+
   it('protectedProcedure accepts a context with userId defined (no UNAUTHORIZED)', async () => {
     // All procedures use protectedProcedure; if any threw UNAUTHORIZED we
     // would have seen it in the tests above. This test makes the intent
