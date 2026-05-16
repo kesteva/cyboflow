@@ -1,39 +1,32 @@
 ---
 id: TASK-405
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "Oldest-first sort + blocking-pin (>3min) + repeated-approval grouping; Blocking/Pending sections; CardChrome subcomponent"
+summary: "Oldest-first sort + blocking-pin (>3min) + grouping selectors; Blocking/Pending sections; CardChrome refactor (cumulative from SPRINT-010)"
 executor_loops: 0
-code_review_rounds: 1
+code_review_rounds: 0
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: skipped_unable
 ---
 
-# TASK-405 — Selectors + Sections + Group Variant
+# TASK-405 — Done (SPRINT-011)
 
-## Outcome
+## Context
+TASK-405 work fully landed in SPRINT-010 (commits 99a3c87, a7e38cf, eb4095f). Verifier APPROVED all 7 ACs; code reviewer CLEAN with one defense-in-depth out-of-diff note queued for compounder.
 
-Three pure selectors composed in `frontend/src/utils/reviewQueueSelectors.ts`: `sortQueueOldestFirst`, `partitionBlockingItems` (3-min threshold), `groupRepeatedApprovals` (same-run + same toolName + payloadSignature), and `selectQueueView` composing all three. `useReviewQueueView` hook re-evaluates every 30s. `ReviewQueueView` renders `Blocking` (conditional) + `Pending` sections. `PendingApprovalCard` learned a `group` variant with `{toolName} (×N in this run)` header, blocking badge, and batched Promise.all approve/reject — chrome extracted into a single `CardChrome` subcomponent. `useReviewQueueKeyboard` refactored to `QueueItem[]` (plan step 5).
-
-## Files
-
-- `frontend/src/utils/reviewQueueSelectors.ts` (new)
-- `frontend/src/utils/__tests__/reviewQueueSelectors.test.ts` (new — 22 tests)
-- `frontend/src/stores/reviewQueueStore.ts` (added useReviewQueueView)
-- `frontend/src/components/PendingApprovalCard.tsx` (single + group variants; CardChrome subcomponent)
-- `frontend/src/components/ReviewQueueView.tsx` (Blocking/Pending sections, useReviewQueueView)
-- `frontend/src/hooks/useReviewQueueKeyboard.ts` (refactored to QueueItem[])
-- Test files updated to match: 95 tests across 6 files.
+## Files in Scope
+- `frontend/src/utils/reviewQueueSelectors.ts` (sortQueueOldestFirst, partitionBlockingItems, groupRepeatedApprovals, selectQueueView, payloadSignature, QueueItem type)
+- `frontend/src/utils/__tests__/reviewQueueSelectors.test.ts` (22 tests)
+- `frontend/src/stores/reviewQueueStore.ts` (useReviewQueueView 30s timer hook)
+- `frontend/src/components/PendingApprovalCard.tsx` (CardChrome subcomponent, single + group variants, blocking badge, approveRestOfRun for group approve)
+- `frontend/src/components/ReviewQueueView.tsx` (Blocking + Pending section headers)
 
 ## Verification
+- Tests: 22/22 selector tests, 30/30 PendingApprovalCard tests, 99/99 full frontend
+- Typecheck: PASS
+- Lint: PASS
+- Visual: mobile skipped (user pref); web skipped_unable per-task — deferred to sprint-level verifier (Step 3.5)
 
-- 95 frontend tests pass (vitest + jsdom)
-- `pnpm typecheck`: clean
-- `pnpm lint`: 0 errors
-- Visual: skipped (parallel mode)
-
-## Commits
-
-- `99a3c87` feat(TASK-405): oldest-first sort, blocking-pin, repeated-approval grouping
-- `a7e38cf` refactor(TASK-405): extract CardChrome subcomponent to remove single/group duplication
+## Findings Queued
+- FIND-SPRINT-011-6 (code-reviewer, new): `ReviewQueueView.tsx:26` interpolates `approval.id` into a CSS attribute selector without `CSS.escape()`. Defense-in-depth; today safe because ids are server-issued UUIDs. Compounder candidate.
