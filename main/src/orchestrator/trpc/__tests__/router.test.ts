@@ -8,7 +8,9 @@
  *   1. createContext() returns { userId: 'local' }.
  *   2. protectedProcedure accepts a context with userId defined (no UNAUTHORIZED).
  *   3. appRouter.cyboflow.runs.list throws NOT_IMPLEMENTED.
- *   4. appRouter.cyboflow.approvals.listPending throws NOT_IMPLEMENTED.
+ *   4. appRouter.cyboflow.approvals.listPending returns [] (working stub — DB not yet wired).
+ *   4b. appRouter.cyboflow.approvals.approve returns { success: true } (working stub).
+ *   4c. appRouter.cyboflow.approvals.reject returns { success: true } (working stub).
  *   5. appRouter.cyboflow.workflows.list throws NOT_IMPLEMENTED.
  *   6. appRouter.cyboflow.workflows.get throws NOT_IMPLEMENTED.
  *   7. cyboflow.events.onStreamEvent is a placeholder: yields zero events before
@@ -58,9 +60,22 @@ async function callSubscription(
 // ---------------------------------------------------------------------------
 
 describe('createContext', () => {
-  it("returns { userId: 'local' }", () => {
+  it("returns an object with userId: 'local'", () => {
     const ctx = createContext();
-    expect(ctx).toEqual({ userId: 'local' });
+    expect(ctx.userId).toBe('local');
+  });
+
+  it('includes a setDockBadge no-op when no deps are provided', () => {
+    const ctx = createContext();
+    // The default setDockBadge should be a callable no-op (does not throw).
+    expect(() => ctx.setDockBadge(0)).not.toThrow();
+  });
+
+  it('uses the injected setDockBadge when provided', () => {
+    const calls: number[] = [];
+    const ctx = createContext({ setDockBadge: (count) => calls.push(count) });
+    ctx.setDockBadge(3);
+    expect(calls).toEqual([3]);
   });
 });
 
@@ -89,20 +104,24 @@ describe('appRouter (createCaller)', () => {
     );
   });
 
-  it('cyboflow.approvals.listPending throws NOT_IMPLEMENTED', async () => {
-    await expect(caller.cyboflow.approvals.listPending()).rejects.toSatisfy(isNotImplemented);
+  // cyboflow.approvals procedures are working stubs (not throwNotImplemented)
+  // — they return empty/success values so the review-queue UI has a live read
+  // path even before the full approval-router epic lands.
+
+  it('cyboflow.approvals.listPending returns an empty array (stub — DB not yet wired)', async () => {
+    const result = await caller.cyboflow.approvals.listPending();
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(0);
   });
 
-  it('cyboflow.approvals.approve throws NOT_IMPLEMENTED', async () => {
-    await expect(
-      caller.cyboflow.approvals.approve({ approvalId: 'a-1' }),
-    ).rejects.toSatisfy(isNotImplemented);
+  it('cyboflow.approvals.approve resolves { success: true } (stub)', async () => {
+    const result = await caller.cyboflow.approvals.approve({ approvalId: 'a-1' });
+    expect(result).toEqual({ success: true });
   });
 
-  it('cyboflow.approvals.reject throws NOT_IMPLEMENTED', async () => {
-    await expect(
-      caller.cyboflow.approvals.reject({ approvalId: 'a-1' }),
-    ).rejects.toSatisfy(isNotImplemented);
+  it('cyboflow.approvals.reject resolves { success: true } (stub)', async () => {
+    const result = await caller.cyboflow.approvals.reject({ approvalId: 'a-1' });
+    expect(result).toEqual({ success: true });
   });
 
   it('cyboflow.workflows.list throws NOT_IMPLEMENTED', async () => {

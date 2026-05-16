@@ -23,6 +23,8 @@ import { API } from './utils/api';
 import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import ReviewQueueView from './components/ReviewQueueView';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -351,6 +353,16 @@ function App() {
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
         </div>
+        <ErrorBoundary fallback={(error) => (
+          <div className="w-[360px] h-full flex items-center justify-center p-4 border-r border-border-primary bg-bg-secondary">
+            <div className="text-center">
+              <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
+              <p className="text-xs text-text-muted">{error.message}</p>
+            </div>
+          </div>
+        )}>
+          <ReviewQueueView />
+        </ErrorBoundary>
         <Sidebar
           onHelpClick={() => setIsHelpOpen(true)}
           onAboutClick={() => setIsAboutOpen(true)}
