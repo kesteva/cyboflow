@@ -1,24 +1,10 @@
 /**
- * Renderer-side tRPC client — typed against AppRouter from shared/types/trpc.
+ * Backwards-compatibility re-export shim.
  *
- * Uses trpc-electron's ipcLink so all calls go through Electron's contextBridge
- * (the exposeElectronTRPC() call in preload.ts registers the channel). The
- * superjson transformer must match the server-side transformer in
- * main/src/orchestrator/trpc/trpc.ts.
+ * The canonical tRPC client is now at frontend/src/trpc/client.ts.
+ * This module re-exports `trpc` so existing imports at `utils/trpcClient`
+ * continue to work without modification.
  *
- * Import this singleton wherever tRPC procedures are needed in the renderer:
- *   import { trpc } from '@/utils/trpcClient';
- *   const result = await trpc.cyboflow.runs.list.query({});
+ * Do NOT add new exports here. Import from `@/trpc/client` in new code.
  */
-import { createTRPCProxyClient } from '@trpc/client';
-import { ipcLink } from 'trpc-electron/renderer';
-import superjson from 'superjson';
-import type { AppRouter } from '../../../shared/types/trpc';
-
-export const trpc = createTRPCProxyClient<AppRouter>({
-  links: [
-    ipcLink<AppRouter>({
-      transformer: superjson,
-    }),
-  ],
-});
+export { trpc } from '../trpc/client';
