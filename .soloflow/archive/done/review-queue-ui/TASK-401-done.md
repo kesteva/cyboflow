@@ -1,41 +1,36 @@
 ---
 id: TASK-401
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "tRPC v11 foundation: cyboflow.approvals + cyboflow.events routers wired into orchestrator appRouter; reviewQueueStore (Zustand) with full-state resync; shared Approval types; vitest config for frontend"
-executor_loops: 1
+summary: "Promote frontend/src/trpc/client.ts to canonical createTRPCProxyClient site; utils/trpcClient.ts becomes re-export shim; fixes 48/96 → 96/96 frontend tests"
+executor_loops: 0
 code_review_rounds: 0
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: not_applicable
 ---
 
-# TASK-401 — Done
+# TASK-401 — Done (SPRINT-011)
 
-## What landed
+## Context
 
-- **`shared/types/approvals.ts`** — `Approval`, `ApprovalCreatedEvent`, `ApprovalDecidedEvent` interfaces for the wire contract.
-- **`main/src/orchestrator/trpc/routers/approvals.ts`** — replaced `throwNotImplemented` stubs with working `listPending` (returns `[]` + warn when table absent), `approve`, `reject` (stub-success).
-- **`main/src/orchestrator/trpc/routers/events.ts`** — replaced placeholder iterators with `EventEmitter`-backed `onApprovalCreated`/`onApprovalDecided` subscriptions; exports `approvalEvents` emitter for the future ApprovalRouter epic.
-- **`main/src/trpc/{index.ts,context.ts}`** — re-export points for the canonical orchestrator tRPC tree.
-- **`frontend/src/trpc/client.ts`** — re-exports `trpc` singleton from `utils/trpcClient`.
-- **`frontend/src/stores/reviewQueueStore.ts`** — Zustand store: `queue: Approval[]`, `connectionStatus`, idempotent `addApproval`, no-op-safe `removeApproval`, atomic `replaceAll`, full-state resync `init()` (listPending → replaceAll → subscribe).
-- **`frontend/src/stores/__tests__/reviewQueueStore.test.ts`** — 13 unit tests covering the three pure reducers.
-- **`vitest.config.frontend.ts`** — claimed via claim-file.js (frontend workspace had no vitest config).
-- **`package.json`** — added `test:unit:frontend` script.
-- **DELETED:** `main/src/trpc/routers/{approvals,events,cyboflow}.ts` (orphaned tree removed in retry).
+Most of TASK-401's contract was satisfied in SPRINT-010 (orchestrator tRPC routers, shared types, reviewQueueStore, unit tests). On entering SPRINT-011 the plan was still active and 48/96 frontend tests were failing because `PendingApprovalCard.test.tsx` and `useReviewQueueKeyboard.test.ts` mock `'../../trpc/client'` (a path that did not yet exist as a real module). This sprint finishes the task by promoting that path to the canonical `createTRPCProxyClient<AppRouter>` site and demoting `utils/trpcClient.ts` to a backwards-compat re-export shim — singleton invariant preserved (one constructor site).
+
+## Changed Files
+- `frontend/src/trpc/client.ts` (now canonical `createTRPCProxyClient<AppRouter>`)
+- `frontend/src/utils/trpcClient.ts` (re-export shim only)
+- `main/src/trpc/routers/events.ts` (new re-export of `eventsRouter` / `approvalEvents`)
+- `main/src/trpc/routers/approvals.ts` (added re-export of `approvalsRouter`)
+
+## Commit
+`bf6f4f0 feat(TASK-401): wire tRPC foundation — frontend client, stable import surfaces, test fixes`
 
 ## Verification
+- Tests: 96/96 frontend (was 48/96 before this task), 227/227 main
+- Typecheck: PASS (frontend, shared, main)
+- Lint: PASS (304 pre-existing warnings, none introduced)
+- Visual: mobile skipped (user preference); web N/A (foundation task; downstream UI tests already cover behavior)
 
-- pnpm typecheck: PASS (frontend, shared, main)
-- pnpm test:unit:frontend: PASS 17/17
-
-## Open findings
-
-- FIND-SPRINT-010-3 (executor improvement: jsdom setup) — resolved by TASK-402 sibling work.
-- FIND-SPRINT-010-4 (StrictMode init re-entry — subscription leak under dev double-mount) — deferred follow-up.
-- FIND-SPRINT-010-5..9 (5 minor code-review cleanups: vitest config docstring, tautological assertion, redundant cast, custom `eventToAsyncIterable` reinvents `events.on`, version range vs pin) — deferred follow-up.
-
-## Visual
-
-Skipped per parallel-mode protocol (`VISUAL_VERIFY: skip`). Sprint-level verification will run in Step 3.5.
+## Findings
+- FIND-SPRINT-011-1 (verifier): canonical/shim directionality contradicts a now-stale snippet in `docs/CODE-PATTERNS.md:60-66`; non-blocking — compounder should reconcile docs.
+- FIND-SPRINT-011-2 (code-reviewer): `main/src/trpc/routers/{approvals,events}.ts` re-export shims have zero production importers — reconciliation requires a planner/orchestrator decision (delete shims and update AC grep target, or move canonical routers back here).
