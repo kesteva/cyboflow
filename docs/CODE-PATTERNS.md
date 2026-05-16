@@ -154,4 +154,22 @@ every build. Decision is driven by env vars (`CSC_LINK`, `APPLE_ID`, `APPLE_TEAM
 - **Canonical example:** `scripts/configure-build.js`, `scripts/configure-build.test.js`
 - **Env-var contract:** see `docs/signing/APPLE_DEVELOPER_SETUP.md`.
 
+## Frontend Test Conventions
+
+### `afterEach(cleanup)` is mandatory in vitest setup
+
+`frontend/src/test/setup.ts` explicitly registers `afterEach(() => cleanup())`. The
+vitest `globals: true` + `@testing-library/react@^16` combo does NOT auto-register
+cleanup — without it, `renderHook` calls that attach `window`/`document` listeners
+accumulate across tests (test N fires N handlers per key press). Do NOT remove that
+line. Hooks with global listeners should include a multi-render regression test —
+see `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts`.
+
+### Mock tRPC at the SUT's own import path
+
+`vi.mock(...)` must use the exact specifier the SUT imports (e.g. `'../../utils/trpcClient'`),
+not the canonical client file it re-exports from. Mocking the re-export target works only
+by accident of ESM hoisting and breaks silently if the shim direction is ever flipped.
+Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:22`.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
