@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-011
-pending_count: 5
-last_updated: "2026-05-15T07:35:00.000Z"
+pending_count: 6
+last_updated: "2026-05-15T18:35:00.000Z"
 ---
 # Findings Queue
 
@@ -69,4 +69,14 @@ SPRINT-011 started with missing infra: docker; tests deferred.
 - **location:** frontend/src/components/ReviewQueueView.tsx:26
 - **description:** ReviewQueueView interpolates `approval.id` directly into a CSS attribute selector: `document.querySelector(\`[data-approval-id="${itemId(focused)}"]\`)`. The `approvals.id` column schema is `TEXT PRIMARY KEY` (main/src/database/migrations/006_cyboflow_schema.sql:55) — there is no DB-level UUID format constraint. Today the orchestrator generates UUIDs so the practical risk is zero, but if a future code path ever produces an id containing `"`, `]`, or backslash, the selector silently breaks (returns null and the scroll-to-focused effect no-ops) or throws a SyntaxError. Not a security issue — `id` is server-issued, never user-supplied — but a small defense-in-depth gap that could surface as a confusing "keyboard focus works but no auto-scroll" bug if the id-generation strategy ever changes.
 - **suggested_action:** Replace the template-literal selector with `CSS.escape()`: `` document.querySelector(`[data-approval-id="${CSS.escape(itemId(focused))}"]`) ``. One-line change, no behavior delta for current UUID ids, and removes the implicit "id must be CSS-selector-safe" coupling between the DB layer and the renderer. Alternatively, attach a ref to each card and look up by Map<id, HTMLElement> — cleaner long-term but a bigger change.
+- **resolved_by:**
+
+## FIND-SPRINT-011-7
+- **source:** TASK-407 (code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/events.ts:133
+- **description:** The `setBadgeCount` tRPC mutation validates its input as `z.object({ count: z.number().int().min(0) })` — no upper bound. A renderer (today the only caller is `frontend/src/stores/reviewQueueStore.ts:112` which sends `queue.length`) could in principle send `Number.MAX_SAFE_INTEGER`. macOS' `app.dock.setBadge` accepts arbitrary strings and the dock renders long values harmlessly (visually truncated), so practical risk is zero. Defense-in-depth: an explicit cap (e.g. `.max(9999)`) would document the expected range and reject obviously-bogus values at the boundary. Adjacent quality nit: the procedure has no `createCaller`-based unit test asserting that the mutation forwards `input.count` into `ctx.setDockBadge` — the wire-through is covered transitively by the createContext shape tests in `router.test.ts:62-79` plus the dockBadgeService unit tests, but a one-line direct test would close the layered-test gap.
+- **suggested_action:** Either (a) tighten the schema to `z.number().int().min(0).max(9999)` and add a single test in `main/src/orchestrator/trpc/__tests__/router.test.ts` invoking `caller.cyboflow.events.setBadgeCount({ count: 7 })` with a context whose `setDockBadge` captures the call; or (b) leave the schema open but add the wire-through test only. Option (a) is preferred — it documents the contract and exercises the full call path in one change.
 - **resolved_by:**
