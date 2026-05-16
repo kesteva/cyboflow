@@ -6,11 +6,18 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-451": { "status": "pending" },
-    "TASK-452": { "status": "pending" },
-    "TASK-453": { "status": "pending" },
-    "TASK-454": { "status": "pending" },
-    "TASK-455": { "status": "pending" }
+    "TASK-452": {
+      "status": "pending"
+    },
+    "TASK-453": {
+      "status": "pending"
+    },
+    "TASK-454": {
+      "status": "pending"
+    },
+    "TASK-455": {
+      "status": "pending"
+    }
   },
   "run": {
     "branch": "soloflow/run-20260516-093654-SPRINT-012",
