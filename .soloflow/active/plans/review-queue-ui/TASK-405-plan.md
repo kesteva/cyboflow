@@ -1,8 +1,8 @@
 ---
 id: TASK-405
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/utils/reviewQueueSelectors.ts
   - frontend/src/utils/__tests__/reviewQueueSelectors.test.ts
@@ -29,30 +29,33 @@ acceptance_criteria:
     verification: "grep -n 'blocked' frontend/src/components/PendingApprovalCard.tsx returns the badge string; verified to render on items with isBlocking prop true"
   - criterion: "ReviewQueueView consumes selectQueueView and renders the pinned section above the normal section, each with a section header ('Blocking' / 'Pending')"
     verification: "grep -n 'Blocking\\|Pending' frontend/src/components/ReviewQueueView.tsx returns both section headers"
-depends_on: [TASK-401, TASK-402, TASK-403, TASK-404]
+depends_on:
+  - TASK-401
+  - TASK-402
+  - TASK-403
+  - TASK-404
 estimated_complexity: high
 epic: review-queue-ui
 test_strategy:
   needed: true
   justification: "Three pure selectors with non-trivial sort/partition/group logic — each branch needs verification, and these power the visual ordering of the entire queue"
   targets:
-    - behavior: "sortQueueOldestFirst sorts ascending by createdAt"
-      test_file: "frontend/src/utils/__tests__/reviewQueueSelectors.test.ts"
+    - behavior: sortQueueOldestFirst sorts ascending by createdAt
+      test_file: frontend/src/utils/__tests__/reviewQueueSelectors.test.ts
       type: unit
     - behavior: "partitionBlockingItems splits at >3min age threshold"
-      test_file: "frontend/src/utils/__tests__/reviewQueueSelectors.test.ts"
+      test_file: frontend/src/utils/__tests__/reviewQueueSelectors.test.ts
       type: unit
-    - behavior: "groupRepeatedApprovals collapses same-run + same-signature into groups with count"
-      test_file: "frontend/src/utils/__tests__/reviewQueueSelectors.test.ts"
+    - behavior: groupRepeatedApprovals collapses same-run + same-signature into groups with count
+      test_file: frontend/src/utils/__tests__/reviewQueueSelectors.test.ts
       type: unit
-    - behavior: "selectQueueView composes sort + partition + group correctly"
-      test_file: "frontend/src/utils/__tests__/reviewQueueSelectors.test.ts"
+    - behavior: selectQueueView composes sort + partition + group correctly
+      test_file: frontend/src/utils/__tests__/reviewQueueSelectors.test.ts
       type: unit
-    - behavior: "PendingApprovalCard renders group variant with count and group-level actions"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: PendingApprovalCard renders group variant with count and group-level actions
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: component
 ---
-
 # Oldest-First Sort + Blocking-Pin (>3min) + Collapse Repeated Approvals
 
 ## Objective

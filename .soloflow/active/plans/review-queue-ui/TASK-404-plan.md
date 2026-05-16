@@ -1,8 +1,8 @@
 ---
 id: TASK-404
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useReviewQueueKeyboard.ts
   - frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
@@ -18,37 +18,39 @@ acceptance_criteria:
     verification: "grep -n 'keydown\\|addEventListener' frontend/src/hooks/useReviewQueueKeyboard.ts returns matches; grep -n \"'j'\\|'k'\\|'y'\\|'n'\" frontend/src/hooks/useReviewQueueKeyboard.ts returns all four key handlers"
   - criterion: "j moves focus to next approval, k moves to previous; wraps at ends (j on last item = no-op or first; k on first = no-op or last — choose no-op for v1)"
     verification: "Unit test verifies focusedIndex transitions: from 0 with j → 1; from 0 with k → 0 (no-op); from N-1 with j → N-1 (no-op)"
-  - criterion: "y triggers approve mutation for currently focused approval; n triggers reject mutation"
+  - criterion: y triggers approve mutation for currently focused approval; n triggers reject mutation
     verification: "Unit test asserts trpc.cyboflow.approvals.approve.mutate called with focused approval id on 'y'; .reject.mutate on 'n'"
-  - criterion: "ReviewQueueView consumes the hook and uses focusedIndex to apply a visible focus ring to the matching PendingApprovalCard"
+  - criterion: ReviewQueueView consumes the hook and uses focusedIndex to apply a visible focus ring to the matching PendingApprovalCard
     verification: "grep -n 'focusedIndex\\|useReviewQueueKeyboard' frontend/src/components/ReviewQueueView.tsx returns matches; the rendered card at focusedIndex receives a className with 'ring-2' or equivalent visible-focus utility"
   - criterion: "Keyboard handlers ignore events when focus is inside an input/textarea/contenteditable (e.g., a search field elsewhere in the app)"
     verification: "grep -n 'INPUT\\|TEXTAREA\\|contentEditable\\|isContentEditable' frontend/src/hooks/useReviewQueueKeyboard.ts returns a guard check"
   - criterion: "When the queue is empty, j/k/y/n are no-ops (do not throw)"
     verification: "Unit test: focusedIndex on empty queue with j → no error, no state change"
-  - criterion: "Focus indicator scrolls into view if the focused card is outside the visible scroll area"
+  - criterion: Focus indicator scrolls into view if the focused card is outside the visible scroll area
     verification: "grep -n 'scrollIntoView' frontend/src/components/ReviewQueueView.tsx returns a match inside the focus-change effect"
-depends_on: [TASK-401, TASK-402, TASK-403]
+depends_on:
+  - TASK-401
+  - TASK-402
+  - TASK-403
 estimated_complexity: medium
 epic: review-queue-ui
 test_strategy:
   needed: true
   justification: "Keyboard handling has multiple branches (each key, input-element guard, empty-queue edge case) and integrates with the store — explicit hook tests are the cheapest regression guard"
   targets:
-    - behavior: "j/k navigate focusedIndex with end-clamping"
-      test_file: "frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts"
+    - behavior: j/k navigate focusedIndex with end-clamping
+      test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "y and n invoke approve/reject mutations on the focused approval"
-      test_file: "frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts"
+    - behavior: y and n invoke approve/reject mutations on the focused approval
+      test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "Keys are ignored while focus is in an input field"
-      test_file: "frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts"
+    - behavior: Keys are ignored while focus is in an input field
+      test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
     - behavior: "Empty queue: keys are no-ops"
-      test_file: "frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts"
+      test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
 ---
-
 # Keyboard Navigation: j/k/y/n + Visible Focus
 
 ## Objective
