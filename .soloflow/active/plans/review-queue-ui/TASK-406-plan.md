@@ -1,8 +1,8 @@
 ---
 id: TASK-406
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/trpc/routers/approvals.ts
   - frontend/src/components/PendingApprovalCard.tsx
@@ -18,35 +18,36 @@ files_readonly:
 acceptance_criteria:
   - criterion: "`cyboflow.approvals.approveRestOfRun` tRPC mutation exists with input { runId: string } and decides all pending approvals for that run as approved"
     verification: "grep -n 'approveRestOfRun' main/src/trpc/routers/approvals.ts returns the mutation; grep -n 'approveRestOfRun' shared/types/approvals.ts confirms type exported"
-  - criterion: "No `approveAll` (or globally-scoped approve-all) mutation exists anywhere in the codebase"
+  - criterion: No `approveAll` (or globally-scoped approve-all) mutation exists anywhere in the codebase
     verification: "grep -rn 'approveAll\\|approve_all\\|approveGlobal' main/src/trpc/ frontend/src/ shared/types/ returns 0 matches"
   - criterion: "Group variant of PendingApprovalCard's Approve button calls approveRestOfRun({ runId }) when the group represents all remaining items for that run + signature, rather than batching per-item mutations"
     verification: "grep -n 'approveRestOfRun' frontend/src/components/PendingApprovalCard.tsx returns a match in the group-approve handler"
   - criterion: "approveRestOfRun is scoped: it decides approvals for the given runId only, never affects other runs"
     verification: "Unit test on the tRPC handler: seed 3 pending approvals across 2 runs, call approveRestOfRun({ runId: 'run-A' }), assert only run-A's approvals are decided; run-B's remain pending"
-  - criterion: "A code comment in approvals.ts explicitly documents the deliberate omission of a global approve-all and links to the safety rationale"
+  - criterion: A code comment in approvals.ts explicitly documents the deliberate omission of a global approve-all and links to the safety rationale
     verification: "grep -n 'NO global approve-all\\|deliberate omission\\|bulk-delete' main/src/trpc/routers/approvals.ts returns at least one match in a comment near the approveRestOfRun definition"
-depends_on: [TASK-401, TASK-405]
+depends_on:
+  - TASK-401
+  - TASK-405
 estimated_complexity: medium
 epic: review-queue-ui
 test_strategy:
   needed: true
   justification: "approveRestOfRun has scope-correctness invariants (only the targeted run is affected) that are exactly the kind of thing that breaks silently — the highest-harm failure mode if wrong is approving the wrong run's pending items"
   targets:
-    - behavior: "approveRestOfRun decides all pending approvals for the given runId"
-      test_file: "main/src/trpc/__tests__/approvals.test.ts"
+    - behavior: approveRestOfRun decides all pending approvals for the given runId
+      test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
-    - behavior: "approveRestOfRun does NOT affect approvals from other runs"
-      test_file: "main/src/trpc/__tests__/approvals.test.ts"
+    - behavior: approveRestOfRun does NOT affect approvals from other runs
+      test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
     - behavior: "Group variant card invokes approveRestOfRun on the group's runId when Approve is clicked"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: component
-    - behavior: "Codebase contains no global approve-all symbol (sweep test)"
-      test_file: "main/src/trpc/__tests__/approvals.test.ts"
+    - behavior: Codebase contains no global approve-all symbol (sweep test)
+      test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
 ---
-
 # Per-Run "Approve Rest" + Explicit No-Global-Approve-All Guard
 
 ## Objective

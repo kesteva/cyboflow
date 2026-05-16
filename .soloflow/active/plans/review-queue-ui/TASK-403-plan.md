@@ -1,8 +1,8 @@
 ---
 id: TASK-403
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/PendingApprovalCard.tsx
   - frontend/src/components/__tests__/PendingApprovalCard.test.tsx
@@ -16,7 +16,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "`<PendingApprovalCard />` accepts an Approval prop and renders workflow name, tool name, payload preview, rationale (if present), and age"
     verification: "grep -n 'workflowName\\|toolName\\|payloadPreview\\|rationale\\|createdAt' frontend/src/components/PendingApprovalCard.tsx returns matches for all five fields rendered as visible text"
-  - criterion: "Card renders Approve and Reject buttons that invoke trpc.cyboflow.approvals.approve and .reject mutations with the approval id"
+  - criterion: Card renders Approve and Reject buttons that invoke trpc.cyboflow.approvals.approve and .reject mutations with the approval id
     verification: "grep -n 'cyboflow.approvals.approve\\|cyboflow.approvals.reject' frontend/src/components/PendingApprovalCard.tsx returns both calls; Button onClick handlers wired"
   - criterion: "Age is computed from createdAt and rendered as a human-readable relative time (e.g. '2m', '14m', '1h')"
     verification: "grep -n 'formatAge\\|relativeTime' frontend/src/utils/approvalFormatters.ts returns the formatter; PendingApprovalCard imports it"
@@ -26,27 +26,28 @@ acceptance_criteria:
     verification: "grep -n 'rationale' frontend/src/components/PendingApprovalCard.tsx shows it rendered with a distinct className (e.g. 'text-text-muted')"
   - criterion: "Card has data-approval-id={approval.id} and role='listitem' for keyboard-nav targeting in TASK-404"
     verification: "grep -n 'data-approval-id\\|role=\"listitem\"' frontend/src/components/PendingApprovalCard.tsx returns matches"
-depends_on: [TASK-401, TASK-402]
+depends_on:
+  - TASK-401
+  - TASK-402
 estimated_complexity: medium
 epic: review-queue-ui
 test_strategy:
   needed: true
   justification: "Card has formatting logic (age, truncation), conditional rendering (rationale present/absent), and async button handlers — each needs verification"
   targets:
-    - behavior: "Renders all five context fields when fully populated"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Renders all five context fields when fully populated
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: component
-    - behavior: "Approve button click invokes approve mutation with correct id"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Approve button click invokes approve mutation with correct id
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: component
     - behavior: "Age formatter produces '2m' for 120s delta, '1h' for 3600s, '<1m' for <60s"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: unit
-    - behavior: "Payload preview truncation at ~200 chars"
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Payload preview truncation at ~200 chars
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: unit
 ---
-
 # PendingApprovalCard with Full Approval Context
 
 ## Objective

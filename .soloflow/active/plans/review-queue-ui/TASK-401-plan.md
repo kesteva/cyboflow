@@ -1,8 +1,8 @@
 ---
 id: TASK-401
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/trpc/index.ts
   - main/src/trpc/context.ts
@@ -24,7 +24,7 @@ files_readonly:
   - .soloflow/active/research/ROADMAP-001-research-risks.md
   - .soloflow/active/research/ROADMAP-001-research-architecture.md
 acceptance_criteria:
-  - criterion: "tRPC server is mounted in main process with `cyboflow.approvals` and `cyboflow.events` routers exposed via electron-trpc IPC handler"
+  - criterion: tRPC server is mounted in main process with `cyboflow.approvals` and `cyboflow.events` routers exposed via electron-trpc IPC handler
     verification: "grep -n 'createIPCHandler\\|appRouter' main/src/index.ts returns at least one match referencing the new tRPC handler registration; `pnpm typecheck` passes"
   - criterion: "`cyboflow.approvals.listPending` query returns array of pending Approval rows (typed via shared/types/approvals.ts) and `cyboflow.events.onApprovalCreated` is a subscription"
     verification: "grep -n 'listPending\\|onApprovalCreated' main/src/trpc/routers/approvals.ts main/src/trpc/routers/events.ts returns matches in both files; types resolve at typecheck"
@@ -43,17 +43,16 @@ test_strategy:
   needed: true
   justification: "Store has explicit reducers (addApproval, removeApproval, replaceAll) and resync logic — verify pure-function correctness without a live tRPC connection"
   targets:
-    - behavior: "replaceAll wipes existing queue and inserts new approvals atomically"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: replaceAll wipes existing queue and inserts new approvals atomically
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "addApproval is idempotent on duplicate id (subscription replay safety)"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: addApproval is idempotent on duplicate id (subscription replay safety)
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "removeApproval no-ops when id missing"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: removeApproval no-ops when id missing
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
 ---
-
 # tRPC Foundation: cyboflow.approvals Router + reviewQueueStore + Full-State Resync
 
 ## Objective

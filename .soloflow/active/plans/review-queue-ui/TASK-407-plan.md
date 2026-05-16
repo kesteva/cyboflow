@@ -1,8 +1,8 @@
 ---
 id: TASK-407
 idea: IDEA-009
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/services/dockBadgeService.ts
   - main/src/services/__tests__/dockBadgeService.test.ts
@@ -21,30 +21,31 @@ acceptance_criteria:
     verification: "grep -n 'setBadgeCount\\|dockBadgeService' frontend/src/stores/reviewQueueStore.ts OR a tRPC subscription path returns matches; integration: with 0 pending → no badge; with 3 → badge shows '3'"
   - criterion: "On tRPC reconnect (subscription resync), the badge re-derives from the fresh queue length — does not retain stale value from the disconnected period"
     verification: "grep -n 'replaceAll' frontend/src/stores/reviewQueueStore.ts shows that the same code path that resyncs the queue also updates the badge; manual test: disconnect tRPC, mutate queue state, reconnect → badge matches new length"
-  - criterion: "Badge is updated through a renderer→main tRPC mutation OR via the store subscribing to its own queue length and pushing via IPC — pick one path and use it consistently"
+  - criterion: Badge is updated through a renderer→main tRPC mutation OR via the store subscribing to its own queue length and pushing via IPC — pick one path and use it consistently
     verification: "Either `cyboflow.dock.setBadge` mutation exists in main/src/trpc/routers/events.ts (or a new dock router) AND is called from the store, OR the store calls a window.electron.invoke('dock:setBadge', n) IPC. Exactly one path; grep confirms only one binding."
   - criterion: "Badge value 0 clears the badge (does not show '0')"
     verification: "Unit test: dockBadgeService.setBadgeCount(0) calls app.dock.setBadge('') or equivalent clear-badge API"
   - criterion: "On app quit, badge is cleared"
     verification: "grep -n 'before-quit\\|will-quit' main/src/index.ts shows a handler that calls dockBadgeService.setBadgeCount(0)"
-depends_on: [TASK-401, TASK-402]
+depends_on:
+  - TASK-401
+  - TASK-402
 estimated_complexity: medium
 epic: review-queue-ui
 test_strategy:
   needed: true
-  justification: "Badge desync is one of the failure modes named in risks research §10 — verify the renderer→main wiring works AND that 0 clears (Electron API quirk)"
+  justification: Badge desync is one of the failure modes named in risks research §10 — verify the renderer→main wiring works AND that 0 clears (Electron API quirk)
   targets:
     - behavior: "setBadgeCount(3) calls app.dock.setBadge('3')"
-      test_file: "main/src/services/__tests__/dockBadgeService.test.ts"
+      test_file: main/src/services/__tests__/dockBadgeService.test.ts
       type: unit
     - behavior: "setBadgeCount(0) calls app.dock.setBadge('') (clears, doesn't display zero)"
-      test_file: "main/src/services/__tests__/dockBadgeService.test.ts"
+      test_file: main/src/services/__tests__/dockBadgeService.test.ts
       type: unit
-    - behavior: "Negative counts are clamped to 0"
-      test_file: "main/src/services/__tests__/dockBadgeService.test.ts"
+    - behavior: Negative counts are clamped to 0
+      test_file: main/src/services/__tests__/dockBadgeService.test.ts
       type: unit
 ---
-
 # Dock Badge + Reconnect-Resync
 
 ## Objective
