@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { trpc } from '../utils/trpcClient';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
 
@@ -21,12 +21,31 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  *
  * For group items, y/n issue one mutation per member via Promise.all (batched).
  * TASK-406 will replace this with a single atomic per-run mutation.
+ *
+ * Implementation note: focusedIndex and queue are tracked via refs so the
+ * keydown handler always reads the latest values without being recreated on
+ * every render and without needing to fire side-effects inside a state updater
+ * function (which React.StrictMode would invoke twice in dev, doubling
+ * network calls).
  */
 export function useReviewQueueKeyboard(queue: QueueItem[]): {
   focusedIndex: number;
   setFocusedIndex: (i: number) => void;
 } {
   const [focusedIndex, setFocusedIndex] = useState(0);
+
+  // Refs keep the handler stable — no need to re-register on every render.
+  const focusedIndexRef = useRef(focusedIndex);
+  const queueRef = useRef(queue);
+
+  // Keep refs in sync on every render (runs synchronously after paint).
+  useEffect(() => {
+    focusedIndexRef.current = focusedIndex;
+  }, [focusedIndex]);
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
 
   // Clamp focusedIndex when the queue shrinks (e.g. after an approval decision).
   useEffect(() => {
@@ -37,7 +56,9 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
     }
   }, [queue.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Global keydown listener — registered once per mount, cleaned up on unmount.
+  // Global keydown listener — registered once on mount, cleaned up on unmount.
+  // Reads focusedIndexRef and queueRef so it never goes stale and never needs
+  // to be re-registered (avoids impure state-updater side effects).
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
       // Ignore modifier-key combos (Cmd-K, Ctrl-N, Alt-J, etc.).
@@ -52,54 +73,53 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
         (target.isContentEditable || target.contentEditable === 'true')
       ) return;
 
+      const currentQueue = queueRef.current;
+      const currentIndex = focusedIndexRef.current;
+
       // No-op when queue is empty.
-      if (queue.length === 0) return;
+      if (currentQueue.length === 0) return;
 
       switch (event.key) {
         case 'j':
           event.preventDefault();
-          setFocusedIndex(i => Math.min(queue.length - 1, i + 1));
+          setFocusedIndex(Math.min(currentQueue.length - 1, currentIndex + 1));
           break;
         case 'k':
           event.preventDefault();
-          setFocusedIndex(i => Math.max(0, i - 1));
+          setFocusedIndex(Math.max(0, currentIndex - 1));
           break;
-        case 'y':
+        case 'y': {
           event.preventDefault();
-          setFocusedIndex(currentIndex => {
-            const focused = queue[currentIndex];
-            if (focused !== undefined) {
-              if (focused.kind === 'single') {
-                void trpc.cyboflow.approvals.approve.mutate({ approvalId: focused.approval.id });
-              } else {
-                void Promise.all(
-                  focused.items.map((a) =>
-                    trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id }),
-                  ),
-                );
-              }
+          const focused = currentQueue[currentIndex];
+          if (focused !== undefined) {
+            if (focused.kind === 'single') {
+              void trpc.cyboflow.approvals.approve.mutate({ approvalId: focused.approval.id });
+            } else {
+              void Promise.all(
+                focused.items.map((a) =>
+                  trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id }),
+                ),
+              );
             }
-            return currentIndex;
-          });
+          }
           break;
-        case 'n':
+        }
+        case 'n': {
           event.preventDefault();
-          setFocusedIndex(currentIndex => {
-            const focused = queue[currentIndex];
-            if (focused !== undefined) {
-              if (focused.kind === 'single') {
-                void trpc.cyboflow.approvals.reject.mutate({ approvalId: focused.approval.id });
-              } else {
-                void Promise.all(
-                  focused.items.map((a) =>
-                    trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id }),
-                  ),
-                );
-              }
+          const focused = currentQueue[currentIndex];
+          if (focused !== undefined) {
+            if (focused.kind === 'single') {
+              void trpc.cyboflow.approvals.reject.mutate({ approvalId: focused.approval.id });
+            } else {
+              void Promise.all(
+                focused.items.map((a) =>
+                  trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id }),
+                ),
+              );
             }
-            return currentIndex;
-          });
+          }
           break;
+        }
         default:
           break;
       }
@@ -109,7 +129,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [queue]); // re-registers when queue reference changes
+  }, []); // registered once on mount — refs keep values current without re-registration
 
   return { focusedIndex, setFocusedIndex };
 }

@@ -9,6 +9,7 @@
  * Environment: jsdom (required for window.addEventListener and React hooks).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import React from 'react';
 import { renderHook, act } from '@testing-library/react';
 import { fireEvent } from '@testing-library/dom';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
@@ -276,5 +277,49 @@ describe('useReviewQueueKeyboard — modifier key guard', () => {
       fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
     });
     expect(mockRejectMutate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// React.StrictMode regression — state updaters must not fire side effects
+// ---------------------------------------------------------------------------
+
+describe('useReviewQueueKeyboard — StrictMode double-invocation regression', () => {
+  /**
+   * React.StrictMode intentionally invokes state updater functions twice in
+   * dev to surface impure updaters.  This test mounts the hook inside
+   * StrictMode and asserts that pressing y/n fires each mutation exactly once,
+   * not twice (which would happen if mutations were placed inside setFocusedIndex
+   * updater callbacks instead of directly in the event handler).
+   */
+  const strictWrapper = ({ children }: { children: React.ReactNode }) =>
+    React.createElement(React.StrictMode, null, children);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('y fires approve.mutate exactly once under StrictMode (not twice)', () => {
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3), { wrapper: strictWrapper });
+    act(() => { press('y'); });
+    expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'a' });
+  });
+
+  it('n fires reject.mutate exactly once under StrictMode (not twice)', () => {
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3), { wrapper: strictWrapper });
+    act(() => { press('n'); });
+    expect(mockRejectMutate).toHaveBeenCalledTimes(1);
+    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'a' });
+  });
+
+  it('j/k navigation still works correctly under StrictMode', () => {
+    const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3), {
+      wrapper: strictWrapper,
+    });
+    act(() => { press('j'); });
+    expect(result.current.focusedIndex).toBe(1);
+    act(() => { press('k'); });
+    expect(result.current.focusedIndex).toBe(0);
   });
 });
