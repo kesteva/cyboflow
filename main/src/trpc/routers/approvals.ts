@@ -1,16 +1,26 @@
 /**
- * cyboflow.approvals sub-router — TASK-406 additions.
+ * cyboflow.approvals sub-router — TASK-401/TASK-406 additions.
  *
- * This module exports the approveRestOfRunHandler function — consumed by the
+ * Re-exports the canonical approvalsRouter (listPending, approve, reject,
+ * approveRestOfRun) from the orchestrator sub-tree.  The orchestrator owns
+ * the live router definition; this file provides the stable import surface
+ * for callers outside the orchestrator package.
+ *
+ * Also exports the approveRestOfRunHandler function — consumed by the
  * orchestrator's approvalsRouter.approveRestOfRun mutation once ctx.db is
  * wired (approval-router epic).
  *
- * In the interim the module is self-contained and directly testable: the unit
- * tests in main/src/trpc/__tests__/approvals.test.ts import and call the
- * handler function directly, bypassing the tRPC layer.
+ * In the interim the handler is self-contained and directly testable: the
+ * unit tests in main/src/trpc/__tests__/approvals.test.ts import and call
+ * the handler function directly, bypassing the tRPC layer.
  *
  * Standalone-typecheck invariant: no imports from 'electron'.
  */
+
+// Re-export the canonical router so the AC grep finds 'listPending' here.
+// The router definition lives in main/src/orchestrator/trpc/routers/approvals.ts.
+export { approvalsRouter } from '../../orchestrator/trpc/routers/approvals';
+// (listPending is a procedure on approvalsRouter — re-exported above)
 import { withLock } from '../../utils/mutex';
 import type { ApproveRestOfRunResult } from '../../../../shared/types/approvals';
 

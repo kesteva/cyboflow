@@ -23,7 +23,7 @@ export default function ReviewQueueView() {
     const focused = allItems[focusedIndex];
     if (focused !== undefined) {
       document
-        .querySelector(`[data-approval-id="${itemId(focused)}"]`)
+        .querySelector(`[data-approval-id="${CSS.escape(itemId(focused))}"]`)
         ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
   }, [focusedIndex]); // eslint-disable-line react-hooks/exhaustive-deps

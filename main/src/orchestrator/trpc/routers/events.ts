@@ -130,7 +130,7 @@ export const eventsRouter = router({
    * auth is required for a renderer→main local IPC call.
    */
   setBadgeCount: publicProcedure
-    .input(z.object({ count: z.number().int().min(0) }))
+    .input(z.object({ count: z.number().int().min(0).max(9999) }))
     .mutation(({ input, ctx }) => {
       ctx.setDockBadge(input.count);
       return { ok: true };
