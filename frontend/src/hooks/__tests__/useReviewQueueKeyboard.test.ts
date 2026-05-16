@@ -24,7 +24,7 @@ const { mockApproveMutate, mockRejectMutate } = vi.hoisted(() => ({
   mockRejectMutate:  vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('../../trpc/client', () => ({
+vi.mock('../../utils/trpcClient', () => ({
   trpc: {
     cyboflow: {
       approvals: {
