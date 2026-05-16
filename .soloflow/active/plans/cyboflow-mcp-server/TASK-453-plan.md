@@ -1,8 +1,8 @@
 ---
 id: TASK-453
 idea: IDEA-010
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/cyboflowMcpServer.ts
 files_readonly:
@@ -21,16 +21,17 @@ acceptance_criteria:
     verification: "Visual: every tool branch wraps sendQuery() in try/catch and converts errors into MCP content; grep -E 'catch.*error.*sendQuery|\\.catch\\(' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns >0 matches."
   - criterion: "sendQuery() (added in TASK-451) is updated to support a 30-second timeout — if no response arrives in 30s, the pending request is rejected with error 'orchestrator_timeout' and the requestId entry is cleaned from the pendingRequests map."
     verification: "grep -E 'orchestrator_timeout' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -E 'setTimeout.*30' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
-  - criterion: "TypeScript compiles (pnpm typecheck passes)."
+  - criterion: TypeScript compiles (pnpm typecheck passes).
     verification: "cd main && pnpm typecheck — exit 0"
-depends_on: [TASK-451, TASK-452]
+depends_on:
+  - TASK-451
+  - TASK-452
 estimated_complexity: medium
 epic: cyboflow-mcp-server
 test_strategy:
   needed: false
   justification: "The subprocess is fundamentally an integration artifact — it speaks MCP over stdio to Claude on one end and a Unix socket to the orchestrator on the other. Unit tests would either mock both transports (testing only the routing glue, which the AC greps already cover) or require a full integration harness (out of scope for this task, owned by TASK-454 lifecycle). The behavior tests that matter live on the McpQueryHandler side (TASK-452) where the SQL effects are deterministic, and on TASK-454 where spawn lifecycle has its own integration validation."
 ---
-
 # TASK-453: Implement three MCP tool surfaces
 
 ## Objective

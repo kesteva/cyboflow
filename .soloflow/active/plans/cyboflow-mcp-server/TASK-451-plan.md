@@ -1,8 +1,8 @@
 ---
 id: TASK-451
 idea: IDEA-010
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/cyboflowMcpServer.ts
 files_readonly:
@@ -12,9 +12,9 @@ files_readonly:
   - .soloflow/active/ideas/IDEA-010.md
   - .soloflow/active/roadmaps/ROADMAP-001.md
 acceptance_criteria:
-  - criterion: "File main/src/orchestrator/mcpServer/cyboflowMcpServer.ts exists and exports a module-level main() that starts an MCP Server over StdioServerTransport when invoked as a Node subprocess."
+  - criterion: File main/src/orchestrator/mcpServer/cyboflowMcpServer.ts exists and exports a module-level main() that starts an MCP Server over StdioServerTransport when invoked as a Node subprocess.
     verification: "test -f main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'StdioServerTransport' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'new Server' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
-  - criterion: "Subprocess reads CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET from process.env at startup and exits with code 1 (with a stderr log) if either is missing."
+  - criterion: Subprocess reads CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET from process.env at startup and exits with code 1 (with a stderr log) if either is missing.
     verification: "grep -q 'CYBOFLOW_RUN_ID' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'CYBOFLOW_ORCH_SOCKET' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -E 'process.exit\\(1\\)' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
   - criterion: "Subprocess connects to the orchestrator over a Unix domain socket using net.createConnection(CYBOFLOW_ORCH_SOCKET) at startup; on socket 'close' the process exits cleanly with code 0 (mirroring mcpPermissionBridge.ts behavior)."
     verification: "grep -q \"net.createConnection\" main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -E \"'close'.*process.exit\\(0\\)\" main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
@@ -22,7 +22,7 @@ acceptance_criteria:
     verification: "grep -q 'cyboflow_list_pending_approvals' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'cyboflow_get_run' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'cyboflow_submit_checkpoint' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts && grep -q 'ListToolsRequestSchema' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
   - criterion: "All error paths in the subprocess (uncaughtException, unhandledRejection, parse errors, socket errors) write to process.stderr only — never to process.stdout — so the MCP stdio protocol stream stays clean."
     verification: "grep -E 'process.stdout' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts | grep -v -E '^\\s*//' returns 0 matches (no non-comment writes to stdout outside the MCP SDK transport itself), and uncaughtException + unhandledRejection handlers exist."
-  - criterion: "TypeScript compiles (pnpm typecheck passes for the main workspace)."
+  - criterion: TypeScript compiles (pnpm typecheck passes for the main workspace).
     verification: "cd main && pnpm typecheck — exit 0"
 depends_on: []
 estimated_complexity: medium
@@ -31,7 +31,6 @@ test_strategy:
   needed: false
   justification: "This task scaffolds a subprocess shell with no tool logic yet — behavior is asserted via grep-based AC and a typecheck. Tool-implementation testing comes in TASK-453 where logic actually exists. Adding unit tests for the env-var bootstrap path would require mocking process.argv/env/net and would test the framework, not the code."
 ---
-
 # TASK-451: Build CyboflowMcpServer stdio subprocess shell
 
 ## Objective

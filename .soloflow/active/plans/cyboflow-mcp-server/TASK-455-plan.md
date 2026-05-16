@@ -1,8 +1,8 @@
 ---
 id: TASK-455
 idea: IDEA-010
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/health.ts
   - main/src/orchestrator/router.ts
@@ -19,32 +19,32 @@ acceptance_criteria:
     verification: "grep -E 'health' main/src/orchestrator/router.ts && grep -E 'mcpServer' main/src/orchestrator/router.ts"
   - criterion: "Sidebar.tsx renders a small status dot (3-4px circle) in the bottom-fixed area of the sidebar with three colors: bg-status-success (green) when MCP status is 'running', bg-status-warning (yellow) when 'starting', bg-status-error (red) when 'failed' or 'stopped'."
     verification: "grep -E 'mcp.*[Ss]tatus|McpHealth|useMcpHealth' frontend/src/components/Sidebar.tsx && grep -E 'bg-status-success|bg-status-warning|bg-status-error' frontend/src/components/Sidebar.tsx"
-  - criterion: "Hovering the status dot shows a tooltip with the current status string and the lastError (if any) — using a native title attribute is acceptable for v1."
+  - criterion: Hovering the status dot shows a tooltip with the current status string and the lastError (if any) — using a native title attribute is acceptable for v1.
     verification: "grep -E 'title=.*[Mm][Cc][Pp]|title=.*mcpStatus' frontend/src/components/Sidebar.tsx"
   - criterion: "Frontend hook useMcpHealth() calls window.electronAPI (or the tRPC client when wired) to fetch status every 5 seconds and exposes { status, lastError, restartAttempts }. The hook handles the no-orchestrator-yet case (returns status: 'starting') so the dot is yellow at first paint, not red."
     verification: "test -f frontend/src/hooks/useMcpHealth.ts && grep -E 'setInterval|useEffect.*5000' frontend/src/hooks/useMcpHealth.ts && grep -q \"'starting'\" frontend/src/hooks/useMcpHealth.ts"
   - criterion: "On app boot, if the orchestrator starts and the MCP server start() returns successfully (status moves from 'starting' to 'running' within the lifecycle's bootstrap window), the sidebar dot transitions yellow → green within 5 seconds (one poll cycle). If start() ends in 'failed', the dot stays red and the user can read the lastError via the tooltip — silent failure is forbidden."
     verification: "Manual: launch the app, observe sidebar; with intact socket, dot is green within 5s. With CYBOFLOW_ORCH_SOCKET stubbed to a non-existent path (simulated by editing the lifecycle init), dot is red and tooltip shows the connect error."
-  - criterion: "TypeScript compiles for both main and frontend workspaces; pnpm typecheck passes."
-    verification: "pnpm typecheck — exit 0"
-depends_on: [TASK-454]
+  - criterion: TypeScript compiles for both main and frontend workspaces; pnpm typecheck passes.
+    verification: pnpm typecheck — exit 0
+depends_on:
+  - TASK-454
 estimated_complexity: medium
 epic: cyboflow-mcp-server
 test_strategy:
   needed: true
-  justification: "The health-check is the single user-visible mechanism that surfaces MCP server failure. A regression where the dot stays green despite a failed MCP server is exactly the silent-failure mode the IDEA exists to prevent. Hook-level tests assert the polling cadence and the no-orchestrator-yet fallback; a Sidebar render test asserts the dot color maps correctly to each status value."
+  justification: The health-check is the single user-visible mechanism that surfaces MCP server failure. A regression where the dot stays green despite a failed MCP server is exactly the silent-failure mode the IDEA exists to prevent. Hook-level tests assert the polling cadence and the no-orchestrator-yet fallback; a Sidebar render test asserts the dot color maps correctly to each status value.
   targets:
     - behavior: "useMcpHealth() returns status: 'starting' on initial render before the first fetch resolves"
       test_file: frontend/src/hooks/__tests__/useMcpHealth.test.tsx
       type: unit
-    - behavior: "useMcpHealth() polls every 5 seconds and updates state when the fetched status changes"
+    - behavior: useMcpHealth() polls every 5 seconds and updates state when the fetched status changes
       test_file: frontend/src/hooks/__tests__/useMcpHealth.test.tsx
       type: unit
     - behavior: "Sidebar renders a green dot when mcp status is 'running', red when 'failed', yellow when 'starting'"
       test_file: frontend/src/components/__tests__/Sidebar.mcpHealth.test.tsx
       type: component
 ---
-
 # TASK-455: App-boot MCP health check + Sidebar status indicator
 
 ## Objective
