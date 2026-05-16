@@ -1,43 +1,33 @@
 ---
 id: TASK-406
-sprint: SPRINT-010
+sprint: SPRINT-011
 epic: review-queue-ui
 status: done
-summary: "approveRestOfRun mutation (run-scoped) + group-card integration + NO-global-approve-all sweep guard"
+summary: "approveRestOfRun (run-scoped) mutation + handler + group-card integration + NO-global-approve-all sweep guard (cumulative from SPRINT-010)"
 executor_loops: 0
-code_review_rounds: 1
+code_review_rounds: 0
 visual_mobile: skipped_user_preference
-visual_web: skipped_user_preference
+visual_web: skipped_unable
 ---
 
-# TASK-406 — Per-Run "Approve Rest" + No-Global-Approve-All Guard
+# TASK-406 — Done (SPRINT-011)
 
-## Outcome
+## Context
+TASK-406 work fully delivered in SPRINT-010 (commits 161df62, c31794a, af63228, 26522a2, 98dbb95, 6012a32). Verifier APPROVED all 5 ACs; code reviewer CLEAN.
 
-`cyboflow.approvals.approveRestOfRun` mutation added (`{ runId }` input, returns `{ decided: count }`). Handler in `main/src/trpc/routers/approvals.ts` runs under per-run mutex, scopes by `run_id = ? AND status = 'pending'`. Group-variant Approve in PendingApprovalCard now fires a single atomic call instead of TASK-405's per-item batch. Orchestrator-side `approvalsRouter` stub returns `{ decided: 0 }` pending ctx.db wiring in the approval-router epic — the TODO comment spells out the exact import + delegating call. Prominent NO-global-approve-all comment block + runtime sweep test guards against the highest-harm failure mode.
-
-## Files
-
-- `shared/types/approvals.ts` (added ApproveRestOfRunInput/Result types)
-- `main/src/trpc/routers/approvals.ts` (NEW — handler + NO-global-approve-all comment, orphan router fragment removed in fix pass)
-- `main/src/orchestrator/trpc/routers/approvals.ts` (wired approveRestOfRun mutation stub + delegation-path TODO)
-- `frontend/src/components/PendingApprovalCard.tsx` (group Approve → approveRestOfRun)
-- `main/src/trpc/__tests__/approvals.test.ts` (NEW — 3 tests: scope correctness, no-match, sweep grep)
-- `frontend/src/components/__tests__/PendingApprovalCard.test.tsx` (mock + group test)
+## Files in Scope
+- `shared/types/approvals.ts` (ApproveRestOfRunInput / ApproveRestOfRunResult)
+- `main/src/trpc/routers/approvals.ts` (approveRestOfRunHandler with per-run mutex, `WHERE run_id = ? AND status = 'pending'` guard, best-effort iteration, NO-global-approve-all comment)
+- `main/src/orchestrator/trpc/routers/approvals.ts` (approveRestOfRun protectedProcedure stub pending ctx.db wiring per approval-router epic)
+- `main/src/trpc/__tests__/approvals.test.ts` (3 tests including runtime sweep)
+- `frontend/src/components/PendingApprovalCard.tsx` (group Approve = single atomic mutation)
+- `frontend/src/components/__tests__/PendingApprovalCard.test.tsx` (asserts approveRestOfRun called once; per-item approve never called)
 
 ## Verification
+- Tests: 3/3 approvals.test.ts, 30/30 PendingApprovalCard.test.tsx, 227/227 main, 99/99 frontend
+- Typecheck + lint: PASS
+- Sweep: 0 matches for `approveAll|approve_all|approveGlobal` outside `__tests__`
+- Visual: mobile skipped (user pref); web skipped_unable per-task — deferred to sprint-level verifier
 
-- 222 main tests pass + 96 frontend tests pass
-- `pnpm typecheck`: clean
-- `pnpm lint`: 0 errors
-- Sweep grep returns 0 matches outside __tests__
-- Visual: skipped (parallel mode)
-
-## Commits
-
-- `161df62` feat(TASK-406): add ApproveRestOfRunInput and ApproveRestOfRunResult types
-- `c31794a` feat(TASK-406): add approveRestOfRun handler and router fragment
-- `af63228` feat(TASK-406): wire approveRestOfRun into orchestrator AppRouter type
-- `26522a2` feat(TASK-406): replace per-item batch approve with approveRestOfRun in group card
-- `98dbb95` test(TASK-406): add approveRestOfRun unit tests and update component tests
-- `6012a32` refactor(TASK-406): remove orphan approveRestOfRunRouter; update orchestrator TODO to point at handler
+## Findings
+No new findings. Pre-existing open items unrelated to this task remain queued for compounder.
