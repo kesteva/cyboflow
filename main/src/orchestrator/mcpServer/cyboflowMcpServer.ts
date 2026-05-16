@@ -108,7 +108,21 @@ function sendQuery(type: string, params: Record<string, unknown>): Promise<unkno
       return;
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
-    pendingRequests.set(requestId, { resolve, reject });
+
+    // 30-second timeout — removes the pending entry to prevent memory leaks
+    const timer = setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, 30_000);
+
+    pendingRequests.set(requestId, {
+      resolve: (response: unknown) => {
+        clearTimeout(timer);
+        resolve(response);
+      },
+      reject: (reason: Error) => {
+        clearTimeout(timer);
+        reject(reason);
+      },
+    });
+
     const payload = JSON.stringify({ type, requestId, runId, ...params });
     ipcClient.write(payload + '\n');
   });
@@ -131,28 +145,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'cyboflow_list_pending_approvals',
-        description: 'List all pending approval requests for the current run',
+        description:
+          'Return the cross-run review queue: all approvals currently pending across every running workflow in this Cyboflow workspace. Read-only.',
         inputSchema: { type: 'object', properties: {}, required: [] },
       },
       {
         name: 'cyboflow_get_run',
-        description: 'Get details about a specific run',
+        description:
+          "Fetch a workflow run's state (status, workflow name, timestamps, last 10 events) by ID. Read-only.",
         inputSchema: {
           type: 'object',
           properties: {
-            run_id: { type: 'string', description: 'The run ID to retrieve' },
+            run_id: { type: 'string', description: 'The workflow_runs.id to fetch' },
           },
           required: ['run_id'],
         },
       },
       {
         name: 'cyboflow_submit_checkpoint',
-        description: 'Submit a checkpoint for the current run',
+        description:
+          'Record a checkpoint marker for the current run. This is an observational marker only — it does not change run status, approve anything, or notify the user.',
         inputSchema: {
           type: 'object',
           properties: {
-            label: { type: 'string', description: 'Checkpoint label' },
-            note: { type: 'string', description: 'Optional note for this checkpoint' },
+            label: { type: 'string', description: 'Short identifier for the checkpoint' },
+            note: { type: 'string', description: 'Optional longer description' },
           },
           required: ['label'],
         },
@@ -162,15 +179,106 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  // Stub — TASK-453 replaces this with real implementations
-  return {
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({ error: 'not_implemented', tool: request.params.name }),
-      },
-    ],
-  };
+  switch (request.params.name) {
+    case 'cyboflow_list_pending_approvals': {
+      try {
+        const response = await sendQuery('mcp-list-pending-approvals', {});
+        const resp = response as { ok: boolean; data?: unknown; error?: string };
+        if (!resp.ok) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+        };
+      }
+    }
+
+    case 'cyboflow_get_run': {
+      const args = (request.params.arguments ?? {}) as { run_id?: unknown };
+      const { run_id } = args;
+      if (typeof run_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'run_id: string' }),
+            },
+          ],
+        };
+      }
+      try {
+        const response = await sendQuery('mcp-get-run', { targetRunId: run_id });
+        const resp = response as { ok: boolean; data?: unknown; error?: string };
+        if (!resp.ok) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+        };
+      }
+    }
+
+    case 'cyboflow_submit_checkpoint': {
+      const args = (request.params.arguments ?? {}) as { label?: unknown; note?: unknown };
+      const { label, note } = args;
+      if (typeof label !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'label: string' }),
+            },
+          ],
+        };
+      }
+      if (note !== undefined && typeof note !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'note: string (optional)' }),
+            },
+          ],
+        };
+      }
+      try {
+        const queryParams: Record<string, unknown> = { label };
+        if (note !== undefined) queryParams['note'] = note;
+        const response = await sendQuery('mcp-submit-checkpoint', queryParams);
+        const resp = response as { ok: boolean; data?: unknown; error?: string };
+        if (!resp.ok) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
+        };
+      }
+    }
+
+    default:
+      throw new Error(`Unknown tool: ${request.params.name}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
