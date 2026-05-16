@@ -1,10 +1,10 @@
 ---
-pending_count: 9
+pending_count: 10
 buckets:
   decisions: 0
   actions: 0
   testing: 8
-  deferred_visual: 1
+  deferred_visual: 2
 items: []
 ---
 # Human Review Queue
@@ -116,6 +116,19 @@ _No items._
     - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
   level: requirements
   severity: high
+
+- sprint: SPRINT-010
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  dedup_key: visual_web_electron_renderer_needs_full_electron
+  action: "End-of-sprint visual smoke for the review-queue-ui epic (TASK-401..TASK-407). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Run `pnpm dev` to launch Electron, then drive the six flows: (1) ReviewQueueView empty state, (2) PendingApprovalCard render with a realistic approval payload, (3) Blocking vs Pending section partitioning and the group variant, (4) j/k navigation focus ring (TASK-404), (5) y/n approve/reject keyboard, (6) approveRestOfRun group-card action (TASK-406). Confirm `cyboflow-frontend-debug.log` shows no errors and the dock badge reflects pending count (TASK-407). Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  blocked_checks:
+    - "End-of-sprint cross-task visual verification of review-queue-ui flows (ReviewQueueView, PendingApprovalCard, group variant, j/k/y/n keyboard, approveRestOfRun, dock-badge sync)"
+  level: visual
+  severity: medium
+  created_at: "2026-05-15T18:30:00.000Z"
+  updated_at: "2026-05-15T18:30:00.000Z"
 
 ## Overridden
 

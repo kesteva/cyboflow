@@ -11,16 +11,38 @@
  */
 
 /**
+ * Injectable dependencies for the tRPC context.
+ *
+ * All fields are optional so callers (and unit tests) that do not need a
+ * particular capability can omit it — the factory supplies safe no-ops.
+ */
+export interface ContextDeps {
+  /**
+   * Callback that sets the macOS dock badge count.
+   *
+   * Injected from `main/src/index.ts` by passing a closure over
+   * `dockBadgeService.setBadgeCount`. Keeping this as a plain callback (rather
+   * than importing the service directly) preserves the standalone-typecheck
+   * invariant: no 'electron' or 'main/src/services/*' import is needed here.
+   */
+  setDockBadge?: (count: number) => void;
+}
+
+/**
  * Creates the tRPC request context.
  *
- * @returns A context object carrying the auth principal for this request.
+ * @param deps - Optional injectable callbacks. Omitting a field uses a safe
+ *   no-op so tests and future standalone-Node scenarios work without wiring
+ *   the full Electron service graph.
+ * @returns A context object carrying the auth principal and injected callbacks.
  *
  * @remarks v2 team-tier: replace `'local'` with a real session-token lookup.
  * The shape of this return value is what `protectedProcedure` asserts on — keep
  * `userId` as the canonical field name regardless of how it is populated.
  */
-export function createContext() {
-  return { userId: 'local' as const };
+export function createContext(deps: ContextDeps = {}) {
+  const { setDockBadge = (_count: number) => undefined } = deps;
+  return { userId: 'local' as const, setDockBadge };
 }
 
 /** Shape of the tRPC context, inferred from `createContext`. */

@@ -29,6 +29,7 @@ import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { EventEmitter } from 'node:events';
+import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
@@ -687,7 +688,11 @@ app.whenReady().then(async () => {
         'mainWindow is null after createWindow — cannot attach orchestrator tRPC bridge'
       );
     }
-    attachOrchestratorTrpc({ window: mainWindow, router: appRouter, createContext });
+    attachOrchestratorTrpc({
+      window: mainWindow,
+      router: appRouter,
+      createContext: () => createContext({ setDockBadge: (count) => dockBadgeService.setBadgeCount(count) }),
+    });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
     // Wire ApprovalRouter after the RunQueueRegistry is live.
@@ -753,6 +758,13 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+// Clear the dock badge on `will-quit` (fires only after all `before-quit`
+// preventDefault opportunities have passed, so the badge does not zero
+// while the app is still running due to a cancelled quit).
+app.on('will-quit', () => {
+  dockBadgeService.setBadgeCount(0);
 });
 
 app.on('before-quit', async (event) => {
