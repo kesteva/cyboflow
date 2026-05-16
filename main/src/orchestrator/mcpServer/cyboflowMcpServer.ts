@@ -38,36 +38,62 @@ process.on('unhandledRejection', (reason: unknown) => {
 // ---------------------------------------------------------------------------
 
 type ResponseResolver = (response: unknown) => void;
+type ResponseRejecter = (reason: Error) => void;
 
-const pendingRequests = new Map<string, ResponseResolver>();
+interface PendingRequest {
+  resolve: ResponseResolver;
+  reject: ResponseRejecter;
+}
+
+const pendingRequests = new Map<string, PendingRequest>();
 let requestCounter = 0;
 let ipcClient: net.Socket | null = null;
 
+// Module-scope narrowed constant — the env-var guard above ensures this is
+// always a string by the time we reach this point.
+const SOCKET_PATH: string = socketPath;
+
+function rejectAllPending(reason: Error): void {
+  for (const { reject } of pendingRequests.values()) {
+    reject(reason);
+  }
+  pendingRequests.clear();
+}
+
 function connectToOrchestrator(): net.Socket {
-  const socket = net.createConnection(socketPath as string);
+  const socket = net.createConnection(SOCKET_PATH);
+
+  // Rolling receive buffer — stream sockets can split a JSON message across
+  // multiple 'data' events, or batch messages without a trailing newline in
+  // the first chunk.  We retain any incomplete tail for the next event.
+  let recvBuffer = '';
 
   socket.on('data', (buf: Buffer) => {
-    const raw = buf.toString('utf8');
-    // The socket may batch multiple newline-delimited JSON messages
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+    recvBuffer += buf.toString('utf8');
+    let nl: number;
+    while ((nl = recvBuffer.indexOf('\n')) !== -1) {
+      const line = recvBuffer.slice(0, nl).trim();
+      recvBuffer = recvBuffer.slice(nl + 1);
+      if (!line) continue;
       try {
-        const msg = JSON.parse(trimmed) as Record<string, unknown>;
+        const msg = JSON.parse(line) as Record<string, unknown>;
         const rid = msg['requestId'];
         if (typeof rid === 'string' && pendingRequests.has(rid)) {
-          const resolve = pendingRequests.get(rid)!;
+          const pending = pendingRequests.get(rid)!;
           pendingRequests.delete(rid);
-          resolve(msg);
+          pending.resolve(msg);
         }
       } catch (err) {
-        console.error('[Cyboflow MCP] Failed to parse IPC response:', err, 'raw:', trimmed);
+        console.error('[Cyboflow MCP] Failed to parse IPC response:', err, 'raw:', line);
       }
     }
   });
 
   socket.on('error', (err: Error) => {
     console.error('[Cyboflow MCP] IPC socket error:', err.message);
+    // Belt-and-suspenders: reject any callers that are waiting, in case
+    // 'close' is not emitted (or is delayed) after 'error'.
+    rejectAllPending(err);
   });
 
   socket.on('close', () => { console.error('[Cyboflow MCP] IPC socket closed — exiting'); process.exit(0); });
@@ -82,7 +108,7 @@ function sendQuery(type: string, params: Record<string, unknown>): Promise<unkno
       return;
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
-    pendingRequests.set(requestId, resolve);
+    pendingRequests.set(requestId, { resolve, reject });
     const payload = JSON.stringify({ type, requestId, runId, ...params });
     ipcClient.write(payload + '\n');
   });
