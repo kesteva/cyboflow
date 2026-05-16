@@ -1,8 +1,8 @@
 ---
 id: TASK-452
 idea: IDEA-010
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/mcpQueryHandler.ts
 files_readonly:
@@ -21,9 +21,10 @@ acceptance_criteria:
     verification: "grep -E 'SELECT.*FROM approvals' main/src/orchestrator/mcpServer/mcpQueryHandler.ts && grep -E 'SELECT.*FROM workflow_runs' main/src/orchestrator/mcpServer/mcpQueryHandler.ts"
   - criterion: "Checkpoint write inserts a row into a checkpoints table (or appends to raw_events with event_type='cyboflow_checkpoint') under a single SQL statement — no side-effect to workflow_runs.status, no socket replies to Claude (this is a marker, not an approval)."
     verification: "grep -E 'INSERT INTO (checkpoints|raw_events)' main/src/orchestrator/mcpServer/mcpQueryHandler.ts"
-  - criterion: "TypeScript compiles (pnpm typecheck passes)."
+  - criterion: TypeScript compiles (pnpm typecheck passes).
     verification: "cd main && pnpm typecheck — exit 0"
-depends_on: [TASK-451]
+depends_on:
+  - TASK-451
 estimated_complexity: medium
 epic: cyboflow-mcp-server
 test_strategy:
@@ -43,7 +44,6 @@ test_strategy:
       test_file: main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts
       type: unit
 ---
-
 # TASK-452: Orchestrator-side MCP query handler
 
 ## Objective

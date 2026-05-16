@@ -1,8 +1,8 @@
 ---
 id: TASK-454
 idea: IDEA-010
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/mcpServerLifecycle.ts
   - package.json
@@ -33,7 +33,10 @@ acceptance_criteria:
     verification: "grep -E \"stdio:\\s*\\[['\\\"]pipe['\\\"]\" main/src/orchestrator/mcpServer/mcpServerLifecycle.ts && grep -E 'stderr\\.on|stderr\\.pipe' main/src/orchestrator/mcpServer/mcpServerLifecycle.ts"
   - criterion: "TypeScript compiles (pnpm typecheck passes for the main workspace) and the build:main task succeeds."
     verification: "cd main && pnpm typecheck — exit 0; cd .. && pnpm run build:main — exit 0"
-depends_on: [TASK-451, TASK-452, TASK-453]
+depends_on:
+  - TASK-451
+  - TASK-452
+  - TASK-453
 estimated_complexity: high
 epic: cyboflow-mcp-server
 test_strategy:
@@ -51,15 +54,14 @@ test_strategy:
       type: unit
 prerequisites:
   - check: "grep -q '\"@modelcontextprotocol/sdk\"' package.json"
-    fix: "pnpm add @modelcontextprotocol/sdk"
-    description: "MCP SDK must be a declared dependency for the subprocess script to import from it at runtime in the packaged DMG."
+    fix: pnpm add @modelcontextprotocol/sdk
+    description: MCP SDK must be a declared dependency for the subprocess script to import from it at runtime in the packaged DMG.
     blocking: true
   - check: "test -f main/dist/orchestrator/mcpServer/cyboflowMcpServer.js || test -f main/src/orchestrator/mcpServer/cyboflowMcpServer.ts"
     fix: "Complete TASK-451 first (creates the subprocess source); then pnpm run build:main to produce the dist artifact."
     description: "Lifecycle cannot spawn a script that doesn't exist; TASK-451 is a hard prerequisite."
     blocking: true
 ---
-
 # TASK-454: MCP server spawn lifecycle, asarUnpack, and crash isolation
 
 ## Objective
