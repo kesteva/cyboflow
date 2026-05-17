@@ -646,12 +646,12 @@ export class WorktreeManager {
         const resetResult = await execWithShellPath(command, { cwd: worktreePath });
         lastOutput = resetResult.stdout || resetResult.stderr || '';
 
-        // Get config to check if Crystal footer is enabled (default: true)
+        // Get config to check if Cyboflow footer is enabled (default: true)
         const config = this.configManager?.getConfig();
-        const enableCrystalFooter = config?.enableCrystalFooter !== false;
+        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
         // Add Cyboflow footer if enabled
-        const footer = buildCommitFooter(enableCrystalFooter);
+        const footer = buildCommitFooter(enableCyboflowFooter);
         const fullMessage = footer ? `${commitMessage}\n\n${footer}` : commitMessage;
 
         // Properly escape commit message for cross-platform compatibility
