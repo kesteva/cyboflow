@@ -11,7 +11,7 @@
  * See docs/cyboflow_system_design.md §5.7 for the design background.
  */
 import { EventEmitter } from 'node:events';
-import type { DatabaseLike, LoggerLike } from './types';
+import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { StuckReason, StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
@@ -94,12 +94,38 @@ export class StuckDetector {
   /** One-time warning flag for missing permissionServer. */
   private permissionServerWarnEmitted = false;
 
+  // Hoisted prepared statements — SQL is static, so prepare once per detector
+  // instance instead of on every scan tick / per-row.
+  private readonly stmtStaleApprovals: PreparedStatement;
+  private readonly stmtSelfDeadlockCount: PreparedStatement;
+  private readonly stmtCrossRunDeadlock: PreparedStatement;
+  private readonly stmtTransitionToStuck: PreparedStatement;
+
   constructor(deps: StuckDetectorDeps) {
     this.db = deps.db;
     this.claudeManager = deps.claudeManager;
     this.permissionServer = deps.permissionServer;
     this.eventBus = deps.eventBus;
     this.logger = deps.logger;
+
+    this.stmtStaleApprovals = this.db.prepare(
+      `SELECT id, run_id, status, created_at FROM approvals
+       WHERE status = 'pending' AND created_at < ?`,
+    );
+    this.stmtSelfDeadlockCount = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM approvals
+       WHERE run_id = ? AND status = 'pending' AND id != ?`,
+    );
+    this.stmtCrossRunDeadlock = this.db.prepare(
+      `SELECT id FROM workflow_runs
+       WHERE status = 'awaiting_review' AND id != ?
+       LIMIT 1`,
+    );
+    this.stmtTransitionToStuck = this.db.prepare(
+      `UPDATE workflow_runs
+       SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?
+       WHERE id = ? AND status = 'awaiting_review'`,
+    );
 
     // Bind scan so `setInterval` can call it as a free function without losing
     // the `this` context.
@@ -150,17 +176,12 @@ export class StuckDetector {
     try {
       const cutoff = Date.now() - STALE_THRESHOLD_MS;
 
-      const stmt = this.db.prepare(
-        `SELECT id, run_id, status, created_at FROM approvals
-         WHERE status = 'pending' AND created_at < ?`,
-      );
-
       // SQLite stores created_at as an ISO datetime string or unix ms integer
       // depending on how it was inserted.  The approvalRouter inserts as ISO
       // (new Date().toISOString()), so we compare against the ISO representation
       // of the cutoff timestamp.
       const cutoffIso = new Date(cutoff).toISOString();
-      const rows = stmt.all(cutoffIso) as ApprovalRow[];
+      const rows = this.stmtStaleApprovals.all(cutoffIso) as ApprovalRow[];
 
       for (const approval of rows) {
         const reason = this.classifyStaleApproval(approval);
@@ -216,22 +237,13 @@ export class StuckDetector {
     }
 
     // 3. self_deadlock — another pending approval for the same run
-    const selfDeadlockStmt = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM approvals
-       WHERE run_id = ? AND status = 'pending' AND id != ?`,
-    );
-    const selfRow = selfDeadlockStmt.get(runId, approvalId) as { cnt: number };
+    const selfRow = this.stmtSelfDeadlockCount.get(runId, approvalId) as { cnt: number };
     if (selfRow.cnt > 0) {
       return { kind: 'self_deadlock' };
     }
 
     // 4. cross_run_deadlock (v1 heuristic)
-    const crossStmt = this.db.prepare(
-      `SELECT id FROM workflow_runs
-       WHERE status = 'awaiting_review' AND id != ?
-       LIMIT 1`,
-    );
-    const crossRow = crossStmt.get(runId) as WorkflowRunRow | undefined;
+    const crossRow = this.stmtCrossRunDeadlock.get(runId) as WorkflowRunRow | undefined;
     if (crossRow) {
       return { kind: 'cross_run_deadlock', conflictingRunId: crossRow.id };
     }
@@ -255,12 +267,7 @@ export class StuckDetector {
     const runId = approval.run_id;
     const approvalId = approval.id;
 
-    const updateStmt = this.db.prepare(
-      `UPDATE workflow_runs
-       SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?
-       WHERE id = ? AND status = 'awaiting_review'`,
-    );
-    const { changes } = updateStmt.run(reason.kind, detectedAt, runId) as { changes: number };
+    const { changes } = this.stmtTransitionToStuck.run(reason.kind, detectedAt, runId) as { changes: number };
 
     if (changes === 1) {
       const event: StuckDetectedEvent = {
