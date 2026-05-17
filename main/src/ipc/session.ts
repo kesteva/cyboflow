@@ -4,7 +4,7 @@ import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import type { AppServices } from './types';
 import type { CreateSessionRequest } from '../types/session';
-import { getCrystalSubdirectory } from '../utils/crystalDirectory';
+import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
 import {
@@ -340,7 +340,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         }
 
         // Clean up session artifacts (images)
-        const artifactsDir = getCrystalSubdirectory('artifacts', sessionId);
+        const artifactsDir = getCyboflowSubdirectory('artifacts', sessionId);
         if (existsSync(artifactsDir)) {
           try {
             // Update progress: cleaning artifacts
@@ -1561,7 +1561,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       // Create images directory in CRYSTAL_DIR/artifacts/{sessionId}
-      const imagesDir = getCrystalSubdirectory('artifacts', sessionId);
+      const imagesDir = getCyboflowSubdirectory('artifacts', sessionId);
       if (!existsSync(imagesDir)) {
         await fs.mkdir(imagesDir, { recursive: true });
       }
@@ -1610,7 +1610,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       // Create text directory in CRYSTAL_DIR/artifacts/{sessionId}
-      const textDir = getCrystalSubdirectory('artifacts', sessionId);
+      const textDir = getCyboflowSubdirectory('artifacts', sessionId);
       if (!existsSync(textDir)) {
         await fs.mkdir(textDir, { recursive: true });
       }

@@ -1,88 +1,16 @@
-import { homedir } from 'os';
-import { join } from 'path';
-import { app } from 'electron';
-
-let customCrystalDir: string | undefined;
-
 /**
- * Sets a custom Cyboflow directory path. This should be called early in the
- * application lifecycle, before any services are initialized.
+ * @deprecated Use main/src/utils/cyboflowDirectory.ts instead.
+ * This module is a thin re-export shim preserved for backward compatibility.
  */
-export function setCrystalDirectory(dir: string): void {
-  customCrystalDir = dir;
-}
+import {
+  getCyboflowDirectory,
+  getCyboflowSubdirectory,
+  setCyboflowDirectory,
+} from './cyboflowDirectory';
 
-/**
- * Determines if Cyboflow is running from an installed application (DMG/Applications folder)
- * rather than a development build
- */
-function isInstalledApp(): boolean {
-  // Check if app is packaged (built for distribution)
-  if (!app.isPackaged) {
-    return false;
-  }
-
-  // On macOS, check if running from /Applications or a mounted DMG volume
-  if (process.platform === 'darwin') {
-    const appPath = app.getPath('exe');
-    // Apps installed from DMG or in /Applications will have these paths
-    const isInApplications = appPath.startsWith('/Applications/');
-    const isInVolumes = appPath.startsWith('/Volumes/');
-    const isInPrivateTmp = appPath.includes('/private/var/folders/'); // Temp mount for DMG
-
-    return isInApplications || isInVolumes || isInPrivateTmp;
-  }
-
-  // For other platforms, being packaged is sufficient
-  return true;
-}
-
-/**
- * Gets the Cyboflow directory path. Returns the custom directory if set,
- * otherwise falls back to the environment variable CYBOFLOW_DIR,
- * and finally defaults to ~/.cyboflow
- */
-export function getCrystalDirectory(): string {
-  // 1. Check if custom directory was set programmatically
-  if (customCrystalDir) {
-    return customCrystalDir;
-  }
-
-  // 2. Check environment variable
-  const envDir = process.env.CYBOFLOW_DIR;
-  if (envDir) {
-    return envDir;
-  }
-
-  // 3. If running as an installed app (from DMG, /Applications, etc), always use ~/.cyboflow
-  if (isInstalledApp()) {
-    console.log('[Cyboflow] Running as installed app, using ~/.cyboflow');
-    return join(homedir(), '.cyboflow');
-  }
-
-  // 4. If running inside Cyboflow (detected by bundle identifier) in development, use development directory
-  // This prevents development Cyboflow from interfering with production Cyboflow
-  if (process.env.__CFBundleIdentifier === 'com.cyboflow.app' && !app.isPackaged) {
-    console.log('[Cyboflow] Detected running inside Cyboflow development, using ~/.cyboflow_dev for isolation');
-    return join(homedir(), '.cyboflow_dev');
-  }
-
-  // 5. Default to ~/.cyboflow
-  return join(homedir(), '.cyboflow');
-}
-
-/**
- * Gets a subdirectory path within the Cyboflow directory
- */
-export function getCrystalSubdirectory(...subPaths: string[]): string {
-  return join(getCrystalDirectory(), ...subPaths);
-}
-
-/**
- * Alias for getCrystalSubdirectory using Cyboflow naming.
- * NOTE: getCrystalDirectory() already returns ~/.cyboflow paths — the
- * data-directory flip is complete. The legacy function name is preserved
- * for git-history clarity; both will be renamed in the
- * crystal-cuts-and-rebrand epic when call sites are swept.
- */
-export const getCyboflowSubdirectory = getCrystalSubdirectory;
+/** @deprecated Use getCyboflowDirectory from cyboflowDirectory.ts */
+export const getCrystalDirectory = getCyboflowDirectory;
+/** @deprecated Use getCyboflowSubdirectory from cyboflowDirectory.ts */
+export const getCrystalSubdirectory = getCyboflowSubdirectory;
+/** @deprecated Use setCyboflowDirectory from cyboflowDirectory.ts */
+export const setCrystalDirectory = setCyboflowDirectory;
