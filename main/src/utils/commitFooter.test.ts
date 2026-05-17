@@ -13,6 +13,10 @@ describe('buildCommitFooter', () => {
     expect(result.startsWith('💎')).toBe(true); // 💎
     // The two sections must be separated by a blank line
     expect(result).toContain('\n\n');
+    // Exact byte-level check: catches silent rebrand drift (typo'd URL, wrong email, etc.)
+    expect(result).toBe(
+      '💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)\n\nCo-Authored-By: Cyboflow <hello@cyboflow.com>'
+    );
   });
 
   it('returns empty string when disabled', () => {
