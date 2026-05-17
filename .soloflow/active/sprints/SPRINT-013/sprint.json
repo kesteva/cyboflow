@@ -6,16 +6,37 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-501": { "status": "pending" },
-    "TASK-502": { "status": "pending" },
-    "TASK-503": { "status": "pending" },
-    "TASK-504": { "status": "pending" },
-    "TASK-551": { "status": "pending" },
-    "TASK-552": { "status": "pending" },
-    "TASK-553": { "status": "pending" },
-    "TASK-554": { "status": "pending" },
-    "TASK-555": { "status": "pending" },
-    "TASK-556": { "status": "pending" }
+    "TASK-501": {
+      "status": "pending"
+    },
+    "TASK-502": {
+      "status": "pending"
+    },
+    "TASK-503": {
+      "status": "pending"
+    },
+    "TASK-504": {
+      "status": "pending"
+    },
+    "TASK-551": {
+      "status": "pending"
+    },
+    "TASK-552": {
+      "status": "pending"
+    },
+    "TASK-553": {
+      "status": "pending"
+    },
+    "TASK-554": {
+      "status": "pending"
+    },
+    "TASK-555": {
+      "status": "blocked",
+      "verdict_at": "2026-05-17T14:46:26.332Z"
+    },
+    "TASK-556": {
+      "status": "pending"
+    }
   },
   "run": {
     "branch": "soloflow/run-20260517-074503-SPRINT-013",
