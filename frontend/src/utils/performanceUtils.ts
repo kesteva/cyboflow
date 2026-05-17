@@ -1,4 +1,4 @@
-// Performance utilities for Crystal
+// Performance utilities for Cyboflow
 
 /**
  * Checks if the document is visible (not minimized or in background tab)

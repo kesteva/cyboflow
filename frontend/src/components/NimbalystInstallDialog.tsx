@@ -84,7 +84,7 @@ export function NimbalystInstallDialog({ isOpen, onClose }: NimbalystInstallDial
 
           <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/30 rounded-lg p-4">
             <p className="text-gray-700 dark:text-gray-300 text-sm leading-relaxed">
-              <span className="font-semibold text-blue-700 dark:text-blue-400">Nimbalyst</span> is an integrated markdown environment for Claude Code from the team that brought you Crystal.
+              <span className="font-semibold text-blue-700 dark:text-blue-400">Nimbalyst</span> is an integrated markdown environment for Claude Code from the team that brought you Cyboflow.
             </p>
           </div>
         </div>
