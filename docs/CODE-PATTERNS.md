@@ -87,6 +87,13 @@ type definitions across packages.
 - `shared/types/panels.ts` — panel configuration and state types
 - `shared/types/cliPanels.ts` — CLI-specific panel types
 
+**Label maps for shared-type discriminants** belong next to the type (same file
+or a companion `*Labels.ts` in `shared/types/`), keyed by `Record<Union['kind'], string>`
+so adding a new variant breaks the map at compile time. Never duplicate the map in a
+component and a hook — see `frontend/src/components/ReviewQueue/StuckInspectorModal.tsx`
+and `frontend/src/hooks/useStuckNotifications.ts` (SPRINT-013 divergence) for the
+anti-pattern.
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with
