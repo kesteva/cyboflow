@@ -10,7 +10,7 @@ interface VersionInfo {
   releaseNotes?: string;
   publishedAt?: string;
   workingDirectory?: string;
-  crystalDirectory?: string;
+  cyboflowDirectory?: string;
   buildDate?: string;
   gitCommit?: string;
   buildTimestamp?: number;
@@ -44,7 +44,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           latest: result.data.current,
           hasUpdate: false,
           workingDirectory: result.data.workingDirectory,
-          crystalDirectory: result.data.crystalDirectory,
+          cyboflowDirectory: result.data.cyboflowDirectory,
           buildDate: result.data.buildDate,
           gitCommit: result.data.gitCommit,
           buildTimestamp: result.data.buildTimestamp,
@@ -162,13 +162,13 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               </span>
             </div>
 
-            {versionInfo?.crystalDirectory && (
+            {versionInfo?.cyboflowDirectory && (
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium text-text-secondary">
                   Data Directory
                 </span>
-                <span className="text-sm text-text-primary font-mono truncate max-w-[200px]" title={versionInfo.crystalDirectory}>
-                  {versionInfo.crystalDirectory.replace(/^\/Users\/[^/]+/, '~')}
+                <span className="text-sm text-text-primary font-mono truncate max-w-[200px]" title={versionInfo.cyboflowDirectory}>
+                  {versionInfo.cyboflowDirectory.replace(/^\/Users\/[^/]+/, '~')}
                 </span>
               </div>
             )}
