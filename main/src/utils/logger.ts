@@ -1,7 +1,7 @@
 import type { ConfigManager } from '../services/configManager';
 import * as fs from 'fs';
 import * as path from 'path';
-import { getCrystalSubdirectory } from './crystalDirectory';
+import { getCyboflowSubdirectory } from './cyboflowDirectory';
 import { formatForDatabase } from './timestampUtils';
 
 // Capture the ORIGINAL console methods immediately when this module loads
@@ -28,7 +28,7 @@ export class Logger {
 
   constructor(private configManager: ConfigManager) {
     // Use the centralized Crystal directory
-    this.logDir = getCrystalSubdirectory('logs');
+    this.logDir = getCyboflowSubdirectory('logs');
     
     this.currentLogFile = this.getCurrentLogFileName();
     this.initializeLogger();

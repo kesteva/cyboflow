@@ -16,7 +16,7 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { AnalyticsManager } from './services/analyticsManager';
 import { initializeCommitManager } from './services/commitManager';
-import { setCrystalDirectory } from './utils/crystalDirectory';
+import { setCyboflowDirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { setupAutoUpdater } from './autoUpdater';
@@ -119,14 +119,14 @@ for (let i = 0; i < args.length; i++) {
   if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
     const flagName = arg.startsWith('--cyboflow-dir=') ? '--cyboflow-dir=' : '--crystal-dir=';
     const dir = arg.substring(flagName.length);
-    setCrystalDirectory(dir);
+    setCyboflowDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
     if (flagName === '--crystal-dir=') {
       console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
     }
   } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < args.length) {
     const dir = args[i + 1];
-    setCrystalDirectory(dir);
+    setCyboflowDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
     if (arg === '--crystal-dir') {
       console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');

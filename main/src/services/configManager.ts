@@ -3,7 +3,7 @@ import type { AppConfig } from '../types/config';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
-import { getCrystalDirectory } from '../utils/crystalDirectory';
+import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
 
 export class ConfigManager extends EventEmitter {
@@ -13,7 +13,7 @@ export class ConfigManager extends EventEmitter {
 
   constructor(defaultGitPath?: string) {
     super();
-    this.configDir = getCrystalDirectory();
+    this.configDir = getCyboflowDirectory();
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = {
       gitRepoPath: defaultGitPath || os.homedir(),
