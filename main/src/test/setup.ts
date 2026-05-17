@@ -5,7 +5,7 @@ import { vi } from 'vitest';
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => '/mock/path'),
-    getName: vi.fn(() => 'Crystal'),
+    getName: vi.fn(() => 'Cyboflow'),
     getVersion: vi.fn(() => '0.1.0'),
   },
   ipcMain: {

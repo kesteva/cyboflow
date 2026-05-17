@@ -543,7 +543,7 @@ export class TaskQueue {
       const worktreeNameExists = db.checkSessionNameExists(uniqueWorktreeName);
 
       // Check if worktree directory exists on filesystem
-      // This handles cases where a worktree was created outside of Crystal
+      // This handles cases where a worktree was created outside of Cyboflow
       let worktreePathExists = false;
       try {
         if (project) {

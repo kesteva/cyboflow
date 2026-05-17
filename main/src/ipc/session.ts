@@ -1560,7 +1560,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         }
       }
 
-      // Create images directory in CRYSTAL_DIR/artifacts/{sessionId}
+      // Create images directory in CYBOFLOW_DIR/artifacts/{sessionId}
       const imagesDir = getCyboflowSubdirectory('artifacts', sessionId);
       if (!existsSync(imagesDir)) {
         await fs.mkdir(imagesDir, { recursive: true });
@@ -1609,7 +1609,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         }
       }
 
-      // Create text directory in CRYSTAL_DIR/artifacts/{sessionId}
+      // Create text directory in CYBOFLOW_DIR/artifacts/{sessionId}
       const textDir = getCyboflowSubdirectory('artifacts', sessionId);
       if (!existsSync(textDir)) {
         await fs.mkdir(textDir, { recursive: true });

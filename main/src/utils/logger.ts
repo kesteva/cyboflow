@@ -27,7 +27,7 @@ export class Logger {
   private isInErrorHandler = false; // Prevent recursion in error handling
 
   constructor(private configManager: ConfigManager) {
-    // Use the centralized Crystal directory
+    // Use the centralized Cyboflow directory
     this.logDir = getCyboflowSubdirectory('logs');
     
     this.currentLogFile = this.getCurrentLogFileName();

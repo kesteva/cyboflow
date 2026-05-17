@@ -57,7 +57,7 @@ interface CliSpawnedEvent {
 }
 
 /**
- * Abstract base class for managing CLI tool processes in Crystal
+ * Abstract base class for managing CLI tool processes in Cyboflow
  * Provides common functionality for spawning, managing, and communicating with CLI tools
  */
 export abstract class AbstractCliManager extends EventEmitter {
@@ -516,7 +516,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       '',
       `If ${this.getCliToolName()} is installed but not in your PATH:`,
       `- Add the ${this.getCliToolName()} installation directory to your PATH environment variable`,
-      '- Or set a custom executable path in Crystal Settings',
+      '- Or set a custom executable path in Cyboflow Settings',
       '',
       `Enhanced PATH searched: ${getShellPath()}`,
       `Attempted command: ${this.getCliToolName()} --version`

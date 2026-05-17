@@ -5,10 +5,10 @@
  * `main/src/orchestrator/approvalRouter.ts` and the canonical wire types live
  * in `shared/types/approval.ts`.
  *
- * The `PermissionRequest` / `PermissionResponse` interfaces below are Crystal-
+ * The `PermissionRequest` / `PermissionResponse` interfaces below are Cyboflow-
  * era types and diverge from the canonical substrate-portable contract in
  * `shared/types/approval.ts` — notably `PermissionRequest.sessionId` is the
- * Crystal-era equivalent of `ApprovalRequest.runId`. They are intentionally
+ * Cyboflow-era equivalent of `ApprovalRequest.runId`. They are intentionally
  * NOT aligned here; this file's death (TASK-579) is the alignment.
  */
 import { EventEmitter } from 'events';
