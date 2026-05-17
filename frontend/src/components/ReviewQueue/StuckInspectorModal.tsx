@@ -146,9 +146,9 @@ export const StuckInspectorModal: React.FC<StuckInspectorModalProps> = ({
           <div className="space-y-6">
             {/* Section 1: Detected reason */}
             <section>
-              <h2 className="text-sm font-semibold text-text-primary mb-2">
+              <h3 className="text-sm font-semibold text-text-primary mb-2">
                 Detected reason
-              </h2>
+              </h3>
               <p className="text-sm text-text-secondary">
                 {stuckReasonLabel(data.stuckReason)}
               </p>
@@ -161,9 +161,9 @@ export const StuckInspectorModal: React.FC<StuckInspectorModalProps> = ({
 
             {/* Section 2: Pending approval */}
             <section>
-              <h2 className="text-sm font-semibold text-text-primary mb-2">
+              <h3 className="text-sm font-semibold text-text-primary mb-2">
                 Pending approval
-              </h2>
+              </h3>
               {data.pendingApproval === null ? (
                 <p className="text-sm text-text-muted">No pending approval found.</p>
               ) : (
@@ -186,9 +186,9 @@ export const StuckInspectorModal: React.FC<StuckInspectorModalProps> = ({
 
             {/* Section 3: Recent events */}
             <section>
-              <h2 className="text-sm font-semibold text-text-primary mb-2">
+              <h3 className="text-sm font-semibold text-text-primary mb-2">
                 Recent events
-              </h2>
+              </h3>
               {data.recentEvents.length === 0 ? (
                 <p className="text-sm text-text-muted">No events recorded.</p>
               ) : (
