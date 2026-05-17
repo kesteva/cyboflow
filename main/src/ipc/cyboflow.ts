@@ -19,7 +19,8 @@ import type { AppServices } from './types';
 import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
 import { RunLauncher } from '../orchestrator/runLauncher';
 import type { LoggerLike } from '../orchestrator/types';
-import type { OrchestratorHealth, McpServerHealth } from '../orchestrator/health';
+import type { OrchestratorHealth } from '../orchestrator/health';
+import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
 // Module-level lazy singletons (reset on each hot-reload in dev; fine for prod)

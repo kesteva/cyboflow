@@ -12,6 +12,7 @@
  *   cyboflow:approveRun     — approve / deny a day-3 gate approval request
  */
 import type { WorkflowRow } from '../../../shared/types/workflows';
+import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -110,6 +111,18 @@ export function subscribeToStreamEvents({
 }
 
 /**
+ * Return a point-in-time snapshot of the MCP server's health.
+ *
+ * Routes through the generic invoke() bridge until the tRPC ipcLink lands
+ * (orchestrator-and-trpc-router epic), at which point swap to
+ * `trpc.cyboflow.health.mcpServer.query()`.
+ */
+export async function getMcpHealth(): Promise<McpServerHealth> {
+  const electron = requireElectron();
+  return electron.invoke('cyboflow:mcp-health') as Promise<McpServerHealth>;
+}
+
+/**
  * Approve or deny a day-3 gate approval request.
  *
  * NOTE: The main-process handler is currently a NOT_IMPLEMENTED stub.
@@ -147,4 +160,5 @@ export const cyboflowApi = {
   startRun,
   subscribeToStreamEvents,
   approveRun,
+  getMcpHealth,
 };
