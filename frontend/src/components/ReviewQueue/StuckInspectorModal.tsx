@@ -15,7 +15,7 @@
 import React, { useState } from 'react';
 import { Modal, ModalHeader, ModalBody } from '../ui/Modal';
 import { trpc } from '../../utils/trpcClient';
-import type { RawEvent, PendingApproval, StuckInspectionResult } from '../../../../shared/types/stuckInspection';
+import type { StuckInspectionResult } from '../../../../shared/types/stuckInspection';
 
 // ---------------------------------------------------------------------------
 // Stuck-reason human-readable mapping
