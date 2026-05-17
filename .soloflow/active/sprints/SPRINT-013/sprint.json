@@ -7,8 +7,9 @@
   },
   "tasks": {
     "TASK-554": {
-      "status": "in_progress",
-      "started": "2026-05-17T17:04:30.575Z"
+      "status": "human_needed",
+      "started": "2026-05-17T17:04:30.575Z",
+      "verdict_at": "2026-05-17T17:21:43.298Z"
     },
     "TASK-555": {
       "status": "blocked",
