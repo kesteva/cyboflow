@@ -1,8 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useReviewQueueStore, useReviewQueueView } from '../stores/reviewQueueStore';
 import { PendingApprovalCard } from './PendingApprovalCard';
 import { useReviewQueueKeyboard } from '../hooks/useReviewQueueKeyboard';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
+import OnboardingCard from './OnboardingCard';
 
 function itemId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.id : item.items[0].id;
@@ -14,9 +15,42 @@ export default function ReviewQueueView() {
   const allItems = [...blocking, ...normal];
   const { focusedIndex } = useReviewQueueKeyboard(allItems);
 
+  // One-shot: dismiss the onboarding card on the user's first approve/reject
+  // keyboard action (y or n).  Uses a ref so the effect closure doesn't need
+  // to re-register on every render, and the guard prevents double-writes.
+  const onboardingDismissedRef = useRef(false);
+
   useEffect(() => {
     useReviewQueueStore.getState().init();
   }, []);
+
+  // Register a keydown listener for y/n that calls dismissOnboarding once.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key !== 'y' && event.key !== 'n') return;
+      if (onboardingDismissedRef.current) return;
+
+      // Guard: only fire if there's something in the queue to act on.
+      if (allItems.length === 0) return;
+
+      const target = event.target;
+      if (target instanceof HTMLInputElement) return;
+      if (target instanceof HTMLTextAreaElement) return;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || target.contentEditable === 'true')
+      ) return;
+
+      onboardingDismissedRef.current = true;
+      void window.electron?.invoke('preferences:set', 'cyboflow_onboarding_dismissed', 'true');
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [allItems.length]);
 
   // Scroll the focused card into view whenever focusedIndex changes.
   useEffect(() => {
@@ -36,6 +70,7 @@ export default function ReviewQueueView() {
         <h2 className="text-sm font-semibold text-text-primary">Review Queue</h2>
         <span className="text-xs text-text-muted">{totalCount} pending</span>
       </div>
+      <OnboardingCard />
       {totalCount === 0 ? (
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
           No pending approvals
