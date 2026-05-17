@@ -274,6 +274,16 @@ Three commitments to lock before writing application code. They cost roughly one
 
 ---
 
+## 7.5 Trust Boundaries
+
+**Local Unix socket = trusted channel.** The cyboflow MCP server communicates with the orchestrator exclusively over a Unix domain socket at `CYBOFLOW_ORCH_SOCKET`. There is no authentication on this channel — it is process-local and accessible only to processes that know the socket path (which is injected by the orchestrator at session spawn time). Do not expose this socket over the network or to untrusted processes.
+
+**Cross-run read scope is intentional.** `cyboflow_list_pending_approvals` returns approvals across *all* workflow runs (no `WHERE run_id = ?` filter). This is the design: the review queue is workspace-scoped, aggregating every pending approval regardless of which run produced it. Narrowing this SELECT to the caller's own `run_id` would break the day-3 review-queue UX. Similarly, `cyboflow_get_run` accepts any `targetRunId` — a running agent can inspect the status of sibling runs. Do NOT add a run-scoped WHERE clause to either handler without revisiting this product decision.
+
+**Checkpoint run_id.** `cyboflow_submit_checkpoint` writes `run_id` from the caller's `CYBOFLOW_RUN_ID` env var. The singleton orchestrator server uses the sentinel value `orchestrator`, which collides with the `raw_events.run_id` foreign key into `workflow_runs(id)`. See B1 (FK-violation backlog task) for the resolved handling strategy; today, the test suite disables FK enforcement to mask this — production checkpoint calls from the singleton would crash.
+
+---
+
 ## 8. What's Explicitly Out of Scope for v1
 
 Auto-update via `electron-updater`. Codex / OpenAI integration. Linux or Windows builds (macOS-only). AI-driven worktree naming. Crystal's rebase/squash UI. Multi-panel-per-session UI surfaces. Cross-machine sync. Cloud agents. Custom DAG editor. Workflow versioning. Multi-user. Authentication. SSO. Team review queues. Edit-plan and request-changes flows (Approve/Reject only). Cost estimation from historical data (static estimates fine, or omitted). Streaming partial JSON for tool inputs (parse on `content_block_stop` only).
