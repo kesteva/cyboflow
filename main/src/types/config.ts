@@ -98,7 +98,7 @@ export interface UpdateConfigRequest {
       checkpointPrefix?: string;
     };
   };
-  disableCyboflowFooter?: boolean;
+  enableCyboflowFooter?: boolean;
   // PostHog analytics settings
   analytics?: {
     enabled: boolean;
