@@ -346,6 +346,101 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   });
 });
 
+describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('registers a handler for the channel', async () => {
+    const { registerCyboflowHandlers } = await import('../cyboflow');
+    const db = createTestDb();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+    expect(handlers.has('cyboflow:mcp-health')).toBe(true);
+  });
+
+  it('returns { status: starting, restartAttempts: 0 } when health singleton has not been injected', async () => {
+    const { registerCyboflowHandlers } = await import('../cyboflow');
+    const db = createTestDb();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    // No setCyboflowHealth() call — singleton is null
+    const result = await invoke(handlers, 'cyboflow:mcp-health', undefined) as {
+      status: string;
+      restartAttempts: number;
+      lastError?: string;
+    };
+
+    expect(result.status).toBe('starting');
+    expect(result.restartAttempts).toBe(0);
+    expect(result.lastError).toBeUndefined();
+  });
+
+  it('delegates to OrchestratorHealth.getMcpServerStatus() after setCyboflowHealth()', async () => {
+    const { registerCyboflowHandlers, setCyboflowHealth } = await import('../cyboflow');
+    const db = createTestDb();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    // Inject a mock OrchestratorHealth
+    const mockStatus = { status: 'running' as const, restartAttempts: 1, lastError: undefined };
+    const mockHealth = {
+      getMcpServerStatus: vi.fn(() => mockStatus),
+      setMcpError: vi.fn(),
+    };
+    setCyboflowHealth(mockHealth as unknown as Parameters<typeof setCyboflowHealth>[0]);
+
+    const result = await invoke(handlers, 'cyboflow:mcp-health', undefined) as {
+      status: string;
+      restartAttempts: number;
+    };
+
+    expect(result.status).toBe('running');
+    expect(result.restartAttempts).toBe(1);
+    expect(mockHealth.getMcpServerStatus).toHaveBeenCalledOnce();
+  });
+
+  it('returns lastError from the health snapshot when the MCP server has failed', async () => {
+    const { registerCyboflowHandlers, setCyboflowHealth } = await import('../cyboflow');
+    const db = createTestDb();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const mockHealth = {
+      getMcpServerStatus: vi.fn(() => ({
+        status: 'failed' as const,
+        restartAttempts: 2,
+        lastError: 'subprocess exited with code 1',
+      })),
+      setMcpError: vi.fn(),
+    };
+    setCyboflowHealth(mockHealth as unknown as Parameters<typeof setCyboflowHealth>[0]);
+
+    const result = await invoke(handlers, 'cyboflow:mcp-health', undefined) as {
+      status: string;
+      restartAttempts: number;
+      lastError?: string;
+    };
+
+    expect(result.status).toBe('failed');
+    expect(result.lastError).toBe('subprocess exited with code 1');
+    expect(result.restartAttempts).toBe(2);
+  });
+});
+
 describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
   beforeEach(() => {
     vi.resetModules();

@@ -31,7 +31,7 @@ interface ElectronAPI {
   // Generic invoke method for direct IPC calls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
-  
+
   // Basic app info
   getAppVersion: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
