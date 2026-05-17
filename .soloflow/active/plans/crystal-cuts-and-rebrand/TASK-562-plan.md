@@ -1,8 +1,8 @@
 ---
 id: TASK-562
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - main/src/utils/cyboflowDirectory.ts
   - main/src/utils/crystalDirectory.ts
@@ -21,20 +21,20 @@ files_readonly:
   - .soloflow/active/plans/crystal-cuts-and-rebrand/EPIC-crystal-cuts-and-rebrand.md
   - .soloflow/archive/done/crystal-cuts-and-rebrand/TASK-558-done.md
 acceptance_criteria:
-  - criterion: "Canonical module file is main/src/utils/cyboflowDirectory.ts and exports getCyboflowDirectory / getCyboflowSubdirectory / setCyboflowDirectory"
+  - criterion: Canonical module file is main/src/utils/cyboflowDirectory.ts and exports getCyboflowDirectory / getCyboflowSubdirectory / setCyboflowDirectory
     verification: "test -f main/src/utils/cyboflowDirectory.ts && grep -nE 'export function (getCyboflowDirectory|getCyboflowSubdirectory|setCyboflowDirectory)' main/src/utils/cyboflowDirectory.ts returns exactly 3 matches"
   - criterion: "Legacy module main/src/utils/crystalDirectory.ts remains as a thin re-export shim with deprecation comment, exporting the legacy names AS aliases of the new canonical names"
     verification: "test -f main/src/utils/crystalDirectory.ts && grep -n '@deprecated' main/src/utils/crystalDirectory.ts returns at least 1 match AND grep -nE 'export (\\{|const|function) .*getCrystalDirectory|getCrystalSubdirectory|setCrystalDirectory' main/src/utils/crystalDirectory.ts returns at least 3 matches AND grep -nE 'cyboflowDirectory' main/src/utils/crystalDirectory.ts returns at least 1 match (proves it re-exports from the new module)"
-  - criterion: "All in-tree call sites import from the new module path (./cyboflowDirectory) and call the new function names"
+  - criterion: All in-tree call sites import from the new module path (./cyboflowDirectory) and call the new function names
     verification: "grep -rnE \"from ['\\\"](.+/)?crystalDirectory['\\\"]\" main/src/ --include='*.ts' | grep -v 'main/src/utils/crystalDirectory' returns zero lines AND grep -rnE 'getCrystalDirectory|getCrystalSubdirectory|setCrystalDirectory' main/src/ --include='*.ts' | grep -v 'main/src/utils/crystalDirectory' returns zero lines"
   - criterion: "ipc/updater.ts response field is renamed: `crystalDirectory:` → `cyboflowDirectory:` in the IPC payload"
     verification: "grep -n 'crystalDirectory:' main/src/ipc/updater.ts returns 0 matches AND grep -n 'cyboflowDirectory:' main/src/ipc/updater.ts returns at least 1 match"
-  - criterion: "New unit test file main/src/utils/cyboflowDirectory.test.ts mirrors the 5 existing crystalDirectory test cases with renamed function names"
+  - criterion: New unit test file main/src/utils/cyboflowDirectory.test.ts mirrors the 5 existing crystalDirectory test cases with renamed function names
     verification: "test -f main/src/utils/cyboflowDirectory.test.ts && grep -nE 'getCyboflowDirectory\\(\\)' main/src/utils/cyboflowDirectory.test.ts returns at least 4 matches"
-  - criterion: "Old test file main/src/utils/crystalDirectory.test.ts is deleted (or rewritten to only assert the deprecation shim re-exports work)"
+  - criterion: Old test file main/src/utils/crystalDirectory.test.ts is deleted (or rewritten to only assert the deprecation shim re-exports work)
     verification: "test ! -e main/src/utils/crystalDirectory.test.ts OR (grep -n '@deprecated' main/src/utils/crystalDirectory.test.ts returns 1 match AND the file is < 30 lines)"
-  - criterion: "Main typecheck and main test suite pass"
-    verification: "pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0"
+  - criterion: Main typecheck and main test suite pass
+    verification: pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0
   - criterion: "MCP server name and socket path renames are explicitly NOT in this task's diff (they are owned by TASK-301 in approval-router-and-permission-fix epic)"
     verification: "grep -rn 'crystal-permissions' main/src/services/mcpPermissionServer.ts main/src/services/mcpPermissionBridge.ts returns at least 2 matches (unchanged from baseline, proving this task did not touch them) AND TASK-562's diff does not modify mcpPermissionServer.ts or mcpPermissionBridge.ts"
 depends_on: []
@@ -44,7 +44,7 @@ test_strategy:
   needed: true
   justification: "The crystalDirectory module is the data-directory abstraction used by 8 production files (database, configManager, permissionIpcServer, claudeCodeManager, logger, index.ts, ipc/updater.ts, ipc/session.ts). It already has a vitest spec (crystalDirectory.test.ts) with 5 cases — moving the module without an equivalent test file at the new path would silently regress coverage. The shim file also needs at least one test to assert the re-exports work."
   targets:
-    - behavior: "getCyboflowDirectory() returns ~/.cyboflow by default; respects CYBOFLOW_DIR env var; respects programmatic override; getCyboflowSubdirectory appends subpaths"
+    - behavior: getCyboflowDirectory() returns ~/.cyboflow by default; respects CYBOFLOW_DIR env var; respects programmatic override; getCyboflowSubdirectory appends subpaths
       test_file: main/src/utils/cyboflowDirectory.test.ts
       type: unit
     - behavior: "Legacy crystalDirectory.ts re-exports resolve to the same function as the new module (import { getCrystalDirectory } from './crystalDirectory' returns the same value as getCyboflowDirectory)"
@@ -56,7 +56,6 @@ prerequisites:
     description: "Confirms baseline state: TASK-301 (which renames MCP server name to cyboflow-permissions) has not yet shipped. This task explicitly does NOT rename MCP server names; if TASK-301 lands first, no harm — but the executor should be aware which task touched what."
     blocking: false
 ---
-
 # Rename crystalDirectory module to cyboflowDirectory with backward-compat alias shim
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-560
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - frontend/src/App.tsx
   - frontend/src/components/UpdateDialog.tsx
@@ -32,14 +32,14 @@ acceptance_criteria:
     verification: "grep -n 'Crystal v\\${' frontend/src/App.tsx returns zero matches AND grep -n 'A new version of Crystal' frontend/src/App.tsx returns zero matches AND grep -n 'Cyboflow v\\${' frontend/src/App.tsx returns 1 match"
   - criterion: "No bare-word 'Crystal' remains in frontend/src/ except the AboutDialog attribution line"
     verification: "grep -rn --include='*.ts' --include='*.tsx' --include='*.css' -E '\\bCrystal\\b' frontend/src/ | grep -v 'AboutDialog.tsx:332' returns zero lines"
-  - criterion: "AboutDialog attribution line is preserved verbatim"
+  - criterion: AboutDialog attribution line is preserved verbatim
     verification: "grep -n 'forked from Crystal (by Stravu)' frontend/src/components/AboutDialog.tsx returns exactly 1 match on line 332"
-  - criterion: "Settings.tsx Stravu utm_source parameters are flagged in the plan body as ESCALATE TO HUMAN (no code change required this task)"
+  - criterion: Settings.tsx Stravu utm_source parameters are flagged in the plan body as ESCALATE TO HUMAN (no code change required this task)
     verification: "grep -n 'utm_source=Crystal' frontend/src/components/Settings.tsx returns 1 match on line 643 (intentionally preserved pending human decision; see plan body)"
-  - criterion: "Frontend typecheck passes"
-    verification: "pnpm --filter frontend typecheck exits with status 0"
-  - criterion: "Frontend lint passes"
-    verification: "pnpm --filter frontend lint exits with status 0"
+  - criterion: Frontend typecheck passes
+    verification: pnpm --filter frontend typecheck exits with status 0
+  - criterion: Frontend lint passes
+    verification: pnpm --filter frontend lint exits with status 0
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
@@ -47,7 +47,6 @@ test_strategy:
   needed: false
   justification: "Pure user-facing string sweep. The visible-behavior surface is asserted by the AC grep (zero residual 'Crystal' bare words outside the AboutDialog allowlist). No new sibling tests exist under frontend/src/components/ to keep green: `find frontend/src/components -name '*.test.*' -o -name '*.spec.*'` returns zero matches as of 2026-05-12. The migrateLocalStorageKey vitest spec (B4) is unrelated. Typecheck and lint are sufficient runtime gates."
 ---
-
 # Bare-word "Crystal" copy sweep across frontend user-facing strings
 
 ## Objective

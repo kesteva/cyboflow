@@ -1,8 +1,8 @@
 ---
 id: TASK-565
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - main/src/utils/commitFooter.ts
   - main/src/utils/shellEscape.ts
@@ -13,37 +13,37 @@ files_readonly:
   - main/src/types/config.ts
   - .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-561-plan.md
 acceptance_criteria:
-  - criterion: "New helper module main/src/utils/commitFooter.ts exists and exports a buildCommitFooter function"
+  - criterion: New helper module main/src/utils/commitFooter.ts exists and exports a buildCommitFooter function
     verification: "test -f main/src/utils/commitFooter.ts && grep -nE 'export function buildCommitFooter' main/src/utils/commitFooter.ts returns exactly 1 match"
-  - criterion: "The helper function takes a boolean parameter named `enableCyboflowFooter` (matches the renamed config field from TASK-561)"
+  - criterion: The helper function takes a boolean parameter named `enableCyboflowFooter` (matches the renamed config field from TASK-561)
     verification: "grep -nE 'function buildCommitFooter\\(enableCyboflowFooter: boolean' main/src/utils/commitFooter.ts returns at least 1 match"
   - criterion: "The literal commit-footer string `💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)` appears EXACTLY ONCE in the entire main/src tree (only in commitFooter.ts)"
     verification: "grep -rn --include='*.ts' '💎 Built using \\[Cyboflow\\]' main/src/ returns exactly 1 match (in main/src/utils/commitFooter.ts)"
   - criterion: "The 4 prior duplicated footer blocks are removed from shellEscape.ts, ipc/file.ts (×2 — initial commit + retry branches), and worktreeManager.ts"
     verification: "grep -rn --include='*.ts' -E '💎 Built using.*Co-Authored-By: Cyboflow' main/src/utils/shellEscape.ts main/src/ipc/file.ts main/src/services/worktreeManager.ts returns 0 matches"
-  - criterion: "shellEscape.ts buildGitCommitCommand calls buildCommitFooter to construct the full message"
+  - criterion: shellEscape.ts buildGitCommitCommand calls buildCommitFooter to construct the full message
     verification: "grep -n 'buildCommitFooter' main/src/utils/shellEscape.ts returns at least 1 match"
-  - criterion: "ipc/file.ts uses buildCommitFooter in both the initial and retry branches; main commit-message construction is extracted to a shared local helper buildCommitMessage if both branches build the message identically"
+  - criterion: ipc/file.ts uses buildCommitFooter in both the initial and retry branches; main commit-message construction is extracted to a shared local helper buildCommitMessage if both branches build the message identically
     verification: "grep -n 'buildCommitFooter' main/src/ipc/file.ts returns at least 2 matches (one per branch) OR if a local buildCommitMessage helper is introduced, grep -nE 'buildCommitMessage|buildCommitFooter' main/src/ipc/file.ts returns at least 3 matches (1 helper def + 2 callers)"
-  - criterion: "worktreeManager.ts uses buildCommitFooter to construct the squashed-commit message"
+  - criterion: worktreeManager.ts uses buildCommitFooter to construct the squashed-commit message
     verification: "grep -n 'buildCommitFooter' main/src/services/worktreeManager.ts returns at least 1 match"
-  - criterion: "Main typecheck and main vitest both pass"
-    verification: "pnpm --filter main typecheck exits 0 AND pnpm --filter main test exits 0"
-depends_on: [TASK-561]
+  - criterion: Main typecheck and main vitest both pass
+    verification: pnpm --filter main typecheck exits 0 AND pnpm --filter main test exits 0
+depends_on:
+  - TASK-561
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: true
   justification: "buildCommitFooter is a small pure function but lives on the path of every commit Cyboflow creates. A silent regression (wrong attribution URL, missing newline, swallowed `enableCyboflowFooter=false` case) would silently rebrand or duplicate footers on every user commit. Two cases give us full branch coverage."
   targets:
-    - behavior: "buildCommitFooter(true) returns the canonical Cyboflow footer string with the exact format used by existing commits"
+    - behavior: buildCommitFooter(true) returns the canonical Cyboflow footer string with the exact format used by existing commits
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "buildCommitFooter(false) returns an empty string (or whatever the contract says — see Implementation Step 2)"
+    - behavior: buildCommitFooter(false) returns an empty string (or whatever the contract says — see Implementation Step 2)
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
 ---
-
 # Extract buildCommitFooter helper to eliminate 4 hardcoded Cyboflow footer string literals
 
 ## Objective
