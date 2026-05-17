@@ -148,6 +148,15 @@ Two valid categories:
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   inactive surfaces (both categories).
 
+### IPC preference-backed component visibility
+
+When a component's visibility depends on an async IPC preference (`preferences:get`),
+track the read result as `boolean | null` in the parent and render nothing while it is
+`null`. Do NOT initialise the child's own state to "hidden by default" and rely on an
+async effect to flip it — that produces the correct steady state but a one-frame flash
+on every page reload for returning users. Consumers: `OnboardingCard`, `Welcome`,
+`DiscordPopup`, `AnalyticsConsentDialog` (audit via `grep -rln 'preferences:get' frontend/src`).
+
 ## Build & Packaging
 
 ### macOS signing posture (`scripts/configure-build.js`)
