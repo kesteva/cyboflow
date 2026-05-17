@@ -13,7 +13,7 @@
  * TASK-502 — stuck-detection-and-observability epic.
  */
 import { randomUUID } from 'node:crypto';
-import type { DatabaseLike } from './types';
+import type { DatabaseLike, LoggerLike } from './types';
 import type { ApprovalRouter } from './approvalRouter';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -34,6 +34,13 @@ export interface CancelAndRestartDeps {
    * preserving the standalone-typecheck invariant.
    */
   claudeManagerStop: (sessionId: string) => Promise<void>;
+  /**
+   * Optional structured logger.  When provided, errors from `claudeManagerStop`
+   * are logged as `[cancelAndRestart]` entries before the handler proceeds to
+   * the DB writes (the run is conceptually canceled regardless of PTY teardown
+   * success).  When omitted, errors are silently swallowed.
+   */
+  logger?: LoggerLike;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +94,7 @@ export async function cancelAndRestartHandler(
   runId: string,
   deps: CancelAndRestartDeps,
 ): Promise<CancelAndRestartResult> {
-  const { db, approvalRouter, runQueues, claudeManagerStop } = deps;
+  const { db, approvalRouter, runQueues, claudeManagerStop, logger } = deps;
 
   // Execute everything inside the per-run PQueue to serialize with any
   // concurrent status changes for this run.
@@ -115,32 +122,59 @@ export async function cancelAndRestartHandler(
     approvalRouter.clearPendingForRun(runId);
 
     // Step 3: Kill the Claude SDK run.
-    await claudeManagerStop(runId);
+    // Wrapped in try/catch so a rejection here does NOT leave the run stuck
+    // forever — the DB writes in steps 4+5 still apply.  The run is
+    // conceptually canceled from the user's perspective regardless of whether
+    // PTY teardown succeeded.
+    try {
+      await claudeManagerStop(runId);
+    } catch (err: unknown) {
+      logger?.error('[cancelAndRestart] claudeManagerStop rejected — proceeding to DB writes', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
-    // Step 4: Mark the old run as canceled.
-    // Status guard: only update runs that are in a non-terminal state.
-    db.prepare(
-      `UPDATE workflow_runs
-         SET status = 'canceled', ended_at = ?, updated_at = ?
-       WHERE id = ? AND status NOT IN ('canceled', 'failed', 'completed')`,
-    ).run(now, now, runId);
-
-    // Step 5: Insert a new run row, reusing the same workflow/project/worktree.
-    // Worktree is PRESERVED — no worktreeManager.remove call.
+    // Steps 4+5: Wrapped in a single db.transaction so the UPDATE and INSERT
+    // are atomic.  If the UPDATE finds zero rows (run was concurrently moved to
+    // a terminal status between the guard above and the write), throw inside the
+    // transaction so the INSERT does not fire and the caller learns the row was
+    // already terminal.
     const newRunId = randomUUID();
-    db.prepare(
-      `INSERT INTO workflow_runs
-         (id, workflow_id, project_id, worktree_path, policy_json, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
-    ).run(
-      newRunId,
-      row.workflow_id,
-      row.project_id,
-      row.worktree_path,
-      row.policy_json,
-      now,
-      now,
-    );
+    const cancelAndInsertTx = db.transaction(() => {
+      // Step 4: Mark the old run as canceled.
+      const updateResult = db.prepare(
+        `UPDATE workflow_runs
+           SET status = 'canceled', ended_at = ?, updated_at = ?
+         WHERE id = ? AND status NOT IN ('canceled', 'failed', 'completed')`,
+      ).run(now, now, runId) as { changes: number };
+
+      if (updateResult.changes === 0) {
+        throw new Error(
+          `cancelAndRestart: run ${runId} was already in a terminal state when the UPDATE was attempted`,
+        );
+      }
+
+      // Step 5: Insert a new run row, reusing the same workflow/project/worktree.
+      // Worktree is PRESERVED — no worktreeManager.remove call.
+      db.prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, worktree_path, policy_json, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+      ).run(
+        newRunId,
+        row.workflow_id,
+        row.project_id,
+        row.worktree_path,
+        row.policy_json,
+        now,
+        now,
+      );
+
+      return newRunId;
+    });
+
+    cancelAndInsertTx();
 
     // Step 6: Return the new run ID.
     return { newRunId };
