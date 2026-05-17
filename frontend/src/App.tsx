@@ -26,6 +26,8 @@ import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import ReviewQueueView from './components/ReviewQueueView';
+import { StatusBar } from './components/StatusBar';
+import { useMcpHealthStore } from './stores/mcpHealthStore';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -79,7 +81,14 @@ function App() {
   useIPCEvents();
   const { showNotification } = useNotifications();
   useStuckNotifications();
-  
+
+  // Start the MCP health polling subscription on mount.
+  const { subscribeToMcpHealth } = useMcpHealthStore();
+  useEffect(() => {
+    const unsubscribe = subscribeToMcpHealth();
+    return unsubscribe;
+  }, [subscribeToMcpHealth]);
+
   // Load config on app startup
   useEffect(() => {
     fetchConfig();
@@ -347,71 +356,77 @@ function App() {
 
   return (
     <ContextMenuProvider>
-      <div className="h-screen flex overflow-hidden bg-bg-primary">
+      {/* Outer: h-screen flex-col so StatusBar sits below the main row */}
+      <div className="h-screen flex flex-col overflow-hidden bg-bg-primary">
         <MainProcessLogger />
         {/* Draggable title bar area */}
-        <div 
-          className="fixed top-0 left-0 right-0 h-8 z-50 flex items-center justify-end pr-4" 
+        <div
+          className="fixed top-0 left-0 right-0 h-8 z-50 flex items-center justify-end pr-4"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
         </div>
-        <ErrorBoundary fallback={(error) => (
-          <div className="w-[360px] h-full flex items-center justify-center p-4 border-r border-border-primary bg-bg-secondary">
-            <div className="text-center">
-              <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
-              <p className="text-xs text-text-muted">{error.message}</p>
+        {/* Main content row: review queue + sidebar + primary panel */}
+        <div className="flex flex-1 overflow-hidden">
+          <ErrorBoundary fallback={(error) => (
+            <div className="w-[360px] h-full flex items-center justify-center p-4 border-r border-border-primary bg-bg-secondary">
+              <div className="text-center">
+                <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
+                <p className="text-xs text-text-muted">{error.message}</p>
+              </div>
             </div>
-          </div>
-        )}>
-          <ReviewQueueView />
-        </ErrorBoundary>
-        <Sidebar
-          onHelpClick={() => setIsHelpOpen(true)}
-          onAboutClick={() => setIsAboutOpen(true)}
-          onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
-          width={sidebarWidth}
-          onResize={startResize}
-        />
-        {/* Primary content area: CyboflowRoot when a project is active, else SessionView.
-            The "Legacy Crystal view" toggle lets users fall back to the Crystal surface.
-            Deeper UI surgery is deferred to the crystal-cuts-and-rebrand epic. */}
-        {activeProjectId !== null && !useLegacyCrystalView ? (
-          <div className="flex flex-col flex-1 overflow-hidden">
-            <div
-              className="flex justify-end px-4 py-1 border-b border-border-primary"
-              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-            >
-              <button
-                onClick={() => setUseLegacyCrystalView(true)}
-                className="text-xs text-text-secondary hover:text-text-primary"
-                title="Switch back to the legacy Crystal session view"
-              >
-                Legacy Crystal view
-              </button>
-            </div>
-            <div className="flex-1 overflow-hidden">
-              <CyboflowRoot projectId={activeProjectId} />
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-col flex-1 overflow-hidden">
-            {useLegacyCrystalView && (
+          )}>
+            <ReviewQueueView />
+          </ErrorBoundary>
+          <Sidebar
+            onHelpClick={() => setIsHelpOpen(true)}
+            onAboutClick={() => setIsAboutOpen(true)}
+            onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
+            width={sidebarWidth}
+            onResize={startResize}
+          />
+          {/* Primary content area: CyboflowRoot when a project is active, else SessionView.
+              The "Legacy Crystal view" toggle lets users fall back to the Crystal surface.
+              Deeper UI surgery is deferred to the crystal-cuts-and-rebrand epic. */}
+          {activeProjectId !== null && !useLegacyCrystalView ? (
+            <div className="flex flex-col flex-1 overflow-hidden">
               <div
                 className="flex justify-end px-4 py-1 border-b border-border-primary"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
               >
                 <button
-                  onClick={() => setUseLegacyCrystalView(false)}
+                  onClick={() => setUseLegacyCrystalView(true)}
                   className="text-xs text-text-secondary hover:text-text-primary"
-                  title="Switch to the new Cyboflow view"
+                  title="Switch back to the legacy Crystal session view"
                 >
-                  Cyboflow view
+                  Legacy Crystal view
                 </button>
               </div>
-            )}
-            <SessionView />
-          </div>
-        )}
+              <div className="flex-1 overflow-hidden">
+                <CyboflowRoot projectId={activeProjectId} />
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col flex-1 overflow-hidden">
+              {useLegacyCrystalView && (
+                <div
+                  className="flex justify-end px-4 py-1 border-b border-border-primary"
+                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                >
+                  <button
+                    onClick={() => setUseLegacyCrystalView(false)}
+                    className="text-xs text-text-secondary hover:text-text-primary"
+                    title="Switch to the new Cyboflow view"
+                  >
+                    Cyboflow view
+                  </button>
+                </div>
+              )}
+              <SessionView />
+            </div>
+          )}
+        </div>
+        {/* Persistent status bar at the bottom of the app shell */}
+        <StatusBar />
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
         <AnalyticsConsentDialog
           isOpen={isAnalyticsConsentOpen}
