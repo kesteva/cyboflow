@@ -602,7 +602,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 // Wire trpc-electron's IPC bridge so the renderer can use the typed tRPC client.
 // Must be called in the preload script after contextBridge is set up.
-// Crystal's existing contextBridge surfaces above are preserved — this is additive.
+// Cyboflow's existing contextBridge surfaces above are preserved — this is additive.
 exposeElectronTRPC();
 
 // Expose electron event listeners and utilities for permission requests

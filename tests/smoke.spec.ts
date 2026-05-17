@@ -10,7 +10,7 @@ test.describe('Smoke Tests', () => {
     
     // Check that the page has loaded
     const title = await page.title();
-    expect(title).toBe('Crystal');
+    expect(title).toBe('Cyboflow');
     
     // Take a screenshot for debugging
     await page.screenshot({ path: 'test-results/smoke-test.png' });
