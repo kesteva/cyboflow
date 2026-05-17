@@ -226,3 +226,11 @@ _No items._
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
+
+- task: TASK-578
+  type: action_required
+  bucket: actions
+  action: "Re-run /soloflow:sprint with TASK-578 after SPRINT-014 (containing TASK-562) merges to main. TASK-578's prerequisite check evaluates shipped main state, so it cannot ride alongside TASK-562 in the same sprint."
+  blocked_checks: ["prerequisite: Confirms TASK-562 has shipped on the producer side, so the consumer-side rename in AboutDialog will line up with the actual IPC response shape."]
+  level: "ground_truth"
+  severity: "high"
