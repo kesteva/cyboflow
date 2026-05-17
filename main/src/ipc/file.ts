@@ -234,12 +234,12 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         // Stage all changes
         await execAsync('git add -A', { cwd: session.worktreePath });
 
-        // Check if Crystal footer is enabled (default: true)
+        // Check if Cyboflow footer is enabled (default: true)
         const config = configManager.getConfig();
-        const enableCrystalFooter = config?.enableCrystalFooter !== false;
+        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
         // Create the commit with Cyboflow signature if enabled
-        const footer = buildCommitFooter(enableCrystalFooter);
+        const footer = buildCommitFooter(enableCyboflowFooter);
         const commitMessage = footer ? `${request.message}\n\n${footer}` : request.message;
 
         // Use a temporary file to handle commit messages with special characters
@@ -270,11 +270,11 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
           try {
             await execAsync('git add -A', { cwd: session.worktreePath });
             
-            // Check if Crystal footer is enabled (default: true)
+            // Check if Cyboflow footer is enabled (default: true)
             const config = configManager.getConfig();
-            const enableCrystalFooter = config?.enableCrystalFooter !== false;
+            const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
-            const retryFooter = buildCommitFooter(enableCrystalFooter);
+            const retryFooter = buildCommitFooter(enableCyboflowFooter);
             const retryMessage = retryFooter ? `${request.message}\n\n${retryFooter}` : request.message;
 
             // Use a temporary file for retry as well

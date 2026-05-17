@@ -40,7 +40,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
-  const [enableCrystalFooter, setEnableCrystalFooter] = useState(true);
+  const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -76,7 +76,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setDefaultPermissionMode(data.defaultPermissionMode || 'ignore');
       setAutoCheckUpdates(data.autoCheckUpdates !== false); // Default to true
       setDevMode(data.devMode || false);
-      setEnableCrystalFooter(data.enableCrystalFooter !== false); // Default to true
+      setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -137,7 +137,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         defaultPermissionMode,
         autoCheckUpdates,
         devMode,
-        enableCrystalFooter,
+        enableCyboflowFooter,
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
         analytics: {
@@ -349,8 +349,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               >
                 <Checkbox
                   label="Include Cyboflow footer in commits"
-                  checked={enableCrystalFooter}
-                  onChange={(e) => setEnableCrystalFooter(e.target.checked)}
+                  checked={enableCyboflowFooter}
+                  onChange={(e) => setEnableCyboflowFooter(e.target.checked)}
                 />
                 <p className="text-xs text-text-tertiary mt-1">
                   When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.

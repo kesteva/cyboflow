@@ -37,7 +37,7 @@ export interface AppConfig {
     };
   };
   // Cyboflow commit footer setting (enabled by default)
-  enableCrystalFooter?: boolean;
+  enableCyboflowFooter?: boolean;
   // PostHog analytics settings
   analytics?: {
     enabled: boolean;

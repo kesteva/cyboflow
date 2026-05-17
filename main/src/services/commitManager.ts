@@ -97,12 +97,12 @@ export class CommitManager extends EventEmitter {
 
       const fullMessage = prefix + commitMessage;
 
-      // Check if Crystal footer is enabled (default: true)
+      // Check if Cyboflow footer is enabled (default: true)
       const config = this.configManager?.getConfig();
-      const enableCrystalFooter = config?.enableCrystalFooter !== false;
+      const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
-      // Build commit command with Crystal footer if enabled
-      const commitCommand = buildGitCommitCommand(fullMessage, enableCrystalFooter) + ' --no-verify';
+      // Build commit command with Cyboflow footer if enabled
+      const commitCommand = buildGitCommitCommand(fullMessage, enableCyboflowFooter) + ' --no-verify';
       const result = execSync(commitCommand, { cwd: worktreePath, encoding: 'utf8' });
 
       // Extract commit hash from output
@@ -208,8 +208,8 @@ export class CommitManager extends EventEmitter {
         // Commit with final message
         const commitMessage = options.commitMessage || 'Finalized session changes';
         const config = this.configManager?.getConfig();
-        const enableCrystalFooter = config?.enableCrystalFooter !== false;
-        const commitCommand = buildGitCommitCommand(commitMessage, enableCrystalFooter);
+        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
+        const commitCommand = buildGitCommitCommand(commitMessage, enableCyboflowFooter);
         execSync(commitCommand, { cwd: worktreePath });
 
         const commitHash = execSync('git log -1 --format=%H', {

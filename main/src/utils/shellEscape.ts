@@ -21,12 +21,12 @@ export function escapeShellArg(arg: string): string {
 /**
  * Build a safe git commit command with proper escaping
  * @param message The commit message
- * @param enableCrystalFooter If true (default), add the Cyboflow footer
+ * @param enableCyboflowFooter If true (default), add the Cyboflow footer
  * @returns The safe commit command
  */
-export function buildGitCommitCommand(message: string, enableCrystalFooter: boolean = true): string {
+export function buildGitCommitCommand(message: string, enableCyboflowFooter: boolean = true): string {
   // Create the full commit message with signature
-  const footer = buildCommitFooter(enableCrystalFooter);
+  const footer = buildCommitFooter(enableCyboflowFooter);
   const fullMessage = footer ? `${message}\n\n${footer}` : message;
 
   const escapedMessage = escapeShellArg(fullMessage);
