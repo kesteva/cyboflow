@@ -1,8 +1,8 @@
 ---
 id: TASK-576
 idea: SPRINT-006-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/test/setup.ts
   - main/src/services/cyboflowPermissionBridge.ts
@@ -41,12 +41,12 @@ acceptance_criteria:
     verification: "grep -nE 'Crystal session' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches"
   - criterion: "Stream-parser upstream-attribution comments are preserved verbatim (intentional historical reference, mirrors TASK-560's AboutDialog allowlist)"
     verification: "grep -nE \"Crystal's ClaudeMessageTransformer\\.ts\" shared/types/claudeStream.ts main/src/services/streamParser/schemas.ts main/src/services/streamParser/__fixtures__/README.md main/src/services/streamParser/__tests__/schemas.test.ts returns at least 4 matches"
-  - criterion: "Deprecated --crystal-dir CLI alias in main/src/index.ts is preserved (intentional backward compat)"
+  - criterion: Deprecated --crystal-dir CLI alias in main/src/index.ts is preserved (intentional backward compat)
     verification: "grep -n \"'--crystal-dir'\" main/src/index.ts returns at least 2 matches"
-  - criterion: "Main typecheck and unit tests pass"
-    verification: "pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0"
-  - criterion: "Frontend typecheck and lint pass (no incidental breakage)"
-    verification: "pnpm --filter frontend typecheck exits with status 0 AND pnpm --filter frontend lint exits with status 0"
+  - criterion: Main typecheck and unit tests pass
+    verification: pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0
+  - criterion: Frontend typecheck and lint pass (no incidental breakage)
+    verification: pnpm --filter frontend typecheck exits with status 0 AND pnpm --filter frontend lint exits with status 0
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
@@ -59,7 +59,6 @@ prerequisites:
     description: "Confirms the actual window title is 'Cyboflow' (so the rewritten smoke test will pass)."
     blocking: true
 ---
-
 # Backend Crystal-reference sweep across main/, shared/, scripts/, and tests/
 
 ## Objective

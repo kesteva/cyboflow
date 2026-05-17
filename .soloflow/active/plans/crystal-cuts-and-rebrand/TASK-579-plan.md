@@ -1,9 +1,9 @@
 ---
 id: TASK-579
 idea: SPRINT-006-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/permissionManager.ts
   - main/src/services/mcpPermissionServer.ts
@@ -18,24 +18,24 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-006-proposal.md
   - .soloflow/active/plans/crystal-cuts-and-rebrand/EPIC-crystal-cuts-and-rebrand.md
 acceptance_criteria:
-  - criterion: "main/src/services/permissionManager.ts no longer exists on disk"
+  - criterion: main/src/services/permissionManager.ts no longer exists on disk
     verification: "test ! -e main/src/services/permissionManager.ts"
-  - criterion: "main/src/services/mcpPermissionServer.ts no longer exists on disk"
+  - criterion: main/src/services/mcpPermissionServer.ts no longer exists on disk
     verification: "test ! -e main/src/services/mcpPermissionServer.ts"
   - criterion: "No production source file imports from a path resolving to the deleted permissionManager file (the import string `'./permissionManager'`, `'../services/permissionManager'`, etc. is gone)"
     verification: "grep -rn --include='*.ts' --include='*.tsx' \"from ['\\\"].*permissionManager['\\\"]\" main/src frontend/src returns 0 matches"
-  - criterion: "No production source file imports the dead MCPPermissionServer or PermissionManager classes"
+  - criterion: No production source file imports the dead MCPPermissionServer or PermissionManager classes
     verification: "grep -rn --include='*.ts' --include='*.tsx' -E '\\b(MCPPermissionServer|PermissionManager)\\b' main/src frontend/src returns 0 matches (this includes class names, type names, and instance references)"
   - criterion: "No production source file imports the `PermissionResponse` *type* from the deleted file. The `PermissionResponse` interface in `frontend/src/types/electron.d.ts` is an independent renderer-side type declaration (not imported from main) and remains untouched"
     verification: "grep -rn --include='*.ts' --include='*.tsx' \"from ['\\\"].*permissionManager['\\\"]\" main/src frontend/src returns 0 matches; grep -n 'interface PermissionResponse' frontend/src/types/electron.d.ts returns 1 match (this file is intentionally not modified)"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
-  - criterion: "Main process unit tests pass with the same case count as before deletion"
-    verification: "pnpm --filter main test exits 0; record the case count from the test run output in the done report so the reviewer can compare against the pre-task baseline"
-  - criterion: "Frontend typecheck passes (sanity check that the unrelated renderer-side `PermissionResponse` interface still resolves)"
-    verification: "pnpm --filter frontend typecheck exits 0"
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
+  - criterion: Main process unit tests pass with the same case count as before deletion
+    verification: pnpm --filter main test exits 0; record the case count from the test run output in the done report so the reviewer can compare against the pre-task baseline
+  - criterion: Frontend typecheck passes (sanity check that the unrelated renderer-side `PermissionResponse` interface still resolves)
+    verification: pnpm --filter frontend typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
@@ -43,7 +43,6 @@ test_strategy:
   needed: false
   justification: "Pure deletion of two dead files (zero live importers verified at plan time — `grep -rn --include='*.ts' \"from ['\\\"].*permissionManager['\\\"]\" main/src frontend/src` returns 0 matches; `grep -rn --include='*.ts' -E '\\b(MCPPermissionServer|PermissionManager)\\b' main/src frontend/src` returns matches only inside the two files being deleted). Sibling-test scan: `ls main/src/services/__tests__/` contains only `claudeCodeManagerPermissions.test.ts`, which tests `ClaudeCodeManager` permission-mode enforcement and does not import either of the deleted files (verified via `grep -n 'PermissionManager\\|MCPPermissionServer\\|permissionManager' main/src/services/__tests__/claudeCodeManagerPermissions.test.ts` returns 0 matches). The existing AC `pnpm --filter main test exits 0 with unchanged case count` IS the regression test — if any hidden import path is missed, vitest will fail to resolve the module."
 ---
-
 # Delete dead permission-layer files (permissionManager.ts, mcpPermissionServer.ts)
 
 ## Objective

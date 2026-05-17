@@ -1,8 +1,8 @@
 ---
 id: TASK-577
 idea: SPRINT-006-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/terminalPanelManager.ts
 files_readonly:
@@ -12,12 +12,12 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Terminal PTY env block sets both CYBOFLOW_SESSION_ID and CYBOFLOW_PANEL_ID to the same values previously assigned to the CRYSTAL_* names"
     verification: "grep -nE 'CYBOFLOW_SESSION_ID:\\s*panel\\.sessionId' main/src/services/terminalPanelManager.ts returns 1 match AND grep -nE 'CYBOFLOW_PANEL_ID:\\s*panel\\.id' main/src/services/terminalPanelManager.ts returns 1 match"
-  - criterion: "Legacy CRYSTAL_SESSION_ID and CRYSTAL_PANEL_ID env vars are still set (dual-set for backward compatibility with user scripts)"
+  - criterion: Legacy CRYSTAL_SESSION_ID and CRYSTAL_PANEL_ID env vars are still set (dual-set for backward compatibility with user scripts)
     verification: "grep -nE 'CRYSTAL_SESSION_ID:\\s*panel\\.sessionId' main/src/services/terminalPanelManager.ts returns 1 match AND grep -nE 'CRYSTAL_PANEL_ID:\\s*panel\\.id' main/src/services/terminalPanelManager.ts returns 1 match"
   - criterion: "A deprecation comment above the CRYSTAL_* pair documents the intent to remove and points at the canonical CYBOFLOW_* names"
     verification: "grep -nE '@deprecated|deprecated|TODO.*remove' main/src/services/terminalPanelManager.ts returns at least 1 match within 5 lines of the CRYSTAL_SESSION_ID line"
-  - criterion: "Main typecheck and unit tests pass"
-    verification: "pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0"
+  - criterion: Main typecheck and unit tests pass
+    verification: pnpm --filter main typecheck exits with status 0 AND pnpm --filter main test exits with status 0
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
@@ -26,7 +26,6 @@ test_strategy:
   justification: "Single-file edit adding two literal key-value entries to an env object and a deprecation comment. No existing test covers terminalPanelManager's env emission (find main/src/services/__tests__ -name 'terminal*' returns zero matches), and the env vars are consumed by user-authored shell scripts inside the spawned PTY — out of unit-test reach. The verification surface is the grep AC + a manual smoke (open a terminal panel, `echo $CYBOFLOW_SESSION_ID` returns the panel's session ID, `echo $CRYSTAL_SESSION_ID` returns the same value). Adding a unit test would require mocking `node-pty` and asserting on the env arg of `pty.spawn` — disproportionate scaffolding for a 4-line edit."
 prerequisites: []
 ---
-
 # Dual-set CYBOFLOW_SESSION_ID / CYBOFLOW_PANEL_ID env vars with CRYSTAL_* deprecation window
 
 ## Objective

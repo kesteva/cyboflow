@@ -1,17 +1,17 @@
 ---
 id: TASK-566
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - main/src/utils/devDebugLog.ts
   - main/src/index.ts
 files_readonly:
   - main/src/utils/logger.ts
 acceptance_criteria:
-  - criterion: "New helper module main/src/utils/devDebugLog.ts exists and exports getDevDebugLogPath and appendDevDebugLog"
+  - criterion: New helper module main/src/utils/devDebugLog.ts exists and exports getDevDebugLogPath and appendDevDebugLog
     verification: "test -f main/src/utils/devDebugLog.ts && grep -nE 'export function getDevDebugLogPath|export function appendDevDebugLog' main/src/utils/devDebugLog.ts returns at least 2 matches"
-  - criterion: "The string literals `cyboflow-frontend-debug.log` and `cyboflow-backend-debug.log` appear in main/src ONLY inside main/src/utils/devDebugLog.ts"
+  - criterion: The string literals `cyboflow-frontend-debug.log` and `cyboflow-backend-debug.log` appear in main/src ONLY inside main/src/utils/devDebugLog.ts
     verification: "grep -rn --include='*.ts' -E 'cyboflow-(frontend|backend)-debug\\.log' main/src/ | grep -v 'main/src/utils/devDebugLog.ts' returns 0 lines"
   - criterion: "The reset-debug-logs block at main/src/index.ts:91-103 calls getDevDebugLogPath instead of hardcoded path.join calls"
     verification: "grep -nE 'getDevDebugLogPath\\(.(frontend|backend).\\)' main/src/index.ts returns at least 2 matches in the reset block region"
@@ -19,7 +19,7 @@ acceptance_criteria:
     verification: "grep -nE 'fs\\.appendFileSync\\(.*cyboflow-(frontend|backend)-debug\\.log' main/src/index.ts returns 0 matches AND grep -n 'appendDevDebugLog' main/src/index.ts returns at least 6 matches"
   - criterion: "Dev-mode console:log IPC handler at lines 640-657 uses appendDevDebugLog"
     verification: "grep -n 'appendDevDebugLog' main/src/index.ts returns at least 7 matches total (6 override blocks + 1 IPC handler)"
-  - criterion: "Main typecheck passes and the file count touched by this task is exactly 2 (helper file + index.ts)"
+  - criterion: Main typecheck passes and the file count touched by this task is exactly 2 (helper file + index.ts)
     verification: "pnpm --filter main typecheck exits 0 AND the diff in this task's commit touches exactly main/src/utils/devDebugLog.ts and main/src/index.ts"
 depends_on: []
 estimated_complexity: low
@@ -31,11 +31,10 @@ test_strategy:
     - behavior: "getDevDebugLogPath('frontend') returns a path ending in 'cyboflow-frontend-debug.log' under process.cwd(); getDevDebugLogPath('backend') returns a path ending in 'cyboflow-backend-debug.log'"
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
-    - behavior: "appendDevDebugLog formats the line as `[<ISO timestamp>] [<SOURCE> <LEVEL>] <message>\\n` and routes frontend stream → frontend file, backend stream → backend file (verified via a mocked fs.appendFileSync spy)"
+    - behavior: "appendDevDebugLog formats the line as `[<ISO timestamp>] [<SOURCE> <LEVEL>] <message>\n` and routes frontend stream → frontend file, backend stream → backend file (verified via a mocked fs.appendFileSync spy)"
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
 ---
-
 # Extract debug-log path helpers in main/src/index.ts to eliminate 6 hardcoded path blocks
 
 ## Objective

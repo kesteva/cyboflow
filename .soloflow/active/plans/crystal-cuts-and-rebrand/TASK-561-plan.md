@@ -1,8 +1,8 @@
 ---
 id: TASK-561
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - main/src/types/config.ts
   - frontend/src/types/config.ts
@@ -16,22 +16,22 @@ files_readonly:
   - frontend/src/utils/migrateLocalStorageKey.ts
   - .soloflow/archive/done/crystal-cuts-and-rebrand/TASK-558-done.md
 acceptance_criteria:
-  - criterion: "Zero references to `enableCrystalFooter` or `disableCrystalFooter` remain in main/src or frontend/src"
+  - criterion: Zero references to `enableCrystalFooter` or `disableCrystalFooter` remain in main/src or frontend/src
     verification: "grep -rn --include='*.ts' --include='*.tsx' -E 'enableCrystalFooter|disableCrystalFooter' main/src/ frontend/src/ returns zero lines"
   - criterion: "Both AppConfig interfaces (main and frontend) declare `enableCyboflowFooter?: boolean`"
     verification: "grep -n 'enableCyboflowFooter\\?: boolean' main/src/types/config.ts frontend/src/types/config.ts returns exactly 2 matches (one per file)"
-  - criterion: "UpdateConfigRequest interface in main/src/types/config.ts uses the new field name on the disable path"
+  - criterion: UpdateConfigRequest interface in main/src/types/config.ts uses the new field name on the disable path
     verification: "grep -n 'disableCyboflowFooter\\?: boolean' main/src/types/config.ts returns 1 match AND grep -n 'disableCrystalFooter' main/src/types/config.ts returns 0 matches"
   - criterion: "ConfigManager performs a one-time migration: on initialize, if loaded config has `enableCrystalFooter` and not `enableCyboflowFooter`, the value is copied to `enableCyboflowFooter`, the legacy key is deleted, and the config is re-saved"
     verification: "grep -n 'enableCyboflowFooter' main/src/services/configManager.ts returns at least 1 match AND grep -nE 'delete .*enableCrystalFooter' main/src/services/configManager.ts returns at least 1 match"
-  - criterion: "All four call sites that read the footer flag use the new field name"
+  - criterion: All four call sites that read the footer flag use the new field name
     verification: "grep -rn 'enableCyboflowFooter' main/src/utils/shellEscape.ts main/src/ipc/file.ts main/src/services/worktreeManager.ts main/src/services/commitManager.ts returns at least 6 matches AND grep -rn 'enableCrystalFooter' main/src/utils/shellEscape.ts main/src/ipc/file.ts main/src/services/worktreeManager.ts main/src/services/commitManager.ts returns 0 matches"
-  - criterion: "Settings.tsx renames its local state hook from `enableCrystalFooter`/`setEnableCrystalFooter` to `enableCyboflowFooter`/`setEnableCyboflowFooter` and submits the new field"
+  - criterion: Settings.tsx renames its local state hook from `enableCrystalFooter`/`setEnableCrystalFooter` to `enableCyboflowFooter`/`setEnableCyboflowFooter` and submits the new field
     verification: "grep -n 'enableCyboflowFooter\\|setEnableCyboflowFooter' frontend/src/components/Settings.tsx returns at least 4 matches AND grep -n 'enableCrystalFooter\\|setEnableCrystalFooter' frontend/src/components/Settings.tsx returns 0 matches"
-  - criterion: "Main and frontend typecheck pass"
-    verification: "pnpm typecheck exits with status 0"
+  - criterion: Main and frontend typecheck pass
+    verification: pnpm typecheck exits with status 0
   - criterion: "Existing ConfigManager unit tests (if any) pass; manual smoke: with a config.json containing `\"enableCrystalFooter\": false`, the next initialize migrates to `\"enableCyboflowFooter\": false` and deletes the legacy key"
-    verification: "pnpm --filter main test exits with status 0 AND a new vitest case in main/src/services/configManager.test.ts (created by this task) asserts the migration round-trip"
+    verification: pnpm --filter main test exits with status 0 AND a new vitest case in main/src/services/configManager.test.ts (created by this task) asserts the migration round-trip
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
@@ -49,7 +49,6 @@ test_strategy:
       test_file: main/src/services/configManager.test.ts
       type: unit
 ---
-
 # Rename enableCrystalFooter → enableCyboflowFooter across schema, persistence, and call sites
 
 ## Objective

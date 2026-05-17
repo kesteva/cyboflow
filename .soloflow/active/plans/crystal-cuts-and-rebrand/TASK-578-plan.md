@@ -1,8 +1,8 @@
 ---
 id: TASK-578
 idea: SPRINT-006-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - frontend/src/components/AboutDialog.tsx
 files_readonly:
@@ -12,15 +12,16 @@ files_readonly:
 acceptance_criteria:
   - criterion: "VersionInfo interface in AboutDialog.tsx declares `cyboflowDirectory?: string` and no longer declares `crystalDirectory`"
     verification: "grep -n 'cyboflowDirectory\\?: string' frontend/src/components/AboutDialog.tsx returns 1 match AND grep -n 'crystalDirectory' frontend/src/components/AboutDialog.tsx returns 0 matches"
-  - criterion: "loadCurrentVersion() reads the renamed field from the IPC response"
+  - criterion: loadCurrentVersion() reads the renamed field from the IPC response
     verification: "grep -nE 'cyboflowDirectory:\\s*result\\.data\\.cyboflowDirectory' frontend/src/components/AboutDialog.tsx returns 1 match"
-  - criterion: "JSX render block uses versionInfo.cyboflowDirectory (gated + tooltip + display)"
+  - criterion: JSX render block uses versionInfo.cyboflowDirectory (gated + tooltip + display)
     verification: "grep -nE 'versionInfo\\?\\.cyboflowDirectory' frontend/src/components/AboutDialog.tsx returns at least 1 match AND grep -nE 'versionInfo\\.cyboflowDirectory' frontend/src/components/AboutDialog.tsx returns at least 2 matches"
-  - criterion: "Frontend typecheck passes (proves the IPC field rename in TASK-562 is consistent with the consumer)"
-    verification: "pnpm --filter frontend typecheck exits with status 0"
-  - criterion: "Frontend lint passes"
-    verification: "pnpm --filter frontend lint exits with status 0"
-depends_on: [TASK-562]
+  - criterion: Frontend typecheck passes (proves the IPC field rename in TASK-562 is consistent with the consumer)
+    verification: pnpm --filter frontend typecheck exits with status 0
+  - criterion: Frontend lint passes
+    verification: pnpm --filter frontend lint exits with status 0
+depends_on:
+  - TASK-562
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
@@ -32,7 +33,6 @@ prerequisites:
     description: "Confirms TASK-562 has shipped on the producer side, so the consumer-side rename in AboutDialog will line up with the actual IPC response shape."
     blocking: true
 ---
-
 # Update AboutDialog.tsx to consume the renamed cyboflowDirectory IPC field
 
 ## Objective
