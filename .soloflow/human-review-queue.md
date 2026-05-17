@@ -1,8 +1,8 @@
 ---
-pending_count: 11
+pending_count: 12
 buckets:
   decisions: 0
-  actions: 0
+  actions: 1
   testing: 9
   deferred_visual: 2
 items: []
@@ -15,7 +15,14 @@ _No items._
 
 ## Actions
 
-_No items._
+- task: TASK-555
+  type: action_required
+  bucket: actions
+  action: "xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>; set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars."
+  blocked_checks:
+    - "prerequisite: Notarization requires Apple ID + team ID + app-specific password. Without these, electron-builder notarize step fails."
+  level: ground_truth
+  severity: high
 
 ## Testing
 
