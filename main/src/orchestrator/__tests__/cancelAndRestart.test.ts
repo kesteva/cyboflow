@@ -341,4 +341,70 @@ describe('cancelAndRestartHandler', () => {
     const newRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(result.newRunId) as { status: string };
     expect(newRun.status).toBe('queued');
   });
+
+  // -------------------------------------------------------------------------
+  // Race branch: changes === 0 (FIND-SPRINT-013-17)
+  //
+  // Scenario: the row-fetch guard passes (run is 'stuck'), but a concurrent
+  // process moves the run to a terminal status between the guard and the
+  // UPDATE inside the transaction.  The UPDATE finds zero matching rows
+  // (status IN guard in the WHERE clause rejects), so `changes === 0` and
+  // the handler should throw.  The INSERT must NOT execute — no new run row
+  // is created.
+  // -------------------------------------------------------------------------
+
+  it('throws when UPDATE finds changes=0 (concurrent terminal transition race)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    // Build a DatabaseLike that wraps the real db but intercepts the UPDATE
+    // prepare call.  On the first call whose SQL contains the status-guard
+    // WHERE clause, we pre-cancel the run directly so the prepared statement
+    // sees changes=0.
+    let updateIntercepted = false;
+    const racingDb: DatabaseLike = {
+      prepare: (sql: string) => {
+        const realStmt = db.prepare(sql);
+        // Intercept only the guarded UPDATE (identified by its NOT IN clause).
+        if (!updateIntercepted && sql.includes("status NOT IN ('canceled'")) {
+          updateIntercepted = true;
+          return {
+            run: (...params: unknown[]) => {
+              // Simulate a concurrent write: move run to 'canceled' BEFORE
+              // the transaction UPDATE executes its WHERE-filtered rows.
+              db.prepare(
+                `UPDATE workflow_runs SET status = 'canceled' WHERE id = ?`,
+              ).run(runId);
+              // Now run the real guarded UPDATE — it will match 0 rows.
+              return realStmt.run(...params);
+            },
+            get: (...params: unknown[]) => realStmt.get(...params),
+            all: (...params: unknown[]) => realStmt.all(...params),
+          };
+        }
+        return realStmt;
+      },
+      transaction: <T>(fn: (...args: unknown[]) => T) =>
+        db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
+    };
+
+    const deps: HandlerDeps = {
+      db: racingDb,
+      approvalRouter: { clearPendingForRun: spy.clearPendingForRun } as unknown as import('../approvalRouter').ApprovalRouter,
+      runQueues,
+      claudeManagerStop: spy.claudeManagerStop,
+    };
+
+    // The transaction guard must throw.
+    await expect(cancelAndRestartHandler(runId, deps)).rejects.toThrow(
+      `cancelAndRestart: run ${runId} was already in a terminal state when the UPDATE was attempted`,
+    );
+
+    // The INSERT must not have fired — no new run row should exist beyond the
+    // original seeded row.
+    const allRuns = db.prepare('SELECT id FROM workflow_runs').all() as { id: string }[];
+    const runIds = allRuns.map((r) => r.id);
+    expect(runIds).toHaveLength(1);
+    expect(runIds[0]).toBe(runId);
+  });
 });
