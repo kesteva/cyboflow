@@ -1,8 +1,8 @@
 ---
 id: TASK-502
 idea: IDEA-011
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueue/StuckBadge.tsx
   - frontend/src/components/ReviewQueue/PendingApprovalCard.tsx
@@ -24,7 +24,7 @@ acceptance_criteria:
   - criterion: "`<PendingApprovalCard />` renders a `<StuckBadge />` with text 'STUCK' plus a tooltip showing the `stuck_reason` whenever the card's underlying run has `workflow_runs.status === 'stuck'`."
     verification: "`grep -n 'StuckBadge' frontend/src/components/ReviewQueue/PendingApprovalCard.tsx` returns the import and JSX usage; React component test renders the card with a fixture run in `status: 'stuck'` and asserts the badge is in the DOM via `getByText('STUCK')`."
   - criterion: "Cards for stuck runs are visually distinguished from normal cards via a Tailwind class delta (e.g., `border-red-500` or equivalent), not via inline styles."
-    verification: "Component test renders one stuck card and one running card; asserts the stuck card root element has a className containing `red` (or the agreed alert color); the running card does not."
+    verification: Component test renders one stuck card and one running card; asserts the stuck card root element has a className containing `red` (or the agreed alert color); the running card does not.
   - criterion: "A `Cancel and restart` button is rendered only when the card's run is `stuck`. Clicking it calls a tRPC mutation `cyboflow.runs.cancelAndRestart({ runId })`."
     verification: "Component test using a mocked API client asserts the button is absent for a `running` run, present for a `stuck` run; clicking the button calls `api.cyboflow.runs.cancelAndRestart` with the correct runId."
   - criterion: "`runs.cancelAndRestart` tRPC mutation in `main/src/orchestrator/router/runs.ts` runs under the per-run `p-queue` and executes in order: (a) `approvalRouter.clearPendingForRun(runId)` (which sends socket deny replies for every pending approval), (b) kill the Claude PTY via `claudeManager.stop(sessionId)`, (c) `UPDATE workflow_runs SET status = 'canceled' WHERE id = ?`, (d) create a new `workflow_runs` row with the same `workflow_id`, `project_id`, `prompt`, and worktree path (worktree is preserved, not destroyed), (e) return the new `runId`."
@@ -33,29 +33,29 @@ acceptance_criteria:
     verification: "`grep -n 'clearPendingForRun\\|denyAllForRun\\|cancelPendingForRun' main/src/orchestrator/router/runs.ts` returns a call site to the named router method; the integration test verifies the deny replies were sent before the PTY was killed by asserting a spy on the deny method was called before a spy on `claudeManager.stop`."
   - criterion: "`reviewQueueSlice` Zustand store subscribes to the `runs:stuck` event via the existing tRPC subscription (`cyboflow.events.onApprovalCreated` or a new `onRunStatusChanged`) and updates the matching queue item's `runStatus` field to `'stuck'` reactively. The card re-renders within one event loop tick of the event arriving."
     verification: "Component test attaches a real Zustand store, calls the slice's `applyStuckEvent({ runId })` reducer directly, asserts the matching queue item's `runStatus` flips to `'stuck'` and a re-render occurs (verified via React Testing Library `rerender` or `waitFor`)."
-  - criterion: "Worktree preservation is the v1 default for cancel-and-restart. The mutation does NOT call `worktreeManager.remove(...)`. The new run reuses the existing worktree path."
+  - criterion: Worktree preservation is the v1 default for cancel-and-restart. The mutation does NOT call `worktreeManager.remove(...)`. The new run reuses the existing worktree path.
     verification: "Integration test asserts after `cancelAndRestart` runs, `fs.existsSync(<worktreePath>) === true` and `worktreeManager.remove` (mocked) was never called."
-depends_on: [TASK-501]
+depends_on:
+  - TASK-501
 estimated_complexity: medium
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
   justification: "Two integration surfaces — the cancel-and-restart mutation orchestrating four ordered side effects, and the UI's reactive response to a stuck-state transition — both have multiple branches that warrant explicit tests."
   targets:
-    - behavior: "Stuck badge renders only for stuck runs"
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Stuck badge renders only for stuck runs
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
-    - behavior: "Cancel-and-restart button renders only for stuck runs and calls the correct mutation"
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Cancel-and-restart button renders only for stuck runs and calls the correct mutation
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
-    - behavior: "reviewQueueSlice applies stuck event reactively"
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+    - behavior: reviewQueueSlice applies stuck event reactively
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "cancelAndRestart mutation: deny socket replies → kill PTY → cancel old run → create new run, worktree preserved"
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: integration
 ---
-
 # Stuck-run UI surface and cancel-and-restart recovery
 
 ## Objective

@@ -2,8 +2,8 @@
 id: TASK-551
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueueView.tsx
   - frontend/src/components/OnboardingCard.tsx
@@ -22,9 +22,10 @@ acceptance_criteria:
     verification: "grep -n \"preferences:set.*cyboflow_onboarding_dismissed\" frontend/src/components/OnboardingCard.tsx returns one match; grep -n \"preferences:set.*cyboflow_onboarding_dismissed\" frontend/src/components/ReviewQueueView.tsx returns one match (on first decide)."
   - criterion: "After dismissal, reloading the renderer never shows the card again — the OnboardingCard mount effect short-circuits if preferences:get returns 'true'."
     verification: "Unit test in OnboardingCard.test.tsx: mock preferences:get to return {success:true, data:'true'}, assert the rendered output is null/empty."
-  - criterion: "OnboardingCard is wrapped inside the existing ReviewQueueView error boundary (no separate boundary needed) — verify it lives below the ReviewQueueView ErrorBoundary in the JSX tree."
+  - criterion: OnboardingCard is wrapped inside the existing ReviewQueueView error boundary (no separate boundary needed) — verify it lives below the ReviewQueueView ErrorBoundary in the JSX tree.
     verification: "Read frontend/src/components/ReviewQueueView.tsx; <OnboardingCard /> appears as a child of the ErrorBoundary wrapper, not as a sibling at App.tsx level."
-depends_on: [TASK-525]
+depends_on:
+  - TASK-525
 estimated_complexity: low
 epic: first-run-onboarding-and-self-host-acceptance
 test_strategy:
@@ -32,16 +33,15 @@ test_strategy:
   justification: "State logic (preference read/write, one-shot dismissal) is non-trivial and is the criterion that defines 'one-time'. Without a unit test, regression-by-typo (writing the wrong preference key) is undetectable until a user complains."
   targets:
     - behavior: "Card hidden when preferences:get returns 'true'"
-      test_file: "frontend/src/components/OnboardingCard.test.tsx"
+      test_file: frontend/src/components/OnboardingCard.test.tsx
       type: component
     - behavior: "Clicking Got it writes preferences:set with cyboflow_onboarding_dismissed='true'"
-      test_file: "frontend/src/components/OnboardingCard.test.tsx"
+      test_file: frontend/src/components/OnboardingCard.test.tsx
       type: component
-    - behavior: "First approval/rejection in queue auto-dismisses the card"
-      test_file: "frontend/src/components/OnboardingCard.test.tsx"
+    - behavior: First approval/rejection in queue auto-dismisses the card
+      test_file: frontend/src/components/OnboardingCard.test.tsx
       type: component
 ---
-
 # First-Run Onboarding Card for the Review Queue
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-501
 idea: IDEA-011
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/stuckDetector.ts
   - main/src/orchestrator/__tests__/stuckDetector.test.ts
@@ -33,8 +33,8 @@ acceptance_criteria:
     verification: "Unit test runs three scan ticks against the same stale approval; asserts the `runs:stuck` event emitter fired exactly once across all three ticks."
   - criterion: "On stuck transition, `StuckDetector` emits a typed `runs:stuck` event on the shared orchestrator `EventEmitter` (or equivalent bus the orchestrator exposes) carrying `{ runId, approvalId, reason, detectedAt }`. The event is the integration point downstream tasks subscribe to."
     verification: "Unit test attaches a listener on the orchestrator's event bus, runs one scan tick that produces a stuck transition, asserts the listener receives exactly one event matching the expected shape."
-  - criterion: "All scan work runs inside a single try/catch; any thrown error is logged via `main/src/utils/logger.ts` at WARN level and the next scan is still scheduled (a single failed scan must not stop the detector)."
-    verification: "Unit test installs a spy that throws on the first `classifyStaleApproval` call but returns normally on the second; advances fake timers two scan intervals; asserts both scans ran and the logger was called once at WARN."
+  - criterion: All scan work runs inside a single try/catch; any thrown error is logged via `main/src/utils/logger.ts` at WARN level and the next scan is still scheduled (a single failed scan must not stop the detector).
+    verification: Unit test installs a spy that throws on the first `classifyStaleApproval` call but returns normally on the second; advances fake timers two scan intervals; asserts both scans ran and the logger was called once at WARN.
   - criterion: "`Orchestrator.start()` (in `main/src/orchestrator/index.ts`) constructs a `StuckDetector` and calls `start()`; `Orchestrator.stop()` calls `detector.stop()`. The detector is not constructed by Electron-facing code — orchestrator boundary discipline preserved."
     verification: "`grep -n 'StuckDetector' main/src/orchestrator/index.ts` returns the constructor call and the start/stop wiring; `grep -rn 'electron' main/src/orchestrator/stuckDetector.ts` returns 0 matches."
 depends_on: []
@@ -45,28 +45,27 @@ test_strategy:
   justification: "Stuck detection is a stateful, time-driven service whose correctness depends on conditional classification paths, transition guards, and idempotent scheduling. Each classification variant and each guard is a distinct failure mode worth covering with unit tests."
   targets:
     - behavior: "60-second interval scheduling and stop() cancellation"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
     - behavior: "5-minute threshold filtering of pending approvals"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
-    - behavior: "Classification into self_deadlock / cross_run_deadlock / orphan_pty / stale_socket"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+    - behavior: Classification into self_deadlock / cross_run_deadlock / orphan_pty / stale_socket
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
-    - behavior: "Stuck transition is no-op when run is not in awaiting_review (status guard)"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+    - behavior: Stuck transition is no-op when run is not in awaiting_review (status guard)
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
-    - behavior: "Already-stuck runs are not re-transitioned on subsequent scans"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+    - behavior: Already-stuck runs are not re-transitioned on subsequent scans
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
-    - behavior: "Scan error in one tick does not stop the interval"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+    - behavior: Scan error in one tick does not stop the interval
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
     - behavior: "runs:stuck event is emitted on the orchestrator event bus on transition"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
 ---
-
 # Periodic stuck-state detector with deadlock classification
 
 ## Objective

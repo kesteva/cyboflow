@@ -1,8 +1,8 @@
 ---
 id: TASK-504
 idea: IDEA-011
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueue/StuckInspectorModal.tsx
   - frontend/src/components/ReviewQueue/__tests__/StuckInspectorModal.test.tsx
@@ -21,7 +21,7 @@ acceptance_criteria:
   - criterion: "`<PendingApprovalCard />` renders a `Why stuck?` button beneath the StuckBadge when the card's runStatus is `'stuck'`. Clicking opens the `<StuckInspectorModal />`."
     verification: "Component test on the card asserts the button is absent for non-stuck runs and present for stuck runs; clicking the button toggles a state that mounts `<StuckInspectorModal />`."
   - criterion: "`<StuckInspectorModal />` calls a tRPC query `cyboflow.runs.getStuckInspection({ runId })` on mount and renders a loading state while pending."
-    verification: "Component test asserts the modal mounts with a loading indicator visible before the mocked query resolves; asserts the query was called with the correct `runId`."
+    verification: Component test asserts the modal mounts with a loading indicator visible before the mocked query resolves; asserts the query was called with the correct `runId`.
   - criterion: "`getStuckInspection` returns `{ runId, stuckReason, stuckDetectedAt, pendingApproval: { toolName, input, createdAt }, recentEvents: RawEvent[] }` where `recentEvents` is the latest 10 rows from `raw_events` for that `run_id` ordered by `id DESC`."
     verification: "Backend integration test in `inspectorQueries.test.ts` inserts 15 `raw_events` rows for a stuck run plus one pending approval; calls the query; asserts `recentEvents.length === 10` and the rows are the highest 10 ids in descending order; asserts `pendingApproval` matches the inserted approval; asserts `stuckReason` matches the run's column value."
   - criterion: "The modal renders three sections in this order: (1) detected reason (with the human-readable mapping from TASK-503's reason map), (2) pending approval (tool name in monospace, input payload as collapsed JSON), (3) recent events (each row showing `event_type`, timestamp, and a one-line payload preview)."
@@ -30,27 +30,28 @@ acceptance_criteria:
     verification: "Component test renders the modal and asserts the absence of any button with text matching `/Approve|Reject|Cancel and restart/i`. The only interactive element is the modal's close affordance (inherited from `<Modal />`)."
   - criterion: "The query handler scopes to the requesting principal (`ctx.principal.userId === 'local'` for v1) and refuses to return data for a run the principal does not own — even though v1 is solo and this is always true, the check is structurally present for forward compatibility with the auth principal the `orchestrator-and-trpc-router` epic establishes."
     verification: "`grep -n 'ctx\\.principal\\|userId' main/src/orchestrator/router/runs.ts` shows the principal is consulted inside `getStuckInspection`; backend test injects a principal with a non-`local` userId and asserts the query throws or returns an unauthorized error."
-depends_on: [TASK-501, TASK-502]
+depends_on:
+  - TASK-501
+  - TASK-502
 estimated_complexity: low
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
   justification: "Two surfaces: a backend query that joins three tables with an explicit row-limit and ordering, and a modal UI with a documented section order and a documented read-only invariant. Each invariant has a small but real failure mode worth testing."
   targets:
-    - behavior: "getStuckInspection returns latest 10 raw_events plus pending approval and stuck metadata"
-      test_file: "main/src/orchestrator/__tests__/inspectorQueries.test.ts"
+    - behavior: getStuckInspection returns latest 10 raw_events plus pending approval and stuck metadata
+      test_file: main/src/orchestrator/__tests__/inspectorQueries.test.ts
       type: integration
-    - behavior: "getStuckInspection enforces principal scoping"
-      test_file: "main/src/orchestrator/__tests__/inspectorQueries.test.ts"
+    - behavior: getStuckInspection enforces principal scoping
+      test_file: main/src/orchestrator/__tests__/inspectorQueries.test.ts
       type: integration
     - behavior: "Why stuck? button visible only for stuck runs, opens modal"
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
     - behavior: "Modal renders three sections in correct order, in loading state initially, and is read-only"
-      test_file: "frontend/src/components/ReviewQueue/__tests__/StuckInspectorModal.test.tsx"
+      test_file: frontend/src/components/ReviewQueue/__tests__/StuckInspectorModal.test.tsx
       type: component
 ---
-
 # Why-stuck inspector modal (read-only diagnostic)
 
 ## Objective
