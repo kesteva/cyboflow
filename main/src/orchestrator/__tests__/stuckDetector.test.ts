@@ -163,7 +163,7 @@ function makeClaudeManager(activeRunIds: Set<string> = new Set()): ClaudeManager
 
 function makePermissionServer(connectedRunIds: Set<string> = new Set()): PermissionServerLike {
   return {
-    hasClientForSession: (runId) => connectedRunIds.has(runId),
+    hasClientForRun: (runId) => connectedRunIds.has(runId),
   };
 }
 

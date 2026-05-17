@@ -44,7 +44,7 @@ export interface ClaudeManagerLike {
  * classification disabled) with a one-time WARN.
  */
 export interface PermissionServerLike {
-  hasClientForSession(runId: string): boolean;
+  hasClientForRun(runId: string): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +192,9 @@ export class StuckDetector {
         this.transitionToStuck(approval, reason);
       }
     } catch (err) {
-      this.logger.warn('[StuckDetector] scan failed', { error: String(err) });
+      this.logger.warn('[StuckDetector] scan failed', {
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
     }
   }
 
@@ -223,7 +225,7 @@ export class StuckDetector {
 
     // 2. stale_socket
     if (this.permissionServer) {
-      if (!this.permissionServer.hasClientForSession(runId)) {
+      if (!this.permissionServer.hasClientForRun(runId)) {
         return { kind: 'stale_socket' };
       }
     } else {
