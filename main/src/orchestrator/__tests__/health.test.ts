@@ -44,7 +44,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns the status from the lifecycle getStatus()', () => {
     const lifecycle = makeLifecycleStub('running');
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     const result = health.getMcpServerStatus();
@@ -56,7 +56,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns status: starting when lifecycle status is starting', () => {
     const lifecycle = makeLifecycleStub('starting');
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     expect(health.getMcpServerStatus().status).toBe('starting');
@@ -65,7 +65,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns status: failed when lifecycle status is failed', () => {
     const lifecycle = makeLifecycleStub('failed');
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     expect(health.getMcpServerStatus().status).toBe('failed');
@@ -74,7 +74,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns restartAttempts from the lifecycle getRestartAttempts()', () => {
     const lifecycle = makeLifecycleStub('running', 2);
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     expect(health.getMcpServerStatus().restartAttempts).toBe(2);
@@ -84,7 +84,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns lastError: undefined before setMcpError is called', () => {
     const lifecycle = makeLifecycleStub();
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     expect(health.getMcpServerStatus().lastError).toBeUndefined();
@@ -93,7 +93,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('returns lastError equal to the string passed to setMcpError()', () => {
     const lifecycle = makeLifecycleStub('failed');
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     health.setMcpError('subprocess exited with code 1');
@@ -104,7 +104,7 @@ describe('OrchestratorHealth.getMcpServerStatus()', () => {
   it('overwrites lastError on a second setMcpError() call', () => {
     const lifecycle = makeLifecycleStub('failed');
     const health = new OrchestratorHealth(
-      lifecycle as unknown as Parameters<typeof OrchestratorHealth.prototype.constructor>[0],
+      lifecycle as unknown as ConstructorParameters<typeof OrchestratorHealth>[0],
     );
 
     health.setMcpError('first error');
