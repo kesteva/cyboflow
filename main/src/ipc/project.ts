@@ -3,6 +3,7 @@ import type { AppServices } from './types';
 import type { CreateProjectRequest, UpdateProjectRequest } from '../../../frontend/src/types/project';
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
+import { ensureGitignoreEntry } from '../utils/gitignoreWriter';
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -151,6 +152,16 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       console.log('[Main] Project created successfully:', project);
+
+      // Ensure .cyboflow/worktrees/ is in the project's .gitignore so that
+      // worktrees created under that directory do not appear as untracked changes.
+      try {
+        ensureGitignoreEntry(projectData.path, '.cyboflow/worktrees/');
+      } catch (error) {
+        // Should never reach here — ensureGitignoreEntry swallows its own errors.
+        // Belt-and-suspenders: log and continue so project creation always succeeds.
+        console.error('[Main] Unexpected error from ensureGitignoreEntry:', error);
+      }
 
       // Track project creation
       if (analyticsManager && project) {
