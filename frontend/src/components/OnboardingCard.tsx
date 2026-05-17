@@ -17,19 +17,36 @@ export async function dismissOnboarding(): Promise<void> {
   }
 }
 
+interface OnboardingCardProps {
+  /** When true, the card returns null immediately (controlled dismiss). */
+  dismissed?: boolean;
+  /** Called when the user clicks "Got it". Parent should set dismissed=true. */
+  onDismiss?: () => void;
+}
+
 /**
  * One-shot onboarding card for the Review Queue.
  *
- * On mount, reads cyboflow_onboarding_dismissed from user_preferences.
- * If already 'true', renders nothing (short-circuits).
- * Otherwise renders a welcome card with a "Got it" button that persists
- * the dismissal and unmounts the card.
+ * Supports two modes:
+ * - Uncontrolled (no props): manages its own dismissed state, reads the
+ *   preference on mount, and writes it when "Got it" is clicked.
+ * - Controlled (dismissed + onDismiss props): the parent owns the dismissed
+ *   state; the card renders null when dismissed=true and calls onDismiss on
+ *   "Got it". The parent is responsible for reading/writing the preference.
+ *
+ * ReviewQueueView uses the controlled mode so that the y/n keypress path can
+ * also unmount the card within the same React render cycle.
  */
-export default function OnboardingCard(): React.ReactElement | null {
-  const [dismissed, setDismissed] = useState(false);
-  const [checked, setChecked] = useState(false);
+export default function OnboardingCard({ dismissed: dismissedProp, onDismiss }: OnboardingCardProps = {}): React.ReactElement | null {
+  const isControlled = dismissedProp !== undefined;
+
+  const [dismissedLocal, setDismissedLocal] = useState(false);
+  const [checked, setChecked] = useState(isControlled); // In controlled mode, skip the async check.
 
   useEffect(() => {
+    // In controlled mode the parent has already read the preference.
+    if (isControlled) return;
+
     const electronInvoke = window.electron?.invoke;
     if (!electronInvoke) {
       setChecked(true);
@@ -42,7 +59,7 @@ export default function OnboardingCard(): React.ReactElement | null {
           'cyboflow_onboarding_dismissed',
         )) as IPCResponse<string>;
         if (result?.data === 'true') {
-          setDismissed(true);
+          setDismissedLocal(true);
         }
       } catch {
         // Silently proceed — show card if the preference can't be read.
@@ -50,15 +67,21 @@ export default function OnboardingCard(): React.ReactElement | null {
         setChecked(true);
       }
     })();
-  }, []);
+  }, [isControlled]);
 
   async function handleGotIt(): Promise<void> {
-    await dismissOnboarding();
-    setDismissed(true);
+    if (isControlled) {
+      onDismiss?.();
+    } else {
+      await dismissOnboarding();
+      setDismissedLocal(true);
+    }
   }
 
+  const effectiveDismissed = isControlled ? (dismissedProp ?? false) : dismissedLocal;
+
   // Wait until the preference has been checked to avoid a flash of content.
-  if (!checked || dismissed) {
+  if (!checked || effectiveDismissed) {
     return null;
   }
 
