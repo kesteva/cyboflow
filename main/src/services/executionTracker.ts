@@ -4,7 +4,6 @@ import type { SessionManager } from './sessionManager';
 import { GitDiffManager, type GitDiffResult } from './gitDiffManager';
 import type { CreateExecutionDiffData, ExecutionDiff } from '../database/models';
 import { execSync } from '../utils/commandExecutor';
-import { buildGitCommitCommand } from '../utils/shellEscape';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { commitManager } from './commitManager';
 import type { CommitModeSettings } from '../../../shared/types';
