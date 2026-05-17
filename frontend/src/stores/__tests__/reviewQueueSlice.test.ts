@@ -39,7 +39,7 @@ vi.mock('../../utils/trpcClient', () => ({
   },
 }));
 
-import { pureApplyStuckEvent, useReviewQueueSlice } from '../reviewQueueSlice';
+import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice } from '../reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // pureApplyStuckEvent — pure function tests
@@ -142,16 +142,80 @@ describe('useReviewQueueSlice — setRunStatus', () => {
     useReviewQueueSlice.setState({ runStatusMap: {} });
   });
 
-  it('sets an arbitrary status for a run', () => {
+  it('sets an arbitrary non-terminal status for a run', () => {
     const { setRunStatus } = useReviewQueueSlice.getState();
     setRunStatus('run-1', 'running');
     expect(useReviewQueueSlice.getState().runStatusMap['run-1']).toBe('running');
   });
 
-  it('overwrites a previous status', () => {
+  it('evicts the entry when status is completed (avoids unbounded growth)', () => {
     useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
     const { setRunStatus } = useReviewQueueSlice.getState();
     setRunStatus('run-1', 'completed');
-    expect(useReviewQueueSlice.getState().runStatusMap['run-1']).toBe('completed');
+    expect('run-1' in useReviewQueueSlice.getState().runStatusMap).toBe(false);
+  });
+
+  it('evicts the entry when status is canceled', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'running' } });
+    const { setRunStatus } = useReviewQueueSlice.getState();
+    setRunStatus('run-1', 'canceled');
+    expect('run-1' in useReviewQueueSlice.getState().runStatusMap).toBe(false);
+  });
+
+  it('evicts the entry when status is failed', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'running' } });
+    const { setRunStatus } = useReviewQueueSlice.getState();
+    setRunStatus('run-1', 'failed');
+    expect('run-1' in useReviewQueueSlice.getState().runStatusMap).toBe(false);
+  });
+
+  it('does not affect other run entries when evicting', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck', 'run-2': 'running' } });
+    const { setRunStatus } = useReviewQueueSlice.getState();
+    setRunStatus('run-1', 'completed');
+    expect('run-1' in useReviewQueueSlice.getState().runStatusMap).toBe(false);
+    expect(useReviewQueueSlice.getState().runStatusMap['run-2']).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pureSetRunStatus — pure function tests
+// ---------------------------------------------------------------------------
+
+describe('pureSetRunStatus', () => {
+  it('stores a non-terminal status', () => {
+    const result = pureSetRunStatus({}, 'run-1', 'running');
+    expect(result['run-1']).toBe('running');
+  });
+
+  it('evicts the key on completed status', () => {
+    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'stuck' };
+    const result = pureSetRunStatus(map, 'run-1', 'completed');
+    expect('run-1' in result).toBe(false);
+  });
+
+  it('evicts the key on canceled status', () => {
+    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'running' };
+    const result = pureSetRunStatus(map, 'run-1', 'canceled');
+    expect('run-1' in result).toBe(false);
+  });
+
+  it('evicts the key on failed status', () => {
+    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'running' };
+    const result = pureSetRunStatus(map, 'run-1', 'failed');
+    expect('run-1' in result).toBe(false);
+  });
+
+  it('returns same reference when evicting an absent key', () => {
+    const map: Record<string, WorkflowRunStatus> = {};
+    const result = pureSetRunStatus(map, 'run-1', 'completed');
+    expect(result).toBe(map);
+  });
+
+  it('does not mutate other entries', () => {
+    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'stuck', 'run-2': 'running' };
+    const result = pureSetRunStatus(map, 'run-1', 'completed');
+    expect('run-1' in result).toBe(false);
+    expect(result['run-2']).toBe('running');
   });
 });
