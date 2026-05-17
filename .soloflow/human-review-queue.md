@@ -1,8 +1,8 @@
 ---
-pending_count: 12
+pending_count: 13
 buckets:
   decisions: 0
-  actions: 1
+  actions: 2
   testing: 9
   deferred_visual: 2
 items: []
@@ -23,6 +23,15 @@ _No items._
     - "prerequisite: Notarization requires Apple ID + team ID + app-specific password. Without these, electron-builder notarize step fails."
   level: ground_truth
   severity: high
+
+- task: TASK-554
+  type: human_needed
+  plan_ref: .soloflow/active/plans/first-run-onboarding-and-self-host-acceptance/TASK-554-plan.md
+  verdict_notes: Manual 8-hour self-host acceptance run. Executor scaffolded the empty log on the TASK-554 worktree branch (cherry-pick or recreate it).
+  action: "Perform a full working-day self-host session using Cyboflow exclusively for SoloFlow workflows. Fill in .soloflow/active/acceptance/SELF-HOST-LOG.md per the plan: log every run, log every Crystal/CLI fallback before working around it, complete the Risk-Check Findings section after Cmd+Q (zombie PTY count, .db-wal size, raw_events row count + EXPLAIN), triage each fallback (fix-same-day vs defer-to-ROADMAP-002), set the final Verdict line."
+  severity: high
+  level: goal_backward
+  bucket: actions
 
 ## Testing
 
