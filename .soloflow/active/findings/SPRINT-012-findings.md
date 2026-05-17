@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-012
 pending_count: 3
-last_updated: "2026-05-17T00:10:52.365Z"
+last_updated: "2026-05-17T01:00:00.000Z"
 ---
 # Findings Queue
 
@@ -63,3 +63,39 @@ last_updated: "2026-05-17T00:10:52.365Z"
 - **description:** The `asarUnpack` globs `main/dist/services/**/*.js` and `main/dist/orchestrator/mcpServer/**/*.js` do not match the actual tsc output layout, which produces `main/dist/main/src/services/**` and `main/dist/main/src/orchestrator/mcpServer/**` (note the extra `main/src/` segment from the include path in `main/tsconfig.json`). This was the existing pattern for `services/` — TASK-454 followed it verbatim per plan instruction — but the latent mismatch means either (a) electron-builder's glob matcher is more permissive than naive expansion, or (b) the asarUnpack rule has never actually unpacked anything in production. The packaged DMG smoke test in TASK-454 plan step 13 will surface this; until then, asar extraction at runtime is the actual fallback that makes the packaged path work via `fs.readFileSync` of the in-asar virtual path. A follow-up should validate whether asarUnpack matters at all for these subprocess scripts (since `scriptPath.ts` already extracts them on first use) or whether the glob should be tightened to `main/dist/main/src/services/**/*.js` and `main/dist/main/src/orchestrator/mcpServer/**/*.js`.
 - **suggested_action:** Add a check (post-`pnpm run build:mac:arm64`) that the .app bundle contains both `Contents/Resources/app.asar.unpacked/main/dist/.../cyboflowMcpServer.js` and verify the asarUnpack glob actually unpacks it. If not, either (a) drop the entries (rely solely on the in-app asar-extraction path) or (b) fix the glob.
 - **resolved_by:** 
+
+## FIND-SPRINT-012-7
+- **type:** scope_deviation
+- **source:** TASK-455 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/preload.ts
+- **description:** TASK-455 cannot add getMcpHealth to contextBridge.exposeInMainWorld because main/src/preload.ts is owned by TASK-255. Mitigated by using window.electronAPI.invoke("cyboflow:mcp-health") in the useMcpHealth hook instead of a named binding. The type for getMcpHealth is added to frontend/src/types/electron.d.ts as an optional typed method that routes through the generic invoke. A future task can add the named binding to preload.ts when TASK-255 lands.
+- **resolved_by:** verifier — no scope deviation occurred: preload.ts was NOT edited; the executor documented the intentional avoidance. AC5 explicitly allows `window.electronAPI (or the tRPC client when wired)` — invoke() satisfies that.
+
+## FIND-SPRINT-012-8
+- **type:** scope_deviation
+- **source:** TASK-455 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/mcpServer/mcpServerLifecycle.ts
+- **description:** Required to meet AC (restartAttempts in getMcpServerStatus return shape). Added getRestartAttempts() public getter exposing the existing private restartAttempts field. Plan explicitly authorizes this one-line extension.
+- **resolved_by:** verifier — plan-prescribed: plan step 1 explicitly authorizes adding `getRestartAttempts()` to McpServerLifecycle, treating it as the one acceptable cross-task readonly-violation. File is also listed in `files_owned` (line 11 of plan frontmatter).
+
+## FIND-SPRINT-012-9
+- **type:** scope_deviation
+- **source:** TASK-455 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/ipc/cyboflow.ts
+- **description:** Added cyboflow:mcp-health ipcMain.handle to expose OrchestratorHealth.getMcpServerStatus() to the renderer as an interim IPC channel (per plan step 4) while tRPC ipcLink is not yet wired by the orchestrator epic.
+- **resolved_by:** verifier — plan-prescribed: plan step 4 explicitly instructs adding the ipcMain.handle. File is listed in `files_owned` (line 12 of plan frontmatter).
+
+## FIND-SPRINT-012-10
+- **type:** scope_deviation
+- **source:** TASK-455 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/types/electron.d.ts
+- **description:** Added getMcpHealth optional typed method to ElectronAPI interface. The actual named binding in preload.ts cannot be added (owned by TASK-255), so the hook uses window.electronAPI.invoke() instead. The type annotation documents intent and aids IDE completion.
+- **resolved_by:** verifier — plan-prescribed: plan step 7 explicitly instructs extending the electronAPI type definitions; file is listed in `files_owned` (line 13 of plan frontmatter).
