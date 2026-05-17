@@ -5,11 +5,7 @@
     "started": "2026-05-16T00:00:00.000Z",
     "execution_mode": "serial"
   },
-  "tasks": {
-    "TASK-455": {
-      "status": "pending"
-    }
-  },
+  "tasks": {},
   "run": {
     "branch": "soloflow/run-20260516-093654-SPRINT-012",
     "base_branch": "main",
