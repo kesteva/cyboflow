@@ -5,7 +5,7 @@
  * Used by both McpServerLifecycle (singleton spawn) and claudeCodeManager
  * (per-session .mcp.json injection) so both callers see the same script.
  *
- * Asar-extraction pattern lifted from Crystal's original claudeCodeManager
+ * Asar-extraction pattern lifted from the original claudeCodeManager
  * approach: if the candidate script path is inside an .asar archive
  * (packaged DMG), the script is extracted to ~/.cyboflow/ on first use
  * and subsequent calls return the extracted path.

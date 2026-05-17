@@ -30,7 +30,7 @@ export interface AttachOrchestratorTrpcOpts {
  * synchronous factory so the type contract is satisfied without changing the
  * orchestrator's narrow context interface.
  *
- * Crystal's existing `ipcMain.handle` surface is unaffected — this call is
+ * Cyboflow's existing `ipcMain.handle` surface is unaffected — this call is
  * purely additive for `cyboflow.*` procedures.
  */
 export function attachOrchestratorTrpc({

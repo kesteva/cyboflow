@@ -311,7 +311,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // Stage all changes
       execSync('git add -A', { cwd: session.worktreePath });
 
-      // Create the commit with Crystal's signature using safe escaping
+      // Create the commit with Cyboflow's signature using safe escaping
       const commitCommand = buildGitCommitCommand(message);
 
       try {

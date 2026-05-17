@@ -32,7 +32,7 @@ interface ClaudeSpawnOptions {
    * the per-run `.mcp.json` servers load and user-global MCP servers from
    * `~/.claude.json` cannot interfere with the permission bridge.
    *
-   * Defaults to `undefined` (falsy) for Crystal-session callers so existing
+   * Defaults to `undefined` (falsy) for Cyboflow-session callers so existing
    * behaviour is preserved.  Cyboflow workflow run launches pass `true`.
    */
   strictMcpConfig?: boolean;
@@ -213,7 +213,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (isResume) {
         const claudeSessionId = this.sessionManager.getPanelClaudeSessionId(panelId);
         if (!claudeSessionId) {
-          const errMsg = `Cannot resume: no Claude session_id stored for Crystal session ${sessionId}`;
+          const errMsg = `Cannot resume: no Claude session_id stored for Cyboflow session ${sessionId}`;
           this.logger?.error(`[ClaudeCodeManager] ${errMsg}`);
           this.emit('output', {
             panelId,
@@ -402,7 +402,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (options.isResume) {
       const claudeSessionId = this.sessionManager.getPanelClaudeSessionId(options.panelId);
       if (!claudeSessionId) {
-        throw new Error(`Cannot resume: no Claude session_id stored for Crystal session ${options.sessionId}`);
+        throw new Error(`Cannot resume: no Claude session_id stored for Cyboflow session ${options.sessionId}`);
       }
       sdkOptions.resume = claudeSessionId;
     }
@@ -448,7 +448,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           command: nodeCmd,
           args: [cyboflowMcpScriptPath],
           env: {
-            // Use sessionId as a stand-in run ID for Crystal-legacy sessions.
+            // Use sessionId as a stand-in run ID for Cyboflow-legacy sessions.
             // Workflow-run epic will tighten this to a real workflow_runs.id.
             CYBOFLOW_RUN_ID: options.sessionId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,

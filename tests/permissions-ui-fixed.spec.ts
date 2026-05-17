@@ -18,7 +18,7 @@ test.describe('Permission UI Elements', () => {
     await expect(settingsButton).toBeVisible({ timeout: 10000 });
     await settingsButton.click();
 
-    // Wait for settings dialog (header is "Crystal Settings")
+    // Wait for settings dialog (header is "Cyboflow Settings")
     const settingsDialog = page.locator('div[role="dialog"]:has-text("Settings")');
     await expect(settingsDialog).toBeVisible({ timeout: 10000 });
 
