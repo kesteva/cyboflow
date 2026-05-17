@@ -4,6 +4,7 @@ import { join, dirname } from 'path';
 import { mkdir } from 'fs/promises';
 import { getShellPath } from '../utils/shellPath';
 import { withLock } from '../utils/mutex';
+import { buildCommitFooter } from '../utils/commitFooter';
 import type { ConfigManager } from './configManager';
 import type { AnalyticsManager } from './analyticsManager';
 
@@ -650,11 +651,8 @@ export class WorktreeManager {
         const enableCrystalFooter = config?.enableCrystalFooter !== false;
 
         // Add Cyboflow footer if enabled
-        const fullMessage = enableCrystalFooter ? `${commitMessage}
-
-💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
-
-Co-Authored-By: Cyboflow <hello@cyboflow.com>` : commitMessage;
+        const footer = buildCommitFooter(enableCrystalFooter);
+        const fullMessage = footer ? `${commitMessage}\n\n${footer}` : commitMessage;
 
         // Properly escape commit message for cross-platform compatibility
         const escapedMessage = fullMessage.replace(/"/g, '\\"');
