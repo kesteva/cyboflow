@@ -87,6 +87,13 @@ type definitions across packages.
 - `shared/types/panels.ts` — panel configuration and state types
 - `shared/types/cliPanels.ts` — CLI-specific panel types
 
+**Label maps for shared-type discriminants** belong next to the type (same file
+or a companion `*Labels.ts` in `shared/types/`), keyed by `Record<Union['kind'], string>`
+so adding a new variant breaks the map at compile time. Never duplicate the map in a
+component and a hook — see `frontend/src/components/ReviewQueue/StuckInspectorModal.tsx`
+and `frontend/src/hooks/useStuckNotifications.ts` (SPRINT-013 divergence) for the
+anti-pattern.
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with
@@ -140,6 +147,15 @@ Two valid categories:
   (Day-3 ApprovalRouter integration point)
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   inactive surfaces (both categories).
+
+### IPC preference-backed component visibility
+
+When a component's visibility depends on an async IPC preference (`preferences:get`),
+track the read result as `boolean | null` in the parent and render nothing while it is
+`null`. Do NOT initialise the child's own state to "hidden by default" and rely on an
+async effect to flip it — that produces the correct steady state but a one-frame flash
+on every page reload for returning users. Consumers: `OnboardingCard`, `Welcome`,
+`DiscordPopup`, `AnalyticsConsentDialog` (audit via `grep -rln 'preferences:get' frontend/src`).
 
 ## Build & Packaging
 

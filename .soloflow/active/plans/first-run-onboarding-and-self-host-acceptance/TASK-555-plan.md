@@ -2,8 +2,8 @@
 id: TASK-555
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - package.json
   - .soloflow/active/acceptance/DMG-VERIFICATION.md
@@ -21,12 +21,13 @@ acceptance_criteria:
   - criterion: "A signed, notarized universal DMG named 'Cyboflow-1.0.0-macOS-universal.dmg' is produced under dist-electron/ by the build pipeline established in epic apple-signing-notarization-setup."
     verification: "After running `pnpm build:mac:universal`, `ls dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` exits 0 and `codesign -dvv dist-electron/mac-universal/Cyboflow.app 2>&1 | grep 'Authority=Developer ID Application'` returns a match."
   - criterion: "Notarization status is 'Accepted' — verified via `spctl --assess --type install dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` returns exit 0 and `stapler validate dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` returns 'The validate action worked!'."
-    verification: "Run both commands; record their stdout in DMG-VERIFICATION.md. Both must succeed."
+    verification: Run both commands; record their stdout in DMG-VERIFICATION.md. Both must succeed.
   - criterion: "Clean-account smoke test: a separate macOS user account (or a fresh test machine) opens the DMG, drags Cyboflow.app to /Applications, launches it. Gatekeeper shows no warnings. The app reaches the main UI with a green StatusBar dot."
     verification: "DMG-VERIFICATION.md contains a 'Clean-Account Smoke Test' section with: account/machine used, screenshot or terminal log of the launch, and a PASS/FAIL stamp."
-  - criterion: "lipo -info confirms both x64 and arm64 slices in better-sqlite3.node and node-pty.node bundled in the DMG."
+  - criterion: lipo -info confirms both x64 and arm64 slices in better-sqlite3.node and node-pty.node bundled in the DMG.
     verification: "Mount the DMG, run `lipo -info /Volumes/Cyboflow/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node` and the equivalent for node-pty; both report 'Architectures in the fat file: x86_64 arm64'. Output captured in DMG-VERIFICATION.md."
-depends_on: [TASK-554]
+depends_on:
+  - TASK-554
 estimated_complexity: medium
 epic: first-run-onboarding-and-self-host-acceptance
 test_strategy:
@@ -46,7 +47,6 @@ prerequisites:
     description: "Crystal's inherited package.json ships with hardenedRuntime: false and notarize: false (Crystal's dev shortcut). Notarization will not run unless both flags are true."
     blocking: true
 ---
-
 # Produce, Sign, and Notarize the v1.0.0 DMG
 
 ## Objective

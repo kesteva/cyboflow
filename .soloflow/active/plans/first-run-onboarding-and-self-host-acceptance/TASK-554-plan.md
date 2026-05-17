@@ -2,8 +2,8 @@
 id: TASK-554
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - .soloflow/active/acceptance/SELF-HOST-LOG.md
 files_readonly:
@@ -11,7 +11,7 @@ files_readonly:
   - .soloflow/active/research/ROADMAP-001-research-risks.md
   - docs/cyboflow_system_design.md
 acceptance_criteria:
-  - criterion: "A self-host log file exists at .soloflow/active/acceptance/SELF-HOST-LOG.md and contains exactly one timestamped session entry covering at least 8 hours of clock time on a single calendar day."
+  - criterion: A self-host log file exists at .soloflow/active/acceptance/SELF-HOST-LOG.md and contains exactly one timestamped session entry covering at least 8 hours of clock time on a single calendar day.
     verification: "Read SELF-HOST-LOG.md; verify a 'Session start: <ISO>' and 'Session end: <ISO>' line where the difference is >= 8 hours and dates match."
   - criterion: "The log enumerates every Cyboflow run started during the session: workflow name, runId, start timestamp, terminal state (completed | failed | canceled | stuck), and pause/approval count."
     verification: "Visual review — the log's 'Runs' section is a markdown table with columns: Workflow | Run ID | Started | Ended | Terminal State | Approvals | Notes. At least 6 runs covering the 5 SoloFlow workflows (soloflow, planner, sprint, prune, compound) appear."
@@ -20,15 +20,18 @@ acceptance_criteria:
   - criterion: "Risks-research §10 failure surfaces are addressed in a 'Risk-Check Findings' section: tRPC subscription leaks (memory observation), WAL checkpoint stalls (DB size after session), zombie PTYs (process count after app quit), dock badge desync (manual count vs queue.length verification), p-queue recursive self-deadlock (any observed)."
     verification: "Read SELF-HOST-LOG.md; section 'Risk-Check Findings' lists each of the 5 enumerated surfaces with a one-line observation (e.g., 'memory grew from 180MB → 240MB over 7h, no leak signature')."
   - criterion: "The log's final 'Verdict' line is one of: 'PASS — no fallback observed; v1 acceptance gate met' OR 'PASS-WITH-DEFERS — N fallbacks, all deferred to ROADMAP-002' OR 'FAIL — uncategorized fallbacks remain; re-run required after fix'."
-    verification: "Read the final line of SELF-HOST-LOG.md; it matches one of the three verdict templates verbatim."
-depends_on: [TASK-551, TASK-552, TASK-553, TASK-555]
+    verification: Read the final line of SELF-HOST-LOG.md; it matches one of the three verdict templates verbatim.
+depends_on:
+  - TASK-551
+  - TASK-552
+  - TASK-553
+  - TASK-555
 estimated_complexity: medium
 epic: first-run-onboarding-and-self-host-acceptance
 test_strategy:
   needed: false
   justification: "This is a manual acceptance task — the deliverable is a structured log file produced during a real-world session. There is no code to unit-test. The 'tests' are the AC verifications applied to the log itself."
 ---
-
 # 1-Day Self-Host Acceptance Run
 
 ## Objective

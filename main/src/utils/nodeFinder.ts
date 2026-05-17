@@ -39,7 +39,6 @@ export async function findNodeExecutable(): Promise<string> {
       const baseDir = path.dirname(nodePath.split('*')[0]);
       if (fs.existsSync(baseDir)) {
         try {
-          const pattern = path.basename(nodePath);
           const entries = fs.readdirSync(baseDir);
           for (const entry of entries) {
             const fullPath = path.join(baseDir, entry, 'bin', 'node');

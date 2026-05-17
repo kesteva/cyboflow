@@ -7,6 +7,7 @@
  */
 import { EventEmitter } from 'node:events';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
 
 // ---------------------------------------------------------------------------
 // DatabaseLike
@@ -58,4 +59,21 @@ export interface OrchestratorDeps {
   logger: LoggerLike;
   eventBus: EventEmitter;
   runQueues: RunQueueRegistry;
+  /**
+   * Optional: narrow interface for querying whether a Claude SDK run is
+   * active for a given run ID.  When provided, StuckDetector uses it to
+   * classify orphan_pty stuck reasons.  When omitted, orphan_pty detection
+   * is effectively disabled (hasActiveRunForId always returns true).
+   */
+  claudeManager?: ClaudeManagerLike;
+  /**
+   * Optional: narrow interface for querying whether a permission-socket
+   * client is connected for a given run ID.  When omitted, stale_socket
+   * classification is disabled with a one-time WARN logged.
+   */
+  permissionServer?: PermissionServerLike;
 }
+
+// Re-export narrow interfaces so callers that only need the interface shapes
+// do not need to import from stuckDetector.ts directly.
+export type { ClaudeManagerLike, PermissionServerLike };
