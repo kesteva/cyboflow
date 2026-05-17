@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useIPCEvents } from './hooks/useIPCEvents';
 import { useNotifications } from './hooks/useNotifications';
+import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
@@ -77,6 +78,7 @@ function App() {
   
   useIPCEvents();
   const { showNotification } = useNotifications();
+  useStuckNotifications();
   
   // Load config on app startup
   useEffect(() => {
