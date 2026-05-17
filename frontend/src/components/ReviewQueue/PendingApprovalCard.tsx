@@ -19,6 +19,7 @@ import { formatAge, truncatePayload } from '../../utils/approvalFormatters';
 import { trpc } from '../../utils/trpcClient';
 import type { Approval } from '../../../../shared/types/approvals';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
+import type { WorkflowRunStatus } from '../../../../shared/types/stuckInspection';
 import { StuckInspectorModal } from './StuckInspectorModal';
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ interface PendingApprovalCardProps {
    * Current run status for the run this approval belongs to.
    * When 'stuck', renders the stuck-run UI (StuckBadge, Why stuck?, Cancel and restart).
    */
-  runStatus?: string;
+  runStatus?: WorkflowRunStatus;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ interface CardChromeProps {
   onReject: () => void;
   isFocused: boolean;
   /** When 'stuck', renders stuck-run UI. */
-  runStatus?: string;
+  runStatus?: WorkflowRunStatus;
   /** The runId for stuck-run actions. */
   runId: string;
 }
