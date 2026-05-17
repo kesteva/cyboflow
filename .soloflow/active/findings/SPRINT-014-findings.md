@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-014
-pending_count: 6
-last_updated: "2026-05-17T23:10:00.000Z"
+pending_count: 15
+last_updated: "2026-05-17T23:35:55.299Z"
 ---
 # Findings Queue
 
@@ -155,4 +155,189 @@ TASK-578 gated: failing blocking prereq (TASK-562 must land first).
 - **location:** .soloflow/worktrees/TASK-577/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node (worktree-local node_modules)
 - **description:** `pnpm --filter main exec vitest run` in the TASK-577 worktree fails 14 test files / 116 tests with `Error: ...better_sqlite3.node was compiled against a different Node.js version using NODE_MODULE_VERSION 136. This version of Node.js requires NODE_MODULE_VERSION 127`. Identical failure pattern on the parent commit (ae78e34^) — pre-existing environmental drift, not caused by TASK-577's 5-line env-object literal edit. CLAUDE.md prescribes `pnpm electron:rebuild` as the fix. AC4 ("pnpm --filter main test exits with status 0") cannot pass until the worktree's better-sqlite3 binding is rebuilt against the Node version vitest is running under. The task's typecheck gate passes cleanly (exit 0), and the grep ACs (1–3) all pass.
 - **suggested_action:** Operator runs `pnpm electron:rebuild` (or `pnpm install --force` followed by `pnpm electron:rebuild`) inside `.soloflow/worktrees/TASK-577` before the test gate is re-asserted. Alternatively: rebuild against the host Node and re-run `pnpm --filter main test`. The same environmental issue likely affects all sibling parallel worktrees on SPRINT-014 — investigate whether the parent-checkout's better-sqlite3 build is being shared into worktrees in a stale state.
+- **resolved_by:** 
+
+## FIND-SPRINT-014-17
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** main/src/ipc/git.ts:315
+- **description:** `sessions:git-commit` IPC handler ignores user `enableCyboflowFooter` setting — `buildGitCommitCommand(message)` is called without the flag, so it always falls back to the default `enableCyboflowFooter: boolean = true` and appends the Cyboflow commit footer regardless of user preference.
+- **suggested_action:** In `main/src/ipc/git.ts` `sessions:git-commit` handler: import configManager, read `config?.enableCyboflowFooter !== false`, and pass that as the second arg to `buildGitCommitCommand(message, enableCyboflowFooter)`. Add a unit test that flips the config to false and asserts the constructed command contains no footer text. Optional belt-and-braces: change the default in `buildGitCommitCommand` signature from `= true` to required, forcing every caller to make the choice explicit (caught at typecheck).
+- **resolved_by:** 
+
+
+
+
+
+
+
+
+
+The sibling commit IPC handler in `main/src/ipc/file.ts:237-243` correctly reads the config and threads `enableCyboflowFooter` through. Two live commit IPC handlers now disagree on whether to honor the toggle — flipping the Settings checkbox suppresses the footer for `git:commit` (file.ts) but not for `sessions:git-commit` (git.ts).
+
+Suspected tasks: TASK-561 (rename of enableCrystalFooter → enableCyboflowFooter swept config/file.ts/commitManager.ts/worktreeManager.ts but missed the git.ts caller), TASK-565 (introduced buildCommitFooter helper but the duplicate code path through buildGitCommitCommand kept its `= true` default).
+
+## FIND-SPRINT-014-18
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/services/commitManager.ts:101-102,210-211; main/src/ipc/file.ts:238-239,274-275; main/src/services/worktreeManager.ts:650-651
+- **description:** The `enableCyboflowFooter` config lookup is duplicated 5 times across 3 files with the identical 2-line pattern:
+- **suggested_action:** Add `isCommitFooterEnabled(configManager): boolean` (or `getCommitFooter(configManager): string`) helper to `main/src/utils/commitFooter.ts`. Replace the 5 duplicated lookups. Co-locates the default-true policy with the footer string so the implicit `!== false` (defaults to true when unset) is documented once. Net diff: -10 lines, +5 lines.
+- **resolved_by:** 
+
+
+
+
+
+
+
+```
+const config = (this.)configManager?.getConfig();
+const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
+```
+
+TASK-565 extracted `buildCommitFooter(enabled)` to one site but left every caller still doing the config lookup. TASK-561 renamed the field but did not consolidate the lookup. Net effect across the sprint: the *footer string* is now centralized, but the *enabled-decision boilerplate* is just as duplicated as before.
+
+Suspected tasks: TASK-561 (rename), TASK-565 (extract buildCommitFooter).
+
+## FIND-SPRINT-014-19
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/utils/shellEscape.ts:29-30; main/src/ipc/file.ts:242-243,277-278; main/src/services/worktreeManager.ts:654-655
+- **description:** The compose-footer-with-message pattern is duplicated 4 times across 3 files:
+- **suggested_action:** Add `appendCommitFooter(message: string, enabled: boolean): string` to `main/src/utils/commitFooter.ts` that wraps the bare `buildCommitFooter` + ternary composition. Either replace all 4 sites with this helper, or fold the entire concern into the existing `buildGitCommitCommand` for the shellEscape.ts site. Supersedes/subsumes FIND-SPRINT-014-6.
+- **resolved_by:** 
+
+
+
+
+
+
+```
+const footer = buildCommitFooter(enableCyboflowFooter);
+const fullMessage = footer ? `${message}\n\n${footer}` : message;
+```
+
+TASK-565 extracted `buildCommitFooter` but left the "append-with-blank-line if non-empty" composition repeated at every caller. FIND-6 (already in the queue) flagged this for the two IPC handlers in file.ts only — the sprint view shows the pattern is broader (shellEscape.ts and worktreeManager.ts have it too).
+
+Suspected tasks: TASK-565 (introduced helper but did not include the compose step).
+
+## FIND-SPRINT-014-20
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/utils/crystalDirectory.ts
+- **description:** The `crystalDirectory.ts` backward-compat shim created by TASK-562 has zero in-tree consumers. Verified via `grep -rn "from .*crystalDirectory" --include="*.ts" --include="*.tsx"` and `grep -rn "getCrystalDirectory|getCrystalSubdirectory|setCrystalDirectory"` — both return only the shim file itself.
+- **suggested_action:** Delete `main/src/utils/crystalDirectory.ts`. The `--crystal-dir` CLI flag aliasing in `main/src/index.ts:120-137` is independent of the module shim and should stay (that handles end-user invocation, not in-tree imports). Add a one-line note to docs/CODE-PATTERNS.md or the migration changelog if user-facing deprecation tracking is desired.
+- **resolved_by:** 
+
+
+
+
+
+
+The shim is annotated @deprecated and re-exports three symbols (`getCrystalDirectory`, `getCrystalSubdirectory`, `setCrystalDirectory`) that nothing imports. TASK-562 also rewrote `scriptPath.ts` (FIND-1) to import from the new module, eliminating the last potential caller. Since cyboflow is pre-1.0 with no external API, there is no external consumer either.
+
+Suspected tasks: TASK-562 (introduced the shim defensively but the rename was complete in the same task).
+
+## FIND-SPRINT-014-21
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** docs/CODE-PATTERNS.md (Shared Utilities section)
+- **description:** Two new shared utilities introduced in SPRINT-014 are not registered in `docs/CODE-PATTERNS.md`:
+- **suggested_action:** Append two entries to `docs/CODE-PATTERNS.md` `Shared Utilities` section in the existing format (Path/Use it for/Canonical example), one per new helper. devDebugLog canonical example: `main/src/index.ts:38,100-110,236-396` (console wrapper). commitFooter canonical example: `main/src/utils/shellEscape.ts:29` (the buildGitCommitCommand wrapper).
+- **resolved_by:** 
+
+
+
+
+
+1. `main/src/utils/devDebugLog.ts` (TASK-566) — exports `getDevDebugLogPath(stream)` and `appendDevDebugLog(stream, level, source, message, originalConsole?)`. Centralizes the cyboflow-{frontend,backend}-debug.log filename literals; future rebrand or relocation touches one file.
+2. `main/src/utils/commitFooter.ts` (TASK-565) — exports `buildCommitFooter(enabled)`. Holds the canonical Cyboflow footer string; per the test file (`commitFooter.test.ts`) the byte-level equality check is the contract.
+
+CODE-PATTERNS.md `Shared Utilities` section is the documented home for these — it currently lists `cn`, `mutex`, `simpleTaskQueue`, `logger`, `api`, `trpcClient`, `migrateLocalStorageKey`. Future agents reading the patterns doc will reinvent these helpers.
+
+Suspected tasks: TASK-565, TASK-566.
+
+## FIND-SPRINT-014-22
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/index.ts:244-437 (console.log/error/warn/info/debug overrides)
+- **description:** TASK-566 extracted the dev-debug-log filename/path literals but left the surrounding 5 console-override bodies still ~95% duplicated. Each of `console.log`, `console.error`, `console.warn`, `console.info`, `console.debug` (lines ~244-437) hand-builds the same args-to-string formatter:
+- **suggested_action:** Add `formatConsoleArgs(args: unknown[]): string` to `main/src/utils/devDebugLog.ts` (or a new `consoleFormat.ts` if you prefer separation of concerns). Replace the 5 console-override formatter blocks. Net diff: ~ -60 lines, +10 lines. Reuses the same single point of truth for object/Error/circular-ref formatting that the renderer-forwarding code, the logger, and the devDebugLog already share.
+- **resolved_by:** 
+
+
+
+```
+const message = args.map(arg => {
+  if (typeof arg === "object" && arg !== null) {
+    if (arg instanceof Error) return `Error: ${arg.message}\nStack: ${arg.stack}`;
+    try { return JSON.stringify(arg, null, 2); } catch (e) { return `[Object with circular structure: ${arg.constructor?.name || "Object"}]`; }
+  }
+  return String(arg);
+}).join(" ");
+```
+
+Roughly 60 lines of duplicated formatting code remain across the 5 overrides. TASK-566 had a chance to also extract `formatConsoleArgs(args): string` as a sibling helper to `appendDevDebugLog` — the two are always called in sequence inside each override.
+
+Suspected tasks: TASK-566 (scope was log-helper only, did not extend to the args formatter).
+
+## FIND-SPRINT-014-23
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/executionTracker.ts:7
+- **description:** Dead import: `import { buildGitCommitCommand } from "../utils/shellEscape";` — `buildGitCommitCommand` is referenced exactly once in the file (the import) and is never called. Verified via `grep -c buildGitCommitCommand main/src/services/executionTracker.ts` → 1.
+- **suggested_action:** Delete the import in `main/src/services/executionTracker.ts:7`. `pnpm lint` would catch this with the `no-unused-vars` rule — also worth confirming whether the rule is currently configured (the dead import means it is not, or is downgraded to warn).
+- **resolved_by:** 
+
+
+
+Not introduced by this sprint, but TASK-561 swept every `enableCrystalFooter` / `buildGitCommitCommand` call site and is the natural moment to notice the orphan. Importing a function that builds a git-commit shell command without using it carries a slight footgun risk (someone copy-paste reuses it without the safe-default-true argument).
+
+Suspected tasks: TASK-561 (made a sweep over buildGitCommitCommand callers but did not include this orphaned import).
+
+## FIND-SPRINT-014-24
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/index.ts:120-137
+- **description:** The --cyboflow-dir / --crystal-dir CLI flag parser has two near-identical branches (one for the `--flag=value` form, one for the `--flag value` form), each with its own deprecation-warning branch. Net: 18 lines of imperative parsing with the deprecation message repeated twice.
+- **suggested_action:** Refactor to a single normalize step at the top of the parse loop: collect `(flagName, value)` pairs from either form, then a single switch on the canonical flag. Or use a tiny argv helper. Net diff: -10 lines, +6 lines, one deprecation-warning site instead of two. Not blocking; cosmetic but the surface will grow as more cyboflow-* flags appear.
+- **resolved_by:** 
+
+
+TASK-562 added this defensively for backward compat, but the dual-form duplication makes future flag changes (e.g. adding `--cyboflow-data-dir`) error-prone — any new pair would need 4 branches.
+
+Suspected tasks: TASK-562.
+
+## FIND-SPRINT-014-25
+- **source:** SPRINT-014 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/terminalSessionManager.ts:41-48 vs main/src/services/terminalPanelManager.ts:47-61
+- **description:** Two terminal manager classes spawn PTY subprocesses with divergent env-var contracts:
+
+1. `terminalPanelManager.ts` (TASK-577 just updated) — sets both legacy `CRYSTAL_SESSION_ID`/`CRYSTAL_PANEL_ID` and canonical `CYBOFLOW_SESSION_ID`/`CYBOFLOW_PANEL_ID`.
+2. `terminalSessionManager.ts` (untouched this sprint) — sets neither. Used live by `sessionManager.ts:1556` for the legacy per-session terminal pathway.
+
+User shell scripts relying on these env vars will see them present in panel-mode terminals and absent in session-mode terminals — same product feature ("a cyboflow terminal"), inconsistent contract. Not a regression (terminalSessionManager has never set them), but the inconsistency is now visible because TASK-577 codified the dual-set as policy in only one of the two managers.
+
+Suspected tasks: TASK-577 (codified the env-var contract on one of two parallel managers).
+- **suggested_action:** Either (a) mirror the dual-set into `terminalSessionManager.ts` so both pathways expose the session/panel env vars consistently, or (b) annotate `terminalSessionManager.ts` with `@cyboflow-hidden` if the plan is to delete it as part of the panel-migration epic, with a TODO referencing the deletion task. If (a), also add a shared helper `buildCyboflowSessionEnv(sessionId, panelId?)` to avoid a third copy of the same key set.
 - **resolved_by:** 
