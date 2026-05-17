@@ -102,25 +102,6 @@ export class ShellDetector {
     return { path: '/bin/sh', name: 'sh', args: ['-i'] };
   }
 
-  private static findExecutable(name: string): string | null {
-    const pathEnv = process.env.PATH || '';
-    const pathDirs = pathEnv.split(path.delimiter);
-
-    for (const dir of pathDirs) {
-      const fullPath = path.join(dir, name);
-      if (fs.existsSync(fullPath)) {
-        try {
-          fs.accessSync(fullPath, fs.constants.X_OK);
-          return fullPath;
-        } catch {
-          // Not executable, continue searching
-        }
-      }
-    }
-
-    return null;
-  }
-
   private static getShellArgs(shellName: string): string[] {
     // Return appropriate arguments for interactive shell sessions
     switch (shellName) {
