@@ -13,10 +13,6 @@
     "TASK-555": {
       "status": "blocked",
       "verdict_at": "2026-05-17T14:46:26.332Z"
-    },
-    "TASK-556": {
-      "status": "in_progress",
-      "started": "2026-05-17T17:04:30.602Z"
     }
   },
   "run": {
