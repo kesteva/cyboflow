@@ -246,8 +246,8 @@ export class StuckDetector {
   /**
    * Attempt to transition a workflow_run to status='stuck'.
    *
-   * Executes inside a db.transaction() guarded by `AND status='awaiting_review'`
-   * so a concurrently-canceled run is not revived.  Only emits the 'runs:stuck'
+   * The `WHERE id = ? AND status = 'awaiting_review'` predicate is the idempotency
+   * guard — a concurrently-canceled run is not revived. Only emits the 'runs:stuck'
    * event when `changes === 1` (exactly one row was updated).
    */
   private transitionToStuck(approval: ApprovalRow, reason: StuckReason): void {
@@ -255,18 +255,14 @@ export class StuckDetector {
     const runId = approval.run_id;
     const approvalId = approval.id;
 
-    const txn = this.db.transaction(() => {
-      const updateStmt = this.db.prepare(
-        `UPDATE workflow_runs
-         SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?
-         WHERE id = ? AND status = 'awaiting_review'`,
-      );
-      return updateStmt.run(reason.kind, detectedAt, runId) as { changes: number };
-    });
+    const updateStmt = this.db.prepare(
+      `UPDATE workflow_runs
+       SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?
+       WHERE id = ? AND status = 'awaiting_review'`,
+    );
+    const { changes } = updateStmt.run(reason.kind, detectedAt, runId) as { changes: number };
 
-    const result = (txn as () => { changes: number })();
-
-    if (result.changes === 1) {
+    if (changes === 1) {
       const event: StuckDetectedEvent = {
         runId,
         approvalId,
