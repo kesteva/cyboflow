@@ -274,4 +274,71 @@ describe('cancelAndRestartHandler', () => {
 
     expect(spy.clearPendingForRun).toHaveBeenCalledWith(runId);
   });
+
+  // -------------------------------------------------------------------------
+  // claudeManagerStop rejection — run still canceled, new run still inserted
+  // -------------------------------------------------------------------------
+
+  it('still marks run as canceled and inserts new run when claudeManagerStop rejects', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    // Make claudeManagerStop reject.
+    const rejectingSpy = makeOrderSpy();
+    rejectingSpy.claudeManagerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
+
+    const loggerErrors: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const testLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerErrors.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
+      debug: vi.fn(),
+    };
+
+    const deps: HandlerDeps = {
+      ...makeDeps(db, rejectingSpy, runQueues),
+      logger: testLogger,
+    };
+
+    const result = await cancelAndRestartHandler(runId, deps);
+
+    // Should not be a noOp
+    if ('noOp' in result) throw new Error('Expected newRunId, got noOp');
+
+    // Old run should be canceled
+    const oldRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(oldRun.status).toBe('canceled');
+
+    // New run should be inserted
+    const newRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(result.newRunId) as { status: string };
+    expect(newRun.status).toBe('queued');
+
+    // Logger should have recorded the error with [cancelAndRestart] prefix
+    expect(loggerErrors.length).toBeGreaterThanOrEqual(1);
+    expect(loggerErrors[0].msg).toContain('[cancelAndRestart]');
+    expect(loggerErrors[0].ctx['runId']).toBe(runId);
+  });
+
+  it('still works without a logger when claudeManagerStop rejects', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    const rejectingSpy = makeOrderSpy();
+    rejectingSpy.claudeManagerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
+
+    // No logger provided
+    const deps: HandlerDeps = makeDeps(db, rejectingSpy, runQueues);
+
+    const result = await cancelAndRestartHandler(runId, deps);
+
+    if ('noOp' in result) throw new Error('Expected newRunId, got noOp');
+
+    const oldRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(oldRun.status).toBe('canceled');
+
+    const newRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(result.newRunId) as { status: string };
+    expect(newRun.status).toBe('queued');
+  });
 });
