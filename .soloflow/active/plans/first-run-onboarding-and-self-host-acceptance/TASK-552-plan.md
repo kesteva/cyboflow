@@ -2,8 +2,8 @@
 id: TASK-552
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/ipc/project.ts
   - main/src/utils/gitignoreWriter.ts
@@ -14,12 +14,12 @@ files_readonly:
 acceptance_criteria:
   - criterion: "On projects:create handler success, .cyboflow/worktrees/ is appended to <projectPath>/.gitignore if not already present."
     verification: "Read main/src/ipc/project.ts; the projects:create handler calls ensureGitignoreEntry(project.path, '.cyboflow/worktrees/') AFTER the createProject call and BEFORE returning success."
-  - criterion: "If .gitignore does not exist, it is created with the single line '.cyboflow/worktrees/\\n'."
-    verification: "Unit test in main/src/utils/gitignoreWriter.test.ts: temp dir with no .gitignore → call ensureGitignoreEntry → assert .gitignore exists with exact content '.cyboflow/worktrees/\\n'."
+  - criterion: "If .gitignore does not exist, it is created with the single line '.cyboflow/worktrees/\n'."
+    verification: "Unit test in main/src/utils/gitignoreWriter.test.ts: temp dir with no .gitignore → call ensureGitignoreEntry → assert .gitignore exists with exact content '.cyboflow/worktrees/\n'."
   - criterion: "If .gitignore already contains the entry (with or without trailing slash, with or without leading slash, on any line), no duplicate is appended."
     verification: "Unit tests for three idempotency cases: existing '.cyboflow/worktrees/', '.cyboflow/worktrees', '/.cyboflow/worktrees/' — all three must short-circuit without writing."
   - criterion: "If .gitignore exists but does not end with a newline, ensureGitignoreEntry prepends a newline before the new entry to avoid joining lines."
-    verification: "Unit test: pre-populate .gitignore with 'node_modules' (no trailing newline) → call → assert resulting file is 'node_modules\\n.cyboflow/worktrees/\\n'."
+    verification: "Unit test: pre-populate .gitignore with 'node_modules' (no trailing newline) → call → assert resulting file is 'node_modules\n.cyboflow/worktrees/\n'."
   - criterion: "Errors writing to .gitignore (e.g., permission denied, directory not writable) are logged but do not fail project creation — the project still appears in the project list."
     verification: "Unit test: mock fs.writeFileSync to throw → call ensureGitignoreEntry → assert no exception propagates; in project.ts handler, ensureGitignoreEntry is wrapped in try/catch with console.error."
 depends_on: []
@@ -29,20 +29,19 @@ test_strategy:
   needed: true
   justification: "Pure file-IO helper with branching idempotency rules. Easy to test, easy to regress; a typo in the entry-pattern match (leading slash vs no leading slash) would silently duplicate lines forever."
   targets:
-    - behavior: "Creates .gitignore from scratch if missing"
-      test_file: "main/src/utils/gitignoreWriter.test.ts"
+    - behavior: Creates .gitignore from scratch if missing
+      test_file: main/src/utils/gitignoreWriter.test.ts
       type: unit
-    - behavior: "Idempotent across all forms of the entry"
-      test_file: "main/src/utils/gitignoreWriter.test.ts"
+    - behavior: Idempotent across all forms of the entry
+      test_file: main/src/utils/gitignoreWriter.test.ts
       type: unit
-    - behavior: "Handles trailing-newline-missing case"
-      test_file: "main/src/utils/gitignoreWriter.test.ts"
+    - behavior: Handles trailing-newline-missing case
+      test_file: main/src/utils/gitignoreWriter.test.ts
       type: unit
-    - behavior: "Swallows fs errors without throwing"
-      test_file: "main/src/utils/gitignoreWriter.test.ts"
+    - behavior: Swallows fs errors without throwing
+      test_file: main/src/utils/gitignoreWriter.test.ts
       type: unit
 ---
-
 # Auto-Write .cyboflow/worktrees/ to Project .gitignore on Project Add
 
 ## Objective

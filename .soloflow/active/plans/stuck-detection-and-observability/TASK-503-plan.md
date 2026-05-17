@@ -1,8 +1,8 @@
 ---
 id: TASK-503
 idea: IDEA-011
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useStuckNotifications.ts
   - frontend/src/hooks/__tests__/useStuckNotifications.test.ts
@@ -18,7 +18,7 @@ acceptance_criteria:
   - criterion: "`useStuckNotifications` subscribes to the same `runs:stuck` / `onStuckDetected` tRPC subscription the queue slice uses and fires a macOS notification via the renderer `Notification` API on each event."
     verification: "Component test mounts a host component that calls `useStuckNotifications()`; injects a mock subscription that emits one stuck event; asserts `window.Notification` constructor was called exactly once with a body containing the run's workflow name and the stuck reason."
   - criterion: "Only the FIRST stuck-detection event per `session_id` (Crystal's session row id, the per-app-launch session counter) fires a notification. Subsequent events for the same session are suppressed silently."
-    verification: "Unit test emits three stuck events for the same `sessionId` (different `runId`s allowed) and asserts `window.Notification` was called exactly once; emits one more event for a different `sessionId` and asserts the constructor count rises to 2."
+    verification: Unit test emits three stuck events for the same `sessionId` (different `runId`s allowed) and asserts `window.Notification` was called exactly once; emits one more event for a different `sessionId` and asserts the constructor count rises to 2.
   - criterion: "The suppression set is held in memory only — it does not persist across app restarts. A fresh app launch starts with an empty suppression set, so the first stuck detection after restart fires a notification regardless of pre-restart history."
     verification: "Unit test unmounts the hook (simulating app restart by re-mounting it fresh), emits a stuck event for a `sessionId` that previously triggered a notification, asserts the constructor is called again. The hook MUST NOT read or write `localStorage` / `sessionStorage` for this state."
   - criterion: "Notification text follows the format established in `frontend/src/hooks/useNotifications.ts` — title with emoji, body sentence-cased with the workflow name in quotes."
@@ -27,30 +27,30 @@ acceptance_criteria:
     verification: "Unit test sets the mock config's `notifications.enabled === false`, emits a stuck event, asserts `window.Notification` was NOT called."
   - criterion: "The hook is mounted exactly once, from `frontend/src/App.tsx` at the top level (analogous to `useNotifications()`). It is not mounted inside `<ReviewQueueView />` to avoid the suppression state resetting on view-mount/unmount cycles."
     verification: "`grep -n 'useStuckNotifications' frontend/src/App.tsx` returns one call site; `grep -rn 'useStuckNotifications' frontend/src/components/` returns 0 matches."
-depends_on: [TASK-501]
+depends_on:
+  - TASK-501
 estimated_complexity: low
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
   justification: "The collapse-after-first-per-session logic is the entire substantive behavior. Three distinct cases — first stuck, second stuck same session, stuck for new session — must each be exercised to prove the suppression is keyed correctly."
   targets:
-    - behavior: "First stuck event per session fires a notification"
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: First stuck event per session fires a notification
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Subsequent stuck events same session are suppressed"
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Subsequent stuck events same session are suppressed
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Stuck events for a new session fire a notification"
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Stuck events for a new session fire a notification
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Suppression set is in-memory only (resets on hook remount)"
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Suppression set is in-memory only (resets on hook remount)
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Disabled-notifications config gates the entire hook"
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Disabled-notifications config gates the entire hook
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
 ---
-
 # First-stuck-per-session macOS notification with collapse
 
 ## Objective

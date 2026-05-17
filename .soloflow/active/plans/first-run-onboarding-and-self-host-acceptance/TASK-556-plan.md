@@ -2,8 +2,8 @@
 id: TASK-556
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - README.md
   - docs/PROVENANCE.md
@@ -28,9 +28,8 @@ estimated_complexity: low
 epic: first-run-onboarding-and-self-host-acceptance
 test_strategy:
   needed: false
-  justification: "Documentation file. The AC verifications (greps and file presence) are sufficient — no behavior to unit-test."
+  justification: Documentation file. The AC verifications (greps and file presence) are sufficient — no behavior to unit-test.
 ---
-
 # README and License Provenance — Crystal Commit Tag and MIT/Do-Not-Merge-From-Nimbalyst Rule
 
 ## Objective

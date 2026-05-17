@@ -2,8 +2,8 @@
 id: TASK-553
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
-created: 2026-05-11T00:00:00Z
+status: in-flight
+created: "2026-05-11T00:00:00Z"
 files_owned:
   - frontend/src/components/StatusBar.tsx
   - frontend/src/components/StatusBar.test.tsx
@@ -15,7 +15,7 @@ files_readonly:
   - main/src/orchestrator/index.ts
   - frontend/src/utils/api.ts
 acceptance_criteria:
-  - criterion: "A StatusBar component is rendered at the bottom of the app shell inside App.tsx and contains a McpHealthIndicator child."
+  - criterion: A StatusBar component is rendered at the bottom of the app shell inside App.tsx and contains a McpHealthIndicator child.
     verification: "grep -n 'StatusBar' frontend/src/App.tsx returns at least one import and one JSX usage; grep -n 'McpHealthIndicator' frontend/src/components/StatusBar.tsx returns at least one import and one JSX usage."
   - criterion: "McpHealthIndicator displays a colored dot (green = healthy, yellow = starting/degraded, red = error/stopped) reflecting state from the mcpHealthStore Zustand slice."
     verification: "Read frontend/src/components/McpHealthIndicator.tsx; verify the rendered color attribute or className depends on the store's status enum value, which is one of 'healthy' | 'starting' | 'error'."
@@ -25,24 +25,24 @@ acceptance_criteria:
     verification: "grep -n 'Diagnostics\\|diagnostics' frontend/src/components/McpHealthIndicator.tsx returns one match; clicking the indicator in a test triggers a popover render (component test)."
   - criterion: "On initial mount before the first health event arrives, status defaults to 'starting' (yellow) — never 'healthy' (green) without an actual probe."
     verification: "Unit test in StatusBar.test.tsx: render with empty store → assert dot is yellow/starting variant."
-depends_on: [TASK-535]
+depends_on:
+  - TASK-535
 estimated_complexity: medium
 epic: first-run-onboarding-and-self-host-acceptance
 test_strategy:
   needed: true
-  justification: "Status semantics (when is it green vs yellow vs red?) are the AC and would silently drift if untested. The default-to-yellow rule especially is easy to break by changing a store initializer."
+  justification: Status semantics (when is it green vs yellow vs red?) are the AC and would silently drift if untested. The default-to-yellow rule especially is easy to break by changing a store initializer.
   targets:
     - behavior: "Defaults to 'starting' (yellow) on cold mount with no events received"
-      test_file: "frontend/src/components/StatusBar.test.tsx"
+      test_file: frontend/src/components/StatusBar.test.tsx
       type: component
     - behavior: "Transitions to 'healthy' (green) when store status is set to healthy"
-      test_file: "frontend/src/components/StatusBar.test.tsx"
+      test_file: frontend/src/components/StatusBar.test.tsx
       type: component
     - behavior: "Transitions to 'error' (red) when store status is set to error and exposes the error message in the diagnostics popover"
-      test_file: "frontend/src/components/StatusBar.test.tsx"
+      test_file: frontend/src/components/StatusBar.test.tsx
       type: component
 ---
-
 # MCP Server Health Indicator in App Status Bar
 
 ## Objective
