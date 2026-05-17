@@ -184,7 +184,7 @@ describe('ReviewQueueView — first approve/reject auto-dismisses OnboardingCard
     mockQueue = [];
   });
 
-  it('pressing y with pending approvals calls preferences:set with cyboflow_onboarding_dismissed', async () => {
+  it('pressing y with pending approvals calls preferences:set with cyboflow_onboarding_dismissed and unmounts the card', async () => {
     render(<ReviewQueueView />);
 
     // Wait for the onboarding card to finish checking its preference
@@ -202,5 +202,8 @@ describe('ReviewQueueView — first approve/reject auto-dismisses OnboardingCard
       'cyboflow_onboarding_dismissed',
       'true',
     );
+
+    // Card must be unmounted in the same session — not just the preference written.
+    await waitFor(() => expect(screen.queryByText(/Cyboflow pauses Claude/)).not.toBeInTheDocument());
   });
 });
