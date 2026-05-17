@@ -16,15 +16,18 @@
 export { runsRouter } from '../../orchestrator/trpc/routers/runs';
 
 // ---------------------------------------------------------------------------
-// Output types — re-exported from the shared module so downstream consumers
-// can import from a single location without creating an import cycle.
+// Output types — imported for local use and re-exported from the shared module
+// so downstream consumers can import from a single location without creating
+// an import cycle.
 // ---------------------------------------------------------------------------
 
-export type {
+import type {
   RawEvent,
   PendingApproval,
   StuckInspectionResult,
 } from '../../../../shared/types/stuckInspection';
+
+export type { RawEvent, PendingApproval, StuckInspectionResult };
 
 // ---------------------------------------------------------------------------
 // Narrow DB types for direct testing
