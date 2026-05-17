@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-013
-pending_count: 12
-last_updated: "2026-05-17T16:59:42.599Z"
+pending_count: 15
+last_updated: "2026-05-17T17:14:00.000Z"
 ---
 # Findings Queue
 
@@ -169,3 +169,32 @@ TASK-555 gated: failing blocking prereq (Notarization requires Apple ID + team I
 - **location:** main/src/orchestrator/__tests__/cancelAndRestart.test.ts
 - **description:** The round-2 transaction wrap (commit 20e1e3a) adds a `changes === 0` guard inside `db.transaction()` that throws when the run was concurrently moved to a terminal state between the row-fetch guard and the UPDATE. This is the precise race-window the transaction wrap is designed to handle, but no test exercises it — the existing 12 tests cover only the happy path, the noOp-on-terminal-status path (where the row-fetch guard fires), and the claudeManagerStop rejection branches. Adding a regression test (e.g., a deps with a db whose UPDATE prepare returns `{ changes: 0 }`) would lock in the behavior and prevent silent regression if a future edit drops the guard.
 - **suggested_action:** Add one test case in cancelAndRestart.test.ts that stubs the UPDATE prepare to return changes=0 and asserts the handler throws with the expected message and that the new-run INSERT is NOT executed.
+
+## FIND-SPRINT-013-18
+- **type:** improvement
+- **source:** TASK-553 (executor)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/mcpHealthStore.ts:subscribeToMcpHealth
+- **description:** The mcpHealthStore currently polls via the cyboflow:mcp-health IPC channel (5-second interval) because the TASK-535 (cyboflow-mcp-server epic) dependency does not yet exist. When TASK-535 lands and emits a push-based health event, this store should subscribe to trpc.cyboflow.events.onMcpHealth instead of polling. The subscription wiring point is the subscribeToMcpHealth() action — replace the setInterval block with the tRPC subscription and remove the polling interval.
+- **suggested_action:** After TASK-535 merges, replace the setInterval polling in mcpHealthStore.subscribeToMcpHealth() with trpc.cyboflow.events.onMcpHealth.subscribe(). Remove the FUTURE comment markers.
+- **resolved_by:** 
+
+## FIND-SPRINT-013-19
+- **source:** TASK-553 (verifier)
+- **type:** cleanup
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/stores/mcpHealthStore.ts + frontend/src/hooks/useMcpHealth.ts + frontend/src/components/Sidebar.tsx (lines 9, 22, 177-183)
+- **description:** TASK-553 introduces a Zustand `mcpHealthStore` that polls `cyboflow:mcp-health` every 5s and renders a colored dot via the new `StatusBar` + `McpHealthIndicator`. A parallel implementation already exists: the `useMcpHealth` hook (`frontend/src/hooks/useMcpHealth.ts`) polls the same channel on the same 5s interval, and `Sidebar.tsx` already renders a green/yellow/red MCP dot driven by that hook. The runtime now runs two independent 5s polling loops against the same IPC channel and shows two MCP status dots (one in the sidebar's drag-handle area, one in the new status bar). The TASK-553 plan listed the existing hook only obliquely (the Sidebar dot is in neither `files_owned` nor `files_readonly`), so the executor was not formally directed to consolidate — but the duplication is real and should be resolved before TASK-535 lands the push subscription (otherwise both consumers will need migrating).
+- **suggested_action:** When TASK-535 lands the push-based `onMcpHealth` subscription, refactor `useMcpHealth` to read from `mcpHealthStore` (one polling/subscription owner) and either remove the sidebar dot in favor of the status bar dot or keep both UIs but feed them from the single store. Decide product-side which dot location wins.
+
+## FIND-SPRINT-013-20
+- **source:** TASK-553 (verifier)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/mcpHealthStore.ts:lastError mapping
+- **description:** The store maps `McpServerHealth.lastError` from the IPC payload to its `lastError` field on every poll without preserving the previous error when the next poll returns no error (e.g., status flips to 'running' but `lastError` is undefined). This is technically correct (latest snapshot wins), but combined with AC4 ("last error message (if any)") it means a transient error briefly shown to the user disappears on the next clean tick — the user has 5s max to see it before it's overwritten. Consider preserving `lastError` until the user dismisses the popover or status is healthy for N successive polls. Not a blocker — current behavior is consistent with the IPC contract.
+- **suggested_action:** Either preserve `lastError` across polls when transitioning healthy→error→healthy quickly, or document the "5s visibility window" tradeoff in the store doc-comment so future readers know it is intentional.
+- **resolved_by:** 

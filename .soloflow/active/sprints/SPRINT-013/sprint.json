@@ -6,18 +6,17 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-553": {
-      "status": "pending"
-    },
     "TASK-554": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-17T17:04:30.575Z"
     },
     "TASK-555": {
       "status": "blocked",
       "verdict_at": "2026-05-17T14:46:26.332Z"
     },
     "TASK-556": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-17T17:04:30.602Z"
     }
   },
   "run": {
