@@ -129,8 +129,8 @@ describe('StuckInspectorModal — loaded state', () => {
       expect(screen.getByText('Detected reason')).toBeInTheDocument();
     });
 
-    const headings = screen.getAllByRole('heading', { level: 2 });
-    // Filter to only the three section headings (excluding modal header h2).
+    const headings = screen.getAllByRole('heading', { level: 3 });
+    // Filter to only the three section headings (h3, nested under modal's h2 title).
     const sectionHeadings = headings.filter((h) =>
       ['Detected reason', 'Pending approval', 'Recent events'].includes(h.textContent ?? ''),
     );
