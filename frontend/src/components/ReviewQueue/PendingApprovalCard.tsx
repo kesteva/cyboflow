@@ -4,7 +4,7 @@
  * Extends the base PendingApprovalCard with:
  *  - StuckBadge when runStatus === 'stuck' (TASK-502)
  *  - "Why stuck?" button that opens StuckInspectorModal (TASK-504)
- *  - "Cancel and restart" button stub when runStatus === 'stuck' (TASK-502)
+ *  - "Cancel and restart" button when runStatus === 'stuck' (TASK-502)
  *
  * This file lives in ReviewQueue/ as part of the stuck-detection epic
  * (TASK-502 + TASK-504). The root-level PendingApprovalCard.tsx remains
@@ -20,6 +20,7 @@ import { trpc } from '../../utils/trpcClient';
 import type { Approval } from '../../../../shared/types/approvals';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { WorkflowRunStatus } from '../../../../shared/types/stuckInspection';
+import { StuckBadge } from './StuckBadge';
 import { StuckInspectorModal } from './StuckInspectorModal';
 
 // ---------------------------------------------------------------------------
@@ -35,25 +36,12 @@ interface PendingApprovalCardProps {
    * When 'stuck', renders the stuck-run UI (StuckBadge, Why stuck?, Cancel and restart).
    */
   runStatus?: WorkflowRunStatus;
-}
-
-// ---------------------------------------------------------------------------
-// StuckBadge sub-component (inline — full version in TASK-502)
-// ---------------------------------------------------------------------------
-
-interface StuckBadgeProps {
-  reason?: string | null;
-}
-
-function StuckBadge({ reason }: StuckBadgeProps): React.ReactElement {
-  return (
-    <span
-      title={reason ?? undefined}
-      className="ml-1 inline-flex items-center px-1.5 py-0.5 text-xs font-bold tracking-wide text-white bg-red-600 rounded"
-    >
-      STUCK
-    </span>
-  );
+  /**
+   * Human-readable explanation of why the run is stuck.
+   * Forwarded to <StuckBadge reason=…> as the hover tooltip.
+   * Only meaningful when runStatus === 'stuck'.
+   */
+  stuckReason?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +64,12 @@ interface CardChromeProps {
   runStatus?: WorkflowRunStatus;
   /** The runId for stuck-run actions. */
   runId: string;
+  /**
+   * Human-readable explanation of why the run is stuck.
+   * Passed as the tooltip on <StuckBadge>. When null/undefined, no tooltip
+   * is shown but the badge still renders.
+   */
+  stuckReason?: string | null;
 }
 
 function CardChrome({
@@ -88,8 +82,10 @@ function CardChrome({
   isFocused,
   runStatus,
   runId,
+  stuckReason,
 }: CardChromeProps): React.ReactElement {
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
   const isStuck = runStatus === 'stuck';
 
   const focusClass = isFocused
@@ -100,6 +96,12 @@ function CardChrome({
 
   const truncated = truncatePayload(representative.payloadPreview);
 
+  function handleCancelAndRestart(): void {
+    setCancelBusy(true);
+    void trpc.cyboflow.runs.cancelAndRestart.mutate({ runId })
+      .finally(() => { setCancelBusy(false); });
+  }
+
   return (
     <div
       data-approval-id={representative.id}
@@ -109,7 +111,7 @@ function CardChrome({
       <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-xs text-text-muted">{representative.workflowName}</span>
         <span className="text-sm font-semibold text-text-primary">{label}</span>
-        {isStuck && <StuckBadge />}
+        {isStuck && <StuckBadge reason={stuckReason} />}
         {isBlocking && (
           <span className="ml-1 text-xs font-medium text-status-error">
             blocked {formatAge(representative.createdAt)}
@@ -159,13 +161,8 @@ function CardChrome({
           <Button
             variant="secondary"
             size="sm"
-            disabled={busy}
-            onClick={() => {
-              // @cyboflow-hidden TASK-502: cancelAndRestart mutation not yet wired.
-              // Full implementation in the stuck-run recovery epic.
-              // eslint-disable-next-line no-console
-              console.log(`[PendingApprovalCard] cancelAndRestart stub — runId=${runId}`);
-            }}
+            disabled={busy || cancelBusy}
+            onClick={handleCancelAndRestart}
           >
             Cancel and restart
           </Button>
@@ -192,12 +189,13 @@ function CardChrome({
  * Adds stuck-run features on top of the base card:
  *  - StuckBadge when runStatus === 'stuck'
  *  - "Why stuck?" button that opens StuckInspectorModal
- *  - "Cancel and restart" button (TASK-502 stub)
+ *  - "Cancel and restart" button that calls cyboflow.runs.cancelAndRestart
  */
 export function PendingApprovalCard({
   item,
   isFocused = false,
   runStatus,
+  stuckReason,
 }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
@@ -230,6 +228,7 @@ export function PendingApprovalCard({
         isFocused={isFocused}
         runStatus={runStatus}
         runId={runId}
+        stuckReason={stuckReason}
       />
     );
   }
@@ -261,6 +260,7 @@ export function PendingApprovalCard({
       isFocused={isFocused}
       runStatus={runStatus}
       runId={approval.runId}
+      stuckReason={stuckReason}
     />
   );
 }
