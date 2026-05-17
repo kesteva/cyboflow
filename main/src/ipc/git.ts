@@ -52,7 +52,7 @@ interface RawCommitData {
 
 
 export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService } = services;
+  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService, configManager } = services;
 
   // Helper function to emit git operation events to all sessions in a project
   const emitGitOperationToProject = (sessionId: string, eventType: PanelEventType, message: string, details?: Record<string, unknown>) => {
@@ -312,7 +312,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       execSync('git add -A', { cwd: session.worktreePath });
 
       // Create the commit with Cyboflow's signature using safe escaping
-      const commitCommand = buildGitCommitCommand(message);
+      const config = configManager.getConfig();
+      const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
+      const commitCommand = buildGitCommitCommand(message, enableCyboflowFooter);
 
       try {
         execSync(commitCommand, { 
