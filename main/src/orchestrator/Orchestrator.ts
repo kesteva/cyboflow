@@ -11,10 +11,14 @@
  * See also: docs/ARCHITECTURE.md §Orchestrator, ROADMAP-001 §6.3.
  */
 import type { OrchestratorDeps } from './types';
+import { StuckDetector, type ClaudeManagerLike } from './stuckDetector';
 
 export class Orchestrator {
   private readonly deps: OrchestratorDeps;
   private running = false;
+
+  /** Periodic stuck-state scanner — constructed in start(), stopped in stop(). */
+  private detector?: StuckDetector;
 
   /**
    * Construct an Orchestrator with all collaborators provided by the caller.
@@ -39,6 +43,22 @@ export class Orchestrator {
     }
     this.running = true;
     this.deps.logger.info('orchestrator.start');
+
+    // Construct and start the stuck detector.  When claudeManager is not
+    // provided in deps, supply a no-op adapter that treats every run as alive
+    // (orphan_pty classification disabled but all other variants still work).
+    const claudeManager: ClaudeManagerLike =
+      this.deps.claudeManager ?? { hasActiveRunForId: () => true };
+
+    this.detector = new StuckDetector({
+      db: this.deps.db,
+      claudeManager,
+      permissionServer: this.deps.permissionServer,
+      eventBus: this.deps.eventBus,
+      logger: this.deps.logger,
+    });
+
+    this.detector.start();
   }
 
   /**
@@ -54,6 +74,13 @@ export class Orchestrator {
     }
     this.running = false;
     this.deps.logger.info('orchestrator.stop.begin');
+
+    // Stop the stuck detector before draining queues.
+    if (this.detector) {
+      this.detector.stop();
+      this.detector = undefined;
+    }
+
     await this.deps.runQueues.drainAll();
     this.deps.logger.info('orchestrator.stop.complete');
   }
