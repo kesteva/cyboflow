@@ -11,7 +11,7 @@
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
-import type { StuckInspectionResult } from '../../../trpc/routers/runs';
+import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 
 export const runsRouter = router({
   /** List workflow runs, optionally filtered by project. */

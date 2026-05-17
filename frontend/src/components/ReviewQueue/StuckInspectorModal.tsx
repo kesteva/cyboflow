@@ -15,6 +15,7 @@
 import React, { useState } from 'react';
 import { Modal, ModalHeader, ModalBody } from '../ui/Modal';
 import { trpc } from '../../utils/trpcClient';
+import type { RawEvent, PendingApproval, StuckInspectionResult } from '../../../../shared/types/stuckInspection';
 
 // ---------------------------------------------------------------------------
 // Stuck-reason human-readable mapping
@@ -60,30 +61,8 @@ function formatTimestamp(iso: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Types from the tRPC response
-// ---------------------------------------------------------------------------
-
-interface RawEvent {
-  id: number;
-  eventType: string;
-  payload: unknown;
-  createdAt: string;
-}
-
-interface PendingApproval {
-  toolName: string;
-  input: unknown;
-  createdAt: string;
-}
-
-interface StuckInspectionData {
-  runId: string;
-  stuckReason: string | null;
-  stuckDetectedAt: string | null;
-  pendingApproval: PendingApproval | null;
-  recentEvents: RawEvent[];
-}
+// StuckInspectionResult is used as StuckInspectionData — alias for local clarity.
+type StuckInspectionData = StuckInspectionResult;
 
 // ---------------------------------------------------------------------------
 // Props

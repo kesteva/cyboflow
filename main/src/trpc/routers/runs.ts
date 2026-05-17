@@ -16,32 +16,15 @@
 export { runsRouter } from '../../orchestrator/trpc/routers/runs';
 
 // ---------------------------------------------------------------------------
-// Output types
+// Output types — re-exported from the shared module so downstream consumers
+// can import from a single location without creating an import cycle.
 // ---------------------------------------------------------------------------
 
-/** A single raw event row as returned by getStuckInspectionHandler. */
-export interface RawEvent {
-  id: number;
-  eventType: string;
-  payload: unknown;
-  createdAt: string;
-}
-
-/** A pending approval row as returned by getStuckInspectionHandler. */
-export interface PendingApproval {
-  toolName: string;
-  input: unknown;
-  createdAt: string;
-}
-
-/** Full result type for getStuckInspectionHandler. */
-export interface StuckInspectionResult {
-  runId: string;
-  stuckReason: string | null;
-  stuckDetectedAt: string | null;
-  pendingApproval: PendingApproval | null;
-  recentEvents: RawEvent[];
-}
+export type {
+  RawEvent,
+  PendingApproval,
+  StuckInspectionResult,
+} from '../../../../shared/types/stuckInspection';
 
 // ---------------------------------------------------------------------------
 // Narrow DB types for direct testing
