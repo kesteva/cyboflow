@@ -1,10 +1,7 @@
 /**
- * Orchestrator-level tRPC router skeleton.
- *
- * Exposes `cyboflow.health.mcpServer` as a query procedure.
- * Additional procedures from earlier epics (runs, approvals, workflows, events)
- * are defined in main/src/orchestrator/trpc/router.ts and will be merged here
- * when the orchestrator-and-trpc-router epic lands.
+ * tRPC health sub-router — exposes `cyboflow.health.mcpServer` as a query
+ * procedure, merged into the root cyboflow router via
+ * main/src/orchestrator/trpc/router.ts.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
@@ -13,8 +10,8 @@
  * a module-level setter so the health singleton can be injected at boot
  * without coupling this module to the full dependency graph.
  */
-import { router, publicProcedure } from './trpc/trpc';
-import type { OrchestratorHealth } from './health';
+import { router, publicProcedure } from '../trpc';
+import type { OrchestratorHealth } from '../../health';
 
 // ---------------------------------------------------------------------------
 // Module-level injectable singleton (set once at app boot via setHealthProvider)
@@ -50,13 +47,3 @@ export const healthRouter = router({
     return _health.getMcpServerStatus();
   }),
 });
-
-// ---------------------------------------------------------------------------
-// Root cyboflow router (minimal skeleton — extended by orchestrator epic)
-// ---------------------------------------------------------------------------
-
-export const cyboflowRouter = router({
-  health: healthRouter,
-});
-
-export type CyboflowRouter = typeof cyboflowRouter;

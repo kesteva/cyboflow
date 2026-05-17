@@ -4,31 +4,30 @@
  *
  * Verifies:
  *  (a) Initial state is { status: 'starting', restartAttempts: 0 } before the
- *      first invoke() resolves.
+ *      first getMcpHealth() resolves.
  *  (b) After the first tick resolves with { status: 'running' }, the hook
  *      returns that value.
  *  (c) Advancing fake timers by 5000ms triggers a second poll and the hook
  *      updates when the status changes.
- *  (d) Errors from invoke() are swallowed and the state stays at 'starting'.
+ *  (d) Errors from getMcpHealth() are swallowed and the state stays at 'starting'.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { McpHealth } from '../useMcpHealth';
+import type { McpServerHealth } from '../../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
-// Mock window.electronAPI
+// Mock cyboflowApi
 // ---------------------------------------------------------------------------
 
-const mockInvoke = vi.fn<() => Promise<McpHealth>>();
+const mockGetMcpHealth = vi.fn<() => Promise<McpServerHealth>>();
+
+vi.mock('../../utils/cyboflowApi', () => ({
+  getMcpHealth: mockGetMcpHealth,
+}));
 
 beforeEach(() => {
   vi.useFakeTimers();
-  mockInvoke.mockReset();
-
-  Object.defineProperty(window, 'electronAPI', {
-    writable: true,
-    value: { invoke: mockInvoke },
-  });
+  mockGetMcpHealth.mockReset();
 });
 
 afterEach(() => {
@@ -39,9 +38,10 @@ afterEach(() => {
 // Import under test (after mock setup)
 // ---------------------------------------------------------------------------
 
-// Import dynamically so each test gets a fresh module state.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { useMcpHealth } = await import('../useMcpHealth');
+
+// Re-export alias used in test assertions
+type McpHealth = McpServerHealth;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -50,7 +50,7 @@ const { useMcpHealth } = await import('../useMcpHealth');
 describe('useMcpHealth', () => {
   it('returns starting status as initial state before first fetch resolves', async () => {
     // Never resolves during this test
-    mockInvoke.mockReturnValue(new Promise(() => undefined));
+    mockGetMcpHealth.mockReturnValue(new Promise(() => undefined));
 
     const { result } = renderHook(() => useMcpHealth());
 
@@ -61,7 +61,7 @@ describe('useMcpHealth', () => {
 
   it('updates state after first tick resolves with running status', async () => {
     const runningHealth: McpHealth = { status: 'running', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(runningHealth);
+    mockGetMcpHealth.mockResolvedValue(runningHealth);
 
     const { result } = renderHook(() => useMcpHealth());
 
@@ -79,7 +79,7 @@ describe('useMcpHealth', () => {
     const failedHealth: McpHealth = { status: 'failed', restartAttempts: 2, lastError: 'subprocess died' };
 
     // First call returns running; second call returns failed
-    mockInvoke
+    mockGetMcpHealth
       .mockResolvedValueOnce(runningHealth)
       .mockResolvedValueOnce(failedHealth);
 
@@ -102,8 +102,8 @@ describe('useMcpHealth', () => {
     expect(result.current.restartAttempts).toBe(2);
   });
 
-  it('stays at starting when invoke throws (orchestrator not ready)', async () => {
-    mockInvoke.mockRejectedValue(new Error('IPC not available'));
+  it('stays at starting when getMcpHealth throws (orchestrator not ready)', async () => {
+    mockGetMcpHealth.mockRejectedValue(new Error('IPC not available'));
 
     const { result } = renderHook(() => useMcpHealth());
 
@@ -117,7 +117,7 @@ describe('useMcpHealth', () => {
 
   it('cleans up the interval on unmount', async () => {
     const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-    mockInvoke.mockResolvedValue({ status: 'running', restartAttempts: 0 });
+    mockGetMcpHealth.mockResolvedValue({ status: 'running', restartAttempts: 0 });
 
     const { unmount } = renderHook(() => useMcpHealth());
 

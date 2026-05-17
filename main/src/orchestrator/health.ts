@@ -4,14 +4,15 @@
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
+ *
+ * See also: main/src/orchestrator/trpc/routers/health.ts (tRPC procedure).
  */
 import type { McpServerLifecycle } from './mcpServer/mcpServerLifecycle';
+import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
-export interface McpServerHealth {
-  status: 'starting' | 'running' | 'failed' | 'stopped';
-  lastError?: string;
-  restartAttempts: number;
-}
+// Re-export so consumers that imported McpServerHealth from this module
+// continue to compile without update.
+export type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 /**
  * Aggregates runtime health data for the cyboflow orchestrator subsystem.
@@ -21,6 +22,13 @@ export interface McpServerHealth {
  * const health = new OrchestratorHealth(mcpLifecycle);
  * ipcMain.handle('cyboflow:mcp-health', () => health.getMcpServerStatus());
  * ```
+ *
+ * WARNING: The McpServerLifecycle default state is 'stopped', which is normally
+ * never observed through a health snapshot in production. Either call
+ * mcpLifecycle.start() before constructing OrchestratorHealth, or translate
+ * any 'stopped' status → 'starting' until the lifecycle has been started at
+ * least once, so the frontend dot stays yellow rather than showing an
+ * unexpected red state at boot.
  */
 export class OrchestratorHealth {
   private lastMcpError: string | undefined;
