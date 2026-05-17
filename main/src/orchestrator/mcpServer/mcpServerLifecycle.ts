@@ -29,6 +29,7 @@ export class McpServerLifecycle {
   private subprocess: ChildProcess | null = null;
   private _status: McpServerStatus = 'stopped';
   private restartAttempts = 0;
+  private restartTimer: NodeJS.Timeout | null = null;
 
   private readonly MAX_RESTARTS = 2;
   /** Backoff delays in ms indexed by attempt number (0-based). */
@@ -70,9 +71,27 @@ export class McpServerLifecycle {
    * Start the MCP server subprocess.
    *
    * Idempotent: if status is already 'running', returns immediately.
-   * Resets the restart counter so a manual start-after-failure is clean.
+   * Resets the restart counter so a manual start-after-failure gets a full
+   * retry budget (distinguishes manual entry from the internal restart path).
    */
   async start(): Promise<void> {
+    if (this._status === 'running') {
+      return;
+    }
+    // Manual entry always resets the counter so the full retry budget is
+    // available after a 'failed' or 'stopped' state.
+    this.restartAttempts = 0;
+    await this._spawn();
+  }
+
+  /**
+   * Spawn (or re-spawn) the subprocess.
+   *
+   * Called by start() for manual entry and by handleExit() for the internal
+   * retry path.  Unlike start(), _spawn() does NOT reset restartAttempts, so
+   * the retry counter accumulates correctly across automatic restart attempts.
+   */
+  private async _spawn(): Promise<void> {
     if (this._status === 'running') {
       return;
     }
@@ -143,6 +162,13 @@ export class McpServerLifecycle {
    * exit as intentional and does not attempt auto-restart.
    */
   async stop(): Promise<void> {
+    // Cancel any pending backoff restart before anything else so the deferred
+    // _spawn() cannot fire after we return.
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
     // Set stopped BEFORE sending SIGTERM so the exit handler does not restart.
     this._status = 'stopped';
 
@@ -197,10 +223,12 @@ export class McpServerLifecycle {
       this.restartAttempts++;
       // Detach subprocess reference before restarting.
       this.subprocess = null;
-      // Reset status to allow start() to proceed.
+      // Reset status to allow _spawn() to proceed.
       this._status = 'stopped';
-      setTimeout(() => {
-        void this.start();
+      // Store the handle so stop() can cancel it if called during the backoff.
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        void this._spawn();
       }, delay);
     } else {
       this._status = 'failed';

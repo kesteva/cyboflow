@@ -171,7 +171,7 @@ describe('McpServerLifecycle — restart state machine', () => {
 
     // Advance 1 s for first backoff.
     await vi.advanceTimersByTimeAsync(1000);
-    // Allow the restarted start() to settle (200 ms bootstrap wait).
+    // Allow the restarted _spawn() to settle (200 ms bootstrap wait).
     await vi.advanceTimersByTimeAsync(300);
 
     expect(spawnCallCount).toBe(2);
@@ -194,6 +194,64 @@ describe('McpServerLifecycle — restart state machine', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('unrecoverable after 2 restarts'),
     );
+  });
+
+  it('resets the restart budget after stop() + start() following "failed" state', async () => {
+    vi.useFakeTimers();
+
+    const { lifecycle } = makeLifecycle();
+
+    // ---- First run: exhaust all restarts → 'failed'. ----
+    const startPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    // Crash 1 (spawn 1 → triggers attempt 1 restart → spawn 2).
+    currentFake!.simulateExit(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(300);
+
+    // Crash 2 (spawn 2 → triggers attempt 2 restart → spawn 3).
+    currentFake!.simulateExit(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(300);
+
+    // Crash 3 (spawn 3 → no more retries → 'failed').
+    currentFake!.simulateExit(1);
+    await vi.runAllTimersAsync();
+
+    expect(lifecycle.getStatus()).toBe('failed');
+    expect(spawnCallCount).toBe(3);
+
+    // ---- Recovery: stop() then start() from 'failed'. ----
+    await lifecycle.stop();
+
+    const recoverPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await recoverPromise;
+
+    expect(lifecycle.getStatus()).toBe('running');
+    expect(spawnCallCount).toBe(4); // Fresh spawn after recovery.
+
+    // ---- Verify a fresh 3-attempt budget is available. ----
+    // Crash 1 of new cycle.
+    currentFake!.simulateExit(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(spawnCallCount).toBe(5);
+
+    // Crash 2 of new cycle.
+    currentFake!.simulateExit(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(spawnCallCount).toBe(6);
+
+    // Crash 3 of new cycle → 'failed' again (not stuck after 1 retry).
+    currentFake!.simulateExit(1);
+    await vi.runAllTimersAsync();
+
+    expect(lifecycle.getStatus()).toBe('failed');
+    expect(spawnCallCount).toBe(6); // No 7th spawn.
   });
 });
 
@@ -306,6 +364,35 @@ describe('McpServerLifecycle — stop()', () => {
 
     expect(fake.killCalls).toContain('SIGTERM');
     expect(fake.killCalls).toContain('SIGKILL');
+    expect(lifecycle.getStatus()).toBe('stopped');
+  });
+
+  it('cancels the pending backoff restart when stop() is called within the backoff window', async () => {
+    vi.useFakeTimers();
+
+    const { lifecycle } = makeLifecycle();
+
+    // Start — first spawn.
+    const startPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    expect(spawnCallCount).toBe(1);
+
+    // Crash once → backoff timer (1 s) is scheduled but NOT yet fired.
+    currentFake!.simulateExit(1);
+    // Advance only partway through the 1 s backoff.
+    await vi.advanceTimersByTimeAsync(500);
+
+    // stop() must cancel the pending timer.
+    await lifecycle.stop();
+
+    // Advance well past the original backoff deadline.
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.runAllTimersAsync();
+
+    // The ghost spawn must NOT have happened.
+    expect(spawnCallCount).toBe(1);
     expect(lifecycle.getStatus()).toBe('stopped');
   });
 });
