@@ -93,6 +93,14 @@ export interface ReviewQueueSliceState {
    *
    * More general than `applyStuckEvent` — used when the full-state resync
    * or another event needs to set an arbitrary status.
+   *
+   * ## Eviction semantics
+   *
+   * When `status` is a terminal value (`completed`, `canceled`, or `failed`),
+   * the entry is **removed** from `runStatusMap` instead of stored.  This
+   * prevents unbounded map growth: once a run reaches a terminal state it will
+   * never transition again, so tracking it provides no value and wastes memory.
+   * Non-terminal statuses are stored normally.
    */
   setRunStatus: (runId: string, status: WorkflowRunStatus) => void;
 
@@ -130,6 +138,16 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
   },
 
   setRunStatus: (runId, status) => {
+    // Terminal statuses: evict the entry instead of storing it.
+    // See JSDoc on the interface method for the eviction rationale.
+    if (status === 'completed' || status === 'canceled' || status === 'failed') {
+      set((state) => {
+        const next = { ...state.runStatusMap };
+        delete next[runId];
+        return { runStatusMap: next };
+      });
+      return;
+    }
     set((state) => ({
       runStatusMap: { ...state.runStatusMap, [runId]: status },
     }));
@@ -183,4 +201,25 @@ export function pureApplyStuckEvent(
 ): Record<string, WorkflowRunStatus> {
   if (map[runId] === 'stuck') return map; // already stuck — no allocation
   return { ...map, [runId]: 'stuck' };
+}
+
+/**
+ * Pure setRunStatus reducer — exported for unit testing.
+ *
+ * Applies a status update to a given runStatusMap snapshot without touching
+ * the Zustand store.  Terminal statuses (`completed`, `canceled`, `failed`)
+ * cause eviction of the key; all others are stored normally.
+ */
+export function pureSetRunStatus(
+  map: Record<string, WorkflowRunStatus>,
+  runId: string,
+  status: WorkflowRunStatus,
+): Record<string, WorkflowRunStatus> {
+  if (status === 'completed' || status === 'canceled' || status === 'failed') {
+    if (!(runId in map)) return map; // already absent — no allocation
+    const next = { ...map };
+    delete next[runId];
+    return next;
+  }
+  return { ...map, [runId]: status };
 }
