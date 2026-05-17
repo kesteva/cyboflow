@@ -1,10 +1,10 @@
 ---
-pending_count: 13
+pending_count: 16
 buckets:
   decisions: 0
-  actions: 1
+  actions: 3
   testing: 9
-  deferred_visual: 3
+  deferred_visual: 4
 items: []
 ---
 # Human Review Queue
@@ -23,6 +23,29 @@ _No items._
   severity: high
   level: goal_backward
   bucket: actions
+
+- task: TASK-578
+  type: action_required
+  bucket: actions
+  action: "Re-run /soloflow:sprint with TASK-578 after SPRINT-014 (containing TASK-562) merges to main. TASK-578's prerequisite check evaluates shipped main state, so it cannot ride alongside TASK-562 in the same sprint."
+  blocked_checks:
+    - "\"prerequisite: Confirms TASK-562 has shipped on the producer side"
+    - "so the consumer-side rename in AboutDialog will line up with the actual IPC response shape.\""
+  level: ground_truth
+  severity: high
+
+- task: TASK-577
+  type: action_required
+  bucket: actions
+  dedup_key: main_workspace_better_sqlite3_abi_mismatch
+  plan_ref: .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-577-plan.md
+  action: "Run `pnpm electron:rebuild` in .soloflow/worktrees/TASK-577 (or the merged main checkout) to rebuild better-sqlite3 against the active Node ABI. Until then, `pnpm --filter main test` fails with NODE_MODULE_VERSION 136 vs required 127 — pre-existing env drift, identical failure on parent commit ae78e34^, not caused by TASK-577's 5-line env-object edit. After rebuild, re-run `pnpm --filter main test` to confirm AC4 (exit 0). See FIND-SPRINT-014-16."
+  blocked_checks:
+    - "AC4: pnpm --filter main test exit 0"
+  level: ground_truth
+  severity: medium
+  created_at: "2026-05-17T23:07:54.516Z"
+  updated_at: "2026-05-17T23:07:54.516Z"
 
 ## Testing
 
@@ -227,10 +250,27 @@ _No items._
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
 
-- task: TASK-578
-  type: action_required
-  bucket: actions
-  action: "Re-run /soloflow:sprint with TASK-578 after SPRINT-014 (containing TASK-562) merges to main. TASK-578's prerequisite check evaluates shipped main state, so it cannot ride alongside TASK-562 in the same sprint."
-  blocked_checks: ["prerequisite: Confirms TASK-562 has shipped on the producer side, so the consumer-side rename in AboutDialog will line up with the actual IPC response shape."]
-  level: "ground_truth"
-  severity: "high"
+- sprint: SPRINT-014
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  dedup_key: visual_web_electron_renderer_needs_full_electron_sprint014
+  action: "End-of-sprint visual smoke for the crystal-cuts-and-rebrand sprint (TASK-560/561/562/565/566/576/577/579). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (CLAUDE.md; frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Verifier env has no Playwright/Electron binary on PATH and no live `pnpm dev` to attach to. Run `pnpm dev` to launch Electron, then drive four flows: (1) About dialog: open AboutDialog and confirm the 'Data Directory' row renders the path (tests the TASK-562 IPC-rename cross-task contract — producer in main/src/ipc/updater.ts emits `cyboflowDirectory`, consumer in frontend/src/components/AboutDialog.tsx reads `cyboflowDirectory`). (2) Settings modal: open Settings, confirm header reads 'Cyboflow Settings', 'Cyboflow Attribution' section is visible, the 'Include Cyboflow footer in commits' checkbox toggles + persists (tests TASK-561 + TASK-565 — settings write should round-trip the `enableCyboflowFooter` key and saved commits should carry the buildCommitFooter() output). (3) Update dialog (when an update is available, or via the 'Check for updates' button): confirm prose says 'A new version of Cyboflow is available.' and 'You are running the latest version of Cyboflow!' (TASK-560). (4) Create a session, run any prompt that produces a commit, then `git log -1 --pretty=%B` on the worktree and confirm the commit body ends with the canonical Cyboflow footer from buildCommitFooter (TASK-565 byte-level contract). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  blocked_checks:
+    - "End-of-sprint cross-task visual verification of AboutDialog cyboflowDirectory IPC rename (TASK-562 producer × consumer)"
+    - "End-of-sprint cross-task visual verification of Settings modal cyboflow rebrand + enableCyboflowFooter round-trip (TASK-560 × TASK-561)"
+    - "End-of-sprint cross-task visual verification of UpdateDialog prose rebrand (TASK-560)"
+    - "End-of-sprint cross-task visual verification of buildCommitFooter byte-level output on a real commit (TASK-565)"
+  level: visual
+  severity: medium
+  created_at: "2026-05-17T13:02:37.000Z"
+  updated_at: "2026-05-17T13:02:37.000Z"
+  affected_tasks:
+    - TASK-560
+    - TASK-561
+    - TASK-562
+    - TASK-565
+    - TASK-566
+    - TASK-576
+    - TASK-577
+    - TASK-579
