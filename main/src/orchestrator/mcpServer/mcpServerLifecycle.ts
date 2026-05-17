@@ -59,6 +59,11 @@ export class McpServerLifecycle {
     return this._status;
   }
 
+  /** Returns the number of automatic restart attempts since the last manual start(). */
+  getRestartAttempts(): number {
+    return this.restartAttempts;
+  }
+
   /**
    * Resolve the cyboflowMcpServer.js script path.
    * Public so tests and claudeCodeManager can call it independently.

@@ -5,6 +5,7 @@ import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { ToolPanel } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
+import type { McpHealth } from '../hooks/useMcpHealth';
 
 interface LogEntry {
   timestamp: string;
@@ -31,7 +32,16 @@ interface ElectronAPI {
   // Generic invoke method for direct IPC calls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
-  
+
+  /**
+   * Returns the current MCP server health snapshot.
+   *
+   * Optional: the named binding is added to the preload bridge when
+   * TASK-255 lands. Until then, useMcpHealth() calls invoke('cyboflow:mcp-health')
+   * directly.
+   */
+  getMcpHealth?: () => Promise<McpHealth>;
+
   // Basic app info
   getAppVersion: () => Promise<string>;
   isPackaged: () => Promise<boolean>;

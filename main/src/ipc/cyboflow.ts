@@ -5,6 +5,7 @@
  *   cyboflow:listWorkflows  — list (and auto-seed) workflows for a project
  *   cyboflow:startRun       — launch a new workflow run
  *   cyboflow:approveRun     — approve / deny an approval request (stub; epic 7)
+ *   cyboflow:mcp-health     — returns current MCP server health snapshot
  *
  * Collaborators (WorkflowRegistry, RunLauncher) are constructed lazily on
  * first call using the injected AppServices.  When epic 6 (orchestrator-and-
@@ -18,6 +19,7 @@ import type { AppServices } from './types';
 import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
 import { RunLauncher } from '../orchestrator/runLauncher';
 import type { LoggerLike } from '../orchestrator/types';
+import type { OrchestratorHealth, McpServerHealth } from '../orchestrator/health';
 
 // ---------------------------------------------------------------------------
 // Module-level lazy singletons (reset on each hot-reload in dev; fine for prod)
@@ -25,6 +27,31 @@ import type { LoggerLike } from '../orchestrator/types';
 
 let _workflowRegistry: WorkflowRegistry | null = null;
 let _runLauncher: RunLauncher | null = null;
+
+/**
+ * Module-level OrchestratorHealth singleton.
+ *
+ * Null until the McpServerLifecycle is wired (epic 6). While null, the
+ * cyboflow:mcp-health handler returns the safe 'starting' default so the
+ * frontend dot stays yellow instead of crashing.
+ *
+ * Set this via setCyboflowHealth() after constructing OrchestratorHealth
+ * in the app bootstrap path (main/src/index.ts) once the McpServerLifecycle
+ * singleton is available.
+ */
+let _orchestratorHealth: OrchestratorHealth | null = null;
+
+/** The safe fallback returned before the health singleton is injected. */
+const HEALTH_STARTING: McpServerHealth = { status: 'starting', restartAttempts: 0 };
+
+/**
+ * Inject the OrchestratorHealth singleton.
+ * Call once from main/src/index.ts during app bootstrap, after
+ * McpServerLifecycle.start() is called.
+ */
+export function setCyboflowHealth(health: OrchestratorHealth): void {
+  _orchestratorHealth = health;
+}
 
 /**
  * Build a LoggerLike from AppServices.logger (which may be undefined or a
@@ -167,5 +194,24 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
    */
   ipcMain.handle('cyboflow:approveRun', async () => {
     return { success: false, error: 'NOT_IMPLEMENTED: cyboflow:approveRun is pending epic 7' };
+  });
+
+  /**
+   * cyboflow:mcp-health
+   *
+   * Returns a point-in-time snapshot of the MCP server's health status.
+   * Interim IPC channel bridging the frontend sidebar dot until the
+   * tRPC ipcLink (orchestrator-and-trpc-router epic) is fully wired.
+   *
+   * Returns { status: 'starting', restartAttempts: 0 } when the
+   * OrchestratorHealth singleton has not yet been injected via
+   * setCyboflowHealth(), ensuring the sidebar dot shows yellow rather
+   * than erroring out on first paint.
+   */
+  ipcMain.handle('cyboflow:mcp-health', () => {
+    if (_orchestratorHealth === null) {
+      return HEALTH_STARTING;
+    }
+    return _orchestratorHealth.getMcpServerStatus();
   });
 }

@@ -6,6 +6,7 @@ import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Arr
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
+import { useMcpHealth } from '../hooks/useMcpHealth';
 
 interface SidebarProps {
   onHelpClick: () => void;
@@ -18,6 +19,7 @@ interface SidebarProps {
 export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width, onResize }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
+  const mcpHealth = useMcpHealth();
   const [version, setVersion] = useState<string>('');
   const [gitCommit, setGitCommit] = useState<string>('');
   const [worktreeName, setWorktreeName] = useState<string>('');
@@ -168,10 +170,27 @@ export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
           
+          {/* MCP server health indicator */}
+          <div className="px-4 py-1 border-t border-border-primary flex items-center gap-2">
+            <div
+              className="flex items-center gap-2 px-1 py-0.5"
+              title={mcpHealth.lastError
+                ? `MCP server: ${mcpHealth.status} — ${mcpHealth.lastError}`
+                : `MCP server: ${mcpHealth.status}`}
+            >
+              <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
+                mcpHealth.status === 'running' ? 'bg-status-success' :
+                mcpHealth.status === 'starting' ? 'bg-status-warning' :
+                'bg-status-error'
+              }`} />
+              <span className="text-xs text-text-tertiary">MCP</span>
+            </div>
+          </div>
+
           {/* Version display at bottom */}
           {version && (
             <div className="px-4 py-2 border-t border-border-primary">
-              <div 
+              <div
                 className="text-xs text-text-tertiary text-center cursor-pointer hover:text-text-secondary transition-colors truncate"
                 onClick={onAboutClick}
                 title="Click to view version details"

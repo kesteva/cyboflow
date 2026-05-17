@@ -1,0 +1,62 @@
+/**
+ * Orchestrator-level tRPC router skeleton.
+ *
+ * Exposes `cyboflow.health.mcpServer` as a query procedure.
+ * Additional procedures from earlier epics (runs, approvals, workflows, events)
+ * are defined in main/src/orchestrator/trpc/router.ts and will be merged here
+ * when the orchestrator-and-trpc-router epic lands.
+ *
+ * Standalone-typecheck invariant: no imports from 'electron',
+ * 'better-sqlite3', or main/src/services/*.
+ *
+ * Pattern: the procedure accesses the OrchestratorHealth instance via
+ * a module-level setter so the health singleton can be injected at boot
+ * without coupling this module to the full dependency graph.
+ */
+import { router, publicProcedure } from './trpc/trpc';
+import type { OrchestratorHealth } from './health';
+
+// ---------------------------------------------------------------------------
+// Module-level injectable singleton (set once at app boot via setHealthProvider)
+// ---------------------------------------------------------------------------
+
+let _health: OrchestratorHealth | null = null;
+
+/**
+ * Inject the OrchestratorHealth instance.
+ * Call this from the IPC wiring layer (main/src/ipc/cyboflow.ts or index.ts)
+ * before the tRPC server starts handling requests.
+ */
+export function setHealthProvider(health: OrchestratorHealth): void {
+  _health = health;
+}
+
+// ---------------------------------------------------------------------------
+// health sub-router
+// ---------------------------------------------------------------------------
+
+export const healthRouter = router({
+  /**
+   * cyboflow.health.mcpServer
+   *
+   * Returns a point-in-time snapshot of the MCP server health.
+   * Falls back to { status: 'starting', restartAttempts: 0 } when the health
+   * provider has not been injected yet (safe during early boot).
+   */
+  mcpServer: publicProcedure.query(() => {
+    if (_health === null) {
+      return { status: 'starting' as const, restartAttempts: 0 };
+    }
+    return _health.getMcpServerStatus();
+  }),
+});
+
+// ---------------------------------------------------------------------------
+// Root cyboflow router (minimal skeleton — extended by orchestrator epic)
+// ---------------------------------------------------------------------------
+
+export const cyboflowRouter = router({
+  health: healthRouter,
+});
+
+export type CyboflowRouter = typeof cyboflowRouter;
