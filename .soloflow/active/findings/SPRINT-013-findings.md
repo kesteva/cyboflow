@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-013
-pending_count: 15
-last_updated: "2026-05-17T17:14:00.000Z"
+pending_count: 21
+last_updated: "2026-05-17T17:42:38.896Z"
 ---
 # Findings Queue
 
@@ -197,4 +197,146 @@ TASK-555 gated: failing blocking prereq (Notarization requires Apple ID + team I
 - **location:** frontend/src/stores/mcpHealthStore.ts:lastError mapping
 - **description:** The store maps `McpServerHealth.lastError` from the IPC payload to its `lastError` field on every poll without preserving the previous error when the next poll returns no error (e.g., status flips to 'running' but `lastError` is undefined). This is technically correct (latest snapshot wins), but combined with AC4 ("last error message (if any)") it means a transient error briefly shown to the user disappears on the next clean tick — the user has 5s max to see it before it's overwritten. Consider preserving `lastError` until the user dismisses the popover or status is healthy for N successive polls. Not a blocker — current behavior is consistent with the IPC contract.
 - **suggested_action:** Either preserve `lastError` across polls when transitioning healthy→error→healthy quickly, or document the "5s visibility window" tradeoff in the store doc-comment so future readers know it is intentional.
+- **resolved_by:** 
+
+## FIND-SPRINT-013-21
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** frontend/src/components/ReviewQueueView.tsx:3, frontend/src/stores/reviewQueueSlice.ts (unused), main/src/orchestrator/trpc/routers/runs.ts:40 (setCancelAndRestartDeps never called)
+- **description:** Sprint-wide integration gap — the entire stuck-detection UI surface introduced by TASK-502 and TASK-504 is unreachable at runtime. Three independent disconnects:
+- **suggested_action:** Add a backlog follow-up task that: (1) replaces ReviewQueueView.tsx:3 with `import { PendingApprovalCard } from ./ReviewQueue/PendingApprovalCard;` and threads runStatus + stuckReason props through; (2) mounts `useReviewQueueSlice.subscribeToStuckEvents()` once at app top-level (e.g., inside App.tsx alongside `useStuckNotifications`) and exposes a `useRunStatus(runId)` selector for cards; (3) calls `setCancelAndRestartDeps({ db, approvalRouter, runQueues, claudeManagerStop })` from main/src/index.ts during bootstrap. Without (1)+(2)+(3) the whole sprint UI is invisible.
+- **resolved_by:** 
+
+
+
+
+
+
+1. ReviewQueueView.tsx:3 imports `PendingApprovalCard` from `./PendingApprovalCard` (the base Crystal-era card), NOT from `./ReviewQueue/PendingApprovalCard` (the new stuck-detection-aware variant). The new card renders StuckBadge, the `Why stuck?` button, and the `Cancel and restart` button — none of these ever appear in the running app.
+
+2. `useReviewQueueSlice` (frontend/src/stores/reviewQueueSlice.ts) is not imported by any non-test consumer. Its `subscribeToStuckEvents()` action is never called from App.tsx or any view, so the `runs:stuck` subscription is never established and `runStatusMap` stays empty.
+
+3. `setCancelAndRestartDeps()` (main/src/orchestrator/trpc/routers/runs.ts:40) is never called anywhere in main/src/. Even if the cancel button were rendered, the mutation would throw METHOD_NOT_SUPPORTED.
+
+Net effect: zero observable behaviour from the stuck-detection-and-observability epic until a follow-up wires (a) the new card into ReviewQueueView, (b) reviewQueueSlice into the view + slice → card prop pipeline, and (c) setCancelAndRestartDeps at boot. The detector still classifies runs as stuck and writes the DB column, but the user can never see or act on it.
+
+Suspected tasks: TASK-502, TASK-504
+
+## FIND-SPRINT-013-22
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** frontend/src/hooks/useStuckNotifications.ts:22-28, 136-153
+- **description:** StuckDetectedEvent schema divergence between the orchestrator (TASK-501) and the notification hook (TASK-503). They are NOT compatible.
+- **suggested_action:** In useStuckNotifications.ts: (1) delete lines 22-28 (the locally-redeclared StuckDetectedEvent interface); (2) `import type { StuckDetectedEvent, StuckReason } from ../../../shared/types/stuckDetection`; (3) change `stuckReasonText(kind: StuckReasonKind)` to `stuckReasonText(reason: StuckReason)` and switch on `reason.kind`; (4) drop `sessionId`/`workflowName` references in the notification body — fetch the workflow name from a lookup (e.g., useReviewQueueStore by `runId`) and use `runId` for suppression keying (or have the orchestrator add a `workflowName` field to the canonical event if product wants it in the toast). Coordinates with FIND-SPRINT-013-2 (the cast through `unknown`).
+- **resolved_by:** 
+
+
+
+
+
+Orchestrator emits (shared/types/stuckDetection.ts:42-51, stuckDetector.ts:270-276):
+```
+{ runId: string; approvalId: string; reason: StuckReason (object {kind:...}); detectedAt: number }
+```
+
+useStuckNotifications.ts:22-28 locally redeclares its own interface with the same name but different shape:
+```
+{ runId; sessionId; workflowName; reason: StuckReasonKind (plain string); detectedAt }
+```
+
+Fields `sessionId` and `workflowName` do NOT exist in the orchestrator payload. `reason` is treated as a plain string (`stuckReasonText(reason)` at line 149 expects `case orphan_pty: ...`) but the real payload sends an object like `{kind: orphan_pty}`.
+
+When TASK-254 wires `trpc.cyboflow.events.onStuckDetected` to the real event bus, the notification body becomes `Run "undefined" is stuck: undefined` (or worse, throws a switch-exhaustiveness error because `reason` is an object).
+
+The existing test suite passes because tests construct events from the hooks own re-declared type — they never see the real wire shape.
+
+The parallel slice in reviewQueueSlice.ts correctly imports the canonical `StuckDetectedEvent` from `shared/types/stuckDetection.ts`. The hook should do the same; the divergence is hook-only.
+
+Suspected tasks: TASK-503 (introduced the divergence), TASK-501 (owns the canonical schema)
+
+## FIND-SPRINT-013-23
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/ReviewQueue/StuckInspectorModal.tsx:27-37, frontend/src/hooks/useStuckNotifications.ts:42-49
+- **description:** Duplicate stuck-reason → human-readable label maps with divergent wording, owned by two different tasks. Same four StuckReason variants are mapped twice, in different ways, for different UI surfaces:
+- **suggested_action:** Move the canonical reason-label map to `shared/types/stuckDetection.ts` (or a new `shared/types/stuckReasonLabels.ts` if pure-type module purity is required — though strings are constants, not runtime). Export both a verbose form (modal) and a short form (notification body) keyed by `StuckReason["kind"]`. Both consumers then import the single source. When a new variant is added the TS exhaustiveness check forces both labels in lockstep.
+- **resolved_by:** 
+
+
+
+
+StuckInspectorModal.tsx (TASK-504, line 27-37):
+- self_deadlock → `Self-deadlock — this run has multiple pending approvals stacked up`
+- cross_run_deadlock → `Cross-run deadlock — another run is also awaiting review`
+- orphan_pty → `Orphan PTY — the Claude process for this run is no longer running`
+- stale_socket → `Stale socket — the permission socket client has disconnected`
+
+useStuckNotifications.ts (TASK-503, line 42-49):
+- self_deadlock → `self-deadlock`
+- cross_run_deadlock → `cross-run deadlock`
+- orphan_pty → `Claude process exited`
+- stale_socket → `permission socket disconnected`
+
+Different casing, different terminology (`Claude process exited` vs `Claude process is no longer running`), and if a fifth variant is ever added in shared/types/stuckDetection.ts only one site will be updated.
+
+Suspected tasks: TASK-503, TASK-504
+
+## FIND-SPRINT-013-24
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/hooks/useStuckNotifications.ts:60-70, frontend/src/stores/reviewQueueSlice.ts:46-56
+- **description:** Duplicate `StuckEventsClient` forward-looking subscription interface, declared identically in two files added by different tasks (TASK-502 + TASK-503). Both define the same 5-line interface and the same `trpc.cyboflow.events as unknown as StuckEventsClient` cast.
+- **suggested_action:** Either (a) consolidate the two `StuckEventsClient` interface declarations into a single forward-looking shim module (e.g., `frontend/src/utils/stuckEventsShim.ts`) exporting a typed `getStuckEventsClient()` helper that both consumers call, so the TASK-254 cleanup is a single-file edit; or (b) defer the consolidation to the TASK-254 cleanup itself and document the constraint in FIND-SPRINT-013-2/12 so the eventual removal touches both files. (a) is lower-friction and reduces the cleanup tasks blast radius.
+- **resolved_by:** 
+
+
+
+This is the cross-task companion of FIND-SPRINT-013-2 and FIND-SPRINT-013-12 — each pre-existing finding only tracks the cast in its own file. The duplication itself is what makes them cross-task: when TASK-254 lands the typed subscription, two files need the same edit and any divergence (e.g., one file adds `runId` filter, the other doesnt) will silently desync the two consumers.
+
+This is also a near-miss: the per-task code-reviewer sees only one file, so neither flagged the duplication.
+
+Suspected tasks: TASK-502 (slice), TASK-503 (hook)
+
+## FIND-SPRINT-013-25
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/stores/mcpHealthStore.ts:43, frontend/src/hooks/useMcpHealth.ts:23, shared/types/mcpHealth.ts
+- **description:** Inconsistent MCP status enum between the new mcpHealthStore (TASK-553) and the pre-existing Sidebar dot. Both surfaces show MCP health, but use different enums and different colour mapping:
+- **suggested_action:** When consolidating per FIND-SPRINT-013-19, also pick a single canonical UI-side enum and put it in shared/types/mcpHealth.ts as `McpHealthUiStatus`. Either expand the existing wire enum to four UI states OR fold both surfaces onto the new three-value `McpHealthStatus`. Sidebar.tsx and McpHealthIndicator.tsx should then both read from the single store and use the single enum.
+- **resolved_by:** 
+
+
+- `useMcpHealth` hook (Sidebar): four-value `McpServerHealth.status` from shared/types/mcpHealth.ts — `running | starting | failed | stopped`. Sidebar.tsx:182-184 maps `running → success, starting → warning, anything else → error`.
+- `useMcpHealthStore` (StatusBar/McpHealthIndicator): three-value `McpHealthStatus` — `healthy | starting | error`. Store does the four-to-three mapping internally (`running → healthy`, `failed|stopped → error`).
+
+Different enums mean: (a) the two dots can drift if the shared type adds a fifth state; (b) `lastError`/`pid` fields are surfaced only by the new indicator, even though both can derive them from the same IPC payload; (c) a developer reading the codebase has to learn two vocabularies (`healthy` vs `running`).
+
+Companion to FIND-SPRINT-013-19 (which tracks the dual-polling-loop problem). The polling is one symptom; the enum split is another from the same root cause — two parallel implementations of the same concept.
+
+Suspected tasks: TASK-553 (introduced the second enum)
+
+## FIND-SPRINT-013-26
+- **source:** SPRINT-013 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/cancelAndRestartHandler.ts:122, main/src/orchestrator/approvalRouter.ts:328
+- **description:** Forward-dependency note: `cancelAndRestartHandler` (TASK-502) documents AC5 — `Claude receives deny responses on the socket before the process is aborted` — as being satisfied by `approvalRouter.clearPendingForRun(runId)` at line 122. However, that method is a documented no-op until TASK-304 lands (see approvalRouter.ts:328-337 — `// Silent no-op until then`).
+
+So the structurally-ordered side-effect chain is in place, but the actual deny-replies do not yet fire. Once cancel-and-restart is wired (per FIND-SPRINT-013-21) and TASK-304 lands, the AC will be satisfied; until then, calling cancel-and-restart leaves Claude waiting on the socket for a response that never arrives. The retry/timeout behaviour of the Claude SDK then determines whether the PTY actually exits cleanly.
+
+Not a blocker for v1 because (a) the button isnt wired (FIND-21) and (b) the test suite uses a fake approvalRouter that records the call. Logging this so the dependency is tracked at sprint level rather than relying on the two per-task notes scattered across files.
+
+Suspected tasks: TASK-502 (relies on it), TASK-304 (owner, out of sprint)
+- **suggested_action:** Track as a blocker dependency on the FIND-SPRINT-013-21 cleanup task — until TASK-304 lands the real `clearPendingForRun` body, cancel-and-restart should be either gated off in the UI or documented as `kills Claude, deny-replies sent best-effort`. Add a one-line WARN log to cancelAndRestartHandler when the injected `approvalRouter.clearPendingForRun` is the stub (detect via a `_isStub` marker or just leave the noop comment more prominent).
 - **resolved_by:** 
