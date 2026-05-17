@@ -169,7 +169,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="xl" showCloseButton={false}>
       <ModalHeader 
-        title="Crystal Settings" 
+        title="Cyboflow Settings"
         icon={<SettingsIcon className="w-5 h-5" />}
         onClose={onClose}
       />
@@ -224,7 +224,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             {/* Appearance */}
             <CollapsibleCard
               title="Appearance & Theme"
-              subtitle="Customize how Crystal looks and feels"
+              subtitle="Customize how Cyboflow looks and feels"
               icon={<Palette className="w-5 h-5" />}
               defaultExpanded={true}
             >
@@ -343,17 +343,17 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               </SettingsSection>
 
               <SettingsSection
-                title="Crystal Attribution"
-                description="Add Crystal branding to commit messages"
+                title="Cyboflow Attribution"
+                description="Add Cyboflow branding to commit messages"
                 icon={<FileText className="w-4 h-4" />}
               >
                 <Checkbox
-                  label="Include Crystal footer in commits"
+                  label="Include Cyboflow footer in commits"
                   checked={enableCrystalFooter}
                   onChange={(e) => setEnableCrystalFooter(e.target.checked)}
                 />
                 <p className="text-xs text-text-tertiary mt-1">
-                  When enabled, commits made through Crystal will include a footer crediting Crystal. This helps others know you're using Crystal for AI-powered development.
+                  When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
                 </p>
               </SettingsSection>
             </CollapsibleCard>
@@ -361,7 +361,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             {/* System Updates */}
             <CollapsibleCard
               title="Updates & Maintenance"
-              subtitle="Keep Crystal up to date with the latest features"
+              subtitle="Keep Cyboflow up to date with the latest features"
               icon={<RefreshCw className="w-5 h-5" />}
               defaultExpanded={false}
             >
@@ -389,7 +389,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           if (response.data.hasUpdate) {
                             // Update will be shown via the version update event
                           } else {
-                            alert('You are running the latest version of Crystal!');
+                            alert('You are running the latest version of Cyboflow!');
                           }
                         }
                       } catch (error) {
@@ -453,7 +453,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   placeholder="/opt/homebrew/bin\n/usr/local/bin\n~/bin\n~/.cargo/bin"
                   rows={4}
                   fullWidth
-                  helperText="Enter one directory path per line. These will be added to PATH for all tools.\nUse forward slashes (/path). The tilde (~) expands to your home directory.\nNote: Changes require restarting Crystal to take full effect."
+                  helperText="Enter one directory path per line. These will be added to PATH for all tools.\nUse forward slashes (/path). The tilde (~) expands to your home directory.\nNote: Changes require restarting Cyboflow to take full effect."
                 />
               </SettingsSection>
 
@@ -520,14 +520,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             {/* Analytics Overview */}
             <CollapsibleCard
               title="About Analytics"
-              subtitle="Help improve Crystal by sharing anonymous usage data"
+              subtitle="Help improve Cyboflow by sharing anonymous usage data"
               icon={<BarChart3 className="w-5 h-5" />}
               defaultExpanded={true}
               variant="subtle"
             >
               <div className="space-y-4">
                 <p className="text-sm text-text-secondary leading-relaxed">
-                  Crystal collects anonymous usage analytics to understand how the application is used and to help prioritize improvements. All data is completely anonymous and privacy-focused.
+                  Cyboflow collects anonymous usage analytics to understand how the application is used and to help prioritize improvements. All data is completely anonymous and privacy-focused.
                 </p>
 
                 <div className="bg-surface-tertiary rounded-lg p-4 border border-border-secondary">
@@ -569,7 +569,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             >
               <SettingsSection
                 title="Enable Analytics"
-                description="Allow Crystal to collect anonymous usage data to improve the product"
+                description="Allow Cyboflow to collect anonymous usage data to improve the product"
                 icon={<BarChart3 className="w-4 h-4" />}
               >
                 <Checkbox
@@ -584,7 +584,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 )}
                 {analyticsEnabled && (
                   <p className="text-xs text-status-success mt-2">
-                    Analytics is enabled. Thank you for helping improve Crystal!
+                    Analytics is enabled. Thank you for helping improve Cyboflow!
                   </p>
                 )}
               </SettingsSection>
@@ -616,7 +616,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             >
               <div className="space-y-4">
                 <p className="text-sm text-text-secondary leading-relaxed">
-                  Stravu is the knowledge platform for AI-first teams. Connect Crystal to your Stravu workspace to give Claude access to your team's documentation, best practices, and institutional knowledge.
+                  Stravu is the knowledge platform for AI-first teams. Connect Cyboflow to your Stravu workspace to give Claude access to your team's documentation, best practices, and institutional knowledge.
                 </p>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -651,7 +651,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     </svg>
                   </a>
                   <span className="text-xs text-text-tertiary">
-                    Made by the Crystal team
+                    Made by the Cyboflow team
                   </span>
                 </div>
               </div>

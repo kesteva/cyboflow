@@ -182,7 +182,7 @@ export function UpdateDialog({ isOpen, onClose, versionInfo }: UpdateDialogProps
               <div className="bg-surface-secondary rounded-lg p-4">
                 <h3 className="text-lg font-medium text-text-primary mb-2">Update Available</h3>
                 <p className="text-text-secondary mb-4">
-                  A new version of Crystal is available. 
+                  A new version of Cyboflow is available.
                   {isPackaged ? ' Click below to download and install the update.' : ' Auto-update is only available in the packaged app.'}
                 </p>
                 
@@ -262,7 +262,7 @@ export function UpdateDialog({ isOpen, onClose, versionInfo }: UpdateDialogProps
                   <div className="flex-1">
                     <h3 className="text-lg font-medium text-status-success mb-2">Update Downloaded</h3>
                     <p className="text-text-secondary mb-4">
-                      The update has been downloaded successfully. Crystal will restart to apply the update.
+                      The update has been downloaded successfully. Cyboflow will restart to apply the update.
                     </p>
                     <Button
                       onClick={handleInstallUpdate}
@@ -313,10 +313,10 @@ export function UpdateDialog({ isOpen, onClose, versionInfo }: UpdateDialogProps
                         <ol className="text-sm text-text-secondary list-decimal list-inside ml-2 space-y-2">
                           <li>Click "Download from GitHub" above</li>
                           <li>Download the .dmg file from the release page</li>
-                          <li>Close Crystal</li>
+                          <li>Close Cyboflow</li>
                           <li>Open the downloaded .dmg file</li>
-                          <li>Drag Crystal to your Applications folder</li>
-                          <li>Launch the new version of Crystal</li>
+                          <li>Drag Cyboflow to your Applications folder</li>
+                          <li>Launch the new version of Cyboflow</li>
                         </ol>
                         <p className="text-sm text-text-tertiary mt-3">
                           Your settings and sessions will be preserved during the update.
@@ -345,7 +345,7 @@ export function UpdateDialog({ isOpen, onClose, versionInfo }: UpdateDialogProps
             {!versionInfo?.hasUpdate && updateState === 'idle' && (
               <div className="text-center py-8">
                 <CheckCircle className="w-12 h-12 text-status-success mx-auto mb-3" />
-                <p className="text-text-secondary">You're running the latest version of Crystal!</p>
+                <p className="text-text-secondary">You're running the latest version of Cyboflow!</p>
               </div>
             )}
           </div>

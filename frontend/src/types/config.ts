@@ -36,7 +36,7 @@ export interface AppConfig {
       checkpointPrefix?: string;
     };
   };
-  // Crystal commit footer setting (enabled by default)
+  // Cyboflow commit footer setting (enabled by default)
   enableCrystalFooter?: boolean;
   // PostHog analytics settings
   analytics?: {
