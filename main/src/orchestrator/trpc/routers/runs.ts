@@ -12,6 +12,34 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
+import {
+  cancelAndRestartHandler,
+  type CancelAndRestartDeps,
+} from '../../cancelAndRestartHandler';
+
+// ---------------------------------------------------------------------------
+// cancelAndRestart dependency bag
+//
+// Injected at boot by main/src/index.ts via setCancelAndRestartDeps().
+// All fields are optional so the router compiles during the workflow-runs epic
+// before wiring is complete — the mutation throws NOT_IMPLEMENTED when deps
+// are absent rather than crashing the process.
+// ---------------------------------------------------------------------------
+
+let cancelAndRestartDeps: CancelAndRestartDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the cancelAndRestart mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, ApprovalRouter,
+ * RunQueueRegistry, and ClaudeCodeManager have been initialized.
+ *
+ * Until this is called the mutation throws NOT_IMPLEMENTED (same as
+ * all other stub procedures in this router).
+ */
+export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
+  cancelAndRestartDeps = deps;
+}
 
 export const runsRouter = router({
   /** List workflow runs, optionally filtered by project. */
@@ -33,6 +61,45 @@ export const runsRouter = router({
   get: protectedProcedure
     .input(z.object({ runId: z.string() }))
     .query(() => throwNotImplemented('workflow-runs')),
+
+  /**
+   * Cancel a stuck workflow run and immediately enqueue a fresh run for
+   * the same workflow, project, prompt, and worktree path.
+   *
+   * Execution order (all within the per-run PQueue for `runId`):
+   *   1. Fetch the run row. If already terminal, return { noOp: true }.
+   *   2. Send deny replies for every pending approval
+   *      (approvalRouter.clearPendingForRun) — BEFORE killing the PTY.
+   *   3. Kill the Claude SDK run (claudeManager.stop).
+   *   4. UPDATE old run to status='canceled'.
+   *   5. INSERT a new run row reusing workflow_id, project_id, prompt,
+   *      and worktree_path (worktree is PRESERVED — no worktreeManager.remove).
+   *   6. Return { newRunId }.
+   *
+   * Worktree preservation rationale (TASK-502 hardest decision):
+   *   The worktree may contain partially-completed work the user wants to
+   *   inspect.  v2 can add an explicit "Cancel and discard worktree" variant.
+   *
+   * Standalone-typecheck invariant: the real collaborators (db, approvalRouter,
+   * runQueues, claudeManagerStop) are injected via setCancelAndRestartDeps().
+   * Until that is called the mutation throws NOT_IMPLEMENTED.
+   */
+  cancelAndRestart: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .mutation(async ({ ctx, input }): Promise<{ newRunId: string } | { noOp: true; reason: string }> => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+
+      if (!cancelAndRestartDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'cancelAndRestart dependencies not wired yet (workflow-runs epic). Call setCancelAndRestartDeps() at boot.',
+        });
+      }
+
+      return cancelAndRestartHandler(input.runId, cancelAndRestartDeps);
+    }),
 
   /**
    * Return diagnostic data for a stuck run: stuck reason, pending approval
