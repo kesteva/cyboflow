@@ -1,9 +1,9 @@
 ---
-pending_count: 10
+pending_count: 11
 buckets:
   decisions: 0
   actions: 0
-  testing: 8
+  testing: 9
   deferred_visual: 2
 items: []
 ---
@@ -101,13 +101,26 @@ _No items._
     - Level 2 visual_web verification of WorkflowPicker rendering 5 options
     - Level 2 visual_web verification of Start Run + CyboflowRoot mount
     - Level 2 visual verification for web (review queue keyboard focus ring + scroll-into-view)
+    - "Level 2 visual verification of Sidebar MCP dot rendering, color states, and tooltip"
   level: visual
   severity: medium
   created_at: "2026-05-15T06:37:20.926Z"
-  updated_at: "2026-05-16T02:29:12.567Z"
+  updated_at: "2026-05-17T00:56:05.145Z"
   affected_tasks:
     - TASK-354
     - TASK-404
+    - TASK-455
+
+- task: TASK-455
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-455-plan.md
+  action: "AC6 manual smoke: run `pnpm dev` and observe the Sidebar bottom — confirm an MCP status dot appears with label 'MCP'. The dot will currently show YELLOW (status: starting) because the OrchestratorHealth and McpServerLifecycle singletons are not yet instantiated in main/src/index.ts (deferred to a later orchestrator wire-up task). After the lifecycle wire-up lands, re-run this smoke to confirm yellow→green transition within 5s. To simulate failure path (red dot + tooltip error): temporarily edit the lifecycle init to point CYBOFLOW_ORCH_SOCKET at a nonexistent path; expect dot=red and `title` tooltip to read 'MCP server: failed — <error>'."
+  blocked_checks:
+    - AC6 end-to-end visible yellow→green transition
+    - AC6 failure-path tooltip surfacing
+  level: visual
+  severity: medium
 
 ## Deferred Visual
 
