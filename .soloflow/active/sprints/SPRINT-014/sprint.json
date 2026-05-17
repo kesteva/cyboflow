@@ -6,15 +6,13 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-577": {
-      "status": "pending"
-    },
     "TASK-578": {
       "status": "blocked",
       "verdict_at": "2026-05-17T20:04:13.037Z"
     },
     "TASK-579": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-17T22:20:00.160Z"
     }
   },
   "playwright_target": {

@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-014
-pending_count: 8
-last_updated: "2026-05-17T23:30:00.000Z"
+pending_count: 6
+last_updated: "2026-05-17T23:10:00.000Z"
 ---
 # Findings Queue
 
@@ -104,9 +104,10 @@ TASK-578 gated: failing blocking prereq (TASK-562 must land first).
 - **type:** bug
 - **source:** TASK-576 (executor)
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/services/permissionManager.ts:8,11
 - **description:** Contains Crystal-era and Crystal- prose in JSDoc (Crystal-era equivalent, Crystal- prefix describing the interface origin). claim-file.js denies claiming this file as owned by TASK-579. TASK-579 executor should also sweep these prose comments when modifying permissionManager.ts.
+- **resolved_by:** TASK-579
 
 ## FIND-SPRINT-014-12
 - **type:** claude-md
@@ -121,19 +122,20 @@ TASK-578 gated: failing blocking prereq (TASK-562 must land first).
 - **type:** scope_deviation
 - **source:** TASK-576 (executor)
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/services/permissionManager.ts:8,11
 - **description:** Force-claimed from TASK-579 (pending/not-started) per orchestrator directive to fix 2 prose Crystal references (L8, L11) blocking AC3. TASK-579 plans to delete this file entirely; these edits are safe to make ahead of that deletion.
+- **resolved_by:** TASK-579
 
 ## FIND-SPRINT-014-14
 - **type:** anti-pattern
 - **source:** TASK-576 (code-reviewer)
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/services/permissionManager.ts:8-11
 - **description:** Semantic degradation from the force-claim rewrite (FIND-13). The original JSDoc drew a contrast: the legacy `PermissionRequest`/`PermissionResponse` types here are *Crystal-era* (inherited, pre-Cyboflow) and diverge from the *new* canonical Cyboflow contract in `shared/types/approval.ts`. By replacing both "Crystal-era" occurrences with "Cyboflow-era", the comment now labels the legacy types with the same epoch as the canonical replacement, collapsing the distinction. Reads as: "these Cyboflow-era types diverge from the canonical contract... `sessionId` is the Cyboflow-era equivalent of `ApprovalRequest.runId`" — but `ApprovalRequest.runId` is itself the Cyboflow-substrate name, so the equivalence is now circular. Strict adherence to the bare-word sweep wins over comment precision. Acceptable trade-off because the file is dead code scheduled for deletion in TASK-579 and the comment will exist for a short time.
 - **suggested_action:** When TASK-579 deletes this file, the issue self-resolves. Alternatively, a follow-up could reword to "The interfaces below are *legacy* / *inherited* types and diverge from the canonical Cyboflow substrate contract... `sessionId` is the legacy equivalent of `ApprovalRequest.runId`" to restore the contrast without reintroducing the bare word "Crystal".
-- **resolved_by:**
+- **resolved_by:** TASK-579
 
 ## FIND-SPRINT-014-15
 - **type:** bug
@@ -143,4 +145,14 @@ TASK-578 gated: failing blocking prereq (TASK-562 must land first).
 - **location:** main/src/types/config.ts:101 vs frontend/src/components/Settings.tsx:140 / main/src/ipc/config.ts:15
 - **description:** Pre-existing schema mismatch faithfully preserved by TASK-561's rename. `UpdateConfigRequest` declares the footer-toggle field as `disableCyboflowFooter?: boolean` (inverted polarity from `AppConfig.enableCyboflowFooter`), but every actual call site sends the positive form: `Settings.tsx:140` submits `{ enableCyboflowFooter }` through `API.config.update`, which is typed as `UpdateConfigRequest`. The handler at `main/src/ipc/config.ts:15` accepts the typed payload and forwards it to `configManager.updateConfig(updates)`, which spreads it onto `this.config` — so the wrong-named-but-correctly-shaped field lands on `AppConfig.enableCyboflowFooter` by accident. The `disableCyboflowFooter` slot on `UpdateConfigRequest` is dead. TASK-561 renamed the symbol but did not introduce this — it has been broken since the original Crystal codebase (`disableCrystalFooter` vs `enableCrystalFooter`).
 - **suggested_action:** Remove `disableCyboflowFooter?: boolean` from `UpdateConfigRequest` and add `enableCyboflowFooter?: boolean` instead, so the IPC contract matches what the renderer actually sends. This also exposes the existing call-site to typecheck enforcement (today the mismatch is invisible because the spread accepts any extra field).
-- **resolved_by:**
+- **resolved_by:** 
+
+## FIND-SPRINT-014-16
+- **type:** bug
+- **source:** TASK-577 (verifier)
+- **severity:** medium
+- **status:** open
+- **location:** .soloflow/worktrees/TASK-577/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node (worktree-local node_modules)
+- **description:** `pnpm --filter main exec vitest run` in the TASK-577 worktree fails 14 test files / 116 tests with `Error: ...better_sqlite3.node was compiled against a different Node.js version using NODE_MODULE_VERSION 136. This version of Node.js requires NODE_MODULE_VERSION 127`. Identical failure pattern on the parent commit (ae78e34^) — pre-existing environmental drift, not caused by TASK-577's 5-line env-object literal edit. CLAUDE.md prescribes `pnpm electron:rebuild` as the fix. AC4 ("pnpm --filter main test exits with status 0") cannot pass until the worktree's better-sqlite3 binding is rebuilt against the Node version vitest is running under. The task's typecheck gate passes cleanly (exit 0), and the grep ACs (1–3) all pass.
+- **suggested_action:** Operator runs `pnpm electron:rebuild` (or `pnpm install --force` followed by `pnpm electron:rebuild`) inside `.soloflow/worktrees/TASK-577` before the test gate is re-asserted. Alternatively: rebuild against the host Node and re-run `pnpm --filter main test`. The same environmental issue likely affects all sibling parallel worktrees on SPRINT-014 — investigate whether the parent-checkout's better-sqlite3 build is being shared into worktrees in a stale state.
+- **resolved_by:** 
