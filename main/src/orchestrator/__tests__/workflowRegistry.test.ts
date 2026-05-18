@@ -236,6 +236,19 @@ describe('WorkflowRegistry', () => {
       const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
       expect(count).toBe(1);
     });
+
+    it('assigns the deterministic id wf-<projectId>-<name> to each seeded workflow', () => {
+      // The deterministic-ID seed pattern is documented in workflowRegistry.ts:
+      // Format: "wf-<projectId>-<name>" — unique per project+name pair and stable
+      // across re-seeds so INSERT OR IGNORE is idempotent.
+      const content = `---\n---\n`;
+      const path = writeTempMd(tmpDir, 'deterministic.md', content);
+      registry.seed(42, [{ name: 'sprint', path }]);
+
+      interface IdRow { id: string }
+      const row = db.prepare('SELECT id FROM workflows WHERE project_id = 42 AND name = ?').get('sprint') as IdRow;
+      expect(row.id).toBe('wf-42-sprint');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -329,6 +342,61 @@ describe('WorkflowRegistry', () => {
 
     it('throws when the workflow does not exist', () => {
       expect(() => registry.createRun('nonexistent-id')).toThrow('not found');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getRunById — new nullable columns from TASK-598 reconciliation
+  // -------------------------------------------------------------------------
+
+  describe('getRunById', () => {
+    it('returns null for an unknown run id', () => {
+      expect(registry.getRunById('nonexistent-run')).toBeNull();
+    });
+
+    it('projects policy_json, stuck_at, stuck_reason, error_message as null on a freshly created run', () => {
+      // Seed a workflow, create a run, then read it back via getRunById to
+      // confirm all four new nullable columns are projected (not missing from
+      // the SELECT) and default to null.
+      const path = writeTempMd(tmpDir, 'nullable-cols.md', '---\n---\n');
+      registry.seed(1, [{ name: 'soloflow', path }]);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+      const { runId } = registry.createRun(workflowId);
+
+      const run = registry.getRunById(runId);
+      expect(run).not.toBeNull();
+      // All four columns added by TASK-598 must be present in the returned row
+      // and must be null (no value was written on insert).
+      expect(run!.policy_json).toBeNull();
+      expect(run!.stuck_at).toBeNull();
+      expect(run!.stuck_reason).toBeNull();
+      expect(run!.error_message).toBeNull();
+    });
+
+    it('reads back policy_json, stuck_at, stuck_reason, error_message when written directly', () => {
+      // Confirm getRunById round-trips non-null values for the four new columns
+      // so a future consumer (stuck-detector, B9) can rely on them.
+      const path = writeTempMd(tmpDir, 'written-cols.md', '---\n---\n');
+      registry.seed(1, [{ name: 'planner', path }]);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+      const { runId } = registry.createRun(workflowId);
+
+      db.prepare(
+        `UPDATE workflow_runs
+           SET policy_json = ?, stuck_at = ?, stuck_reason = ?, error_message = ?
+         WHERE id = ?`,
+      ).run('{"key":"value"}', '2026-05-17T10:00:00Z', 'no_progress', 'subprocess exited', runId);
+
+      const run = registry.getRunById(runId);
+      expect(run).not.toBeNull();
+      expect(run!.policy_json).toBe('{"key":"value"}');
+      expect(run!.stuck_at).toBe('2026-05-17T10:00:00Z');
+      expect(run!.stuck_reason).toBe('no_progress');
+      expect(run!.error_message).toBe('subprocess exited');
     });
   });
 });
