@@ -18,6 +18,7 @@ import * as path from 'path';
 import type { AppServices } from './types';
 import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
 import { RunLauncher } from '../orchestrator/runLauncher';
+import type { StreamEventPublisher } from '../orchestrator/runLauncher';
 import type { LoggerLike } from '../orchestrator/types';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
@@ -96,6 +97,18 @@ function getWorkflowRegistry(services: AppServices): WorkflowRegistry {
 
 function getRunLauncher(services: AppServices): RunLauncher {
   if (!_runLauncher) {
+    // Concrete publisher: adapts BrowserWindow.webContents.send to the
+    // StreamEventPublisher interface.  This is the only place in the codebase
+    // that calls win.webContents.send for cyboflow stream events, keeping
+    // the electron import out of main/src/orchestrator/.
+    const publisher: StreamEventPublisher = {
+      publish: (runId, event) => {
+        const win = services.getMainWindow();
+        if (!win || win.isDestroyed()) return;
+        win.webContents.send(`cyboflow:stream:${runId}`, event);
+      },
+    };
+
     _runLauncher = new RunLauncher(
       services.databaseService.getDb(),
       getWorkflowRegistry(services),
@@ -103,6 +116,11 @@ function getRunLauncher(services: AppServices): RunLauncher {
       makeLoggerLike(services),
       // MCP collaborators (orchSocketProvider, bridgeScriptResolver, nodeResolver)
       // are intentionally omitted here; those are wired in epic 6.
+      undefined, // mcpConfigWriter
+      undefined, // orchSocketProvider
+      undefined, // bridgeScriptResolver
+      undefined, // nodeResolver
+      publisher,
     );
   }
   return _runLauncher;
