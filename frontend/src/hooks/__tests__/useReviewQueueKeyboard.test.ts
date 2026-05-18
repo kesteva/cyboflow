@@ -282,6 +282,65 @@ describe('useReviewQueueKeyboard — modifier key guard', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Focus guard for non-input focusable elements (e.g. Radix focus traps)
+// ---------------------------------------------------------------------------
+
+describe('useReviewQueueKeyboard — focus guard for non-input focusable elements', () => {
+  let focusableDiv: HTMLDivElement;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    focusableDiv = document.createElement('div');
+    focusableDiv.tabIndex = 0;
+    document.body.appendChild(focusableDiv);
+  });
+
+  afterEach(() => {
+    document.body.removeChild(focusableDiv);
+    // Restore focus to body so other tests are not affected.
+    document.body.focus();
+  });
+
+  it('j is a no-op when a Radix-style focusable <div> holds focus', () => {
+    const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    focusableDiv.focus();
+    expect(document.activeElement).toBe(focusableDiv);
+
+    act(() => {
+      fireEvent.keyDown(window, { key: 'j', metaKey: false, ctrlKey: false, altKey: false });
+    });
+
+    expect(result.current.focusedIndex).toBe(0);
+  });
+
+  it('y is a no-op when a Radix-style focusable <div> holds focus (no mutation fires)', () => {
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    focusableDiv.focus();
+    expect(document.activeElement).toBe(focusableDiv);
+
+    act(() => {
+      fireEvent.keyDown(window, { key: 'y', metaKey: false, ctrlKey: false, altKey: false });
+    });
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockApproveRestOfRunMutate).not.toHaveBeenCalled();
+  });
+
+  it('j still advances focusedIndex when document.activeElement is document.body', () => {
+    const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    // jsdom starts with body as activeElement; call focus() explicitly to be certain.
+    document.body.focus();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      press('j');
+    });
+
+    expect(result.current.focusedIndex).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // React.StrictMode regression — state updaters must not fire side effects
 // ---------------------------------------------------------------------------
 
