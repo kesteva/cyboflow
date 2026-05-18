@@ -22,6 +22,7 @@ import { WorkflowRegistry, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,18 +34,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-/**
- * Build a DatabaseLike adapter over a better-sqlite3 instance.
- * Mirrors the inline adapter used in main/src/index.ts.
- */
-function dbAdapter(db: Database.Database) {
-  return {
-    prepare: (sql: string) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 /** Creates a fake LoggerLike that records calls for assertion. */
