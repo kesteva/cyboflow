@@ -53,8 +53,7 @@
     "test:headed": "playwright test --headed",
     "test:build": "node build/afterSign.test.js && node scripts/configure-build.test.js",
     "test:unit": "pnpm --filter main test && pnpm --filter frontend test && pnpm run test:build",
-    "test:gate": "vitest run --config vitest.config.gate.ts",
-    "test:unit:frontend": "pnpm --filter main exec vitest run --config ../vitest.config.frontend.ts"
+    "test:gate": "vitest run --config vitest.config.gate.ts"
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
