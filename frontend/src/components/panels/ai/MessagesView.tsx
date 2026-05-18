@@ -52,6 +52,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
           const regularMessages: JSONMessage[] = [];
           let foundSessionInfo: SessionInfo | null = null;
           
+          // FIXME(SPRINT-015): local JSONMessage diverges from ClaudeJsonMessage — see FIND-SPRINT-015-12; resolve in B5 follow-up
           (response.data as unknown as JSONMessage[]).forEach((msg: JSONMessage) => {
             try {
               // Try to parse the message data to check its type
