@@ -1,8 +1,8 @@
 ---
 id: TASK-610
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/ipc/cyboflow.ts
 files_readonly:
@@ -14,10 +14,10 @@ acceptance_criteria:
     verification: "grep -nE 'ctx\\?: |context\\?:|JSON.stringify' main/src/ipc/cyboflow.ts returns at least 4 matches in the makeLoggerLike body (one per level: info, warn, error, debug)"
   - criterion: "When context is undefined/null/empty, no extra trailing whitespace or token is appended (the message is logged as-is)"
     verification: "grep -nE 'ctx \\? .*JSON.stringify' main/src/ipc/cyboflow.ts returns at least 3 matches showing the ternary `ctx ? \\`${msg} ${JSON.stringify(ctx)}\\` : msg` pattern"
-  - criterion: "The fix is bounded to the inline shim in cyboflow.ts; the Logger class signatures remain unchanged"
+  - criterion: The fix is bounded to the inline shim in cyboflow.ts; the Logger class signatures remain unchanged
     verification: "grep -nE 'info\\(message: string\\)|warn\\(message: string, error\\?: Error\\)' main/src/utils/logger.ts returns the unchanged signatures (no new `context` parameter on the Logger class)"
-  - criterion: "Existing tests still pass (no semantic regression)"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: Existing tests still pass (no semantic regression)
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: workflow-runs-and-day3-gate
@@ -25,7 +25,6 @@ test_strategy:
   needed: false
   justification: "makeLoggerLike is a private function inside main/src/ipc/cyboflow.ts with no existing test coverage (it isn't exported, and cyboflow.test.ts uses its own makeSilentLogger fixture). Adding a unit test would require either exporting makeLoggerLike (bloating the surface) or constructing a real `services` object with a real `Logger` (heavy fixture). The fix is a 4-line edit per existing pattern, easy to code-review. The behavior is exercised end-to-end by any cyboflow IPC handler that calls registry.seed() with a context arg — the existing logger.warn call in WorkflowRegistry.seed (which DOES pass a context) is the live consumer, so any regression would surface as missing context in the log file at runtime."
 ---
-
 # Fix makeLoggerLike() — forward the context second argument
 
 ## Objective

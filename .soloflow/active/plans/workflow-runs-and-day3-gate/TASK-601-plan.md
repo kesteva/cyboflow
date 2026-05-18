@@ -1,8 +1,8 @@
 ---
 id: TASK-601
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/orchestrator/workflowRegistry.ts
   - main/src/orchestrator/__tests__/workflowRegistry.test.ts
@@ -10,44 +10,43 @@ files_readonly:
   - main/src/ipc/cyboflow.ts
   - .soloflow/active/findings/SPRINT-009-findings.md
 acceptance_criteria:
-  - criterion: "DEFAULT_SOLOFLOW_WORKFLOWS no longer hardcodes a specific SoloFlow plugin version anywhere in the file"
+  - criterion: DEFAULT_SOLOFLOW_WORKFLOWS no longer hardcodes a specific SoloFlow plugin version anywhere in the file
     verification: "grep -n '0\\.9\\.12' main/src/orchestrator/workflowRegistry.ts returns 0 matches"
-  - criterion: "Plugin path discovery resolves the highest-semver subdirectory under `~/.claude/plugins/cache/soloflow/soloflow-dev/` at runtime"
+  - criterion: Plugin path discovery resolves the highest-semver subdirectory under `~/.claude/plugins/cache/soloflow/soloflow-dev/` at runtime
     verification: "grep -nE 'glob|readdirSync.*soloflow|resolveSoloFlowPluginRoot|SOLOFLOW_PLUGIN_ROOT' main/src/orchestrator/workflowRegistry.ts returns at least one resolver function definition"
-  - criterion: "An env-var override (`SOLOFLOW_PLUGIN_ROOT`) takes precedence over filesystem discovery so users with non-standard installs can pin a path"
+  - criterion: An env-var override (`SOLOFLOW_PLUGIN_ROOT`) takes precedence over filesystem discovery so users with non-standard installs can pin a path
     verification: "grep -n 'SOLOFLOW_PLUGIN_ROOT' main/src/orchestrator/workflowRegistry.ts returns at least one match in the resolver"
   - criterion: "If neither env var nor filesystem discovery succeeds, the fallback path uses a documented constant rather than crashing — and the failure is logged at WARN level"
     verification: "grep -n 'FALLBACK_SOLOFLOW_VERSION\\|could not discover.*soloflow' main/src/orchestrator/workflowRegistry.ts returns at least one match each"
   - criterion: "WorkflowRegistry.seed surfaces a sentinel (e.g. permission_mode='unknown' OR an explicit log.error) when the .md file read fails, instead of silently defaulting to 'default'"
     verification: "grep -n 'extractPermissionMode\\|seed' main/src/orchestrator/workflowRegistry.ts shows the catch branch logs at logger.error level (not just warn) AND/OR sets a distinguishable sentinel value the test can assert on"
-  - criterion: "All existing workflowRegistry.test.ts tests pass"
-    verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts exits 0"
-  - criterion: "New tests assert that the resolver picks the highest semver from a fixture directory and that env-var override wins"
+  - criterion: All existing workflowRegistry.test.ts tests pass
+    verification: pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts exits 0
+  - criterion: New tests assert that the resolver picks the highest semver from a fixture directory and that env-var override wins
     verification: "grep -n 'resolveSoloFlowPluginRoot\\|SOLOFLOW_PLUGIN_ROOT' main/src/orchestrator/__tests__/workflowRegistry.test.ts returns at least 2 test cases"
 depends_on: []
 estimated_complexity: low
 epic: workflow-runs-and-day3-gate
 test_strategy:
   needed: true
-  justification: "The path resolver is new pure logic that must be deterministic given a tmp-dir fixture; existing tests already cover seed() but a new test class is required for the version-discovery behavior."
+  justification: The path resolver is new pure logic that must be deterministic given a tmp-dir fixture; existing tests already cover seed() but a new test class is required for the version-discovery behavior.
   targets:
-    - behavior: "resolveSoloFlowPluginRoot returns the env-var value when SOLOFLOW_PLUGIN_ROOT is set"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: resolveSoloFlowPluginRoot returns the env-var value when SOLOFLOW_PLUGIN_ROOT is set
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "resolveSoloFlowPluginRoot picks the lexicographically/semver-highest subdirectory when multiple versions are present"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: resolveSoloFlowPluginRoot picks the lexicographically/semver-highest subdirectory when multiple versions are present
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
     - behavior: "resolveSoloFlowPluginRoot falls back to the documented constant when neither env var nor filesystem discovery succeeds, and logs a WARN"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
     - behavior: "DEFAULT_SOLOFLOW_WORKFLOWS resolves the 5 workflow paths against the discovered root, not against a hardcoded version"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
     - behavior: "WorkflowRegistry.seed logs at ERROR (not just WARN) when a workflow .md file cannot be read, and the inserted row reflects the sentinel"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
 ---
-
 # Add SoloFlow plugin path discovery + fail-loud on workflow read failure
 
 ## Objective

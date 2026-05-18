@@ -1,8 +1,8 @@
 ---
 id: TASK-599
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/preload.ts
 files_readonly:
@@ -14,7 +14,7 @@ acceptance_criteria:
     verification: "grep -n \"channel.startsWith('cyboflow:stream:')\" main/src/preload.ts returns at least one match in the `on()` whitelist branch"
   - criterion: "preload.ts allows `electron.off('cyboflow:stream:<runId>', handler)` to remove the previously-registered handler"
     verification: "grep -n \"channel.startsWith('cyboflow:stream:')\" main/src/preload.ts returns at least one match in the `off()` whitelist branch"
-  - criterion: "off() actually removes the wrapper that on() registered (not the bare callback)"
+  - criterion: off() actually removes the wrapper that on() registered (not the bare callback)
     verification: "grep -n 'wrapperByCallback\\|listenerWrappers\\|Map<string, Map<' main/src/preload.ts returns at least one wrapper-storage construct, and `removeListener` is called with the stored wrapper"
   - criterion: "Existing `permission:request` channel continues to work via the same on/off pair"
     verification: "grep -n \"'permission:request'\" main/src/preload.ts shows the channel is still in the validChannels list and the same wrapper-storage applies"
@@ -25,7 +25,6 @@ test_strategy:
   needed: false
   justification: "preload.ts has no existing sibling test file (verified via Glob: `main/src/preload.test.ts` does not exist; `main/src/__tests__/` does not exist) and is excluded from vitest coverage (see `main/vitest.config.ts:18`). The change is exercised end-to-end by the day-3 gate spec only when a stream-event publisher exists (TASK-602). Adding a unit test for preload would require mocking the entire Electron contextBridge surface for two-line behaviour; the cost outweighs the benefit. The fix is verified by code review + the green path TASK-602 will exercise."
 ---
-
 # Fix preload.ts cyboflow:stream:* whitelist + off() wrapper-removal bug
 
 ## Objective
