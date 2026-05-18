@@ -33,7 +33,7 @@ export function PromptHistory() {
       setLoading(true);
       const response = await API.prompts.getAll();
       if (response.success) {
-        setPrompts(response.data);
+        setPrompts(response.data as PromptHistoryItem[]);
       } else {
         throw new Error(response.error || 'Failed to fetch prompt history');
       }

@@ -69,7 +69,7 @@ export async function startRun({
   workflowId,
   projectId,
 }: {
-  workflowId: number;
+  workflowId: string;
   projectId: number;
 }): Promise<StartRunResult> {
   const electron = requireElectron();

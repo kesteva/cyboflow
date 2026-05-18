@@ -346,7 +346,7 @@ export const useSessionView = (
       try {
         const response = await API.sessions.getConversationMessages(activeSession.id);
         if (response.success && response.data) {
-          setHasConversationHistory(response.data.length > 0);
+          setHasConversationHistory((response.data as unknown[]).length > 0);
         }
       } catch (error) {
         console.error('Failed to check conversation history:', error);
@@ -1395,8 +1395,9 @@ export const useSessionView = (
     if (!activeSession) return '';
     try {
       const promptsResponse = await API.sessions.getPrompts(activeSession.id);
-      if (promptsResponse.success && promptsResponse.data?.length > 0) {
-        return promptsResponse.data.map((p: PromptMarker) => p.prompt_text).filter(Boolean).join('\n\n');
+      const promptData = promptsResponse.data as PromptMarker[];
+      if (promptsResponse.success && promptData?.length > 0) {
+        return promptData.map((p: PromptMarker) => p.prompt_text).filter(Boolean).join('\n\n');
       }
     } catch (error) {
       console.error('Error generating default commit message:', error);

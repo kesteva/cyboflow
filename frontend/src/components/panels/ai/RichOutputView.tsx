@@ -216,7 +216,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         const allMessages = [...userPrompts];
         if (outputResponse.success && outputResponse.data && Array.isArray(outputResponse.data)) {
           // JSON messages are already in the correct format from getJsonMessages
-          allMessages.push(...outputResponse.data);
+          allMessages.push(...(outputResponse.data as unknown as UserPromptMessage[]));
         }
         
         // Sort by timestamp to get correct order

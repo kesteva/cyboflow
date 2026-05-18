@@ -52,7 +52,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
           const regularMessages: JSONMessage[] = [];
           let foundSessionInfo: SessionInfo | null = null;
           
-          response.data.forEach((msg: JSONMessage) => {
+          (response.data as unknown as JSONMessage[]).forEach((msg: JSONMessage) => {
             try {
               // Try to parse the message data to check its type
               let msgData: unknown;
