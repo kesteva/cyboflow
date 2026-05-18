@@ -75,6 +75,20 @@ to a canonical example — read those for the actual implementation.
 - **Anti-pattern:** `frontend/src/utils/console.ts:9–12` calls it inside `isVerboseEnabled()`,
   which fires on every `devLog.*` invocation — redundant localStorage reads per log line.
 
+### `main/src/utils/commitFooter`
+
+- **Path:** `main/src/utils/commitFooter.ts`
+- **Use it for:** The canonical Cyboflow commit-footer string. Single source of truth — never inline the footer literal elsewhere.
+- **Key export:** `buildCommitFooter(enabled: boolean): string` (empty string when disabled).
+- **Canonical example:** `main/src/utils/shellEscape.ts` (`buildGitCommitCommand`); byte-level contract pinned in `main/src/utils/commitFooter.test.ts`.
+
+### `main/src/utils/devDebugLog`
+
+- **Path:** `main/src/utils/devDebugLog.ts`
+- **Use it for:** Writing structured lines to `cyboflow-{frontend,backend}-debug.log` in dev mode. Centralizes the filename literals and line format — do NOT hardcode either elsewhere.
+- **Key exports:** `getDevDebugLogPath(stream)`, `appendDevDebugLog(stream, level, source, message, originalConsole?)`. Pass the pre-override `originalConsole.error` from inside `console.*` overrides to avoid recursion.
+- **Canonical example:** `main/src/index.ts` console-wrapper overrides and frontend webContents listener.
+
 ## Recurring Patterns
 
 ### Shared types as the cross-package contract
