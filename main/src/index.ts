@@ -28,7 +28,6 @@ import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
-import { EventEmitter } from 'node:events';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -613,7 +612,7 @@ app.whenReady().then(async () => {
       error: (msg: string) => logger.error(msg),
       debug: (msg: string) => logger.info(`[debug] ${msg}`),
     };
-    orchestrator = new Orchestrator({ db, logger: loggerLike, eventBus: new EventEmitter(), runQueues });
+    orchestrator = new Orchestrator({ db, logger: loggerLike, runQueues });
     await orchestrator.start();
     if (!mainWindow) {
       throw new Error(

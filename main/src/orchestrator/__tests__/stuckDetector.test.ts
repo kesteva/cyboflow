@@ -183,13 +183,13 @@ describe('StuckDetector scheduling', () => {
   it('does not fire scan before start()', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -205,13 +205,13 @@ describe('StuckDetector scheduling', () => {
   it('fires scan once after 60001ms', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -235,13 +235,13 @@ describe('StuckDetector scheduling', () => {
   it('stop() clears the interval and no further scans fire', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -269,7 +269,7 @@ describe('StuckDetector 5-minute filter', () => {
   it('only evaluates approvals older than 5 minutes', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     // Two runs — both awaiting_review
@@ -295,7 +295,7 @@ describe('StuckDetector 5-minute filter', () => {
       db,
       claudeManager: makeClaudeManager(activeRuns),
       permissionServer: makePermissionServer(connectedRuns),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -320,7 +320,7 @@ describe('StuckDetector classification: orphan_pty', () => {
   it('returns orphan_pty when claudeManager has no active run', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     seedRun(rawDb, 'run-orphan', 'awaiting_review');
@@ -331,7 +331,7 @@ describe('StuckDetector classification: orphan_pty', () => {
       db,
       claudeManager: makeClaudeManager(new Set()), // empty — no active runs
       permissionServer: makePermissionServer(new Set(['run-orphan'])),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -354,7 +354,7 @@ describe('StuckDetector classification: stale_socket', () => {
   it('returns stale_socket when permissionServer has no connected client', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     seedRun(rawDb, 'run-socket', 'awaiting_review');
@@ -365,7 +365,7 @@ describe('StuckDetector classification: stale_socket', () => {
       db,
       claudeManager: makeClaudeManager(new Set(['run-socket'])),
       permissionServer: makePermissionServer(new Set()), // no connected clients
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -388,7 +388,7 @@ describe('StuckDetector classification: self_deadlock', () => {
   it('returns self_deadlock when the same run has another pending approval', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     seedRun(rawDb, 'run-self', 'awaiting_review');
@@ -401,7 +401,7 @@ describe('StuckDetector classification: self_deadlock', () => {
       db,
       claudeManager: makeClaudeManager(new Set(['run-self'])),
       permissionServer: makePermissionServer(new Set(['run-self'])),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -424,7 +424,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
   it('returns cross_run_deadlock when another run is awaiting_review', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     seedRun(rawDb, 'run-cross-1', 'awaiting_review');
@@ -436,7 +436,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
       db,
       claudeManager: makeClaudeManager(new Set(['run-cross-1', 'run-cross-2'])),
       permissionServer: makePermissionServer(new Set(['run-cross-1', 'run-cross-2'])),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -463,10 +463,10 @@ describe('StuckDetector status guard', () => {
   it('does not transition a run that is already canceled', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
-    eventBus.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
+    emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
     // Insert the run in 'awaiting_review' first (needed for approval FK / scan logic)
     // then immediately update to 'canceled' to simulate concurrent cancellation.
@@ -482,7 +482,7 @@ describe('StuckDetector status guard', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set()), // no active runs
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -510,10 +510,10 @@ describe('StuckDetector idempotency', () => {
   it('emits runs:stuck exactly once across three scan ticks', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
-    eventBus.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
+    emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
     seedRun(rawDb, 'run-idempotent', 'awaiting_review');
     seedApproval(rawDb, 'approval-idempotent', 'run-idempotent', 6 * 60 * 1000);
@@ -522,7 +522,7 @@ describe('StuckDetector idempotency', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set()),
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -546,7 +546,7 @@ describe('StuckDetector error isolation', () => {
   it('a scan error does not stop subsequent scans', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
 
     seedRun(rawDb, 'run-error', 'awaiting_review');
@@ -568,7 +568,7 @@ describe('StuckDetector error isolation', () => {
     const detector = new StuckDetector({
       db,
       claudeManager,
-      eventBus,
+      emitter,
       logger,
     });
 
@@ -598,10 +598,10 @@ describe('StuckDetector event emission shape', () => {
   it('emits runs:stuck with the correct StuckDetectedEvent payload', async () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
-    const eventBus = new EventEmitter();
+    const emitter = new EventEmitter();
     const logger = makeLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
-    eventBus.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
+    emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
     seedRun(rawDb, 'run-event', 'awaiting_review');
     seedApproval(rawDb, 'approval-event', 'run-event', 6 * 60 * 1000);
@@ -610,7 +610,7 @@ describe('StuckDetector event emission shape', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set()),
-      eventBus,
+      emitter,
       logger,
     });
 
