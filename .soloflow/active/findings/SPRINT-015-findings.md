@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-015
-pending_count: 12
-last_updated: "2026-05-17T13:30:00.000Z"
+pending_count: 17
+last_updated: "2026-05-18T07:36:51.604Z"
 ---
 # Findings Queue
 
@@ -101,7 +101,7 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** frontend/src/components/DraggableProjectTreeView.tsx:1199
 - **description:** In `handleAddProject`, after `if (!response.success) return;` the code calls `(response.data as Project)` without a separate `response.data` undefined check. With `IPCResponse<T = unknown>` enforced, `response.data` is `Project | undefined` even when `success === true` (the type allows `{ success: true }` with no `data`). The runtime handler at `main/src/ipc/project.ts:70` does return `data` on success today, so this is latent — but it's the exact silent-bypass pattern TASK-630 aimed to eliminate. The cast lies about whether `data` is defined. Same pattern existed pre-task as `setProjectsWithSessions(response.data)` (also unguarded), so this isn't a regression — but TASK-630's audit pass missed correcting it.
 - **suggested_action:** Replace the cast with a proper narrow: change `if (!response.success) return;` to `if (!response.success || !response.data) { /* show error */ return; }`, then drop the `as Project` and let `response.data` flow as `Project` directly. Same pattern check at any other `as Project` / `as Session` cast-after-success-only-guard sites surfaced during the audit.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-015-13
 - **source:** TASK-630 (code-reviewer)
@@ -111,7 +111,7 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** frontend/src/types/electron.d.ts:37
 - **description:** TASK-630 introduces `type IPCDataResponse<T> = Omit<IPCResponse<T>, 'data'> & { data: T };` so callers can drop the `&& response.data` narrow after a `if (response.success)` check. The helper is type-unsound when the underlying handler can return `{ success: false, error }` without `data` (which most handlers do — see `main/src/ipc/session.ts:1684` for one example). The declared shape asserts `data: T` is always present regardless of `success`, re-introducing the same class of silent-bypass bug TASK-630 was designed to eliminate, just in the other direction: a future caller could write `result.data.foo` without checking `result.success`, the typecheck would pass, and a `{ success: false }` response at runtime would dereference `undefined`. In practice every current IPCDataResponse caller still gates with `if (response.success && response.data)` (see ProjectDashboard.tsx:81), so no concrete defect has shipped — but the helper exists specifically to enable dropping that gate, and the type system no longer enforces it. The discriminated-union shape `{ success: true; data: T } | { success: false; error: string }` would give the same call-site ergonomics under TS control-flow narrowing while preserving the contract.
 - **suggested_action:** Spawn a follow-up task that owns `frontend/src/types/electron.d.ts` and `frontend/src/utils/api.ts` and either (a) deletes `IPCDataResponse` and reverts the ~14 channel signatures to `IPCResponse<T>` (callers already write the guard), or (b) refactors `IPCResponse<T>` itself to a tagged discriminated union — `{ success: true; data: T } | { success: false; error: string; details?: string; command?: string }` — so `if (result.success)` automatically narrows `result.data` to `T`. Option (b) is the more durable fix and aligns with the typed-IPC direction; verify with the existing component tests in TASK-630-plan.md AC8.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-015-11
 - **source:** TASK-630 (code-reviewer)
@@ -121,7 +121,7 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** frontend/src/App.tsx:34, frontend/src/components/DiscordPopup.tsx:5, frontend/src/components/OnboardingCard.tsx:4, frontend/src/components/ReviewQueueView.tsx:9
 - **description:** Four files declare their own local `interface IPCResponse<T = unknown>` that duplicates the canonical type now defined in `frontend/src/types/electron.d.ts:26` and `frontend/src/utils/api.ts:10`. These pre-date TASK-630 but were not deduplicated by it. With the canonical type now stabilised to `<T = unknown>`, the local duplicates create a drift risk — any future change to the canonical shape (e.g. adding a new field like `requestId`) silently won't propagate, and casts like `as IPCResponse<string>` will succeed against the local definition with the stale shape. Audit grep: `grep -n "interface IPCResponse" frontend/src/{App.tsx,components/{DiscordPopup,OnboardingCard,ReviewQueueView}.tsx}` returns all 4.
 - **suggested_action:** Replace each local declaration with `import type { IPCResponse } from '../utils/api';` (or `'./utils/api'` per relative depth). Verify with `pnpm --filter frontend typecheck` — the cast sites in each file already pass `<T>` explicitly so they should keep working unchanged. Pair with a CLAUDE.md bullet warning planners not to introduce a local `IPCResponse` interface — always import from the canonical location.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-015-12
 - **source:** TASK-630 (code-reviewer)
@@ -131,7 +131,7 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** frontend/src/components/panels/ai/MessagesView.tsx:55, frontend/src/components/panels/ai/RichOutputView.tsx:219
 - **description:** Two callers use `(response.data as unknown as LocalType[])` double-casts after `IPCResponse<ClaudeJsonMessage[]>` could not flow directly into local `JSONMessage[]` / `UserPromptMessage[]` types. The double-cast is the executor's path of least resistance for a pre-existing type-coherence gap: the local `JSONMessage` (MessagesView.tsx:12) declares `data: string` (always-string), but the runtime forEach loop accesses `msg.data` as if it were a `ClaudeJsonMessage` (string-or-object) and even handles the object case. The previous `<T=any>` masked this incoherence. Per the plan's "last-resort cast" guidance, the `as unknown as T` is allowed, but it papers over the fact that the local types diverge from the IPC payload shape — a future change to either side won't fail the typecheck. This is a legacy Crystal-era type-modelling debt, not a new defect.
 - **suggested_action:** Spawn a follow-up task that owns the two `panels/ai/` view files and either (a) unifies the local `JSONMessage` / `UserPromptMessage` types with `ClaudeJsonMessage` from `frontend/src/types/session.ts`, or (b) introduces an explicit `function parseJsonMessage(raw: ClaudeJsonMessage): JSONMessage` adapter that performs the runtime sniffing the forEach loops do today, so the type cast is replaced by a real boundary. Keep the cast as `// FIXME(SPRINT-015): see FIND-SPRINT-015-12` for now.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-015-10
 - **type:** improvement
@@ -150,6 +150,11 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** main/src/orchestrator/__tests__/cancelAndRestart.test.ts:51, main/src/orchestrator/__tests__/approvalRouter.test.ts:59, main/src/orchestrator/__tests__/stuckDetector.test.ts:90, main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:90, main/src/orchestrator/__tests__/inspectorQueries.test.ts:64
 - **description:** TASK-604 extracted `dbAdapter` into `main/src/orchestrator/__test_fixtures__/dbAdapter.ts` and migrated the 4 sites enumerated in files_owned. But 5 additional test files outside scope still define identical `function dbAdapter(db: Database.Database): DatabaseLike` helpers with the exact same body (`prepare: (sql) => db.prepare(sql)` + the standard `transaction<T>` cast). These are direct drop-in replacement candidates — same signature, same body. (A 6th site, `main/src/trpc/__tests__/approvals.test.ts:39`, uses a narrower bespoke shape and is NOT substitutable.) Same DRY rationale as TASK-604: any future widening of `DatabaseLike` (e.g. adding `pragma()`) requires updating 5 silently-drifting copies. Mirrors FIND-SPRINT-015-10's "planner discovered only the listed sites" pattern.
 - **suggested_action:** Spawn a low-complexity follow-up task that owns the 5 listed test files and replaces each inline `function dbAdapter(...)` block with `import { dbAdapter } from '<rel>/__test_fixtures__/dbAdapter';`. Leave `main/src/trpc/__tests__/approvals.test.ts` alone (different shape, intentional local narrowing).
+
+
+
+
+
 - **resolved_by:*
 
 ## FIND-SPRINT-015-16
@@ -160,4 +165,127 @@ last_updated: "2026-05-17T13:30:00.000Z"
 - **location:** main/src/utils/gitignoreWriter.test.ts:11-13, main/src/orchestrator/__tests__/workflowRegistry.test.ts:88
 - **description:** TASK-605 created the `withTempDir` helper and migrated the 6 sites listed in `files_owned`. Two additional `mkdtempSync` sites outside that scope leak their temp dirs with no cleanup whatsoever — same class of leak the task targeted, just missed by the planner's discovery grep. (1) `gitignoreWriter.test.ts:11-13` defines `makeTempDir()` which calls `mkdtempSync(...,'gitignore-test-')` and is invoked from many `it` blocks; no `afterEach`/`afterAll` hook exists in the file. (2) `workflowRegistry.test.ts:88` calls `mkdtempSync(...,'workflow-registry-test-')` in `beforeEach` with no matching cleanup hook in the file. Both leave directories named `gitignore-test-*` and `workflow-registry-test-*` in `$TMPDIR` after every test run. The TASK-605 AC check (`ls $TMPDIR | grep -E 'runlauncher-test-|cyboflow-ipc-test-|cyboflow-gate-wf-|cyboflow-day3-'`) intentionally only covers the 4 prefixes the task was scoped to, so this leakage is invisible to the in-scope verification but real. Mirrors the same "planner discovered only the listed sites" pattern as FIND-SPRINT-015-10 and FIND-SPRINT-015-15.
 - **suggested_action:** Spawn a low-complexity follow-up task that owns the two files and migrates each `it` body to `await withTempDir('gitignore-test-', ...)` / `await withTempDir('workflow-registry-test-', ...)` — replacing `makeTempDir()` in `gitignoreWriter.test.ts` and the `beforeEach` temp-dir creation in `workflowRegistry.test.ts`. Verify post-migration with `ls $TMPDIR | grep -E 'gitignore-test-|workflow-registry-test-'` returning no rows after `pnpm --filter main test`.
+
+
+
+
+
 - **resolved_by:*
+
+## FIND-SPRINT-015-17
+- **source:** SPRINT-015 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/workflowRegistry.ts:200-205, shared/types/workflows.ts:20-42
+- **description:** getRunById SELECT omits started_at and ended_at columns added by the SPRINT-015 schema reconciliation.
+- **suggested_action:** In workflowRegistry.ts:202, extend the SELECT list to `..., started_at, ended_at, created_at, updated_at`. In shared/types/workflows.ts WorkflowRunRow, add `started_at?: string | null;` and `ended_at?: string | null;`. Add a regression test in workflowRegistry.test.ts mirroring the existing `reads back policy_json...` test pattern to round-trip these two fields.
+- **resolved_by:** 
+
+
+
+
+
+TASK-598 added `started_at DATETIME` and `ended_at DATETIME` to workflow_runs in both schema.sql (lines 70-71) and migration 006 (lines 31-32). However:
+  1. workflowRegistry.ts:202 SELECT projects 13 columns and OMITS started_at/ended_at
+  2. shared/types/workflows.ts:20-42 WorkflowRunRow type OMITS both fields
+
+Callers that need run timing (stuck-detector epic, cancel/restart in cancelAndRestartHandler.ts:148 which already writes ended_at) cannot read these timestamps back through the registry. The columns exist in DDL only. This is an end-to-end gap that only surfaces when viewing the sprint as a whole — TASK-598 added the columns, but the projector + type were not extended.
+
+Suspected tasks: TASK-598
+
+## FIND-SPRINT-015-18
+- **source:** SPRINT-015 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/preload.ts:170, frontend/src/types/electron.d.ts:26, frontend/src/utils/api.ts:10
+- **description:** IPCResponse<T = unknown> is declared in THREE active-code files across two processes — the cross-process drift risk extends beyond FIND-SPRINT-015-11.
+- **suggested_action:** Introduce `shared/types/ipc.ts` exporting the single canonical `IPCResponse<T>` and `IPCDataResponse<T>` (or its discriminated-union replacement per FIND-13). Migrate frontend/src/utils/api.ts, frontend/src/types/electron.d.ts, AND main/src/preload.ts to import from there. As a separate task, audit the ~200 `Promise<IPCResponse>` bare sites in preload.ts and either (a) parameterize each with a concrete T matching the handler return shape, or (b) at minimum confirm that `<T = unknown>` (not `<T = any>`) is what the bare uses resolve to. Update CLAUDE.md audit grep to also cover `main/src/preload.ts`.
+- **resolved_by:** 
+
+
+
+
+FIND-11 captured 4 frontend duplicates (App.tsx, DiscordPopup, OnboardingCard, ReviewQueueView) of the canonical type. This finding adds the THIRD canonical-tier site missed by both FIND-11 and the CLAUDE.md audit grep: `main/src/preload.ts:170` declares its own `interface IPCResponse<T = unknown> { success, data?, error? }` and applies it to ~200 `Promise<IPCResponse>` sites (note: bare, no T arg).
+
+This is structurally trickier than the frontend duplicates because preload runs in the Electron preload context and cannot import from `frontend/src/utils/api.ts`. But the project does have a `shared/types/` directory, and currently neither `electron.d.ts` nor `api.ts` import the type from a shared module — they ALSO redeclare it. So the canonical type itself is duplicated 3 times before counting the 4 local frontend copies.
+
+Project CLAUDE.md mandates `grep -rnE "IPCResponse[^<A-Za-z]" frontend/src` as the audit pattern. That grep deliberately excludes main/src, so preload.ts is technically out of mandated scope. But every one of the ~200 `Promise<IPCResponse>` sites in preload.ts is also a `<T = unknown>` bare site that the same TASK-630 logic would tighten — they ARE silent-bypass-prone.
+
+Suspected tasks: TASK-630
+
+## FIND-SPRINT-015-19
+- **source:** SPRINT-015 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/utils/cyboflowApi.ts:55-60, 76-81, 146-150
+- **description:** cyboflowApi.ts inlines three IPCResponse-shaped types instead of using the canonical IPCResponse<T>.
+- **suggested_action:** Refactor cyboflowApi.ts to `import type { IPCResponse } from ./api;` and rewrite each `as { success: ..., data?: T, error? }` cast as `as IPCResponse<T>`. Then re-verify the helper functions with the standard `if (!res.success) throw ...; if (!res.data) throw ...;` narrow already used. This also future-proofs cyboflowApi for the discriminated-union refactor proposed in FIND-13.
+- **resolved_by:** 
+
+
+
+The new IPCResponse<T = unknown> is exported from `frontend/src/utils/api.ts`, but `cyboflowApi.ts` (in the same `utils/` directory) declares its own ad-hoc inline shape at each of three call sites:
+
+  listWorkflows: `as { success: boolean; data?: WorkflowRow[]; error?: string }`
+  startRun:      `as { success: boolean; data?: StartRunResult; error?: string }`
+  approveRun:    `as { success: boolean; error?: string }`
+
+Each call site re-writes the same `{ success, data?, error? }` shape rather than `as IPCResponse<WorkflowRow[]>`. This is the same drift-risk pattern flagged in FIND-SPRINT-015-11 for component-level local declarations, just expressed inline instead of as a named interface. Because TASK-630 explicitly excluded cyboflowApi.ts from its files_owned (it focuses on UI components and api.ts), these inline shapes were not normalised.
+
+Suspected tasks: TASK-630 (out of declared scope)
+
+## FIND-SPRINT-015-20
+- **source:** SPRINT-015 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** docs/CODE-PATTERNS.md (new section)
+- **description:** Cross-task meta-pattern: planner files_owned discovery missed sibling sites across THREE consecutive testing-infrastructure tasks (FIND-10, FIND-15, FIND-16).
+- **suggested_action:** Add a `Refactor Discovery Pattern` section to docs/CODE-PATTERNS.md documenting the rule: for any extract-shared-utility task, run a structural grep across main/src + frontend/src + tests/ for the pre-refactor pattern (e.g. inline DDL `CREATE TABLE workflow_runs`, inline `function dbAdapter`, raw `mkdtempSync`). Every match must appear in files_owned or be explicitly excluded in plan_decisions with a reason. The planner-skeptic agent should reject plans that fail this check.
+- **resolved_by:** 
+
+
+Viewed individually each task did what its plan said. Viewed as a whole sprint, the same root cause repeats:
+
+  TASK-603 (extract REGISTRY_SCHEMA/GATE_SCHEMA): missed 2 more in-repo inline DDL sites (FIND-10 — transitions.test.ts, mcpQueryHandler.test.ts)
+  TASK-604 (extract dbAdapter): missed 5 more identical dbAdapter inline copies (FIND-15)
+  TASK-605 (withTempDir helper): missed 2 more mkdtempSync leak sites, including workflowRegistry.test.ts which was IN the same sprint`s task chain (FIND-16)
+
+Each planner used files_owned to enumerate scope, then verified only those sites — exactly the discovery pattern that misses adjacent code. The verifier of each task confirmed the in-scope sites worked; the leak only becomes visible when the sprint reviewer scans the whole codebase.
+
+The rule that would have caught all three: when a refactor extracts a shared utility, the planner MUST run a structural grep for the OLD pattern (inline DDL, inline dbAdapter, raw mkdtempSync) across the WHOLE codebase, not just the listed scope — and include every match in files_owned (or explicitly justify exclusions).
+
+This is also a SoloFlow workflow defect candidate: the planner-skeptic could add a checkbox `did the planner grep ALL of main/src and frontend/src for the pre-refactor pattern, not just files_owned?`
+
+Also consider adding a soloflow-dev:planner hook: after files_owned is finalised, auto-grep for the most common refactor anti-patterns (mkdtempSync without rmSync; duplicate interface declarations; inline DDL) and surface unmatched hits as a planning warning.
+
+## FIND-SPRINT-015-21
+- **source:** SPRINT-015 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/database/schema.sql:43-75, main/src/database/migrations/006_cyboflow_schema.sql:5-34, main/src/database/__test_fixtures__/registrySchema.ts:21-53
+- **description:** workflows + workflow_runs DDL is now declared in THREE active sites that must be kept in sync — and FIND-10 found 2 more in-repo divergent declarations. That is FIVE sites total for the same two tables.
+
+The three reconciled sites (this finding):
+  1. main/src/database/schema.sql (fresh-install path)
+  2. main/src/database/migrations/006_cyboflow_schema.sql (upgrade path)
+  3. main/src/database/__test_fixtures__/registrySchema.ts REGISTRY_SCHEMA (test fixture)
+
+The two divergent sites flagged by FIND-10:
+  4. main/src/services/cyboflow/__tests__/transitions.test.ts:27 SCHEMA_DDL (already drifted)
+  5. main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:32 MINIMAL_SCHEMA (already drifted)
+
+The registrySchema.ts comment block instructs `Any column added to those tables at the canonical site MUST be mirrored here too` but does not name which of the 5 sites is canonical or what the verification recipe is. TASK-598`s end-of-task verification used grep that was insufficient (see FIND-3 + FIND-4).
+
+This is multi-task synthesis: TASK-598 reconciled sites 1 + 2, TASK-603 extracted site 3, FIND-10 surfaced sites 4 + 5. Viewed individually no task is wrong; viewed as a whole the schema-drift surface has GROWN (one declaration is now five) and the only verification is human inspection.
+
+Suspected tasks: TASK-598, TASK-603 (collectively)
+- **suggested_action:** Add to docs/CODE-PATTERNS.md (or new docs/SCHEMA.md):
+  (a) Designate ONE canonical source. The natural choice is migration 006 (last applied → authoritative final shape). schema.sql becomes a `derived` view: schema.sql should be the union of the inherited Crystal schema PLUS what migrations 003..006 produce. Ideally schema.sql is generated by `sqlite3 :memory: .schema` after running all migrations in CI.
+  (b) Add a CI check: `node scripts/verify-schema-parity.js` that opens an in-memory DB, runs schema.sql, then re-runs every CREATE/ALTER from migrations 003..006, and asserts no new CREATE TABLE actually creates new tables (everything should be IF NOT EXISTS no-ops).
+  (c) Co-locate REGISTRY_SCHEMA: in registrySchema.ts, replace the inline `REGISTRY_SCHEMA = ...` string with `readFileSync(join(__dirname, ..., "schema.sql"))` so the test fixture cannot drift from the real schema — at the cost of one runtime file read at test setup, which is fine.
+- **resolved_by:** 
