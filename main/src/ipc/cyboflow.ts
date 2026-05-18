@@ -18,7 +18,8 @@ import * as path from 'path';
 import type { AppServices } from './types';
 import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
 import { RunLauncher } from '../orchestrator/runLauncher';
-import type { StreamEventPublisher } from '../orchestrator/runLauncher';
+import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../orchestrator/runLauncher';
+import { McpConfigWriter } from '../orchestrator/mcpConfigWriter';
 import type { LoggerLike } from '../orchestrator/types';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
@@ -29,6 +30,18 @@ import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 let _workflowRegistry: WorkflowRegistry | null = null;
 let _runLauncher: RunLauncher | null = null;
+
+/**
+ * TEST-ONLY: inject a pre-built RunLauncher to bypass the sentinel stubs.
+ * Call this after `vi.resetModules()` + dynamic import, before invoking any
+ * handler, so `getRunLauncher` returns the injected instance instead of
+ * constructing one with the throwing epic-7 sentinels.
+ *
+ * Never call this in production code.
+ */
+export function _setRunLauncherForTest(launcher: RunLauncher): void {
+  _runLauncher = launcher;
+}
 
 /**
  * Module-level OrchestratorHealth singleton.
@@ -109,17 +122,40 @@ function getRunLauncher(services: AppServices): RunLauncher {
       },
     };
 
+    // OrchSocketProvider — TODO(epic 7): permissionIpcServer is not yet on
+    // AppServices.  The sentinel throws at call time so any code path that
+    // reaches getSocketPath() surfaces a loud, traceable error instead of
+    // silently producing a broken socket path.
+    const orchSocketProvider: OrchSocketProvider = {
+      getSocketPath: () => {
+        throw new Error('cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)');
+      },
+    };
+
+    // BridgeScriptResolver — TODO(epic 7): ASAR extraction of the bridge
+    // script is not yet implemented.  The sentinel throws at call time so
+    // missing wiring fails loudly rather than resolving to a phantom path.
+    const bridgeScriptResolver: BridgeScriptResolver = {
+      getScriptPath: () => {
+        throw new Error('cyboflow: bridgeScriptResolver not yet wired (epic 7 owns ASAR extraction)');
+      },
+    };
+
+    // NodeResolver — returns the process's own node executable path as a
+    // best-effort fallback.  A proper findExecutableInPath ladder is epic 7.
+    const nodeResolver: NodeResolver = {
+      getNodePath: async () => process.execPath,
+    };
+
     _runLauncher = new RunLauncher(
       services.databaseService.getDb(),
       getWorkflowRegistry(services),
       services.worktreeManager,
       makeLoggerLike(services),
-      // MCP collaborators (orchSocketProvider, bridgeScriptResolver, nodeResolver)
-      // are intentionally omitted here; those are wired in epic 6.
-      undefined, // mcpConfigWriter
-      undefined, // orchSocketProvider
-      undefined, // bridgeScriptResolver
-      undefined, // nodeResolver
+      new McpConfigWriter(),
+      orchSocketProvider,
+      bridgeScriptResolver,
+      nodeResolver,
       publisher,
     );
   }
