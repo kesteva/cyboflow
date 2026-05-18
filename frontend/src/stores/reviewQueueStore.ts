@@ -118,94 +118,118 @@ function syncBadge(queue: Approval[]): void {
 // Store
 // ---------------------------------------------------------------------------
 
-export const useReviewQueueStore = create<ReviewQueueState>((set, get) => ({
-  queue: [],
-  connectionStatus: 'idle',
+export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
+  // Closure-private idempotency state — NOT exposed via ReviewQueueState.
+  let initialized = false;
+  let cachedUnsubscribe: (() => void) | null = null;
 
-  // -- Reducers -------------------------------------------------------------
+  return {
+    queue: [],
+    connectionStatus: 'idle',
 
-  addApproval: (approval) => {
-    const state = get();
-    if (state.queue.some((a) => a.id === approval.id)) return;
-    const next = [...state.queue, approval];
-    set({ queue: next });
-    syncBadge(next);
-  },
+    // -- Reducers -------------------------------------------------------------
 
-  removeApproval: (id) => {
-    const state = get();
-    const next = state.queue.filter((a) => a.id !== id);
-    if (next.length === state.queue.length) return;
-    set({ queue: next });
-    syncBadge(next);
-  },
+    addApproval: (approval) => {
+      const state = get();
+      if (state.queue.some((a) => a.id === approval.id)) return;
+      const next = [...state.queue, approval];
+      set({ queue: next });
+      syncBadge(next);
+    },
 
-  replaceAll: (items) => {
-    const next = [...items];
-    syncBadge(next);
-    set({ queue: next });
-  },
+    removeApproval: (id) => {
+      const state = get();
+      const next = state.queue.filter((a) => a.id !== id);
+      if (next.length === state.queue.length) return;
+      set({ queue: next });
+      syncBadge(next);
+    },
 
-  setConnectionStatus: (status) => {
-    set({ connectionStatus: status });
-  },
+    replaceAll: (items) => {
+      const next = [...items];
+      syncBadge(next);
+      set({ queue: next });
+    },
 
-  // -- Actions --------------------------------------------------------------
+    setConnectionStatus: (status) => {
+      set({ connectionStatus: status });
+    },
 
-  init: () => {
-    const { addApproval, replaceAll, setConnectionStatus } = get();
+    // -- Actions --------------------------------------------------------------
 
-    setConnectionStatus('connecting');
+    init: () => {
+      // Idempotency guard: if already initialized, return the cached unsubscribe.
+      if (initialized) {
+        // cachedUnsubscribe is set synchronously after subscribe() returns, before
+        // any re-entry can occur on this event-loop turn.
+        return cachedUnsubscribe!;
+      }
 
-    // Full-state resync: fetch all pending approvals and replace the queue
-    trpc.cyboflow.approvals.listPending
-      .query()
-      .then((items) => {
-        replaceAll(items);
-        setConnectionStatus('connected');
-      })
-      .catch((err: unknown) => {
-        console.error('[reviewQueueStore] listPending failed:', err);
-        setConnectionStatus('disconnected');
+      // Mark initialized BEFORE async work begins so a concurrent second call
+      // during the same tick sees the guard and returns early.
+      initialized = true;
+
+      const { addApproval, replaceAll, setConnectionStatus } = get();
+
+      setConnectionStatus('connecting');
+
+      // Full-state resync: fetch all pending approvals and replace the queue
+      trpc.cyboflow.approvals.listPending
+        .query()
+        .then((items) => {
+          replaceAll(items);
+          setConnectionStatus('connected');
+        })
+        .catch((err: unknown) => {
+          console.error('[reviewQueueStore] listPending failed:', err);
+          setConnectionStatus('disconnected');
+        });
+
+      // Subscribe to incremental additions.
+      // The event type emitted by onApprovalCreated is the orchestrator's
+      // placeholder ApprovalCreated shape today; the approval-router epic will
+      // update it to include the full Approval record.  We type the handler as
+      // `unknown` and apply a runtime guard so the store remains type-safe while
+      // the backend implementation evolves.
+      const subscription = trpc.cyboflow.events.onApprovalCreated.subscribe(undefined, {
+        onData: (evt: unknown) => {
+          // Expected shape once the approval-router epic lands:
+          //   { approval: Approval }
+          // Guard: only call addApproval when the event carries the full record.
+          if (
+            typeof evt === 'object' &&
+            evt !== null &&
+            'approval' in evt &&
+            typeof (evt as Record<string, unknown>).approval === 'object' &&
+            (evt as Record<string, unknown>).approval !== null
+          ) {
+            addApproval((evt as { approval: Approval }).approval);
+          }
+          // If the event doesn't carry a full approval (current placeholder shape),
+          // we silently ignore it — the full-state resync on init() is the source
+          // of truth, not the delta subscription.
+        },
+        onError: (err: unknown) => {
+          console.error('[reviewQueueStore] onApprovalCreated subscription error:', err);
+          setConnectionStatus('disconnected');
+          // Clear closure state so a subsequent init() re-subscribes.
+          subscription.unsubscribe();
+          initialized = false;
+          cachedUnsubscribe = null;
+        },
       });
 
-    // Subscribe to incremental additions.
-    // The event type emitted by onApprovalCreated is the orchestrator's
-    // placeholder ApprovalCreated shape today; the approval-router epic will
-    // update it to include the full Approval record.  We type the handler as
-    // `unknown` and apply a runtime guard so the store remains type-safe while
-    // the backend implementation evolves.
-    const subscription = trpc.cyboflow.events.onApprovalCreated.subscribe(undefined, {
-      onData: (evt: unknown) => {
-        // Expected shape once the approval-router epic lands:
-        //   { approval: Approval }
-        // Guard: only call addApproval when the event carries the full record.
-        if (
-          typeof evt === 'object' &&
-          evt !== null &&
-          'approval' in evt &&
-          typeof (evt as Record<string, unknown>).approval === 'object' &&
-          (evt as Record<string, unknown>).approval !== null
-        ) {
-          addApproval((evt as { approval: Approval }).approval);
-        }
-        // If the event doesn't carry a full approval (current placeholder shape),
-        // we silently ignore it — the full-state resync on init() is the source
-        // of truth, not the delta subscription.
-      },
-      onError: (err: unknown) => {
-        console.error('[reviewQueueStore] onApprovalCreated subscription error:', err);
-        setConnectionStatus('disconnected');
-        // Callers should call init() again to reconnect.
-      },
-    });
-
-    // Return unsubscribe for cleanup on unmount
-    return () => {
-      subscription.unsubscribe();
-    };
-  },
-}));
+      // Build the unsubscribe function, cache it, and return it.
+      const unsubscribe = () => {
+        subscription.unsubscribe();
+        initialized = false;
+        cachedUnsubscribe = null;
+      };
+      cachedUnsubscribe = unsubscribe;
+      return unsubscribe;
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Derived view hook
