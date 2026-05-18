@@ -26,8 +26,8 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * Meta / Ctrl / Alt modifier combinations are ignored so as not to collide
  * with OS shortcuts (Cmd-K, Ctrl-N, etc.).
  *
- * Group `y` dispatches `approveRestOfRun` atomically; group `n` fans out
- * per-member because no `rejectRestOfRun` exists in v1.
+ * Group `y` dispatches `approveRestOfRun` atomically; group `n` dispatches
+ * `rejectRestOfRun` atomically (TASK-616 — symmetric to `approveRestOfRun`).
  *
  * Implementation note: focusedIndex and queue are tracked via refs so the
  * keydown handler always reads the latest values without being recreated on
@@ -119,11 +119,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             if (focused.kind === 'single') {
               void trpc.cyboflow.approvals.reject.mutate({ approvalId: focused.approval.id });
             } else {
-              void Promise.all(
-                focused.items.map((a) =>
-                  trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id }),
-                ),
-              );
+              void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId: focused.runId });
             }
           }
           break;
