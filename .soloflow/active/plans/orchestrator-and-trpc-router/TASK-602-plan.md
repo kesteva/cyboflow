@@ -1,8 +1,8 @@
 ---
 id: TASK-602
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/ipc/cyboflow.ts
   - main/src/orchestrator/runLauncher.ts
@@ -19,36 +19,36 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Run orchestration emits stream events to the renderer via `mainWindow.webContents.send('cyboflow:stream:<runId>', event)`"
     verification: "grep -rn \"webContents.send('cyboflow:stream:\" main/src/ returns at least one match in either main/src/ipc/cyboflow.ts or main/src/orchestrator/runLauncher.ts (whichever owns the publish)"
-  - criterion: "RunView.tsx subscription comment is annotated `// TODO(epic-6)` if (and only if) the publisher delegates to a future tRPC subscription path; if the publisher uses raw IPC the comment is removed"
+  - criterion: RunView.tsx subscription comment is annotated `// TODO(epic-6)` if (and only if) the publisher delegates to a future tRPC subscription path; if the publisher uses raw IPC the comment is removed
     verification: "grep -n 'TODO(epic-6)\\|tRPC migration' frontend/src/components/cyboflow/RunView.tsx returns matches consistent with the chosen path (raw IPC live OR tRPC TODO documented)"
-  - criterion: "A new Playwright/Vitest spec exercises the full subscribe → publish → render path end-to-end"
+  - criterion: A new Playwright/Vitest spec exercises the full subscribe → publish → render path end-to-end
     verification: "test -f tests/cyboflow-stream-publisher.spec.ts AND grep -n 'subscribeToStreamEvents\\|cyboflow:stream:' tests/cyboflow-stream-publisher.spec.ts returns at least one match"
-  - criterion: "RunLauncher (or wherever the publish lives) accepts an optional event-publisher dependency injected via constructor — preserving the standalone-typecheck invariant (no electron import)"
+  - criterion: RunLauncher (or wherever the publish lives) accepts an optional event-publisher dependency injected via constructor — preserving the standalone-typecheck invariant (no electron import)
     verification: "grep -n 'StreamEventPublisher\\|publisher\\|publish' main/src/orchestrator/runLauncher.ts returns the dependency declaration; grep -n \"from 'electron'\" main/src/orchestrator/runLauncher.ts returns 0 matches"
-  - criterion: "Day-3 gate test (tests/cyboflow-day3-gate.spec.ts) continues to pass — the existing harness is not affected by the publisher addition"
+  - criterion: Day-3 gate test (tests/cyboflow-day3-gate.spec.ts) continues to pass — the existing harness is not affected by the publisher addition
     verification: "pnpm test:gate exits 0 when claude is in PATH (or skip-pass when not)"
   - criterion: "The new spec uses real preload.ts whitelist (post-TASK-599 fix) — i.e. the spec depends on TASK-599's wrapper-storage fix and would fail if TASK-599 regressed"
     verification: "grep -rn 'electron.on.*cyboflow:stream\\|subscribeToStreamEvents' tests/cyboflow-stream-publisher.spec.ts returns at least one match"
-depends_on: [TASK-599]
+depends_on:
+  - TASK-599
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
   justification: "End-to-end stream-event delivery is currently broken in three layers (preload, publisher, subscriber). A new spec that exercises subscribe → publish → assert is the canary for whether the fix holds; without it, regressions in any of the three layers slip through."
   targets:
-    - behavior: "RunLauncher.launch invokes the injected publisher with at least one stream event for the launched runId"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch invokes the injected publisher with at least one stream event for the launched runId
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
     - behavior: "End-to-end: a renderer subscribes to cyboflow:stream:<runId>, the orchestrator publishes an event, the subscriber receives it"
-      test_file: "tests/cyboflow-stream-publisher.spec.ts"
+      test_file: tests/cyboflow-stream-publisher.spec.ts
       type: integration
 prerequisites:
   - check: "test -f main/src/preload.ts && grep -q 'cyboflow:stream:' main/src/preload.ts"
-    fix: "Complete TASK-599 (preload.ts whitelist + off() fix) before starting this task"
+    fix: Complete TASK-599 (preload.ts whitelist + off() fix) before starting this task
     description: "Without TASK-599, the renderer subscription is dropped silently and any spec written here will fail for an unrelated reason"
     blocking: true
 ---
-
 # Wire stream-event publisher (subscribe → publish → render path)
 
 ## Objective
