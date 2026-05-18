@@ -1,8 +1,8 @@
 ---
 id: TASK-615
 idea: IDEA-009
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/trpc/index.ts
   - main/src/trpc/context.ts
@@ -19,18 +19,17 @@ acceptance_criteria:
     verification: "grep -n 'DO NOT ADD NEW ROUTERS' main/src/trpc/routers/approvals.ts returns ≥1 match AND grep -n 'main/src/orchestrator/trpc/routers' main/src/trpc/routers/approvals.ts returns ≥1 match."
   - criterion: "`main/src/trpc/context.ts` contains a one-line back-pointer to index.ts."
     verification: "grep -n 'DO NOT ADD NEW ROUTERS\\|see main/src/trpc/index.ts' main/src/trpc/context.ts returns ≥1 match."
-  - criterion: "approveRestOfRunHandler signature and behaviour unchanged — comments-only change."
-    verification: "git diff --stat shows changes confined to comment lines. main/src/trpc/__tests__/approvals.test.ts continues to pass unchanged."
-  - criterion: "No new TypeScript errors introduced in main."
-    verification: "pnpm --filter main typecheck exits 0."
+  - criterion: approveRestOfRunHandler signature and behaviour unchanged — comments-only change.
+    verification: git diff --stat shows changes confined to comment lines. main/src/trpc/__tests__/approvals.test.ts continues to pass unchanged.
+  - criterion: No new TypeScript errors introduced in main.
+    verification: pnpm --filter main typecheck exits 0.
 depends_on: []
 estimated_complexity: low
 epic: approval-router-and-permission-fix
 test_strategy:
   needed: false
-  justification: "Comments-only change. The existing main/src/trpc/__tests__/approvals.test.ts exercises the handler and serves as a behavioural-regression gate."
+  justification: Comments-only change. The existing main/src/trpc/__tests__/approvals.test.ts exercises the handler and serves as a behavioural-regression gate.
 ---
-
 # Clarify the orphan main/src/trpc/ subtree with DO-NOT-EXPAND warnings
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-608
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/ipc/types.ts
   - main/src/ipc/cyboflow.ts
@@ -20,29 +20,29 @@ acceptance_criteria:
     verification: "grep -n 'new WorkflowRegistry\\|new RunLauncher' main/src/index.ts returns at least 2 matches in the bootstrap path"
   - criterion: "main/src/ipc/cyboflow.ts no longer contains module-level lazy singletons (_workflowRegistry, _runLauncher) or the getWorkflowRegistry/getRunLauncher helpers"
     verification: "grep -nE 'let _workflowRegistry|let _runLauncher|function getWorkflowRegistry|function getRunLauncher' main/src/ipc/cyboflow.ts returns 0 matches"
-  - criterion: "registerCyboflowHandlers reads collaborators from `services.cyboflow.workflowRegistry` / `services.cyboflow.runLauncher` (or the chosen flat-field equivalent)"
+  - criterion: registerCyboflowHandlers reads collaborators from `services.cyboflow.workflowRegistry` / `services.cyboflow.runLauncher` (or the chosen flat-field equivalent)
     verification: "grep -nE 'services\\.cyboflow\\.workflowRegistry|services\\.cyboflow\\.runLauncher|services\\.workflowRegistry|services\\.runLauncher' main/src/ipc/cyboflow.ts returns at least 2 matches"
   - criterion: "main/src/ipc/__tests__/cyboflow.test.ts no longer calls `vi.resetModules()` or uses dynamic `await import('../cyboflow')`"
     verification: "grep -n 'vi.resetModules\\|await import' main/src/ipc/__tests__/cyboflow.test.ts returns 0 matches"
-  - criterion: "All cyboflow.test.ts tests still pass after the migration"
-    verification: "pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0"
-  - criterion: "All other test files still pass and typecheck remains green"
-    verification: "pnpm --filter main test exits 0 AND pnpm --filter main typecheck exits 0"
-depends_on: [TASK-607]
+  - criterion: All cyboflow.test.ts tests still pass after the migration
+    verification: pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0
+  - criterion: All other test files still pass and typecheck remains green
+    verification: pnpm --filter main test exits 0 AND pnpm --filter main typecheck exits 0
+depends_on:
+  - TASK-607
 estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "Removing vi.resetModules + dynamic imports from cyboflow.test.ts requires reworking how each test acquires its handlers; the existing tests are the regression coverage but their setup mechanics fundamentally change."
+  justification: Removing vi.resetModules + dynamic imports from cyboflow.test.ts requires reworking how each test acquires its handlers; the existing tests are the regression coverage but their setup mechanics fundamentally change.
   targets:
-    - behavior: "registerCyboflowHandlers wires the 3 channels using the WorkflowRegistry + RunLauncher from services.cyboflow (no module-level singleton)"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+    - behavior: registerCyboflowHandlers wires the 3 channels using the WorkflowRegistry + RunLauncher from services.cyboflow (no module-level singleton)
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
-    - behavior: "Two test suites in the same file can call registerCyboflowHandlers without vi.resetModules() and not bleed state between each other"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+    - behavior: Two test suites in the same file can call registerCyboflowHandlers without vi.resetModules() and not bleed state between each other
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
 ---
-
 # Move WorkflowRegistry/RunLauncher construction into AppServices
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-636
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/orchestrator/workflowRegistry.ts
@@ -13,13 +13,13 @@ files_readonly:
   - main/src/orchestrator/cancelAndRestartHandler.ts
   - main/src/database/__test_fixtures__/registrySchema.ts
 acceptance_criteria:
-  - criterion: "WorkflowRunRow type includes started_at and ended_at as optional nullable string fields"
+  - criterion: WorkflowRunRow type includes started_at and ended_at as optional nullable string fields
     verification: "grep -nE 'started_at|ended_at' shared/types/workflows.ts returns 2 matches inside the WorkflowRunRow interface"
-  - criterion: "getRunById SELECT projects started_at and ended_at"
+  - criterion: getRunById SELECT projects started_at and ended_at
     verification: "grep -nE 'started_at, ended_at|ended_at, started_at' main/src/orchestrator/workflowRegistry.ts returns at least 1 match inside the getRunById prepare() statement"
-  - criterion: "Regression test reads back started_at and ended_at after a direct UPDATE"
+  - criterion: Regression test reads back started_at and ended_at after a direct UPDATE
     verification: "grep -n \"started_at\\|ended_at\" main/src/orchestrator/__tests__/workflowRegistry.test.ts returns at least 4 matches (test body + assertions)"
-  - criterion: "Typecheck and tests pass"
+  - criterion: Typecheck and tests pass
     verification: "pnpm --filter main typecheck && pnpm --filter main test exit 0"
 depends_on: []
 estimated_complexity: low
@@ -28,14 +28,13 @@ test_strategy:
   needed: true
   justification: "TASK-598 added the columns but the SELECT projection and shared type both lack them — the existing `reads back policy_json, stuck_at, stuck_reason, error_message` test in workflowRegistry.test.ts is the canonical pattern to mirror. Adding a parallel test that writes to and reads back started_at/ended_at locks the new SELECT projection into a typed regression."
   targets:
-    - behavior: "getRunById returns null for started_at and ended_at on a freshly inserted (queued) run"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: getRunById returns null for started_at and ended_at on a freshly inserted (queued) run
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "getRunById round-trips started_at and ended_at after a direct UPDATE writes them"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: getRunById round-trips started_at and ended_at after a direct UPDATE writes them
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
 ---
-
 # Extend getRunById SELECT and WorkflowRunRow to include started_at / ended_at
 
 ## Objective

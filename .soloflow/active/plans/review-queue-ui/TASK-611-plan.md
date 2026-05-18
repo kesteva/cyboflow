@@ -1,8 +1,8 @@
 ---
 id: TASK-611
 idea: IDEA-009
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueueView.tsx
   - frontend/src/stores/reviewQueueStore.ts
@@ -19,7 +19,7 @@ acceptance_criteria:
     verification: "grep -n 'initialized\\|isInitialized' frontend/src/stores/reviewQueueStore.ts shows an internal guard flag. A vitest case in reviewQueueStore.test.ts calls init() twice on the same store instance and asserts `trpc.cyboflow.approvals.listPending.query` was called exactly once and `trpc.cyboflow.events.onApprovalCreated.subscribe` was called exactly once."
   - criterion: "After the returned unsubscribe runs once, the next init() call re-subscribes (re-entry is a no-op only while a live subscription exists)."
     verification: "A vitest case calls init(), invokes the returned unsubscribe, then calls init() again, and asserts subscribe was called twice (one per init() that produced a live subscription)."
-  - criterion: "ReviewQueueView.test.tsx still passes after the mount-effect rewrite — `mockInit` is invoked exactly once per test render."
+  - criterion: ReviewQueueView.test.tsx still passes after the mount-effect rewrite — `mockInit` is invoked exactly once per test render.
     verification: "pnpm --filter frontend test exits 0 and the suite includes the existing `it('calls init() once on mount', ...)` case. The mock's `init` factory MUST return a no-op unsubscribe `() => {}` so React's useEffect contract is satisfied."
   - criterion: "No StrictMode-style double subscription: rendering ReviewQueueView inside <React.StrictMode> (or two consecutive mounts of the component) results in exactly one live onApprovalCreated subscription after both mount effects settle."
     verification: "A vitest case in reviewQueueStore.test.ts that simulates StrictMode's double-invoke (call init() twice without invoking the unsubscribe between calls, then invoke the first unsubscribe, then assert the store still has one subscription accounted for via the mocked subscribe call count and the internal `initialized` flag)."
@@ -28,19 +28,18 @@ estimated_complexity: low
 epic: review-queue-ui
 test_strategy:
   needed: true
-  justification: "Adds an idempotency guard and changes a React effect-cleanup contract — both regressions slip silently if not tested."
+  justification: Adds an idempotency guard and changes a React effect-cleanup contract — both regressions slip silently if not tested.
   targets:
     - behavior: "init() is idempotent on re-entry while subscription is live (single listPending fetch, single subscribe)"
       test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "init() returned unsubscribe disposes the subscription; subsequent init() re-subscribes"
+    - behavior: init() returned unsubscribe disposes the subscription; subsequent init() re-subscribes
       test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
     - behavior: "ReviewQueueView mount effect wires init()'s unsubscribe (mock asserts unsubscribe is invoked on unmount)"
       test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
 ---
-
 # Fix subscription leak — wire init() unsubscribe return in ReviewQueueView
 
 ## Objective

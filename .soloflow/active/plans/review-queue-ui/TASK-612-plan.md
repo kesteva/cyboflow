@@ -1,8 +1,8 @@
 ---
 id: TASK-612
 idea: IDEA-009
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useReviewQueueKeyboard.ts
   - frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
@@ -16,7 +16,7 @@ acceptance_criteria:
     verification: "grep -n 'approveRestOfRun' frontend/src/hooks/useReviewQueueKeyboard.ts shows the call inside the `case 'y':` branch under the `focused.kind === 'group'` arm. Vitest case asserts mockApproveRestOfRunMutate called once with correct runId and mockApproveMutate NOT called."
   - criterion: "Pressing `y` on a single item still calls `approve.mutate({ approvalId })` once with the focused approval's id — unchanged from TASK-404."
     verification: "Vitest case asserts mockApproveMutate.toHaveBeenCalledWith({ approvalId: 'a' }) and mockApproveRestOfRunMutate NOT called when y pressed on single item."
-  - criterion: "Pressing `n` on a group item still calls `reject.mutate` once per member via Promise.all — unchanged (no rejectRestOfRun exists)."
+  - criterion: Pressing `n` on a group item still calls `reject.mutate` once per member via Promise.all — unchanged (no rejectRestOfRun exists).
     verification: "Existing 'n on a group item calls reject.mutate for each member' test continues to pass."
   - criterion: "The hook's tRPC mock path matches the actual import path (`'../../utils/trpcClient'`)."
     verification: "grep -n \"vi.mock('../../utils/trpcClient'\" frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts returns the mock declaration."
@@ -25,19 +25,18 @@ estimated_complexity: low
 epic: review-queue-ui
 test_strategy:
   needed: true
-  justification: "Behavioural change in mutation dispatch — contract that keyboard y on group fires approveRestOfRun (matching mouse) is the entire point of this task."
+  justification: Behavioural change in mutation dispatch — contract that keyboard y on group fires approveRestOfRun (matching mouse) is the entire point of this task.
   targets:
-    - behavior: "y on 3-item group fires approveRestOfRun.mutate exactly once with the group runId; per-member approve.mutate NOT called"
+    - behavior: y on 3-item group fires approveRestOfRun.mutate exactly once with the group runId; per-member approve.mutate NOT called
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "y on single item still fires approve.mutate with the single approvalId"
+    - behavior: y on single item still fires approve.mutate with the single approvalId
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "n on group still fans out to per-member reject.mutate (preserve existing behaviour)"
+    - behavior: n on group still fans out to per-member reject.mutate (preserve existing behaviour)
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
 ---
-
 # Fix keyboard `y` on group card to use approveRestOfRun (match mouse semantics)
 
 ## Objective

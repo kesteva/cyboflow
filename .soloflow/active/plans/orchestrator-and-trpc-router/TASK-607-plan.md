@@ -1,8 +1,8 @@
 ---
 id: TASK-607
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runLauncher.ts
   - main/src/orchestrator/__tests__/runLauncher.test.ts
@@ -15,15 +15,15 @@ files_readonly:
 acceptance_criteria:
   - criterion: "RunLauncher constructor declares mcpConfigWriter, orchSocketProvider, bridgeScriptResolver, nodeResolver as REQUIRED (no `?`)"
     verification: "grep -nE 'private readonly (mcpConfigWriter|orchSocketProvider|bridgeScriptResolver|nodeResolver)\\?' main/src/orchestrator/runLauncher.ts returns 0 matches (no `?` after any of the four field names)"
-  - criterion: "RunLauncher constructor throws if any of the 4 collaborators is missing or null"
+  - criterion: RunLauncher constructor throws if any of the 4 collaborators is missing or null
     verification: "grep -nE 'throw new Error.*mcpConfigWriter|throw new Error.*orchSocketProvider|throw new Error.*bridgeScriptResolver|throw new Error.*nodeResolver|RunLauncher: missing required' main/src/orchestrator/runLauncher.ts returns at least one validation throw"
   - criterion: "RunLauncher.launch removes the `if (this.mcpConfigWriter && ...)` guard and unconditionally invokes the MCP write path"
     verification: "grep -nE 'if \\(\\s*this\\.mcpConfigWriter' main/src/orchestrator/runLauncher.ts returns 0 matches"
-  - criterion: "All existing runLauncher.test.ts tests are updated to pass typed stubs for the 4 collaborators"
+  - criterion: All existing runLauncher.test.ts tests are updated to pass typed stubs for the 4 collaborators
     verification: "grep -nE 'fakeMcpConfigWriter|fakeOrchSocketProvider|fakeBridgeScriptResolver|fakeNodeResolver' main/src/orchestrator/__tests__/runLauncher.test.ts returns at least 4 matches across multiple describe blocks (not just the existing one test)"
   - criterion: "Call sites that construct RunLauncher (cyboflow.ts, cyboflowTestHarness.ts) pass either real or stub collaborators"
     verification: "grep -nE 'new RunLauncher' main/src/ipc/cyboflow.ts tests/helpers/cyboflowTestHarness.ts returns matches that pass at least 8 args (db, registry, worktree, logger, mcp, socket, bridge, node)"
-  - criterion: "All affected tests pass"
+  - criterion: All affected tests pass
     verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/runLauncher.test.ts src/ipc/__tests__/cyboflow.test.ts exits 0 AND pnpm test:gate exits 0 (or skip-pass)"
 depends_on: []
 estimated_complexity: low
@@ -32,17 +32,16 @@ test_strategy:
   needed: true
   justification: "Making the collaborators required removes the implicit silent-skip path; existing tests must be updated to pass stubs, and the constructor's new throw behavior needs explicit coverage."
   targets:
-    - behavior: "RunLauncher constructor throws when mcpConfigWriter is missing"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher constructor throws when mcpConfigWriter is missing
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "RunLauncher constructor throws when any of the 4 MCP collaborators is missing"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher constructor throws when any of the 4 MCP collaborators is missing
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "RunLauncher.launch always calls writeForRun (no longer guarded behind optional collaborators)"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch always calls writeForRun (no longer guarded behind optional collaborators)
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
 ---
-
 # Make MCP collaborators required args in RunLauncher
 
 ## Objective
