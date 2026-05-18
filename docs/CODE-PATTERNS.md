@@ -202,4 +202,14 @@ not the canonical client file it re-exports from. Mocking the re-export target w
 by accident of ESM hoisting and breaks silently if the shim direction is ever flipped.
 Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:22`.
 
+### vitest config must wire `setupFiles` and `globals: true`
+
+Both workspace `vitest.config.ts` files set `globals: true` + `setupFiles:
+['./src/test/setup.ts']`. Do not flip to `globals: false` — `frontend/src/test/setup.ts`
+calls `expect.extend(...)` from `@testing-library/jest-dom` at module load, which throws
+`ReferenceError: expect is not defined` under `globals: false` and breaks every spec in
+the workspace. When adding a new `vitest.config.ts` in either workspace, mirror the
+existing files; before planning a test-wiring task, grep both `@testing-library/jest-dom`
+and `test/setup.ts` — do not rely on a `.test.*` glob.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
