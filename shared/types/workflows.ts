@@ -33,6 +33,10 @@ export interface WorkflowRunRow {
   permission_mode_snapshot: PermissionMode;
   worktree_path: string | null;
   branch_name: string | null;
+  policy_json?: string | null;
+  stuck_at?: string | null;
+  stuck_reason?: string | null;
+  error_message?: string | null;
   created_at: string;
   updated_at: string;
 }
