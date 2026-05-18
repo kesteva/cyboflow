@@ -31,11 +31,7 @@ import { useMcpHealthStore } from './stores/mcpHealthStore';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
-interface IPCResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-}
+import type { IPCResponse } from './utils/api';
 
 interface PermissionRequest {
   id: string;
