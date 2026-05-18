@@ -119,4 +119,36 @@ describe('readWorkflowPrompt', () => {
       expect(result.systemPromptAppend).toBe('Crisp.');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Case 8: single-quoted frontmatter value strips surrounding quotes
+  //         (mirrors the double-quote behaviour tested in case 2)
+  // -------------------------------------------------------------------------
+  it("strips single quotes from frontmatter values", async () => {
+    await withTempDir('wpr-test-', (tmpDir) => {
+      const filePath = join(tmpDir, 'workflow.md');
+      writeFileSync(filePath, "---\nsystem_prompt_append: 'Be brief.'\n---\nDo the thing.");
+      const result = readWorkflowPrompt(filePath);
+      expect(result.systemPromptAppend).toBe('Be brief.');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 9: body containing `---` sequences NOT at start of file are
+  //         preserved as-is — the regex is anchored to `^` so internal
+  //         horizontal-rule markers in markdown content are not treated as
+  //         a second frontmatter delimiter.
+  // -------------------------------------------------------------------------
+  it('preserves --- inside the body that are not at the start of the file', async () => {
+    await withTempDir('wpr-test-', (tmpDir) => {
+      const filePath = join(tmpDir, 'workflow.md');
+      writeFileSync(
+        filePath,
+        '---\ntitle: Test\n---\nFirst paragraph.\n\n---\n\nSecond section.',
+      );
+      const result = readWorkflowPrompt(filePath);
+      expect(result.prompt).toBe('First paragraph.\n\n---\n\nSecond section.');
+      expect(result.systemPromptAppend).toBe('');
+    });
+  });
 });
