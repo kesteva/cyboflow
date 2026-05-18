@@ -1,7 +1,7 @@
 ---
 id: TASK-642
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-18T20:30:00Z"
 files_owned:
   - main/src/orchestrator/runEventBridge.ts

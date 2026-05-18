@@ -1,8 +1,8 @@
 ---
 id: TASK-641
 idea: IDEA-018
-status: ready
-created: 2026-05-18T20:30:00Z
+status: in-flight
+created: "2026-05-18T20:30:00Z"
 files_owned:
   - main/src/orchestrator/workflowPromptReader.ts
   - main/src/orchestrator/__tests__/workflowPromptReader.test.ts
@@ -20,32 +20,33 @@ acceptance_criteria:
     verification: "Unit test `returns body below frontmatter as prompt` writes a temp .md file with a `---` frontmatter block followed by 'Hello workflow body.' and asserts the returned `prompt` is exactly 'Hello workflow body.'."
   - criterion: "When the frontmatter contains a `system_prompt_append` key, its value is returned as `systemPromptAppend`; when absent, `systemPromptAppend` is the empty string `''`."
     verification: "Two unit tests: (a) frontmatter with `system_prompt_append: \"Be terse.\"` yields `systemPromptAppend === 'Be terse.'`; (b) frontmatter without that key yields `systemPromptAppend === ''`."
-  - criterion: "Missing file at `workflowPath` throws `WorkflowPromptReadError` with a message that names the path."
+  - criterion: Missing file at `workflowPath` throws `WorkflowPromptReadError` with a message that names the path.
     verification: "Unit test passes a non-existent path; expects `expect(...).toThrow(WorkflowPromptReadError)` AND the thrown error's `.message` includes the path string AND `.cause` is the underlying ENOENT error."
   - criterion: "Empty body (whitespace-only after frontmatter) throws `WorkflowPromptReadError` with a message that mentions 'empty'."
     verification: "Unit test writes a temp .md with only frontmatter and no body, expects `expect(...).toThrow(/empty/i)` and the error class is `WorkflowPromptReadError`."
   - criterion: "Files with no `---` frontmatter block return the full file content (trimmed) as `prompt` and `systemPromptAppend === ''`."
     verification: "Unit test writes a temp .md without any `---` line containing 'Just a prompt.', expects `prompt === 'Just a prompt.'` and `systemPromptAppend === ''`."
-  - criterion: "Module exports the typed error class `WorkflowPromptReadError` (a subclass of `Error`) so RunExecutor (TASK-640) can `instanceof`-check it."
+  - criterion: Module exports the typed error class `WorkflowPromptReadError` (a subclass of `Error`) so RunExecutor (TASK-640) can `instanceof`-check it.
     verification: "grep -nE 'export class WorkflowPromptReadError extends Error' main/src/orchestrator/workflowPromptReader.ts returns one match."
   - criterion: "`pnpm --filter main typecheck` passes with the new module — `workflowPromptReader.ts` has zero `any` usages."
     verification: "Run `pnpm --filter main typecheck` and confirm exit 0; run `grep -nE '\\bany\\b' main/src/orchestrator/workflowPromptReader.ts` and confirm zero matches inside type positions (matches inside identifiers like 'company' don't count — visual review)."
   - criterion: "`pnpm --filter main test -- workflowPromptReader` runs the new test file and all cases pass."
     verification: "Run `pnpm --filter main test -- workflowPromptReader` and confirm all cases under `describe('readWorkflowPrompt')` report green."
-depends_on: [TASK-640]
+depends_on:
+  - TASK-640
 estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
   justification: "Pure-helper module with branchy parse logic and three throw paths (missing file, empty body, future parse error). Every branch needs a unit test. No existing test file in this directory covers the helper (it is a new module)."
   targets:
-    - behavior: "Body extraction below a standard `---` frontmatter block returns the trimmed body as `prompt`."
+    - behavior: Body extraction below a standard `---` frontmatter block returns the trimmed body as `prompt`.
       test_file: main/src/orchestrator/__tests__/workflowPromptReader.test.ts
       type: unit
     - behavior: "`system_prompt_append` frontmatter key flows through to the returned `systemPromptAppend` field; absent key yields empty string."
       test_file: main/src/orchestrator/__tests__/workflowPromptReader.test.ts
       type: unit
-    - behavior: "Missing file at `workflowPath` throws `WorkflowPromptReadError` whose `.cause` is the ENOENT error and whose message includes the requested path."
+    - behavior: Missing file at `workflowPath` throws `WorkflowPromptReadError` whose `.cause` is the ENOENT error and whose message includes the requested path.
       test_file: main/src/orchestrator/__tests__/workflowPromptReader.test.ts
       type: unit
     - behavior: "Empty body (whitespace-only after frontmatter) throws `WorkflowPromptReadError` with an 'empty'-mentioning message."
@@ -54,11 +55,10 @@ test_strategy:
     - behavior: "Files without any `---` frontmatter return the trimmed full content as `prompt` and `systemPromptAppend === ''`."
       test_file: main/src/orchestrator/__tests__/workflowPromptReader.test.ts
       type: unit
-    - behavior: "CRLF line endings in the frontmatter delimiter are handled (mirrors `workflowRegistry.parseFrontmatter`'s `\\r?\\n` regex)."
+    - behavior: "CRLF line endings in the frontmatter delimiter are handled (mirrors `workflowRegistry.parseFrontmatter`'s `\\r?\n` regex)."
       test_file: main/src/orchestrator/__tests__/workflowPromptReader.test.ts
       type: unit
 ---
-
 # Construct Initial Prompt from Workflow `.md` File Body and Frontmatter
 
 ## Objective
