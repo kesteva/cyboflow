@@ -30,9 +30,7 @@ export default function ReviewQueueView() {
   // One-shot ref guards against writing the preference more than once.
   const onboardingDismissedRef = useRef(false);
 
-  useEffect(() => {
-    useReviewQueueStore.getState().init();
-  }, []);
+  useEffect(() => useReviewQueueStore.getState().init(), []);
 
   // Read the onboarding preference on mount to initialise lifted state.
   useEffect(() => {
