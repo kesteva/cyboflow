@@ -1,8 +1,8 @@
 ---
 id: TASK-605
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/__test_fixtures__/tmp.ts
   - main/src/orchestrator/__tests__/runLauncher.test.ts
@@ -18,11 +18,11 @@ acceptance_criteria:
     verification: "test -f main/src/__test_fixtures__/tmp.ts && grep -nE 'export (async )?function withTempDir' main/src/__test_fixtures__/tmp.ts returns at least one match"
   - criterion: "withTempDir creates a unique temp directory, passes it to the callback, and cleans it up via `fs.rmSync(dir, { recursive: true, force: true })` in a try/finally"
     verification: "grep -n 'mkdtempSync\\|rmSync\\|finally' main/src/__test_fixtures__/tmp.ts returns at least 3 matches (mkdtempSync + rmSync + finally)"
-  - criterion: "The 4 leaking sites identified by the finding migrate to withTempDir or otherwise add proper cleanup"
+  - criterion: The 4 leaking sites identified by the finding migrate to withTempDir or otherwise add proper cleanup
     verification: "manual: each of runLauncher.test.ts, cyboflow.test.ts, cyboflowTestHarness.ts, cyboflow-day3-gate.spec.ts has either an import of withTempDir OR an explicit `afterEach(() => rmSync(...))` covering the temp dirs it creates"
   - criterion: "mcpConfigWriter.test.ts and worktreeManager.test.ts (which already cleanup via afterEach/createdDirs arrays) MAY also migrate to withTempDir for consistency, but it is not required"
     verification: "manual: either both files migrate, or both keep their existing cleanup; no half-migration"
-  - criterion: "All 6 affected test files continue to pass"
+  - criterion: All 6 affected test files continue to pass
     verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/runLauncher.test.ts src/orchestrator/__tests__/mcpConfigWriter.test.ts src/ipc/__tests__/cyboflow.test.ts src/services/__tests__/worktreeManager.test.ts exits 0 AND pnpm test:gate exits 0 (or skip-pass)"
   - criterion: "After running pnpm --filter main test, no `runlauncher-test-*`, `cyboflow-ipc-test-*`, `cyboflow-gate-wf-*`, or `cyboflow-day3-*` directories remain in `os.tmpdir()`"
     verification: "ls $TMPDIR | grep -E 'runlauncher-test-|cyboflow-ipc-test-|cyboflow-gate-wf-|cyboflow-day3-' returns no rows"
@@ -31,22 +31,21 @@ estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "withTempDir is new helper logic that needs its own unit test for the cleanup contract; the migrated test sites are themselves regression coverage but do not assert the cleanup behavior."
+  justification: withTempDir is new helper logic that needs its own unit test for the cleanup contract; the migrated test sites are themselves regression coverage but do not assert the cleanup behavior.
   targets:
-    - behavior: "withTempDir creates a unique directory under os.tmpdir() with the given prefix"
-      test_file: "main/src/__test_fixtures__/__tests__/tmp.test.ts"
+    - behavior: withTempDir creates a unique directory under os.tmpdir() with the given prefix
+      test_file: main/src/__test_fixtures__/__tests__/tmp.test.ts
       type: unit
-    - behavior: "withTempDir cleans up the directory after the callback resolves"
-      test_file: "main/src/__test_fixtures__/__tests__/tmp.test.ts"
+    - behavior: withTempDir cleans up the directory after the callback resolves
+      test_file: main/src/__test_fixtures__/__tests__/tmp.test.ts
       type: unit
-    - behavior: "withTempDir cleans up the directory even if the callback throws"
-      test_file: "main/src/__test_fixtures__/__tests__/tmp.test.ts"
+    - behavior: withTempDir cleans up the directory even if the callback throws
+      test_file: main/src/__test_fixtures__/__tests__/tmp.test.ts
       type: unit
-    - behavior: "withTempDir cleanup is best-effort — does not throw on a non-existent dir"
-      test_file: "main/src/__test_fixtures__/__tests__/tmp.test.ts"
+    - behavior: withTempDir cleanup is best-effort — does not throw on a non-existent dir
+      test_file: main/src/__test_fixtures__/__tests__/tmp.test.ts
       type: unit
 ---
-
 # Create withTempDir test helper + migrate 4 leaking sites
 
 ## Objective

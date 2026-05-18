@@ -1,8 +1,8 @@
 ---
 id: TASK-563
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - frontend/package.json
   - frontend/vitest.config.ts
@@ -15,11 +15,11 @@ files_readonly:
 acceptance_criteria:
   - criterion: "frontend/package.json has vitest, @vitest/ui, and jsdom in devDependencies"
     verification: "node -e 'const p = require(\"./frontend/package.json\"); if (!p.devDependencies.vitest) process.exit(1); if (!p.devDependencies[\"@vitest/ui\"]) process.exit(2); if (!p.devDependencies.jsdom) process.exit(3);' exits with status 0"
-  - criterion: "frontend/package.json has a `test` script that runs `vitest run`"
+  - criterion: frontend/package.json has a `test` script that runs `vitest run`
     verification: "node -e 'const p = require(\"./frontend/package.json\"); if (p.scripts.test !== \"vitest run\") process.exit(1);' exits with status 0"
-  - criterion: "frontend/vitest.config.ts exists and configures the jsdom environment"
+  - criterion: frontend/vitest.config.ts exists and configures the jsdom environment
     verification: "test -f frontend/vitest.config.ts && grep -nE \"environment:\\s*['\\\"]jsdom['\\\"]\" frontend/vitest.config.ts returns at least 1 match"
-  - criterion: "pnpm --filter frontend test runs the 4 existing migrateLocalStorageKey cases and exits 0"
+  - criterion: pnpm --filter frontend test runs the 4 existing migrateLocalStorageKey cases and exits 0
     verification: "pnpm --filter frontend test 2>&1 | grep -E '(4 passed|Tests\\s+4\\s+passed)' returns at least 1 match"
 depends_on: []
 estimated_complexity: low
@@ -28,12 +28,11 @@ test_strategy:
   needed: false
   justification: "Pure infrastructure wiring (package.json devDeps + a single config file). The verification surface is the 4 existing migrateLocalStorageKey.test.ts cases now actually running. No new test code is added by this task. Sibling-test scan: `find frontend/src -name '*.test.*' -o -name '*.spec.*'` returns only the migrateLocalStorageKey spec; no other frontend tests exist to potentially break."
 prerequisites:
-  - check: "test -f frontend/src/utils/migrateLocalStorageKey.test.ts"
+  - check: test -f frontend/src/utils/migrateLocalStorageKey.test.ts
     fix: "The test file must exist before wiring vitest. It was created in TASK-558 and lives at frontend/src/utils/migrateLocalStorageKey.test.ts; if missing, restore from git history."
-    description: "Confirms the orphaned test file this task is meant to wire is present."
+    description: Confirms the orphaned test file this task is meant to wire is present.
     blocking: true
 ---
-
 # Wire frontend vitest workspace so migrateLocalStorageKey.test.ts actually runs
 
 ## Objective

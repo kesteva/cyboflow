@@ -1,8 +1,8 @@
 ---
 id: TASK-606
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runLauncher.ts
   - main/src/orchestrator/__tests__/runLauncher.test.ts
@@ -14,34 +14,34 @@ files_readonly:
   - shared/types/workflows.ts
   - .soloflow/active/findings/SPRINT-009-findings.md
 acceptance_criteria:
-  - criterion: "RunLauncher.launch wraps the worktree creation + mcpConfigWriter.writeForRun calls in try/catch"
+  - criterion: RunLauncher.launch wraps the worktree creation + mcpConfigWriter.writeForRun calls in try/catch
     verification: "grep -nE 'try \\{|catch \\(|catch\\(' main/src/orchestrator/runLauncher.ts returns at least one try/catch pair around the createDeterministicWorktree+writeForRun block"
   - criterion: "On catch, the workflow_runs row is updated with status='failed' and a non-null error_message"
     verification: "grep -nE \"status = 'failed'|status='failed'\" main/src/orchestrator/runLauncher.ts returns at least one match in the catch branch, and error_message is included in the UPDATE statement"
-  - criterion: "schema.sql AND migration 006 declare the error_message column on workflow_runs"
+  - criterion: schema.sql AND migration 006 declare the error_message column on workflow_runs
     verification: "grep -n 'error_message' main/src/database/schema.sql main/src/database/migrations/006_cyboflow_schema.sql returns at least one match in EACH file"
-  - criterion: "RunLauncher.launch re-throws the original error after the failed-status UPDATE so the caller sees the failure"
+  - criterion: RunLauncher.launch re-throws the original error after the failed-status UPDATE so the caller sees the failure
     verification: "grep -nE 'throw err|throw error|throw e' main/src/orchestrator/runLauncher.ts returns at least one match inside the catch branch"
   - criterion: "A new unit test injects a failing worktree creator and asserts the workflow_runs row ends in status='failed' with a populated error_message"
     verification: "grep -n \"status.*'failed'\\|error_message\" main/src/orchestrator/__tests__/runLauncher.test.ts returns at least 2 matches in a new describe block"
-depends_on: [TASK-598]
+depends_on:
+  - TASK-598
 estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "Error handling is new behavior; without a test that injects a failing worktree creator the catch branch is dead code. The existing runLauncher.test.ts has the dbAdapter + in-memory DB scaffolding ready for an additional describe block."
+  justification: Error handling is new behavior; without a test that injects a failing worktree creator the catch branch is dead code. The existing runLauncher.test.ts has the dbAdapter + in-memory DB scaffolding ready for an additional describe block.
   targets:
     - behavior: "RunLauncher.launch UPDATEs workflow_runs to status='failed' with an error_message when createDeterministicWorktree throws"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
     - behavior: "RunLauncher.launch UPDATEs workflow_runs to status='failed' when mcpConfigWriter.writeForRun throws (publisher present, writer fails)"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "RunLauncher.launch re-throws the underlying error so the IPC handler sees a failure response"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch re-throws the underlying error so the IPC handler sees a failure response
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
 ---
-
 # Add error handling for orphan workflow_runs rows
 
 ## Objective

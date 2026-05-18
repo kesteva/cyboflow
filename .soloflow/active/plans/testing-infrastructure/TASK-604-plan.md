@@ -1,8 +1,8 @@
 ---
 id: TASK-604
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__test_fixtures__/dbAdapter.ts
   - main/src/orchestrator/__tests__/workflowRegistry.test.ts
@@ -13,15 +13,15 @@ files_readonly:
   - main/src/orchestrator/types.ts
   - .soloflow/active/findings/SPRINT-009-findings.md
 acceptance_criteria:
-  - criterion: "A new fixture module exports `dbAdapter` returning a `DatabaseLike` over a `better-sqlite3.Database`"
+  - criterion: A new fixture module exports `dbAdapter` returning a `DatabaseLike` over a `better-sqlite3.Database`
     verification: "test -f main/src/orchestrator/__test_fixtures__/dbAdapter.ts && grep -nE 'export function dbAdapter|export const dbAdapter' main/src/orchestrator/__test_fixtures__/dbAdapter.ts returns at least one match"
   - criterion: "The fixture's return type is statically asserted to be `DatabaseLike` (compile-time check enforces conformance)"
     verification: "grep -nE ': DatabaseLike' main/src/orchestrator/__test_fixtures__/dbAdapter.ts returns at least one match (return type annotation OR a `satisfies DatabaseLike` clause OR `const _check: DatabaseLike = dbAdapter(...)` style assert)"
-  - criterion: "All 4 prior inline `dbAdapter` definitions are replaced by an import from the new fixture"
+  - criterion: All 4 prior inline `dbAdapter` definitions are replaced by an import from the new fixture
     verification: "grep -rn 'function dbAdapter\\|const dbAdapter = (' main/src/orchestrator/__tests__/workflowRegistry.test.ts main/src/orchestrator/__tests__/runLauncher.test.ts main/src/ipc/__tests__/cyboflow.test.ts tests/helpers/cyboflowTestHarness.ts returns 0 matches"
-  - criterion: "Each migrated file imports `dbAdapter` from the new fixture"
+  - criterion: Each migrated file imports `dbAdapter` from the new fixture
     verification: "grep -rnE \"from '.*__test_fixtures__/dbAdapter'|from '.*dbAdapter'\" main/src/orchestrator/__tests__/workflowRegistry.test.ts main/src/orchestrator/__tests__/runLauncher.test.ts main/src/ipc/__tests__/cyboflow.test.ts tests/helpers/cyboflowTestHarness.ts returns 4 matches"
-  - criterion: "All affected test suites continue to pass"
+  - criterion: All affected test suites continue to pass
     verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts src/orchestrator/__tests__/runLauncher.test.ts src/ipc/__tests__/cyboflow.test.ts exits 0 AND pnpm test:gate exits 0 (or skip-pass)"
 depends_on: []
 estimated_complexity: low
@@ -30,7 +30,6 @@ test_strategy:
   needed: false
   justification: "This is a fixture-extraction refactor with no behavior change; sibling tests (workflowRegistry.test.ts, runLauncher.test.ts, cyboflow.test.ts, cyboflow-day3-gate.spec.ts) are the regression surface and are listed in files_owned. The compile-time `: DatabaseLike` annotation IS the test for the fixture itself — if a future change to DatabaseLike breaks the adapter, typecheck fails. No new runtime test is needed."
 ---
-
 # Extract shared dbAdapter() test helper
 
 ## Objective

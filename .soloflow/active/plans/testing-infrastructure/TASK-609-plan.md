@@ -1,8 +1,8 @@
 ---
 id: TASK-609
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - package.json
 files_readonly:
@@ -14,7 +14,7 @@ acceptance_criteria:
     verification: "grep -n '\"test:gate\":' package.json returns the value `\"vitest run --config vitest.config.gate.ts\"` (exact match, no `pnpm --filter main exec` indirection)"
   - criterion: "Running `pnpm test:gate` works from a clean checkout (no double-prefix path errors)"
     verification: "pnpm test:gate exits 0 (or skip-pass when claude is not in PATH); the relative config path no longer needs the `../` adjustment"
-  - criterion: "vitest.config.gate.ts continues to resolve test files correctly under the new invocation"
+  - criterion: vitest.config.gate.ts continues to resolve test files correctly under the new invocation
     verification: "grep -n 'include:' vitest.config.gate.ts shows `tests/cyboflow-day3-gate.spec.ts` resolves correctly because cwd is now repo root, and the `__dirname` resolution comment in the config remains accurate"
 depends_on: []
 estimated_complexity: low
@@ -23,7 +23,6 @@ test_strategy:
   needed: false
   justification: "This is a script-config edit; the test_gate command itself is the regression check. No new tests are warranted because the change is purely how the existing test is invoked. The AC enforces that `pnpm test:gate` exits 0 (or skip-pass), which is the integration test of the script change."
 ---
-
 # Fix package.json test:gate script (drop pnpm --filter indirection)
 
 ## Objective

@@ -1,0 +1,31 @@
+{
+  "sprint": {
+    "id": "SPRINT-015",
+    "status": "active",
+    "started": "2026-05-17T13:02:37.000Z",
+    "execution_mode": "parallel"
+  },
+  "tasks": {
+    "TASK-563": { "status": "pending" },
+    "TASK-564": { "status": "pending" },
+    "TASK-598": { "status": "pending" },
+    "TASK-603": { "status": "pending" },
+    "TASK-604": { "status": "pending" },
+    "TASK-605": { "status": "pending" },
+    "TASK-606": { "status": "pending" },
+    "TASK-609": { "status": "pending" },
+    "TASK-630": { "status": "pending" }
+  },
+  "run": {
+    "branch": "soloflow/run-20260517-202755-SPRINT-015",
+    "base_branch": "main",
+    "base_sha": "99058f45fe567241f6af66a2f8900a9b17047cc3",
+    "created_at": "2026-05-17T20:27:55.000Z"
+  },
+  "playwright_target": {
+    "kind": "electron",
+    "evidence": "electron in package.json",
+    "dev_url_hint": null,
+    "divergence_risk": false
+  }
+}
