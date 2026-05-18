@@ -188,6 +188,52 @@ describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () 
     expect(opts.worktreePath).toBe('/my/worktree');
     expect(opts.prompt).toBe('test prompt');
   });
+
+  /**
+   * Regression test: bridgeEvents must be called BEFORE spawnCliProcess so that
+   * no SDK-initialization events are lost when the iterator starts.
+   * The code-reviewer fix-up reordered bridgeEvents ahead of spawnCliProcess;
+   * this test locks in that ordering to prevent future regressions.
+   */
+  it('(e2) bridgeEvents is called BEFORE spawnCliProcess (event-bridge ordering regression)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    // Track the relative call order of bridgeEvents and spawnCliProcess.
+    const callOrder: string[] = [];
+
+    class OrderTrackingExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'order-tracking prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<void> {
+        callOrder.push('bridgeEvents');
+      }
+    }
+
+    // Capture spawnCliProcess call in the order array via a wrapper spy.
+    const originalSpawn = spawner.spawnCliProcess.bind(spawner);
+    (spawner as { spawnCliProcess: (opts: ClaudeSpawnerOptions) => Promise<void> }).spawnCliProcess = vi.fn(
+      async (opts: ClaudeSpawnerOptions) => {
+        callOrder.push('spawnCliProcess');
+        return originalSpawn(opts);
+      },
+    );
+
+    const executor = new OrderTrackingExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    expect(callOrder).toContain('bridgeEvents');
+    expect(callOrder).toContain('spawnCliProcess');
+    // bridgeEvents must appear before spawnCliProcess
+    expect(callOrder.indexOf('bridgeEvents')).toBeLessThan(callOrder.indexOf('spawnCliProcess'));
+  });
 });
 
 // ---------------------------------------------------------------------------
