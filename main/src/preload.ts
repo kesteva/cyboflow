@@ -605,6 +605,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 // Cyboflow's existing contextBridge surfaces above are preserved — this is additive.
 exposeElectronTRPC();
 
+// Wrapper storage for the 'electron' contextBridge on/off pair.
+// Outer map: channel string → Inner map: user callback → ipcRenderer wrapper.
+// This ensures off() removes the exact wrapper that on() registered, not the
+// bare callback (which would be a no-op since ipcRenderer never saw it directly).
+const electronListenerWrappers = new Map<
+  string,
+  Map<(...args: unknown[]) => void, (event: Electron.IpcRendererEvent, ...args: unknown[]) => void>
+>();
+
 // Expose electron event listeners and utilities for permission requests
 contextBridge.exposeInMainWorld('electron', {
   openExternal: (url: string) => ipcRenderer.invoke('openExternal', url),
@@ -613,16 +622,31 @@ contextBridge.exposeInMainWorld('electron', {
     const validChannels = [
       'permission:request'
     ];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.on(channel, (_event, ...args) => callback(...args));
+    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:')) {
+      const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
+      if (!electronListenerWrappers.has(channel)) {
+        electronListenerWrappers.set(channel, new Map());
+      }
+      electronListenerWrappers.get(channel)!.set(callback, wrapper);
+      ipcRenderer.on(channel, wrapper);
     }
   },
   off: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels = [
       'permission:request'
     ];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.removeListener(channel, callback);
+    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:')) {
+      const inner = electronListenerWrappers.get(channel);
+      if (inner) {
+        const wrapper = inner.get(callback);
+        if (wrapper) {
+          ipcRenderer.removeListener(channel, wrapper);
+          inner.delete(callback);
+          if (inner.size === 0) {
+            electronListenerWrappers.delete(channel);
+          }
+        }
+      }
     }
   },
 });
