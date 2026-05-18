@@ -19,17 +19,19 @@ import type { Approval } from '../../../../shared/types/approvals';
 // tRPC mock — use vi.hoisted so variables are available before vi.mock hoisting
 // ---------------------------------------------------------------------------
 
-const { mockApproveMutate, mockRejectMutate } = vi.hoisted(() => ({
-  mockApproveMutate: vi.fn().mockResolvedValue(undefined),
-  mockRejectMutate:  vi.fn().mockResolvedValue(undefined),
+const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate } = vi.hoisted(() => ({
+  mockApproveMutate:           vi.fn().mockResolvedValue(undefined),
+  mockRejectMutate:            vi.fn().mockResolvedValue(undefined),
+  mockApproveRestOfRunMutate:  vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
 vi.mock('../../utils/trpcClient', () => ({
   trpc: {
     cyboflow: {
       approvals: {
-        approve: { mutate: mockApproveMutate },
-        reject:  { mutate: mockRejectMutate  },
+        approve:           { mutate: mockApproveMutate           },
+        reject:            { mutate: mockRejectMutate            },
+        approveRestOfRun:  { mutate: mockApproveRestOfRunMutate  },
       },
     },
   },
@@ -140,6 +142,7 @@ describe('useReviewQueueKeyboard — y/n mutations on single items', () => {
     act(() => { press('y'); });
     expect(mockApproveMutate).toHaveBeenCalledTimes(1);
     expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'a' });
+    expect(mockApproveRestOfRunMutate).not.toHaveBeenCalled();
     expect(result.current.focusedIndex).toBe(0); // index unchanged
   });
 
@@ -164,14 +167,13 @@ describe('useReviewQueueKeyboard — y/n mutations on group items', () => {
     vi.clearAllMocks();
   });
 
-  it('y on a group item calls approve.mutate for each member', () => {
-    const queue: QueueItem[] = [groupItem(['g1', 'g2', 'g3'])];
+  it('y on a group item calls approveRestOfRun.mutate once with the group runId', () => {
+    const queue: QueueItem[] = [groupItem(['g1', 'g2', 'g3'], 'run-42')];
     renderHook(() => useReviewQueueKeyboard(queue));
     act(() => { press('y'); });
-    expect(mockApproveMutate).toHaveBeenCalledTimes(3);
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g1' });
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g2' });
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g3' });
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-42' });
+    expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 
   it('n on a group item calls reject.mutate for each member', () => {
