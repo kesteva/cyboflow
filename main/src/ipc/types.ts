@@ -17,6 +17,8 @@ import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManag
 import type { Logger } from '../utils/logger';
 import type { ArchiveProgressManager } from '../services/archiveProgressManager';
 import type { AnalyticsManager } from '../services/analyticsManager';
+import type { WorkflowRegistry } from '../orchestrator/workflowRegistry';
+import type { RunLauncher } from '../orchestrator/runLauncher';
 
 export interface AppServices {
   app: App;
@@ -38,4 +40,8 @@ export interface AppServices {
   logger?: Logger;
   archiveProgressManager?: ArchiveProgressManager;
   analyticsManager?: AnalyticsManager;
+  cyboflow: {
+    workflowRegistry: WorkflowRegistry;
+    runLauncher: RunLauncher;
+  };
 } 

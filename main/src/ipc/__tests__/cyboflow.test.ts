@@ -16,12 +16,9 @@
  *   - cyboflow:approveRun always returns { success: false, error: /NOT_IMPLEMENTED/ }
  *
  * All tests use an in-memory better-sqlite3 database with the WorkflowRegistry
- * schema applied inline.  RunLauncher is replaced with a vi.fn() stub so no
- * actual worktree or filesystem operations are triggered.
- *
- * IMPORTANT: cyboflow.ts uses module-level lazy singletons (_workflowRegistry,
- * _runLauncher).  Each describe block resets the module via vi.resetModules()
- * to guarantee a clean singleton state per test suite.
+ * schema applied inline.  No vi.resetModules() is needed because WorkflowRegistry
+ * and RunLauncher are no longer module-level singletons — each test gets its own
+ * instances via makeServices().
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -34,6 +31,7 @@ import { WorkflowRegistry } from '../../orchestrator/workflowRegistry';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { withTempDir } from '../../__test_fixtures__/tmp';
+import { registerCyboflowHandlers, setCyboflowHealth } from '../cyboflow';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,14 +82,54 @@ async function invoke(
 }
 
 // ---------------------------------------------------------------------------
+// Stub collaborators for RunLauncher (used in makeServices)
+// ---------------------------------------------------------------------------
+
+const stubOrchSocketProvider: OrchSocketProvider = {
+  getSocketPath: () => '/tmp/test-orch.sock',
+};
+
+const stubBridgeScriptResolver: BridgeScriptResolver = {
+  getScriptPath: () => '/tmp/test-bridge.js',
+};
+
+const stubNodeResolver: NodeResolver = {
+  getNodePath: async () => process.execPath,
+};
+
+// ---------------------------------------------------------------------------
 // Build a minimal AppServices stub, wiring the real in-memory DB and
-// WorkflowRegistry while stubbing everything else.
+// WorkflowRegistry/RunLauncher while stubbing everything else.
+// Each call returns fresh instances so tests don't share singleton state.
 // ---------------------------------------------------------------------------
 
 function makeServices(
   db: Database.Database,
   overrides: Partial<AppServices> = {},
 ): AppServices {
+  const dbLike = dbAdapter(db);
+  const logger = makeSilentLogger();
+  const workflowRegistry = new WorkflowRegistry(dbLike, logger);
+
+  const stubMcpConfigWriter: McpConfigWriter = {
+    writeForRun: vi.fn().mockResolvedValue('/dev/null/.mcp.json'),
+  } as unknown as McpConfigWriter;
+
+  const stubWorktreeManager = {
+    createDeterministicWorktree: vi.fn(),
+  } as unknown as AppServices['worktreeManager'];
+
+  const runLauncher = new RunLauncher(
+    dbLike,
+    workflowRegistry,
+    stubWorktreeManager,
+    logger,
+    stubMcpConfigWriter,
+    stubOrchSocketProvider,
+    stubBridgeScriptResolver,
+    stubNodeResolver,
+  );
+
   return {
     databaseService: {
       getDb: () => db,
@@ -99,9 +137,8 @@ function makeServices(
     sessionManager: {
       getProjectById: vi.fn(),
     } as unknown as AppServices['sessionManager'],
-    worktreeManager: {
-      createDeterministicWorktree: vi.fn(),
-    } as unknown as AppServices['worktreeManager'],
+    worktreeManager: stubWorktreeManager,
+    cyboflow: { workflowRegistry, runLauncher },
     // Remaining fields are stubs — cyboflow.ts does not touch them.
     app: {} as unknown as AppServices['app'],
     configManager: {} as unknown as AppServices['configManager'],
@@ -123,24 +160,16 @@ function makeServices(
 
 // ---------------------------------------------------------------------------
 // Tests
-//
-// cyboflow.ts uses module-level lazy singletons (_workflowRegistry,
-// _runLauncher) that are initialised on the first handler call and cached
-// for the lifetime of the module.  To give each test suite a clean slate we
-// use vi.resetModules() + a dynamic import so each describe block gets a
-// fresh module instance with null singletons.
 // ---------------------------------------------------------------------------
 
 describe('registerCyboflowHandlers — cyboflow:listWorkflows', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    vi.resetModules();
     db = createTestDb();
   });
 
-  it('registers a handler for the channel', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
+  it('registers a handler for the channel', () => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
@@ -150,7 +179,6 @@ describe('registerCyboflowHandlers — cyboflow:listWorkflows', () => {
   });
 
   it('auto-seeds 5 workflows when the project has none and returns them', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
@@ -175,7 +203,6 @@ describe('registerCyboflowHandlers — cyboflow:listWorkflows', () => {
   });
 
   it('returns the same 5 rows on a second call (idempotent seed)', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
@@ -193,19 +220,17 @@ describe('registerCyboflowHandlers — cyboflow:listWorkflows', () => {
   });
 
   it('returns success: false when args cause the registry to throw', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     // Pass a databaseService whose getDb() returns an object that throws on
     // prepare() — simulates a closed or corrupt DB.
     const brokenDb = {
       prepare: () => { throw new Error('DB is closed'); },
       transaction: () => { throw new Error('DB is closed'); },
     } as unknown as Database.Database;
-    const services = makeServices(brokenDb);
 
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
-      services,
+      makeServices(brokenDb),
     );
 
     const result = await invoke(handlers, 'cyboflow:listWorkflows', { projectId: 1 }) as {
@@ -222,12 +247,10 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    vi.resetModules();
     db = createTestDb();
   });
 
-  it('registers a handler for the channel', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
+  it('registers a handler for the channel', () => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
       ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
@@ -237,7 +260,6 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   });
 
   it('returns success: false when the project is not found', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const services = makeServices(db);
     const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
     getProjectById.mockReturnValue(undefined);
@@ -259,54 +281,42 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
 
   it('returns { success: true, data: { runId, worktreePath, branchName } } on happy path', async () => {
     await withTempDir('cyboflow-ipc-test-', async (tmpDir) => {
-      vi.resetModules();
-      const { registerCyboflowHandlers, _setRunLauncherForTest } = await import('../cyboflow');
-      const services = makeServices(db);
+      const logger: LoggerLike = {
+        info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+      };
+      const dbLike = dbAdapter(db);
+      const workflowRegistry = new WorkflowRegistry(dbLike, logger);
 
       // Stub worktreeManager so no real FS work is done.
-      const wm = services.worktreeManager as unknown as {
-        createDeterministicWorktree: ReturnType<typeof vi.fn>;
-      };
-      wm.createDeterministicWorktree.mockResolvedValue({
-        worktreePath: `${tmpDir}/worktree`,
-        branchName: 'cyboflow/test-run',
-      });
+      const stubWorktreeManager = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: `${tmpDir}/worktree`,
+          branchName: 'cyboflow/test-run',
+        }),
+      } as unknown as AppServices['worktreeManager'];
 
-      const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
-      getProjectById.mockReturnValue({ id: 1, path: tmpDir, name: 'test-project' });
-
-      // Build a RunLauncher with benign test stubs for the epic-7 sentinels so
-      // the happy-path test exercises the IPC wiring boundary without hitting the
-      // throwing orchSocketProvider / bridgeScriptResolver sentinels.
       const stubMcpConfigWriter: McpConfigWriter = {
         writeForRun: vi.fn().mockResolvedValue(`${tmpDir}/.mcp.json`),
       } as unknown as McpConfigWriter;
-      const stubOrchSocketProvider: OrchSocketProvider = {
-        getSocketPath: () => '/tmp/test-orch.sock',
-      };
-      const stubBridgeScriptResolver: BridgeScriptResolver = {
-        getScriptPath: () => '/tmp/test-bridge.js',
-      };
-      const stubNodeResolver: NodeResolver = {
-        getNodePath: async () => process.execPath,
-      };
 
-      const testWorktreeManager = services.worktreeManager;
-      const testLogger: LoggerLike = {
-        info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
-      };
-      const testRegistry = new WorkflowRegistry(db, testLogger);
-      const testLauncher = new RunLauncher(
-        dbAdapter(db),
-        testRegistry,
-        testWorktreeManager,
-        testLogger,
+      const customRunLauncher = new RunLauncher(
+        dbLike,
+        workflowRegistry,
+        stubWorktreeManager,
+        logger,
         stubMcpConfigWriter,
         stubOrchSocketProvider,
         stubBridgeScriptResolver,
         stubNodeResolver,
       );
-      _setRunLauncherForTest(testLauncher);
+
+      const services = makeServices(db, {
+        worktreeManager: stubWorktreeManager,
+        cyboflow: { workflowRegistry, runLauncher: customRunLauncher },
+      });
+
+      const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
+      getProjectById.mockReturnValue({ id: 1, path: tmpDir, name: 'test-project' });
 
       const { ipcMain, handlers } = makeHandlerCapture();
       registerCyboflowHandlers(
@@ -345,12 +355,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
 });
 
 describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it('registers a handler for the channel', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
+  it('registers a handler for the channel', () => {
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -361,7 +366,6 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
   });
 
   it('returns { status: starting, restartAttempts: 0 } when health singleton has not been injected', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -382,7 +386,6 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
   });
 
   it('delegates to OrchestratorHealth.getMcpServerStatus() after setCyboflowHealth()', async () => {
-    const { registerCyboflowHandlers, setCyboflowHealth } = await import('../cyboflow');
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -409,7 +412,6 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
   });
 
   it('returns lastError from the health snapshot when the MCP server has failed', async () => {
-    const { registerCyboflowHandlers, setCyboflowHealth } = await import('../cyboflow');
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -440,12 +442,7 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
 });
 
 describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it('registers a handler for the channel', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
+  it('registers a handler for the channel', () => {
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -456,7 +453,6 @@ describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
   });
 
   it('returns success: false with a NOT_IMPLEMENTED error message', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -475,7 +471,6 @@ describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
   });
 
   it('returns NOT_IMPLEMENTED for deny decision as well', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
     const db = createTestDb();
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
