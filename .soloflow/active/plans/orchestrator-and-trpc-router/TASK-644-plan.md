@@ -1,8 +1,8 @@
 ---
 id: TASK-644
 idea: IDEA-018
-status: ready
-created: 2026-05-18T20:30:00Z
+status: in-flight
+created: "2026-05-18T20:30:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/services/cyboflow/transitions.ts
@@ -25,11 +25,11 @@ acceptance_criteria:
   - criterion: "transitionToRunning guards on source status='starting' (per ALLOWED_TRANSITIONS); 0 changes throws TransitionRejectedError."
     verification: "Vitest case in runLifecycle.test.ts seeds a workflow_run with status='queued', calls transitionToRunning, expects TransitionRejectedError. Second case seeds status='starting', calls transitionToRunning, expects DB row status='running'."
   - criterion: "transitionToCompleted, transitionToFailed, transitionToCanceled all set ended_at=CURRENT_TIMESTAMP on the same UPDATE as the status change."
-    verification: "Vitest cases assert ended_at is non-null after each terminal transition."
-  - criterion: "transitionToFailed writes the error_message column."
+    verification: Vitest cases assert ended_at is non-null after each terminal transition.
+  - criterion: transitionToFailed writes the error_message column.
     verification: "Vitest case seeds running, calls transitionToFailed(db, {runId, errorMessage: 'boom'}), then SELECT error_message asserts equals 'boom'."
-  - criterion: "transitionToCanceled accepts any non-terminal source state (queued/starting/running/awaiting_review/stuck) and rejects terminal sources."
-    verification: "Vitest table-driven test covers each starting status; for terminal sources (completed/failed/canceled) expects TransitionRejectedError."
+  - criterion: transitionToCanceled accepts any non-terminal source state (queued/starting/running/awaiting_review/stuck) and rejects terminal sources.
+    verification: Vitest table-driven test covers each starting status; for terminal sources (completed/failed/canceled) expects TransitionRejectedError.
   - criterion: "tRPC procedure cyboflow.runs.cancel mutation body is fully wired: it looks up the RunExecutor for the runId via an injected lookup function, calls executor.cancel(), and returns {canceled: true}. NOT_IMPLEMENTED stub is replaced."
     verification: "grep -n 'throwNotImplemented' main/src/orchestrator/trpc/routers/runs.ts returns at most 3 matches (the list/start/get stubs); the cancel mutation no longer calls throwNotImplemented."
   - criterion: "cancel procedure throws TRPCError with code 'METHOD_NOT_SUPPORTED' when its injected deps are not yet wired, mirroring the cancelAndRestart pattern in the same file (so the procedure compiles and tests run before T1's executor lands)."
@@ -38,9 +38,11 @@ acceptance_criteria:
     verification: "grep -n 'export function setCancelDeps' main/src/orchestrator/trpc/routers/runs.ts shows 1 match."
   - criterion: "Cancel ordering is verifiable end-to-end via a vitest integration in runLifecycle.test.ts: with spies on approvalRouter.clearPendingForRun and on an injected executor.cancel mock, the call order is clearPendingForRun -> executor.cancel -> transitionToCanceled (DB write)."
     verification: "Vitest case sets up an OrderSpy (same pattern as cancelAndRestart.test.ts), invokes the cancel handler, asserts calls array is ['clearPendingForRun','executor.cancel','dbWrite']."
-  - criterion: "pnpm --filter @cyboflow/main typecheck and pnpm --filter @cyboflow/main test --run main/src/orchestrator/__tests__/runLifecycle.test.ts both pass."
+  - criterion: pnpm --filter @cyboflow/main typecheck and pnpm --filter @cyboflow/main test --run main/src/orchestrator/__tests__/runLifecycle.test.ts both pass.
     verification: "Run both commands; exit code 0; new test file has >=6 cases all passing."
-depends_on: [TASK-640, TASK-642]
+depends_on:
+  - TASK-640
+  - TASK-642
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
@@ -56,7 +58,7 @@ test_strategy:
     - behavior: "transitionToFailed succeeds from any non-terminal source, writes error_message, sets ended_at."
       test_file: main/src/orchestrator/__tests__/runLifecycle.test.ts
       type: unit
-    - behavior: "transitionToCanceled succeeds from queued/starting/running/awaiting_review/stuck; rejects from terminal."
+    - behavior: transitionToCanceled succeeds from queued/starting/running/awaiting_review/stuck; rejects from terminal.
       test_file: main/src/orchestrator/__tests__/runLifecycle.test.ts
       type: unit
     - behavior: "tRPC cancel handler executes clearPendingForRun -> executor.cancel -> DB write to status='canceled' in that strict order."
@@ -66,7 +68,6 @@ test_strategy:
       test_file: main/src/orchestrator/__tests__/runLifecycle.test.ts
       type: integration
 ---
-
 # Implement workflow_runs lifecycle transitions: running -> completed / failed / canceled
 
 ## Objective
