@@ -359,6 +359,40 @@ describe('WorkflowRegistry', () => {
       expect(run!.stuck_reason).toBe('no_progress');
       expect(run!.error_message).toBe('subprocess exited');
     });
+
+    it('projects started_at and ended_at as null on a freshly created run', () => {
+      const path = writeTempMd(tmpDir, 'started-ended-null.md', '---\n---\n');
+      registry.seed(1, [{ name: 'soloflow', path }]);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+      const { runId } = registry.createRun(workflowId);
+
+      const run = registry.getRunById(runId);
+      expect(run).not.toBeNull();
+      expect(run!.started_at ?? null).toBeNull();
+      expect(run!.ended_at ?? null).toBeNull();
+    });
+
+    it('reads back started_at and ended_at when written directly', () => {
+      const path = writeTempMd(tmpDir, 'started-ended-written.md', '---\n---\n');
+      registry.seed(1, [{ name: 'planner', path }]);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+      const { runId } = registry.createRun(workflowId);
+
+      db.prepare(
+        `UPDATE workflow_runs
+           SET started_at = ?, ended_at = ?
+         WHERE id = ?`,
+      ).run('2026-05-18T10:00:00Z', '2026-05-18T11:30:00Z', runId);
+
+      const run = registry.getRunById(runId);
+      expect(run).not.toBeNull();
+      expect(run!.started_at).toBe('2026-05-18T10:00:00Z');
+      expect(run!.ended_at).toBe('2026-05-18T11:30:00Z');
+    });
   });
 });
 
