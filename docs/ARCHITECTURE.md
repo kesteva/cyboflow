@@ -105,7 +105,7 @@ The migration from raw IPC to tRPC for the above procs is owned by a future task
 client; each currently throws NOT_IMPLEMENTED because the DB is not yet wired into context:
 - `runs.getStuckInspection` — called by `StuckInspectorModal`.
 - `approvals.listPending`, `approvals.approve`, `approvals.reject`,
-  `approvals.approveRestOfRun` — called by `PendingApprovalCard`, `useReviewQueueKeyboard`,
+  `approvals.approveRestOfRun`, `approvals.rejectRestOfRun` — called by `PendingApprovalCard`, `useReviewQueueKeyboard`,
   and `reviewQueueStore`. Full implementation lands in the approval-router epic.
 
 ### Renderer (`frontend/src/`)
