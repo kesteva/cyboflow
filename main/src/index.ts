@@ -150,7 +150,10 @@ async function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Required: preload uses require('trpc-electron/main') which the sandboxed
+      // preload loader rejects (only 'electron' and relative paths resolve there).
+      sandbox: false,
     },
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hiddenInset',
