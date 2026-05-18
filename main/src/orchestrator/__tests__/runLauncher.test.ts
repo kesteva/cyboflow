@@ -555,11 +555,25 @@ describe('RunLauncher.launch publisher', () => {
       expect(publishSpy).toHaveBeenCalled();
 
       // The runId arg must match the returned runId
-      const firstCall = publishSpy.mock.calls[0] as [string, { type: string; payload: unknown; timestamp: string }];
+      const firstCall = publishSpy.mock.calls[0] as [
+        string,
+        { type: string; payload: Record<string, unknown>; timestamp: string },
+      ];
       expect(firstCall[0]).toBe(result.runId);
 
       // The event must have type 'run_started'
       expect(firstCall[1].type).toBe('run_started');
+
+      // The payload must include the run coordinates so the renderer can
+      // identify the run without a separate query.
+      expect(firstCall[1].payload.runId).toBe(result.runId);
+      expect(firstCall[1].payload.worktreePath).toBe(result.worktreePath);
+      expect(firstCall[1].payload.branchName).toBe(result.branchName);
+
+      // timestamp must be a non-empty ISO-8601 string
+      expect(typeof firstCall[1].timestamp).toBe('string');
+      expect(firstCall[1].timestamp.length).toBeGreaterThan(0);
+      expect(() => new Date(firstCall[1].timestamp)).not.toThrow();
     });
   });
 
