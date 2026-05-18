@@ -46,6 +46,19 @@ export interface NodeResolver {
   getNodePath(): Promise<string>;
 }
 
+/**
+ * Decouples RunLauncher from the Electron layer by accepting a plain publisher
+ * interface instead of importing BrowserWindow directly.
+ *
+ * The concrete implementation lives in main/src/ipc/cyboflow.ts, which is the
+ * only place that calls win.webContents.send for cyboflow stream events.
+ * Keeping this interface here preserves the standalone-typecheck invariant:
+ * no electron imports inside main/src/orchestrator/.
+ */
+export interface StreamEventPublisher {
+  publish(runId: string, event: { type: string; payload: unknown; timestamp: string }): void;
+}
+
 export class RunLauncher {
   constructor(
     private readonly db: DatabaseLike,
@@ -56,6 +69,7 @@ export class RunLauncher {
     private readonly orchSocketProvider?: OrchSocketProvider,
     private readonly bridgeScriptResolver?: BridgeScriptResolver,
     private readonly nodeResolver?: NodeResolver,
+    private readonly publisher?: StreamEventPublisher,
   ) {}
 
   /**
@@ -110,6 +124,15 @@ export class RunLauncher {
           'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         )
         .run(worktreePath, branchName, 'starting', runId);
+
+      // Wiring proof: emit a synthetic launch event so the renderer sees
+      // something immediately on first subscribe.  Richer events will come
+      // from the SDK pipeline once it is integrated (epic 7+).
+      this.publisher?.publish(runId, {
+        type: 'run_started',
+        payload: { runId, worktreePath, branchName },
+        timestamp: new Date().toISOString(),
+      });
 
       this.logger.info('RunLauncher: run started', {
         runId,

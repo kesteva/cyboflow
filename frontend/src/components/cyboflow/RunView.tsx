@@ -12,7 +12,7 @@ export function RunView() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Subscribe to stream events whenever activeRunId changes.
-  // tRPC migration note: replace with trpc.cyboflow.events.onStreamEvent({ runId })
+  // TODO(epic-7-trpc-cutover): migrate to trpc.cyboflow.events.onStreamEvent({ runId })
   useEffect(() => {
     if (!activeRunId) return;
 
