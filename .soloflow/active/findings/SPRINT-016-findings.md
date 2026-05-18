@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-016
-pending_count: 8
-last_updated: "2026-05-18T17:35:30.008Z"
+pending_count: 11
+last_updated: "2026-05-18T19:20:00.000Z"
 ---
 # Findings Queue
 
@@ -144,4 +144,35 @@ The array literal is identical across the two functions, and the prefix check 'c
 - **location:** main/src/orchestrator/workflowRegistry.ts:60-105
 - **description:** resolveSoloFlowPluginRoot emits a console.warn for the fallback path while the rest of the orchestrator subsystem uses an injected LoggerLike. The comment on line 55 acknowledges the gap: 'this function does not own a logger instance'. But the same module's WorkflowRegistry class does receive a LoggerLike, and the DEFAULT_SOLOFLOW_WORKFLOWS IIFE on lines 147-153 runs the resolver at module-import time before any logger exists. Module-level eager evaluation forces the console.warn rather than a structured log; it also makes the resolver impossible to silence in tests without spying on console (which the new tests in workflowRegistry.test.ts do via vi.spyOn(console, 'warn')). Suspected tasks: TASK-601 (introduced both resolveSoloFlowPluginRoot and the module-eager IIFE).
 - **suggested_action:** Two changes: (1) Accept an optional `logger?: LoggerLike` parameter on resolveSoloFlowPluginRoot and use logger.warn when provided, falling back to console.warn only when no logger is passed. (2) Make DEFAULT_SOLOFLOW_WORKFLOWS lazy — convert from an exported constant to an exported function that takes a homeDir (and optional logger) and is invoked from the IPC handler. This also eliminates the @cyboflow-hidden compat-shim concern from FIND-SPRINT-016-6.
+- **resolved_by:** 
+
+
+## FIND-SPRINT-016-9
+- **source:** post-SPRINT-016 interactive session (user-flagged during manual app testing)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/Help.tsx:27 and frontend/src/components/Welcome.tsx:85
+- **description:** Both UI surfaces tell the user "Cyboflow runs Claude Code with `--dangerously-ignore-permissions`". This is stale Crystal copy that no longer matches the implementation on three counts. (1) Mechanism: cyboflow uses the Claude Agent SDK in-process (claudeCodeManager.ts:236 calls buildSdkOptions + query()), not a CLI subprocess — no CLI flag is ever passed. (2) Default: the SDK is registered with a PreToolUse hook (claudeCodeManager.ts:389-395) that routes every tool use through ApprovalRouter for user approval. The default permissionMode at claudeCodeManager.ts:258 is 'approve', the opposite of 'ignore'. (3) Flag name: the real Claude Code CLI flag — if it were used — is `--dangerously-skip-permissions`, not `--dangerously-ignore-permissions`. The 'ignore' verb is cyboflow's internal mode name only. The misleading copy could lead users to assume tools auto-run when in reality the approval-router flow is the default (and isn't even fully wired to the UI yet — cyboflow:approveRun returns NOT_IMPLEMENTED at main/src/ipc/cyboflow.ts:216 pending the approval-router epic).
+- **suggested_action:** Defer the rewrite until the approval-router epic lands and the per-panel permission-mode UX is finalized. At that point, replace both strings with accurate copy describing the two modes (approve / ignore) and noting that approve is the default. Until then, consider a minimal stop-gap: change both lines to "Cyboflow can run Claude Code in approve (default) or ignore permission mode" — no flag mention, no premature commitment to the not-yet-built UI.
+- **resolved_by:** 
+
+## FIND-SPRINT-016-10
+- **source:** post-SPRINT-016 interactive session (diagnosed while investigating blank renderer window)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/index.ts:221-242
+- **description:** The webContents.on('console-message', ...) handler uses the deprecated positional signature (event, level, message, line, sourceId) which Electron 37 collapsed into a single Event<WebContentsConsoleMessageEventParams> object. The backend log even logs the deprecation warning at startup: "(electron) 'console-message' arguments are deprecated and will be removed. Please use Event<WebContentsConsoleMessageEventParams> object instead." Under Electron 37 with the old signature, message/line/sourceId are all undefined; line 223's `message.includes('[Main Process]')` throws TypeError on every renderer console message, the handler crashes silently, and the appendDevDebugLog call never runs. Net effect: cyboflow-frontend-debug.log stays 0 bytes for the entire dev session — confirmed empirically during this session even while 3 errors and 1 warning sat in the renderer DevTools console. This blinds the CLAUDE.md-documented "read these debug logs instead of asking the user to paste console output" workflow on every Electron-37 install.
+- **suggested_action:** Rewrite the handler to use the new event-object signature: webContents.on('console-message', (event) => { const { level, message, lineNumber, sourceId } = event; ... }). Note that level is now a string ('verbose' | 'info' | 'warning' | 'error') rather than a numeric index, so the levelNames lookup table at line 233 should be replaced with a direct cast. Also note line 236 references an originalError that isn't defined in scope — likely a Crystal-era leftover that was masked by the handler crashing before reaching that line.
+- **resolved_by:** 
+
+## FIND-SPRINT-016-11
+- **source:** post-SPRINT-016 interactive session (observed in dev startup log)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/versionChecker.ts (compiled at main/dist/main/src/services/versionChecker.js:20)
+- **description:** On every dev launch, the startup version check emits an ERROR-level log: "[Version Checker] Failed to check for updates: Error: GitHub API returned 404: Not Found". The VersionChecker is a Crystal-era service that polls a GitHub Releases endpoint for update notifications; cyboflow forked from stravu/crystal@0.3.5 but doesn't publish releases under that path, so the 404 is permanent. The error is benign (the app continues to start) but it's noise that surfaces as ERROR rather than INFO/WARN, and it taints any dev-log inspection or future error-rate telemetry. Crystal-legacy services like this are candidates for either (a) repointing to the cyboflow release feed once one exists, or (b) deletion if cyboflow doesn't plan to ship self-update notifications.
+- **suggested_action:** Pick (a) or (b). For (a), find the URL constant in versionChecker.ts and either repoint to cyboflow's GitHub releases (if/when they exist) or to a project-specific endpoint. For (b), remove the checkOnStartup call in main/src/index.ts:643 and delete the service; the docs/cyboflow_system_design.md scope doesn't list self-updating as an MVP feature. If keeping the check disabled-but-present for future, at minimum downgrade the 404 from ERROR to WARN since it's an expected steady-state, and add the @cyboflow-hidden marker per docs/CODE-PATTERNS.md.
 - **resolved_by:** 
