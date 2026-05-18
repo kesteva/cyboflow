@@ -6,7 +6,6 @@
  * and drain behaviour.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { Orchestrator } from '../Orchestrator';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike, LoggerLike, PreparedStatement } from '../types';
@@ -65,13 +64,11 @@ function deferred<T = void>(): {
 describe('Orchestrator', () => {
   let db: DatabaseLike;
   let logger: ReturnType<typeof makeFakeLogger>;
-  let eventBus: EventEmitter;
   let runQueues: RunQueueRegistry;
 
   beforeEach(() => {
     db = makeFakeDb();
     logger = makeFakeLogger();
-    eventBus = new EventEmitter();
     runQueues = new RunQueueRegistry();
   });
 
@@ -79,7 +76,7 @@ describe('Orchestrator', () => {
   // Test: instantiates with in-memory dependencies
   // -------------------------------------------------------------------------
   it('instantiates with in-memory dependencies', async () => {
-    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+    const orchestrator = new Orchestrator({ db, logger, runQueues });
 
     expect(orchestrator.isRunning()).toBe(false);
 
@@ -94,7 +91,7 @@ describe('Orchestrator', () => {
   // Test: start is idempotent
   // -------------------------------------------------------------------------
   it('start is idempotent', async () => {
-    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+    const orchestrator = new Orchestrator({ db, logger, runQueues });
 
     await orchestrator.start();
     expect(orchestrator.isRunning()).toBe(true);
@@ -121,7 +118,7 @@ describe('Orchestrator', () => {
   // Test: stop is a no-op when orchestrator is not running
   // -------------------------------------------------------------------------
   it('stop is a no-op when orchestrator has not been started', async () => {
-    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+    const orchestrator = new Orchestrator({ db, logger, runQueues });
 
     // Precondition: not yet started
     expect(orchestrator.isRunning()).toBe(false);
@@ -140,7 +137,7 @@ describe('Orchestrator', () => {
   // Test: start() emits expected log message on first call
   // -------------------------------------------------------------------------
   it('start emits orchestrator.start info log on first call', async () => {
-    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+    const orchestrator = new Orchestrator({ db, logger, runQueues });
 
     await orchestrator.start();
 
@@ -156,7 +153,7 @@ describe('Orchestrator', () => {
   // Test: stop drains the run queue registry
   // -------------------------------------------------------------------------
   it('stop drains the run queue registry', async () => {
-    const orchestrator = new Orchestrator({ db, logger, eventBus, runQueues });
+    const orchestrator = new Orchestrator({ db, logger, runQueues });
     await orchestrator.start();
 
     // Enqueue a blocking task in the registry
