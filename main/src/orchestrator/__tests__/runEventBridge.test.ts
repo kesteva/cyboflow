@@ -19,7 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
-import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../services/streamParser';
+import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
@@ -91,11 +91,6 @@ const streamEvent: ClaudeStreamEvent = {
   event: {
     type: 'message_start',
   },
-};
-
-const unknownEvent: ClaudeStreamEvent = {
-  kind: '__unknown__',
-  raw: { type: 'future_variant', foo: 'bar' },
 };
 
 // ---------------------------------------------------------------------------
@@ -412,5 +407,48 @@ describe('runEventBridge', () => {
     // dispose() is idempotent — calling twice must not throw.
     expect(() => bridge.dispose()).not.toThrow();
     expect(source.listenerCount('output')).toBe(baselineListenerCount);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Publish fail-soft: publisher.publish throwing still logs a warn and
+  //    does not prevent subsequent events from being processed.
+  // -------------------------------------------------------------------------
+
+  it('fail-soft: when publisher.publish throws, a single warn is logged and subsequent events are still processed', () => {
+    const mockLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    let publishCallCount = 0;
+    const throwingPublisher: StreamEventPublisher = {
+      publish(_runId) {
+        publishCallCount++;
+        if (publishCallCount === 1) {
+          throw new Error('Simulated publish failure');
+        }
+      },
+    };
+
+    bridgeEvents({ runId: RUN_ID, source, publisher: throwingPublisher, db, logger: mockLogger });
+
+    emitOutput(source, RUN_ID, systemEvent);   // publish 1 — throws
+    emitOutput(source, RUN_ID, assistantEvent); // publish 2 — succeeds
+    emitOutput(source, RUN_ID, resultEvent);    // publish 3 — succeeds
+
+    // All 3 rows should be in the DB (INSERT is not affected by publish failure).
+    expect(countRows(db, RUN_ID)).toBe(3);
+
+    // publish was called 3 times.
+    expect(publishCallCount).toBe(3);
+
+    // Exactly one warn logged for the publish failure.
+    expect(mockLogger.warn).toHaveBeenCalledOnce();
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[runEventBridge] publisher.publish threw unexpectedly'),
+      expect.objectContaining({ runId: RUN_ID }),
+    );
   });
 });
