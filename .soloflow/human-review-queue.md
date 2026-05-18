@@ -278,3 +278,15 @@ _No items._
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
+
+- task: SPRINT-015
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-015/sprint.json
+  action: "verification.visual_web is true and playwright_target.kind is 'electron', but the Playwright MCP tools cannot launch an Electron app — they drive a Chromium browser only. Navigating to http://localhost:4521 fails per CLAUDE.md (renderer depends on preload-injected electronTRPC and cannot bootstrap standalone). To unblock visual verification: either (a) set verification.visual_web=false for this repo, (b) add a launch script that exposes the Electron renderer over CDP for Playwright to attach to, or (c) run the existing tests/*.spec.ts suite manually via `pnpm test` after `pnpm dev`."
+  blocked_checks:
+    - "Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling"
+  level: sprint
+  severity: low
+  created_at: "2026-05-18T00:00:00.000Z"
