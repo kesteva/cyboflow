@@ -1,3 +1,5 @@
+// DO NOT ADD NEW ROUTERS HERE — see main/src/trpc/index.ts for the canonical router location and the approval-router epic plan.
+
 /**
  * tRPC context for cyboflow main/src/trpc routers.
  *

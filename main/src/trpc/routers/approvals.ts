@@ -1,4 +1,11 @@
 /**
+ * WARNING: DO NOT ADD NEW ROUTERS HERE.
+ *
+ * This file is part of the orphan main/src/trpc/ subtree.  The canonical
+ * live-router location is main/src/orchestrator/trpc/routers/.  Once the
+ * approval-router epic wires ctx.db in the orchestrator, this file will be
+ * collapsed into main/src/orchestrator/trpc/routers/approvals.ts and deleted.
+ *
  * cyboflow.approvals sub-router — TASK-401/TASK-406 additions.
  *
  * Re-exports the canonical approvalsRouter (listPending, approve, reject,
