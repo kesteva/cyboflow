@@ -1180,7 +1180,7 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
     try {
       const response = await API.projects.create({ ...newProject, active: false });
 
-      if (!response.success) {
+      if (!response.success || !response.data) {
         showError({
           title: 'Failed to Create Project',
           error: response.error || 'An error occurred while creating the project.',
@@ -1194,9 +1194,9 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
       setNewProject({ name: '', path: '', buildScript: '', runScript: '' });
       setDetectedBranchForNewProject(null);
       setShowValidationErrors(false);
-      
+
       // Add the new project to the list without reloading everything
-      const newProjectWithSessions: ProjectWithSessions = { ...(response.data as Project), sessions: [], folders: [] };
+      const newProjectWithSessions: ProjectWithSessions = { ...response.data, sessions: [], folders: [] };
       setProjectsWithSessions(prev => [...prev, newProjectWithSessions]);
     } catch (error: unknown) {
       console.error('Failed to create project:', error);
