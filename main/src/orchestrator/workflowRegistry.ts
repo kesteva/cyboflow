@@ -110,8 +110,8 @@ export class WorkflowRegistry {
    */
   seed(projectId: number, workflowDescriptors: WorkflowDescriptor[]): void {
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO workflows (project_id, name, workflow_path, permission_mode)
-      VALUES (?, ?, ?, ?)
+      INSERT OR IGNORE INTO workflows (id, project_id, name, workflow_path, permission_mode)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     const seedTx = this.db.transaction(() => {
@@ -126,7 +126,10 @@ export class WorkflowRegistry {
             error: err instanceof Error ? err.message : String(err),
           });
         }
-        insert.run(projectId, descriptor.name, descriptor.path, permissionMode);
+        // Use a deterministic ID so INSERT OR IGNORE is idempotent across seed calls.
+        // Format: "wf-<projectId>-<name>" (URL-safe, unique per project+name pair).
+        const deterministicId = `wf-${projectId}-${descriptor.name}`;
+        insert.run(deterministicId, projectId, descriptor.name, descriptor.path, permissionMode);
       }
     });
 
@@ -134,10 +137,10 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Look up a workflow by its integer primary key.
+   * Look up a workflow by its text primary key.
    * Returns null if no row exists with the given id.
    */
-  getById(workflowId: number): WorkflowRow | null {
+  getById(workflowId: string): WorkflowRow | null {
     const stmt = this.db.prepare(
       'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
     );
@@ -167,7 +170,7 @@ export class WorkflowRegistry {
    * Returns the generated runId and the snapshotted permissionMode.
    * Throws if the workflow does not exist.
    */
-  createRun(workflowId: number): { runId: string; permissionMode: PermissionMode } {
+  createRun(workflowId: string): { runId: string; permissionMode: PermissionMode } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
@@ -196,7 +199,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

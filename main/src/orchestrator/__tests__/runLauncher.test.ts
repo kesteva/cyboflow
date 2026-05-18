@@ -29,26 +29,32 @@ import type { McpConfigWriter } from '../mcpConfigWriter';
 
 const REGISTRY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS workflows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT PRIMARY KEY,
   project_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  workflow_path TEXT NOT NULL,
+  spec_json TEXT NOT NULL DEFAULT '{}',
+  workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, name)
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY,
-  workflow_id INTEGER NOT NULL,
+  workflow_id TEXT NOT NULL,
   project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
   permission_mode_snapshot TEXT NOT NULL,
   worktree_path TEXT,
   branch_name TEXT,
+  policy_json TEXT,
+  stuck_at DATETIME,
+  stuck_reason TEXT,
+  error_message TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+  started_at DATETIME,
+  ended_at DATETIME,
+  FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
 `;
 
@@ -172,11 +178,12 @@ describe('RunLauncher.launch', () => {
     const tmpDir = makeTempDir();
 
     // Seed a workflow row so createRun can look it up
+    const seedWorkflowId = randomUUID();
     db.prepare(
-      "INSERT INTO workflows (project_id, name, workflow_path, permission_mode) VALUES (1, 'sprint', '/fake/path.md', 'default')",
-    ).run();
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+    ).run(seedWorkflowId);
 
-    interface IdRow { id: number }
+    interface IdRow { id: string }
     const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
     // Canned values returned by the stubs
@@ -187,7 +194,7 @@ describe('RunLauncher.launch', () => {
     // Mock WorkflowRegistry: use the real getById (reads from our in-memory db),
     // but stub createRun so the runId is predictable
     const realRegistry = {
-      getById: (id: number) => {
+      getById: (id: string) => {
         const row = db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id);
         return row ?? null;
       },
@@ -246,7 +253,7 @@ describe('RunLauncher.launch', () => {
 
     const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
 
-    await expect(launcher.launch(99999, tmpDir)).rejects.toThrow('not found');
+    await expect(launcher.launch('nonexistent-id', tmpDir)).rejects.toThrow('not found');
   });
 
   it('writes per-run mcp config after worktree created, in the correct order', async () => {
@@ -256,11 +263,12 @@ describe('RunLauncher.launch', () => {
     const tmpDir = makeTempDir();
 
     // Seed a workflow
+    const seedWorkflowId2 = randomUUID();
     db.prepare(
-      "INSERT INTO workflows (project_id, name, workflow_path, permission_mode) VALUES (1, 'sprint', '/fake/path.md', 'default')",
-    ).run();
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+    ).run(seedWorkflowId2);
 
-    interface IdRow { id: number }
+    interface IdRow { id: string }
     const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
     const cannedRunId = randomUUID().replace(/-/g, '');
@@ -271,7 +279,7 @@ describe('RunLauncher.launch', () => {
     const callOrder: string[] = [];
 
     const fakeRegistry = {
-      getById: (id: number) => {
+      getById: (id: string) => {
         const row = db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id);
         return row ?? null;
       },
