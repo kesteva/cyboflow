@@ -1317,6 +1317,35 @@ export class DatabaseService {
     // not yet been recorded as applied. This is the entry point for all
     // cyboflow-era schema additions starting with 006_cyboflow_schema.sql.
     this.runFileBasedMigrations();
+
+    // Post-006 reconciler. SQLite has no column-level IF NOT EXISTS, so a
+    // migration file edited in-place after some installs already applied
+    // its earlier shape cannot be re-run idempotently. This block probes
+    // the workflows table for the post-edit columns and adds them when
+    // missing. Fresh installs no-op (columns already created by 006).
+    this.reconcileWorkflowsSchema();
+  }
+
+  private reconcileWorkflowsSchema(): void {
+    interface SqliteTableInfo { name: string }
+    const tableExists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'")
+      .get();
+    if (!tableExists) return;
+
+    const cols = this.db
+      .prepare("PRAGMA table_info(workflows)")
+      .all() as SqliteTableInfo[];
+    const has = (name: string): boolean => cols.some((c) => c.name === name);
+
+    if (!has('workflow_path')) {
+      this.db.prepare("ALTER TABLE workflows ADD COLUMN workflow_path TEXT").run();
+      console.log('[Database] Reconciled workflows: added workflow_path column');
+    }
+    if (!has('permission_mode')) {
+      this.db.prepare("ALTER TABLE workflows ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default'").run();
+      console.log('[Database] Reconciled workflows: added permission_mode column');
+    }
   }
 
   /**
