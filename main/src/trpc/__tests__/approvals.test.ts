@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../routers/approvals';
+import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -33,24 +34,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
   return db;
-}
-
-/** Narrow DatabaseLike adapter for approveRestOfRunHandler. */
-function dbAdapter(db: Database.Database): {
-  prepare: (sql: string) => {
-    all: (...params: unknown[]) => unknown[];
-    run: (...params: unknown[]) => void;
-  };
-} {
-  return {
-    prepare: (sql: string) => {
-      const stmt = db.prepare(sql);
-      return {
-        all: (...params: unknown[]) => stmt.all(...params),
-        run: (...params: unknown[]) => { stmt.run(...params); },
-      };
-    },
-  };
 }
 
 /**
