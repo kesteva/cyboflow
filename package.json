@@ -51,6 +51,8 @@
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
+    "test:build": "node build/afterSign.test.js && node scripts/configure-build.test.js",
+    "test:unit": "pnpm --filter main test && pnpm --filter frontend test && pnpm run test:build",
     "test:gate": "pnpm --filter main exec vitest run --config ../vitest.config.gate.ts",
     "test:unit:frontend": "pnpm --filter main exec vitest run --config ../vitest.config.frontend.ts"
   },
