@@ -11,6 +11,7 @@
  * used by SoloFlow workflow .md files and nothing more complex.
  */
 import { readFileSync, readdirSync } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
@@ -132,20 +133,24 @@ export function buildDefaultSoloFlowWorkflows(pluginRoot: string): WorkflowDescr
  *     path: path.join(homeDir, wf.pathFromHome),
  *   }))
  *
- * By using absolute paths for `pathFromHome`, `path.join(homeDir, absolutePath)`
- * resolves to `absolutePath` on POSIX systems (the absolute segment wins), so
- * the callsite keeps working without modification.
+ * `pathFromHome` stores a **relative** path (relative to the user's home
+ * directory) so that `path.join(homeDir, wf.pathFromHome)` resolves correctly
+ * on both POSIX and Windows.  Note: `path.join` does NOT anchor on an absolute
+ * second segment — that is `path.resolve` behaviour.  Storing an absolute path
+ * in `pathFromHome` would produce a doubled-prefix path such as
+ * `/Users/me/Users/me/.claude/...` and cause all file lookups to fail.
  *
  * @cyboflow-hidden — TASK-610 owns cyboflow.ts and will replace this compat
  * shim with a direct call to buildDefaultSoloFlowWorkflows() +
  * resolveSoloFlowPluginRoot(). Remove this export when that task lands.
  */
 export const DEFAULT_SOLOFLOW_WORKFLOWS: { name: SoloFlowWorkflowName; pathFromHome: string }[] =
-  buildDefaultSoloFlowWorkflows(
-    resolveSoloFlowPluginRoot(
-      process.env['HOME'] ?? process.env['USERPROFILE'] ?? '',
-    ).root,
-  ).map((d) => ({ name: d.name, pathFromHome: d.path }));
+  (() => {
+    const homeDir = os.homedir();
+    return buildDefaultSoloFlowWorkflows(
+      resolveSoloFlowPluginRoot(homeDir).root,
+    ).map((d) => ({ name: d.name, pathFromHome: path.relative(homeDir, d.path) }));
+  })();
 
 // ---------------------------------------------------------------------------
 // WorkflowRegistry

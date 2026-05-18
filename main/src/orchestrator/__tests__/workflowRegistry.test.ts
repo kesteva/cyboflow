@@ -16,10 +16,11 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { writeFileSync, mkdirSync, mkdtempSync } from 'fs';
+import { writeFileSync, mkdirSync, mkdtempSync, existsSync } from 'fs';
 import { join } from 'path';
+import * as path from 'path';
 import { tmpdir } from 'os';
-import { WorkflowRegistry, resolveSoloFlowPluginRoot, type WorkflowDescriptor } from '../workflowRegistry';
+import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
@@ -415,5 +416,80 @@ describe('resolveSoloFlowPluginRoot', () => {
 
     expect(result.source).toBe('fallback');
     expect(result.root).toContain('soloflow-dev');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DEFAULT_SOLOFLOW_WORKFLOWS compat shim regression (TASK-601 bugfix)
+// ---------------------------------------------------------------------------
+
+describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
+  it('pathFromHome is relative so path.join(homeDir, pathFromHome) resolves to an existing file', () => {
+    // Build a temp home directory that mirrors the real plugin layout.
+    const tmpHome = mkdtempSync(join(tmpdir(), 'soloflow-shim-test-'));
+    const pluginRoot = join(
+      tmpHome,
+      '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev', '0.10.3',
+    );
+    const commandsDir = join(pluginRoot, 'commands');
+    mkdirSync(commandsDir, { recursive: true });
+
+    // Write real .md files with frontmatter for all 5 default workflows.
+    const workflowNames = ['idea-extractor', 'planner', 'sprint', 'compound', 'prune'];
+    for (const name of workflowNames) {
+      writeFileSync(
+        join(commandsDir, `${name}.md`),
+        `---\npermission_mode: acceptEdits\n---\n# ${name}\n`,
+        'utf-8',
+      );
+    }
+
+    // Build descriptors pointing at our tmp tree.
+    const descriptors = buildDefaultSoloFlowWorkflows(pluginRoot);
+
+    // Simulate what the compat shim does: store relative paths.
+    const shimEntries = descriptors.map((d) => ({
+      name: d.name,
+      pathFromHome: path.relative(tmpHome, d.path),
+    }));
+
+    // Simulate what the cyboflow.ts callsite does: path.join(homeDir, pathFromHome).
+    const resolvedPaths = shimEntries.map((wf) => ({
+      name: wf.name,
+      resolvedPath: path.join(tmpHome, wf.pathFromHome),
+    }));
+
+    // Every resolved path must exist on disk (no doubled-prefix).
+    for (const { name, resolvedPath } of resolvedPaths) {
+      expect(existsSync(resolvedPath), `${name}: ${resolvedPath} does not exist`).toBe(true);
+    }
+
+    // Also verify that the permission_mode from the file is parseable as 'acceptEdits'.
+    // We use a fresh registry with an in-memory DB to exercise seed() end-to-end.
+    const db = new Database(':memory:');
+    db.exec(REGISTRY_SCHEMA);
+
+    const logger = makeLogger();
+    const registry = new WorkflowRegistry(dbAdapter(db), logger);
+
+    const finalDescriptors = resolvedPaths.map((rp) => ({
+      name: rp.name as import('../../../../shared/types/workflows').SoloFlowWorkflowName,
+      path: rp.resolvedPath,
+    }));
+
+    registry.seed(1, finalDescriptors);
+
+    // No ERROR log should fire in the happy path.
+    expect(logger.errorCalls.length).toBe(0);
+
+    // All 5 workflows should have permission_mode = 'acceptEdits'.
+    interface ModeRow { name: string; permission_mode: string }
+    const rows = db
+      .prepare('SELECT name, permission_mode FROM workflows WHERE project_id = 1 ORDER BY name')
+      .all() as ModeRow[];
+    expect(rows).toHaveLength(5);
+    for (const row of rows) {
+      expect(row.permission_mode).toBe('acceptEdits');
+    }
   });
 });
