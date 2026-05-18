@@ -32,6 +32,18 @@ let _workflowRegistry: WorkflowRegistry | null = null;
 let _runLauncher: RunLauncher | null = null;
 
 /**
+ * TEST-ONLY: inject a pre-built RunLauncher to bypass the sentinel stubs.
+ * Call this after `vi.resetModules()` + dynamic import, before invoking any
+ * handler, so `getRunLauncher` returns the injected instance instead of
+ * constructing one with the throwing epic-7 sentinels.
+ *
+ * Never call this in production code.
+ */
+export function _setRunLauncherForTest(launcher: RunLauncher): void {
+  _runLauncher = launcher;
+}
+
+/**
  * Module-level OrchestratorHealth singleton.
  *
  * Null until the McpServerLifecycle is wired (epic 6). While null, the
@@ -110,17 +122,23 @@ function getRunLauncher(services: AppServices): RunLauncher {
       },
     };
 
-    // OrchSocketProvider — TODO(epic 7): wire real permissionIpcServer once it
-    // is added to AppServices.  For now, a sentinel stub with an empty socket
-    // path keeps the launch path functional without crashing at construction.
+    // OrchSocketProvider — TODO(epic 7): permissionIpcServer is not yet on
+    // AppServices.  The sentinel throws at call time so any code path that
+    // reaches getSocketPath() surfaces a loud, traceable error instead of
+    // silently producing a broken socket path.
     const orchSocketProvider: OrchSocketProvider = {
-      getSocketPath: () => '',
+      getSocketPath: () => {
+        throw new Error('cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)');
+      },
     };
 
-    // BridgeScriptResolver — TODO(epic 7): resolve the bundled bridge path
-    // from __dirname / ASAR extraction.  Sentinel returns empty for now.
+    // BridgeScriptResolver — TODO(epic 7): ASAR extraction of the bridge
+    // script is not yet implemented.  The sentinel throws at call time so
+    // missing wiring fails loudly rather than resolving to a phantom path.
     const bridgeScriptResolver: BridgeScriptResolver = {
-      getScriptPath: () => path.join(__dirname, '..', 'orchestrator', 'cyboflowPermissionBridge.js'),
+      getScriptPath: () => {
+        throw new Error('cyboflow: bridgeScriptResolver not yet wired (epic 7 owns ASAR extraction)');
+      },
     };
 
     // NodeResolver — returns the process's own node executable path as a
