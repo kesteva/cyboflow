@@ -30,7 +30,7 @@ export function StravuConnection({ className = '' }: StravuConnectionProps) {
     try {
       const response = await API.stravu.getConnectionStatus();
       if (response.success) {
-        setConnectionState(response.data);
+        setConnectionState(response.data as StravuConnectionState);
       } else {
         setConnectionState({ status: 'disconnected', error: response.error });
       }

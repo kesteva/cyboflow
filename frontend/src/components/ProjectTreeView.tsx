@@ -167,20 +167,21 @@ export function ProjectTreeView() {
       setIsLoading(true);
       const response = await API.sessions.getAllWithProjects();
       if (response.success && response.data) {
-        setProjectsWithSessions(response.data);
-        
+        const projects = response.data as ProjectWithSessions[];
+        setProjectsWithSessions(projects);
+
         // Auto-expand projects that have sessions
         const projectsToExpand = new Set<number>();
-        response.data.forEach((project: ProjectWithSessions) => {
+        projects.forEach((project: ProjectWithSessions) => {
           if (project.sessions.length > 0) {
             projectsToExpand.add(project.id);
           }
         });
         setExpandedProjects(projectsToExpand);
-        
+
         // Also expand the project containing the active session
         if (activeSessionId) {
-          response.data.forEach((project: ProjectWithSessions) => {
+          projects.forEach((project: ProjectWithSessions) => {
             if (project.sessions.some(s => s.id === activeSessionId)) {
               projectsToExpand.add(project.id);
             }

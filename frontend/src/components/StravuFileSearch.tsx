@@ -120,7 +120,7 @@ export function StravuFileSearch({ isOpen, onClose, onFileSelect }: StravuFileSe
     try {
       const response = await API.stravu.searchNotebooks(searchQuery, 20);
       if (response.success) {
-        setSearchResults(response.data || []);
+        setSearchResults((response.data ?? []) as StravuNotebook[]);
       } else {
         setError('Search failed: ' + (response.error || 'Unknown error'));
         setSearchResults([]);
