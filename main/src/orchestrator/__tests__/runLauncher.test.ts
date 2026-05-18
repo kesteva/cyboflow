@@ -10,7 +10,7 @@
  * Tests use withTempDir for filesystem isolation (auto-cleanup on exit).
  * The launch test uses an in-memory SQLite DB for the workflow_runs assertion.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
@@ -64,6 +64,10 @@ const fakeBridgeScriptResolver: BridgeScriptResolver = {
 const fakeNodeResolver: NodeResolver = {
   getNodePath: async () => '/usr/local/bin/node',
 };
+
+// Reset all vi.fn() call history before each test so the module-level shared
+// stubs (fakeMcpConfigWriter, etc.) do not accumulate state across tests.
+beforeEach(() => vi.clearAllMocks());
 
 // ---------------------------------------------------------------------------
 // ensureGitignoreEntry
