@@ -123,9 +123,8 @@ export function PendingApprovalCard({ item, isFocused = false }: PendingApproval
 
     function handleReject(): void {
       setBusy(true);
-      void Promise.all(
-        items.map((a) => trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id })),
-      ).finally(() => { setBusy(false); });
+      void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId })
+        .finally(() => { setBusy(false); });
     }
 
     return (
