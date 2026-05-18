@@ -5,11 +5,7 @@
     "started": "2026-05-17T13:02:37.000Z",
     "execution_mode": "parallel"
   },
-  "tasks": {
-    "TASK-606": {
-      "status": "pending"
-    }
-  },
+  "tasks": {},
   "run": {
     "branch": "soloflow/run-20260517-202755-SPRINT-015",
     "base_branch": "main",
