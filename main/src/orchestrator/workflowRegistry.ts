@@ -102,8 +102,8 @@ export class WorkflowRegistry {
   /**
    * Seed the `workflows` table with the provided descriptors.
    *
-   * Uses INSERT OR IGNORE on the `(project_id, name)` unique constraint so
-   * re-seeding the same project is idempotent — existing rows are not updated.
+   * Uses INSERT OR IGNORE on the deterministic primary key `wf-<projectId>-<name>`
+   * so re-seeding the same project is idempotent — existing rows are not updated.
    *
    * If a workflow .md file cannot be read, logs WARN and inserts the row with
    * `permission_mode='default'` rather than throwing.
