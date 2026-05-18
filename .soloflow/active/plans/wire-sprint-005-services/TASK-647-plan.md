@@ -1,5 +1,5 @@
 ---
-id: TASK-587
+id: TASK-647
 idea: SPRINT-007-compound
 status: ready
 created: 2026-05-14T00:00:00Z
