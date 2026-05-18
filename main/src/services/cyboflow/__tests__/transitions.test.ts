@@ -26,7 +26,7 @@ import { IllegalTransitionError } from '../stateMachine';
 
 const SCHEMA_DDL = `
 -- Migration 006: Cyboflow orchestrator schema (5 net-new tables)
--- Strictly disjoint from Crystal's sessions/tool_panels — no cross-FK.
+-- Strictly disjoint from the inherited sessions/tool_panels tables — no cross-FK.
 
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,

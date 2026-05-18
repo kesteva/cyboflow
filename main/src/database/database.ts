@@ -1367,7 +1367,7 @@ export class DatabaseService {
    * Scans the migrations directory for numeric-prefix .sql files and applies
    * any that have not yet been recorded as applied in user_preferences.
    * Each file is applied in its own transaction so a single failure does not
-   * prevent subsequent files from running (matching Crystal's existing migration
+   * prevent subsequent files from running (matching Cyboflow's existing migration
    * tolerance pattern).
    */
   private runFileBasedMigrations(): void {
@@ -1432,7 +1432,7 @@ export class DatabaseService {
         });
         console.log(`[Database] Applied file migration: ${name}`);
       } catch (err) {
-        // Match Crystal's existing tolerance pattern (try/catch around 004/005):
+        // Match Cyboflow's existing tolerance pattern (try/catch around 004/005):
         // log + continue so a single broken file does not brick the app boot.
         console.error(`[Database] Migration ${name} failed:`, err);
       }

@@ -1,5 +1,5 @@
 -- Migration 006: Cyboflow orchestrator schema (5 net-new tables)
--- Strictly disjoint from Crystal's sessions/tool_panels — no cross-FK.
+-- Strictly disjoint from the inherited sessions/tool_panels tables — no cross-FK.
 -- See docs/cyboflow_system_design.md §5.3 for the authoritative spec.
 
 -- 1. workflows: user-authored workflow definitions

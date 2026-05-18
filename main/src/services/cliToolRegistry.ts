@@ -167,7 +167,7 @@ export interface ToolDiscoveryResult {
 }
 
 /**
- * Central registry for managing CLI tools in Crystal
+ * Central registry for managing CLI tools in Cyboflow
  * 
  * This singleton class manages the registration, discovery, and instantiation
  * of CLI tools (Claude, Aider, Continue, etc.) providing a unified interface

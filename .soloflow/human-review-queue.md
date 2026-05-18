@@ -1,10 +1,10 @@
 ---
-pending_count: 14
+pending_count: 16
 buckets:
   decisions: 0
-  actions: 2
+  actions: 3
   testing: 9
-  deferred_visual: 3
+  deferred_visual: 4
 items: []
 ---
 # Human Review Queue
@@ -15,15 +15,6 @@ _No items._
 
 ## Actions
 
-- task: TASK-555
-  type: action_required
-  bucket: actions
-  action: "xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>; set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars."
-  blocked_checks:
-    - "prerequisite: Notarization requires Apple ID + team ID + app-specific password. Without these, electron-builder notarize step fails."
-  level: ground_truth
-  severity: high
-
 - task: TASK-554
   type: human_needed
   plan_ref: .soloflow/active/plans/first-run-onboarding-and-self-host-acceptance/TASK-554-plan.md
@@ -32,6 +23,29 @@ _No items._
   severity: high
   level: goal_backward
   bucket: actions
+
+- task: TASK-578
+  type: action_required
+  bucket: actions
+  action: "Re-run /soloflow:sprint with TASK-578 after SPRINT-014 (containing TASK-562) merges to main. TASK-578's prerequisite check evaluates shipped main state, so it cannot ride alongside TASK-562 in the same sprint."
+  blocked_checks:
+    - "\"prerequisite: Confirms TASK-562 has shipped on the producer side"
+    - "so the consumer-side rename in AboutDialog will line up with the actual IPC response shape.\""
+  level: ground_truth
+  severity: high
+
+- task: TASK-577
+  type: action_required
+  bucket: actions
+  dedup_key: main_workspace_better_sqlite3_abi_mismatch
+  plan_ref: .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-577-plan.md
+  action: "Run `pnpm electron:rebuild` in .soloflow/worktrees/TASK-577 (or the merged main checkout) to rebuild better-sqlite3 against the active Node ABI. Until then, `pnpm --filter main test` fails with NODE_MODULE_VERSION 136 vs required 127 — pre-existing env drift, identical failure on parent commit ae78e34^, not caused by TASK-577's 5-line env-object edit. After rebuild, re-run `pnpm --filter main test` to confirm AC4 (exit 0). See FIND-SPRINT-014-16."
+  blocked_checks:
+    - "AC4: pnpm --filter main test exit 0"
+  level: ground_truth
+  severity: medium
+  created_at: "2026-05-17T23:07:54.516Z"
+  updated_at: "2026-05-17T23:07:54.516Z"
 
 ## Testing
 
@@ -163,7 +177,42 @@ _No items._
   created_at: "2026-05-15T18:30:00.000Z"
   updated_at: "2026-05-15T18:30:00.000Z"
 
+- sprint: SPRINT-013
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  dedup_key: visual_web_electron_renderer_needs_full_electron_sprint013
+  action: "End-of-sprint visual smoke for the stuck-detection + onboarding + MCP-health-indicator sprint (TASK-501..504, TASK-551..553). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (see CLAUDE.md, frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Run `pnpm dev` to launch Electron, then drive the seven flows: (1) StuckBadge surfaces on a PendingApprovalCard when a stuck event fires (TASK-501+502). (2) Cancel-and-restart button on a stuck card triggers the cancelAndRestart mutation and the card transitions to a new run within the per-run p-queue (TASK-502). (3) useStuckNotifications system notification fires once per session for the first stuck event (TASK-503). (4) 'Why stuck' button on a stuck card opens StuckInspectorModal with the four sections (transcript tail / approvals timeline / store snapshot / Cancel-and-restart CTA) rendered from getStuckInspection (TASK-504). (5) OnboardingCard renders for first-time users in ReviewQueueView, shows j/k/y/n hint, dismisses on 'Got it' AND on first y/n keypress, then never re-appears after preference write (TASK-551). (6) Creating a new project auto-writes `.cyboflow/worktrees/` to that project's .gitignore (TASK-552 — verifiable via filesystem, but UI confirmation that project creation succeeds without error is part of the same flow). (7) MCP server health dot in the StatusBar at the app shell footer cycles green/yellow/red with the live OrchestratorHealth status, tooltip surfaces lastError (TASK-553). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  blocked_checks:
+    - "End-of-sprint cross-task visual verification of stuck-detection flows (StuckBadge surface, cancel-and-restart button, useStuckNotifications fire, StuckInspectorModal 4 sections)"
+    - "End-of-sprint cross-task visual verification of onboarding flow (OnboardingCard mount, 'Got it' dismiss path, y/n keypress dismiss path, never-re-appear preference contract)"
+    - "End-of-sprint cross-task visual verification of MCP health indicator in StatusBar (green/yellow/red transitions, lastError tooltip)"
+    - "Project creation gitignore-write smoke (project:create succeeds and `.cyboflow/worktrees/` appears in the project's .gitignore)"
+  level: visual
+  severity: medium
+  created_at: "2026-05-17T17:35:00.000Z"
+  updated_at: "2026-05-17T17:35:00.000Z"
+  affected_tasks:
+    - TASK-501
+    - TASK-502
+    - TASK-503
+    - TASK-504
+    - TASK-551
+    - TASK-552
+    - TASK-553
+
 ## Overridden
+
+- task: TASK-555
+  type: overridden
+  bucket: actions
+  action: "xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>; set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars."
+  blocked_checks:
+    - "prerequisite: Notarization requires Apple ID + team ID + app-specific password. Without these, electron-builder notarize step fails."
+  level: ground_truth
+  severity: high
+  override: Notarization credentials are on the apple-signing-notarization-setup epic track (TASK-567/584/585); this sprint targets crystal-cuts-and-rebrand and does not exercise notarization.
+  override_at: "2026-05-17T20:02:07.590Z"
 
 - task: TASK-593
   type: overridden
@@ -201,26 +250,27 @@ _No items._
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
 
-- sprint: SPRINT-013
+- sprint: SPRINT-014
   type: deferred_visual
   bucket: deferred_visual
   source: shadow-sprint-verifier
-  dedup_key: visual_web_electron_renderer_needs_full_electron_sprint013
-  action: "End-of-sprint visual smoke for the stuck-detection + onboarding + MCP-health-indicator sprint (TASK-501..504, TASK-551..553). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (see CLAUDE.md, frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Run `pnpm dev` to launch Electron, then drive the seven flows: (1) StuckBadge surfaces on a PendingApprovalCard when a stuck event fires (TASK-501+502). (2) Cancel-and-restart button on a stuck card triggers the cancelAndRestart mutation and the card transitions to a new run within the per-run p-queue (TASK-502). (3) useStuckNotifications system notification fires once per session for the first stuck event (TASK-503). (4) 'Why stuck' button on a stuck card opens StuckInspectorModal with the four sections (transcript tail / approvals timeline / store snapshot / Cancel-and-restart CTA) rendered from getStuckInspection (TASK-504). (5) OnboardingCard renders for first-time users in ReviewQueueView, shows j/k/y/n hint, dismisses on 'Got it' AND on first y/n keypress, then never re-appears after preference write (TASK-551). (6) Creating a new project auto-writes `.cyboflow/worktrees/` to that project's .gitignore (TASK-552 — verifiable via filesystem, but UI confirmation that project creation succeeds without error is part of the same flow). (7) MCP server health dot in the StatusBar at the app shell footer cycles green/yellow/red with the live OrchestratorHealth status, tooltip surfaces lastError (TASK-553). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  dedup_key: visual_web_electron_renderer_needs_full_electron_sprint014
+  action: "End-of-sprint visual smoke for the crystal-cuts-and-rebrand sprint (TASK-560/561/562/565/566/576/577/579). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (CLAUDE.md; frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Verifier env has no Playwright/Electron binary on PATH and no live `pnpm dev` to attach to. Run `pnpm dev` to launch Electron, then drive four flows: (1) About dialog: open AboutDialog and confirm the 'Data Directory' row renders the path (tests the TASK-562 IPC-rename cross-task contract — producer in main/src/ipc/updater.ts emits `cyboflowDirectory`, consumer in frontend/src/components/AboutDialog.tsx reads `cyboflowDirectory`). (2) Settings modal: open Settings, confirm header reads 'Cyboflow Settings', 'Cyboflow Attribution' section is visible, the 'Include Cyboflow footer in commits' checkbox toggles + persists (tests TASK-561 + TASK-565 — settings write should round-trip the `enableCyboflowFooter` key and saved commits should carry the buildCommitFooter() output). (3) Update dialog (when an update is available, or via the 'Check for updates' button): confirm prose says 'A new version of Cyboflow is available.' and 'You are running the latest version of Cyboflow!' (TASK-560). (4) Create a session, run any prompt that produces a commit, then `git log -1 --pretty=%B` on the worktree and confirm the commit body ends with the canonical Cyboflow footer from buildCommitFooter (TASK-565 byte-level contract). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
   blocked_checks:
-    - "End-of-sprint cross-task visual verification of stuck-detection flows (StuckBadge surface, cancel-and-restart button, useStuckNotifications fire, StuckInspectorModal 4 sections)"
-    - "End-of-sprint cross-task visual verification of onboarding flow (OnboardingCard mount, 'Got it' dismiss path, y/n keypress dismiss path, never-re-appear preference contract)"
-    - "End-of-sprint cross-task visual verification of MCP health indicator in StatusBar (green/yellow/red transitions, lastError tooltip)"
-    - "Project creation gitignore-write smoke (project:create succeeds and `.cyboflow/worktrees/` appears in the project's .gitignore)"
+    - "End-of-sprint cross-task visual verification of AboutDialog cyboflowDirectory IPC rename (TASK-562 producer × consumer)"
+    - "End-of-sprint cross-task visual verification of Settings modal cyboflow rebrand + enableCyboflowFooter round-trip (TASK-560 × TASK-561)"
+    - "End-of-sprint cross-task visual verification of UpdateDialog prose rebrand (TASK-560)"
+    - "End-of-sprint cross-task visual verification of buildCommitFooter byte-level output on a real commit (TASK-565)"
   level: visual
   severity: medium
-  created_at: "2026-05-17T17:35:00.000Z"
-  updated_at: "2026-05-17T17:35:00.000Z"
+  created_at: "2026-05-17T13:02:37.000Z"
+  updated_at: "2026-05-17T13:02:37.000Z"
   affected_tasks:
-    - TASK-501
-    - TASK-502
-    - TASK-503
-    - TASK-504
-    - TASK-551
-    - TASK-552
-    - TASK-553
+    - TASK-560
+    - TASK-561
+    - TASK-562
+    - TASK-565
+    - TASK-566
+    - TASK-576
+    - TASK-577
+    - TASK-579

@@ -2,6 +2,8 @@
  * Safely escape shell arguments to prevent command injection
  */
 
+import { buildCommitFooter } from './commitFooter';
+
 /**
  * Escape a string for safe use in shell commands
  * @param arg The argument to escape
@@ -19,16 +21,13 @@ export function escapeShellArg(arg: string): string {
 /**
  * Build a safe git commit command with proper escaping
  * @param message The commit message
- * @param enableCrystalFooter If true (default), add the Crystal footer
+ * @param enableCyboflowFooter If true (default), add the Cyboflow footer
  * @returns The safe commit command
  */
-export function buildGitCommitCommand(message: string, enableCrystalFooter: boolean = true): string {
+export function buildGitCommitCommand(message: string, enableCyboflowFooter: boolean = true): string {
   // Create the full commit message with signature
-  const fullMessage = enableCrystalFooter ? `${message}
-
-💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
-
-Co-Authored-By: Cyboflow <hello@cyboflow.com>` : message;
+  const footer = buildCommitFooter(enableCyboflowFooter);
+  const fullMessage = footer ? `${message}\n\n${footer}` : message;
 
   const escapedMessage = escapeShellArg(fullMessage);
   return `git commit -m ${escapedMessage}`;

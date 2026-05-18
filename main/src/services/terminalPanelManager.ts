@@ -51,6 +51,11 @@ export class TerminalPanelManager {
         COLORTERM: 'truecolor',
         LANG: process.env.LANG || 'en_US.UTF-8',
         WORKTREE_PATH: cwd,
+        // Canonical Cyboflow env vars exposed to PTY subprocesses.
+        CYBOFLOW_SESSION_ID: panel.sessionId,
+        CYBOFLOW_PANEL_ID: panel.id,
+        // @deprecated Legacy Crystal-era names kept for backward compat with user
+        // shell scripts. TODO(post-v1): remove after deprecation window.
         CRYSTAL_SESSION_ID: panel.sessionId,
         CRYSTAL_PANEL_ID: panel.id
       }

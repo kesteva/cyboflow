@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { glob } from 'glob';
+import { buildCommitFooter } from '../utils/commitFooter';
 import type { AppServices } from './types';
 import type { Session } from '../types/session';
 
@@ -233,16 +234,13 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         // Stage all changes
         await execAsync('git add -A', { cwd: session.worktreePath });
 
-        // Check if Crystal footer is enabled (default: true)
+        // Check if Cyboflow footer is enabled (default: true)
         const config = configManager.getConfig();
-        const enableCrystalFooter = config?.enableCrystalFooter !== false;
+        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
-        // Create the commit with Crystal signature if enabled
-        const commitMessage = enableCrystalFooter ? `${request.message}
-
-💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
-
-Co-Authored-By: Cyboflow <hello@cyboflow.com>` : request.message;
+        // Create the commit with Cyboflow signature if enabled
+        const footer = buildCommitFooter(enableCyboflowFooter);
+        const commitMessage = footer ? `${request.message}\n\n${footer}` : request.message;
 
         // Use a temporary file to handle commit messages with special characters
         const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-${Date.now()}.txt`);
@@ -272,15 +270,12 @@ Co-Authored-By: Cyboflow <hello@cyboflow.com>` : request.message;
           try {
             await execAsync('git add -A', { cwd: session.worktreePath });
             
-            // Check if Crystal footer is enabled (default: true)
+            // Check if Cyboflow footer is enabled (default: true)
             const config = configManager.getConfig();
-            const enableCrystalFooter = config?.enableCrystalFooter !== false;
-            
-            const retryMessage = enableCrystalFooter ? `${request.message}
+            const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
-💎 Built using [Cyboflow](https://github.com/cyboflow/cyboflow)
-
-Co-Authored-By: Cyboflow <hello@cyboflow.com>` : request.message;
+            const retryFooter = buildCommitFooter(enableCyboflowFooter);
+            const retryMessage = retryFooter ? `${request.message}\n\n${retryFooter}` : request.message;
 
             // Use a temporary file for retry as well
             const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-retry-${Date.now()}.txt`);
