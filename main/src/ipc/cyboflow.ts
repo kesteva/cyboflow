@@ -18,7 +18,8 @@ import * as path from 'path';
 import type { AppServices } from './types';
 import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
 import { RunLauncher } from '../orchestrator/runLauncher';
-import type { StreamEventPublisher } from '../orchestrator/runLauncher';
+import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../orchestrator/runLauncher';
+import { McpConfigWriter } from '../orchestrator/mcpConfigWriter';
 import type { LoggerLike } from '../orchestrator/types';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
@@ -109,17 +110,34 @@ function getRunLauncher(services: AppServices): RunLauncher {
       },
     };
 
+    // OrchSocketProvider — TODO(epic 7): wire real permissionIpcServer once it
+    // is added to AppServices.  For now, a sentinel stub with an empty socket
+    // path keeps the launch path functional without crashing at construction.
+    const orchSocketProvider: OrchSocketProvider = {
+      getSocketPath: () => '',
+    };
+
+    // BridgeScriptResolver — TODO(epic 7): resolve the bundled bridge path
+    // from __dirname / ASAR extraction.  Sentinel returns empty for now.
+    const bridgeScriptResolver: BridgeScriptResolver = {
+      getScriptPath: () => path.join(__dirname, '..', 'orchestrator', 'cyboflowPermissionBridge.js'),
+    };
+
+    // NodeResolver — returns the process's own node executable path as a
+    // best-effort fallback.  A proper findExecutableInPath ladder is epic 7.
+    const nodeResolver: NodeResolver = {
+      getNodePath: async () => process.execPath,
+    };
+
     _runLauncher = new RunLauncher(
       services.databaseService.getDb(),
       getWorkflowRegistry(services),
       services.worktreeManager,
       makeLoggerLike(services),
-      // MCP collaborators (orchSocketProvider, bridgeScriptResolver, nodeResolver)
-      // are intentionally omitted here; those are wired in epic 6.
-      undefined, // mcpConfigWriter
-      undefined, // orchSocketProvider
-      undefined, // bridgeScriptResolver
-      undefined, // nodeResolver
+      new McpConfigWriter(),
+      orchSocketProvider,
+      bridgeScriptResolver,
+      nodeResolver,
       publisher,
     );
   }

@@ -65,12 +65,17 @@ export class RunLauncher {
     private readonly workflowRegistry: WorkflowRegistry,
     private readonly worktreeManager: WorktreeManager,
     private readonly logger: LoggerLike,
-    private readonly mcpConfigWriter?: McpConfigWriter,
-    private readonly orchSocketProvider?: OrchSocketProvider,
-    private readonly bridgeScriptResolver?: BridgeScriptResolver,
-    private readonly nodeResolver?: NodeResolver,
+    private readonly mcpConfigWriter: McpConfigWriter,
+    private readonly orchSocketProvider: OrchSocketProvider,
+    private readonly bridgeScriptResolver: BridgeScriptResolver,
+    private readonly nodeResolver: NodeResolver,
     private readonly publisher?: StreamEventPublisher,
-  ) {}
+  ) {
+    if (!mcpConfigWriter) throw new Error('RunLauncher: missing required collaborator mcpConfigWriter');
+    if (!orchSocketProvider) throw new Error('RunLauncher: missing required collaborator orchSocketProvider');
+    if (!bridgeScriptResolver) throw new Error('RunLauncher: missing required collaborator bridgeScriptResolver');
+    if (!nodeResolver) throw new Error('RunLauncher: missing required collaborator nodeResolver');
+  }
 
   /**
    * Launch a workflow run:
@@ -100,24 +105,15 @@ export class RunLauncher {
       );
 
       // Write the per-run .mcp.json into the worktree so Claude can discover
-      // the cyboflow-permissions bridge.  Only executed when all four collaborators
-      // are injected (they are optional to preserve backward-compat with existing
-      // tests and call-sites that pre-date this task).
-      if (
-        this.mcpConfigWriter &&
-        this.orchSocketProvider &&
-        this.bridgeScriptResolver &&
-        this.nodeResolver
-      ) {
-        const nodeExecutablePath = await this.nodeResolver.getNodePath();
-        await this.mcpConfigWriter.writeForRun({
-          runId,
-          worktreePath,
-          orchSocketPath: this.orchSocketProvider.getSocketPath(),
-          bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
-          nodeExecutablePath,
-        });
-      }
+      // the cyboflow-permissions bridge.
+      const nodeExecutablePath = await this.nodeResolver.getNodePath();
+      await this.mcpConfigWriter.writeForRun({
+        runId,
+        worktreePath,
+        orchSocketPath: this.orchSocketProvider.getSocketPath(),
+        bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
+        nodeExecutablePath,
+      });
 
       this.db
         .prepare(
