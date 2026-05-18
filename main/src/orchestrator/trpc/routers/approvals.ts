@@ -6,6 +6,7 @@
  *   - approve           : mutation → { success: true } (stub — full impl in approval-router epic)
  *   - reject            : mutation → { success: true } (stub — full impl in approval-router epic)
  *   - approveRestOfRun  : mutation → { decided: number } (TASK-406 — per-run batch approve)
+ *   - rejectRestOfRun   : mutation → { decided: number } (TASK-616 — per-run batch reject)
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
