@@ -1,8 +1,8 @@
 ---
 id: TASK-603
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/database/__test_fixtures__/registrySchema.ts
   - main/src/orchestrator/__tests__/workflowRegistry.test.ts
@@ -14,24 +14,24 @@ files_readonly:
   - main/src/database/migrations/006_cyboflow_schema.sql
   - .soloflow/active/findings/SPRINT-009-findings.md
 acceptance_criteria:
-  - criterion: "A new fixture module exports `REGISTRY_SCHEMA` and `GATE_SCHEMA` SQL constants"
+  - criterion: A new fixture module exports `REGISTRY_SCHEMA` and `GATE_SCHEMA` SQL constants
     verification: "test -f main/src/database/__test_fixtures__/registrySchema.ts && grep -nE 'export const REGISTRY_SCHEMA|export const GATE_SCHEMA' main/src/database/__test_fixtures__/registrySchema.ts returns 2 matches"
-  - criterion: "All four prior copies of REGISTRY_SCHEMA / GATE_SCHEMA are replaced by an import from the new fixture"
+  - criterion: All four prior copies of REGISTRY_SCHEMA / GATE_SCHEMA are replaced by an import from the new fixture
     verification: "grep -rn 'CREATE TABLE IF NOT EXISTS workflows' main/src/orchestrator/__tests__/workflowRegistry.test.ts main/src/orchestrator/__tests__/runLauncher.test.ts main/src/ipc/__tests__/cyboflow.test.ts tests/helpers/cyboflowTestHarness.ts returns 0 matches (each file imports the constant instead)"
-  - criterion: "Each migrated file imports REGISTRY_SCHEMA (or GATE_SCHEMA for cyboflowTestHarness.ts) from the new fixture module"
+  - criterion: Each migrated file imports REGISTRY_SCHEMA (or GATE_SCHEMA for cyboflowTestHarness.ts) from the new fixture module
     verification: "grep -rnE \"from '.*__test_fixtures__/registrySchema'|from '.*registrySchema'\" main/src/orchestrator/__tests__/workflowRegistry.test.ts main/src/orchestrator/__tests__/runLauncher.test.ts main/src/ipc/__tests__/cyboflow.test.ts tests/helpers/cyboflowTestHarness.ts returns 4 matches"
-  - criterion: "All affected test files continue to pass"
+  - criterion: All affected test files continue to pass
     verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts src/orchestrator/__tests__/runLauncher.test.ts src/ipc/__tests__/cyboflow.test.ts exits 0; pnpm test:gate exits 0 (or skip-pass)"
   - criterion: "The fixture module's schema agrees with main/src/database/schema.sql for the workflows + workflow_runs tables (no fixture-vs-runtime drift)"
     verification: "manual: diff the column lists for workflows and workflow_runs in main/src/database/__test_fixtures__/registrySchema.ts against main/src/database/schema.sql; they must match identically"
-depends_on: [TASK-598]
+depends_on:
+  - TASK-598
 estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: false
   justification: "This is a refactor of test fixtures, not new behavior. Sibling test files (workflowRegistry.test.ts, runLauncher.test.ts, cyboflow.test.ts, cyboflow-day3-gate.spec.ts) are the existing coverage for any regression — they ARE the test_strategy targets and are listed in files_owned because the imports change. After the refactor, the existing test surfaces must continue to pass; the AC enforces this via the pnpm vitest run command. No new behavior tests are warranted because the fixture module is data-only (no logic to test in isolation)."
 ---
-
 # Extract shared REGISTRY_SCHEMA SQL fixture (eliminate 4-file DDL drift)
 
 ## Objective

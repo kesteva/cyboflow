@@ -1,7 +1,7 @@
 ---
 id: TASK-630
 idea: SPRINT-014-COMPOUND
-status: ready
+status: in-flight
 created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/types/electron.d.ts
@@ -20,31 +20,31 @@ files_readonly:
 acceptance_criteria:
   - criterion: "IPCResponse interface no longer defaults T to `any` in electron.d.ts (use `<T = unknown>` or no default)"
     verification: "grep -nE 'interface IPCResponse<T(\\s*=\\s*any)?>' frontend/src/types/electron.d.ts | grep -vE '<T = unknown>|<T>' returns 0 matches"
-  - criterion: "Same in api.ts"
+  - criterion: Same in api.ts
     verification: "grep -nE 'interface IPCResponse<T(\\s*=\\s*any)?>' frontend/src/utils/api.ts | grep -vE '<T = unknown>|<T>' returns 0 matches"
   - criterion: "Eslint-disable comments for IPCResponse's T=any default are removed"
     verification: "grep -nE 'eslint-disable.*no-explicit-any.*IPCResponse|Generic type parameter default for flexible API responses' frontend/src --include='*.ts' --include='*.tsx' -r returns 0 matches"
   - criterion: "No bare `Promise<IPCResponse>` (without type arg) remains in electron.d.ts"
     verification: "grep -nE 'Promise<IPCResponse>' frontend/src/types/electron.d.ts returns 0 matches"
-  - criterion: "No bare `as IPCResponse` cast remains in frontend/src"
+  - criterion: No bare `as IPCResponse` cast remains in frontend/src
     verification: "grep -rnE 'as IPCResponse(?!<)' frontend/src --include='*.ts' --include='*.tsx' returns 0 matches"
   - criterion: "GitErrorResponse extends IPCResponse with explicit type arg (or `<unknown>` with rationale comment)"
     verification: "grep -nE 'extends IPCResponse(<|;|\\s+\\{)' frontend/src/utils/api.ts matches a form with an explicit type arg or `<unknown>`"
-  - criterion: "pnpm typecheck passes"
+  - criterion: pnpm typecheck passes
     verification: "pnpm typecheck && pnpm lint exit 0"
-  - criterion: "Existing component tests for ReviewQueueView and OnboardingCard still pass"
+  - criterion: Existing component tests for ReviewQueueView and OnboardingCard still pass
     verification: "cd frontend && pnpm vitest run src/components/__tests__/ReviewQueueView.test.tsx src/components/OnboardingCard.test.tsx exits 0"
 depends_on: []
 estimated_complexity: high
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "Mechanical type-only changes across ~120 declaration sites + ~13 cast sites. No new tests; the existing component tests guard the IPC mock surface that the rename touches."
+  justification: Mechanical type-only changes across ~120 declaration sites + ~13 cast sites. No new tests; the existing component tests guard the IPC mock surface that the rename touches.
   targets:
-    - behavior: "ReviewQueueView IPC-mock surface continues to deserialize correctly after IPCResponse narrowing"
+    - behavior: ReviewQueueView IPC-mock surface continues to deserialize correctly after IPCResponse narrowing
       test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "OnboardingCard preference-fetch IPC mock continues to deserialize correctly after IPCResponse narrowing"
+    - behavior: OnboardingCard preference-fetch IPC mock continues to deserialize correctly after IPCResponse narrowing
       test_file: frontend/src/components/OnboardingCard.test.tsx
       type: component
 ---

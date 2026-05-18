@@ -1,8 +1,8 @@
 ---
 id: TASK-564
 idea: SPRINT-002-compound
-status: ready
-created: 2026-05-12T00:00:00Z
+status: in-flight
+created: "2026-05-12T00:00:00Z"
 files_owned:
   - package.json
 files_readonly:
@@ -19,9 +19,10 @@ acceptance_criteria:
     verification: "pnpm run test:build exits with status 0"
   - criterion: "pnpm run test:unit exits 0 (all four tiers pass)"
     verification: "pnpm run test:unit exits with status 0"
-  - criterion: "The existing `test` script (Playwright) is unchanged"
+  - criterion: The existing `test` script (Playwright) is unchanged
     verification: "node -e 'const p = require(\"./package.json\"); if (p.scripts.test !== \"playwright test\") process.exit(1);' exits with status 0"
-depends_on: [TASK-563]
+depends_on:
+  - TASK-563
 estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
@@ -30,14 +31,13 @@ test_strategy:
 prerequisites:
   - check: "test -f build/afterSign.test.js && test -f scripts/configure-build.test.js"
     fix: "Both node-assert files must exist. They were created in TASK-053/TASK-054 (SPRINT-002). If missing, restore from git history."
-    description: "Confirms the orphaned node-assert files this task wires up are present."
+    description: Confirms the orphaned node-assert files this task wires up are present.
     blocking: true
   - check: "node -e 'const p = require(\"./frontend/package.json\"); if (p.scripts.test !== \"vitest run\") process.exit(1);'"
     fix: "Run TASK-563 first — it adds the `test` script to frontend/package.json. Without it, `pnpm --filter frontend test` would fail."
-    description: "TASK-564 depends on TASK-563 wiring frontend vitest. Confirms the frontend test script exists before referencing it."
+    description: TASK-564 depends on TASK-563 wiring frontend vitest. Confirms the frontend test script exists before referencing it.
     blocking: true
 ---
-
 # Add root-level test:unit and test:build scripts unifying all unit-test tiers
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-598
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/database/schema.sql
   - main/src/database/migrations/006_cyboflow_schema.sql
@@ -21,7 +21,7 @@ files_readonly:
   - .soloflow/active/findings/SPRINT-009-findings.md
   - main/src/orchestrator/types.ts
 acceptance_criteria:
-  - criterion: "schema.sql and migration 006 declare identical column shapes for `workflows` and `workflow_runs`"
+  - criterion: schema.sql and migration 006 declare identical column shapes for `workflows` and `workflow_runs`
     verification: "diff `<(grep -A 10 'CREATE TABLE.*workflows' main/src/database/schema.sql)` and `<(grep -A 10 'CREATE TABLE.*workflows' main/src/database/migrations/006_cyboflow_schema.sql)` shows the column lists agree on type and order"
   - criterion: "workflows.id is a single canonical type across schema.sql, migration 006, and the runtime read paths"
     verification: "grep -rn 'workflows' main/src/database/schema.sql main/src/database/migrations/006_cyboflow_schema.sql shows the same `id` column type in both"
@@ -29,14 +29,14 @@ acceptance_criteria:
     verification: "grep -E 'permission_mode_snapshot|policy_json|stuck_at|stuck_reason|error_message|branch_name|worktree_path' main/src/database/migrations/006_cyboflow_schema.sql returns 7 lines"
   - criterion: "All test fixture schemas (workflowRegistry.test.ts, runLauncher.test.ts, cyboflow.test.ts, cyboflowTestHarness.ts) match the canonical migration shape"
     verification: "node scripts/refiner/grep-preflight.js --pattern 'CREATE TABLE IF NOT EXISTS workflows' returns exactly the 5 fixture sites + schema.sql + migration 006, and a manual diff of column lists is identical across them"
-  - criterion: "main/src/database/__tests__/cyboflowSchema.test.ts continues to pass after column reconciliation"
-    verification: "pnpm --filter main exec vitest run src/database/__tests__/cyboflowSchema.test.ts exits 0"
-  - criterion: "main/src/orchestrator/__tests__/workflowRegistry.test.ts continues to pass with the reconciled schema"
-    verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts exits 0"
-  - criterion: "main/src/orchestrator/__tests__/runLauncher.test.ts continues to pass"
-    verification: "pnpm --filter main exec vitest run src/orchestrator/__tests__/runLauncher.test.ts exits 0"
-  - criterion: "main/src/ipc/__tests__/cyboflow.test.ts continues to pass"
-    verification: "pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0"
+  - criterion: main/src/database/__tests__/cyboflowSchema.test.ts continues to pass after column reconciliation
+    verification: pnpm --filter main exec vitest run src/database/__tests__/cyboflowSchema.test.ts exits 0
+  - criterion: main/src/orchestrator/__tests__/workflowRegistry.test.ts continues to pass with the reconciled schema
+    verification: pnpm --filter main exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts exits 0
+  - criterion: main/src/orchestrator/__tests__/runLauncher.test.ts continues to pass
+    verification: pnpm --filter main exec vitest run src/orchestrator/__tests__/runLauncher.test.ts exits 0
+  - criterion: main/src/ipc/__tests__/cyboflow.test.ts continues to pass
+    verification: pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0
 depends_on: []
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
@@ -45,19 +45,18 @@ test_strategy:
   justification: "The reconciliation changes the production migration's column types and adds new columns; existing schema and runtime tests must continue to pass and a new fixture-drift assertion is needed."
   targets:
     - behavior: "Reconciled migration 006 keeps the 5-table set, status CHECK constraint, and day-1 indexes intact"
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
-    - behavior: "WorkflowRegistry.seed and createRun continue to work against the reconciled schema"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: WorkflowRegistry.seed and createRun continue to work against the reconciled schema
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "RunLauncher.launch continues to UPDATE worktree_path/branch_name/status against the reconciled workflow_runs row"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch continues to UPDATE worktree_path/branch_name/status against the reconciled workflow_runs row
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "registerCyboflowHandlers continues to seed and start runs against the reconciled schema"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+    - behavior: registerCyboflowHandlers continues to seed and start runs against the reconciled schema
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: integration
 ---
-
 # Reconcile schema.sql / migration 006 column-shape mismatch
 
 ## Objective
