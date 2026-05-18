@@ -6,10 +6,20 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-599": { "status": "pending" },
-    "TASK-601": { "status": "pending" },
-    "TASK-602": { "status": "pending" },
-    "TASK-610": { "status": "pending" }
+    "TASK-599": {
+      "status": "in_progress",
+      "started": "2026-05-18T16:47:48.586Z"
+    },
+    "TASK-601": {
+      "status": "in_progress",
+      "started": "2026-05-18T16:47:49.131Z"
+    },
+    "TASK-602": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-599"
+      ]
+    }
   },
   "playwright_target": {
     "kind": "electron",
