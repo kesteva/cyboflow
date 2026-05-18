@@ -6,11 +6,9 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-608": {
-      "status": "pending"
-    },
     "TASK-613": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-18T21:23:42.589Z"
     },
     "TASK-614": {
       "status": "pending"
@@ -19,7 +17,8 @@
       "status": "pending"
     },
     "TASK-636": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-18T21:23:42.617Z"
     }
   },
   "playwright_target": {
