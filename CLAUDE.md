@@ -33,6 +33,8 @@ pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Nod
 
 Platform packaging (`pnpm build:mac:arm64`, `pnpm build:linux`, etc.) — see `package.json` `scripts`.
 
+Workspace `"test"` scripts that participate in a root multi-tier chain (e.g. `pnpm run test:unit`) MUST be one-shot — use `"vitest run"`, never bare `"vitest"`. Bare `vitest` defaults to watch mode in a TTY and hangs the chain locally (CI escapes only because stdout is not a TTY). Put watch mode on a separate `"test:watch"` key.
+
 Visual verification of any frontend UI change requires `pnpm dev` (full Electron). The Vite renderer at `http://localhost:4521` cannot bootstrap standalone — it depends on `preload`-injected `electronTRPC` and will error without the main process. For headless validation when capture is unavailable, read `cyboflow-frontend-debug.log` (see below).
 
 ## Frontend/Backend Debug Logs (dev mode)
@@ -43,7 +45,9 @@ In `pnpm dev`, the app writes `cyboflow-frontend-debug.log` and `cyboflow-backen
 
 The `any` type is forbidden. ESLint rule `@typescript-eslint/no-explicit-any` is set to `error` and CI enforces it. Use `unknown` (with type guards) or narrow generics instead.
 
-**IPC response types:** `IPCResponse<T>` callers must pass an explicit `T` — never rely on the default. The wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults `T = any`, which silently bypasses typecheck on `result.data` field renames. Audit untyped sites: `grep -rnE "IPCResponse[^<A-Za-z]" frontend/src`.
+**IPC response types:** `IPCResponse<T>` callers must pass an explicit `T` — never rely on the default. The wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults `T = unknown`, which forces narrowing of `result.data` and catches field renames. Audit untyped sites: `grep -rnE "IPCResponse[^<A-Za-z]" frontend/src`.
+
+Never declare a local `interface IPCResponse<T>` or inline `{ success; data?; error? }` shape in frontend code — import from `frontend/src/utils/api.ts`. Audit: `grep -rn "interface IPCResponse" frontend/src` should return zero hits outside `utils/api.ts` and `types/electron.d.ts`. `main/src/preload.ts` currently keeps its own `IPCResponse` declaration plus many bare `Promise<IPCResponse>` sites — include `grep -n "Promise<IPCResponse>" main/src/preload.ts` in any audit pass until `shared/types/ipc.ts` lands.
 
 ## localStorage Key Migrations
 

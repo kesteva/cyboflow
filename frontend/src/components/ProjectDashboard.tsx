@@ -77,24 +77,24 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
       if (useProgressive && isProgressive) {
         // Use progressive loading
         const response = await API.dashboard.getProjectStatusProgressive(projectId);
-        
+
         if (response.success && response.data) {
-          setDashboardData(response.data);
+          setDashboardData(response.data as ProjectDashboardData);
           setLastRefreshTime(new Date());
           // Cache the data
-          dashboardCache.set(projectId, response.data);
+          dashboardCache.set(projectId, response.data as ProjectDashboardData);
         } else {
           setError(response.error || 'Failed to fetch project status');
         }
       } else {
         // Use traditional loading
         const response = await API.dashboard.getProjectStatus(projectId);
-        
+
         if (response.success && response.data) {
-          setDashboardData(response.data);
+          setDashboardData(response.data as ProjectDashboardData);
           setLastRefreshTime(new Date());
           // Cache the data
-          dashboardCache.set(projectId, response.data);
+          dashboardCache.set(projectId, response.data as ProjectDashboardData);
         } else {
           setError(response.error || 'Failed to fetch project status');
         }

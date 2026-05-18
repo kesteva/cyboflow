@@ -215,18 +215,19 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
       try {
         const response = await API.sessions.getOrCreateMainRepoSession(projectId);
         if (response.success && response.data) {
-          setMainRepoSessionId(response.data.id);
-          setMainRepoSession(response.data);
-          
+          const mainRepoData = response.data;
+          setMainRepoSessionId(mainRepoData.id);
+          setMainRepoSession(mainRepoData);
+
           // Subscribe to session updates
           const sessions = useSessionStore.getState().sessions;
-          const mainSession = sessions.find(s => s.id === response.data.id);
+          const mainSession = sessions.find(s => s.id === mainRepoData.id);
           if (mainSession) {
             setMainRepoSession(mainSession);
           }
-          
+
           // Set as active session
-          useSessionStore.getState().setActiveSession(response.data.id);
+          useSessionStore.getState().setActiveSession(mainRepoData.id);
         }
       } catch (error) {
         console.error('Failed to get main repo session:', error);

@@ -79,7 +79,7 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
     try {
       const response = await API.panels.getPrompts(panelId);
       if (response.success) {
-        setPrompts(response.data);
+        setPrompts(response.data as PromptMarker[]);
       }
     } catch (error) {
       console.error('Error fetching prompt markers:', error);

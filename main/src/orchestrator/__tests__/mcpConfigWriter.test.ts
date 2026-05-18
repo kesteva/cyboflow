@@ -6,22 +6,17 @@
  * 2. args array matches the bridge subprocess signature [bridgeScriptPath, runId, orchSocketPath]
  * 3. env vars CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET are both present and correct
  *
- * Tests use os.tmpdir() + a unique subdir for filesystem isolation; afterEach cleans up.
+ * Tests use withTempDir for filesystem isolation (auto-cleanup on exit).
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync, rmSync, mkdtempSync } from 'fs';
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
-import { randomUUID } from 'crypto';
 import { McpConfigWriter } from '../mcpConfigWriter';
+import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function makeTempDir(): string {
-  return mkdtempSync(join(tmpdir(), `mcpconfig-test-${randomUUID().slice(0, 8)}-`));
-}
 
 interface McpConfig {
   mcpServers: Record<
@@ -53,122 +48,105 @@ const FIXTURE_NODE_PATH = '/usr/local/bin/node';
 // ---------------------------------------------------------------------------
 
 describe('McpConfigWriter.writeForRun', () => {
-  const createdDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of createdDirs) {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // best-effort cleanup
-      }
-    }
-    createdDirs.length = 0;
-  });
-
   it('writes .mcp.json at worktree root', async () => {
-    const worktreePath = makeTempDir();
-    createdDirs.push(worktreePath);
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      const configPath = await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
 
-    const writer = new McpConfigWriter();
-    const configPath = await writer.writeForRun({
-      runId: FIXTURE_RUN_ID,
-      worktreePath,
-      orchSocketPath: FIXTURE_ORCH_SOCKET,
-      bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
-      nodeExecutablePath: FIXTURE_NODE_PATH,
+      expect(configPath).toBe(join(worktreePath, '.mcp.json'));
+
+      const config = readMcpJson(worktreePath);
+      expect(config.mcpServers).toBeDefined();
+      expect(config.mcpServers['cyboflow-permissions']).toBeDefined();
+      expect(typeof config.mcpServers['cyboflow-permissions']).toBe('object');
     });
-
-    expect(configPath).toBe(join(worktreePath, '.mcp.json'));
-
-    const config = readMcpJson(worktreePath);
-    expect(config.mcpServers).toBeDefined();
-    expect(config.mcpServers['cyboflow-permissions']).toBeDefined();
-    expect(typeof config.mcpServers['cyboflow-permissions']).toBe('object');
   });
 
   it('args match bridge subprocess signature [bridgeScriptPath, runId, orchSocketPath]', async () => {
-    const worktreePath = makeTempDir();
-    createdDirs.push(worktreePath);
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
 
-    const writer = new McpConfigWriter();
-    await writer.writeForRun({
-      runId: FIXTURE_RUN_ID,
-      worktreePath,
-      orchSocketPath: FIXTURE_ORCH_SOCKET,
-      bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
-      nodeExecutablePath: FIXTURE_NODE_PATH,
+      const config = readMcpJson(worktreePath);
+      const server = config.mcpServers['cyboflow-permissions'];
+
+      // command must be the node executable
+      expect(server.command).toBe(FIXTURE_NODE_PATH);
+
+      // args must be exactly 3 elements in the documented argv order
+      expect(server.args).toHaveLength(3);
+      expect(server.args[0]).toBe(FIXTURE_BRIDGE_SCRIPT);
+      expect(server.args[1]).toBe(FIXTURE_RUN_ID);
+      expect(server.args[2]).toBe(FIXTURE_ORCH_SOCKET);
     });
-
-    const config = readMcpJson(worktreePath);
-    const server = config.mcpServers['cyboflow-permissions'];
-
-    // command must be the node executable
-    expect(server.command).toBe(FIXTURE_NODE_PATH);
-
-    // args must be exactly 3 elements in the documented argv order
-    expect(server.args).toHaveLength(3);
-    expect(server.args[0]).toBe(FIXTURE_BRIDGE_SCRIPT);
-    expect(server.args[1]).toBe(FIXTURE_RUN_ID);
-    expect(server.args[2]).toBe(FIXTURE_ORCH_SOCKET);
   });
 
   it('env vars CYBOFLOW_RUN_ID and CYBOFLOW_ORCH_SOCKET are present and correct', async () => {
-    const worktreePath = makeTempDir();
-    createdDirs.push(worktreePath);
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
 
-    const writer = new McpConfigWriter();
-    await writer.writeForRun({
-      runId: FIXTURE_RUN_ID,
-      worktreePath,
-      orchSocketPath: FIXTURE_ORCH_SOCKET,
-      bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
-      nodeExecutablePath: FIXTURE_NODE_PATH,
+      const config = readMcpJson(worktreePath);
+      const env = config.mcpServers['cyboflow-permissions'].env;
+
+      expect(env.CYBOFLOW_RUN_ID).toBe(FIXTURE_RUN_ID);
+      expect(env.CYBOFLOW_ORCH_SOCKET).toBe(FIXTURE_ORCH_SOCKET);
     });
-
-    const config = readMcpJson(worktreePath);
-    const env = config.mcpServers['cyboflow-permissions'].env;
-
-    expect(env.CYBOFLOW_RUN_ID).toBe(FIXTURE_RUN_ID);
-    expect(env.CYBOFLOW_ORCH_SOCKET).toBe(FIXTURE_ORCH_SOCKET);
   });
 
   it('creates the worktree directory if it does not yet exist', async () => {
-    // Use a path inside a fresh temp dir that has not been created
-    const base = makeTempDir();
-    createdDirs.push(base);
-    const worktreePath = join(base, 'nested', 'worktree');
+    await withTempDir('mcpconfig-test-', async (base) => {
+      // Use a path inside the temp dir that has not been created
+      const worktreePath = join(base, 'nested', 'worktree');
 
-    const writer = new McpConfigWriter();
-    await writer.writeForRun({
-      runId: FIXTURE_RUN_ID,
-      worktreePath,
-      orchSocketPath: FIXTURE_ORCH_SOCKET,
-      bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
-      nodeExecutablePath: FIXTURE_NODE_PATH,
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
+
+      const config = readMcpJson(worktreePath);
+      expect(config.mcpServers['cyboflow-permissions']).toBeDefined();
     });
-
-    const config = readMcpJson(worktreePath);
-    expect(config.mcpServers['cyboflow-permissions']).toBeDefined();
   });
 
   it('written JSON is valid and pretty-printed (not minified)', async () => {
-    const worktreePath = makeTempDir();
-    createdDirs.push(worktreePath);
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
 
-    const writer = new McpConfigWriter();
-    await writer.writeForRun({
-      runId: FIXTURE_RUN_ID,
-      worktreePath,
-      orchSocketPath: FIXTURE_ORCH_SOCKET,
-      bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
-      nodeExecutablePath: FIXTURE_NODE_PATH,
+      const raw = readFileSync(join(worktreePath, '.mcp.json'), 'utf-8');
+      // Pretty-printed JSON has newlines
+      expect(raw).toContain('\n');
+      // Round-trips cleanly
+      expect(() => JSON.parse(raw)).not.toThrow();
     });
-
-    const raw = readFileSync(join(worktreePath, '.mcp.json'), 'utf-8');
-    // Pretty-printed JSON has newlines
-    expect(raw).toContain('\n');
-    // Round-trips cleanly
-    expect(() => JSON.parse(raw)).not.toThrow();
   });
 });

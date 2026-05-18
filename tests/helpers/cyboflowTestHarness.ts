@@ -17,66 +17,11 @@ import { RunLauncher } from '../../main/src/orchestrator/runLauncher';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
 import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
-import type { DatabaseLike, LoggerLike } from '../../main/src/orchestrator/types';
+import type { LoggerLike } from '../../main/src/orchestrator/types';
 import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
-
-// ---------------------------------------------------------------------------
-// DB schema — minimal tables needed for the gate test
-// ---------------------------------------------------------------------------
-
-const GATE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  workflow_path TEXT NOT NULL,
-  permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id INTEGER NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
-  permission_mode_snapshot TEXT NOT NULL,
-  worktree_path TEXT,
-  branch_name TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  tool_input_json TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
-  decided_at DATETIME,
-  decided_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
-);
-CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
-`;
+import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../../main/src/orchestrator/__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Null logger (suppresses noise during tests)
@@ -134,10 +79,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   db.exec(GATE_SCHEMA);
 
   // Adapt better-sqlite3 to DatabaseLike interface
-  const dbLike: DatabaseLike = {
-    prepare: (sql: string) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) => db.transaction(fn) as (...args: unknown[]) => T,
-  };
+  const dbLike = dbAdapter(db);
 
   const runQueueRegistry = new RunQueueRegistry();
   const approvalRouter = new ApprovalRouter(
@@ -278,6 +220,8 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   const harness: CyboflowTestHarness = {
     async launchPair({ projectPath, workflowA, workflowB, promptA, promptB }) {
       // Write minimal workflow .md files to temp paths (no permission_mode frontmatter → default)
+      // Manual lifecycle (not withTempDir) because the dir must survive across launchPair/teardown.
+      // See main/src/__test_fixtures__/tmp.ts for the per-test withTempDir pattern.
       workflowFixturesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-wf-'));
       const tmpDir = workflowFixturesDir;
       const wfPathA = path.join(tmpDir, `${workflowA}.md`);
@@ -296,7 +240,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
       const workflows = (
         db
           .prepare('SELECT id, name FROM workflows WHERE project_id = ? ORDER BY name')
-          .all(PROJECT_ID) as Array<{ id: number; name: string }>
+          .all(PROJECT_ID) as Array<{ id: string; name: string }>
       );
 
       const wfRowA = workflows.find((w) => w.name === workflowA);

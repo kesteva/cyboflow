@@ -7,10 +7,10 @@ CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,
   project_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  description TEXT,
-  spec_json TEXT NOT NULL,           -- full workflow spec (prompt, policy, model, etc.)
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  spec_json TEXT NOT NULL DEFAULT '{}',
+  workflow_path TEXT,
+  permission_mode TEXT NOT NULL DEFAULT 'default',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 2. workflow_runs: one row per execution attempt; carries the 8-state machine
@@ -18,11 +18,14 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY,
   workflow_id TEXT NOT NULL,
   project_id INTEGER NOT NULL,
-  worktree_path TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
-  policy_json TEXT NOT NULL,         -- snapshot of approval/tool policy at start
-  stuck_at DATETIME,                 -- nullable; populated by stuck-detector (epic 10)
-  stuck_reason TEXT,                 -- nullable; short tag, e.g. 'no_progress', 'awaiting_input'
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
+  permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
+  worktree_path TEXT,
+  branch_name TEXT,
+  policy_json TEXT,                   -- nullable snapshot of approval/tool policy at start
+  stuck_at DATETIME,                  -- nullable; populated by stuck-detector (epic 10)
+  stuck_reason TEXT,                  -- nullable; short tag, e.g. 'no_progress', 'awaiting_input'
+  error_message TEXT,                 -- nullable; set on 'failed' transition
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
@@ -70,3 +73,5 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_raw_events_type_run ON raw_events(event_type, run_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);

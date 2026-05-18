@@ -13,6 +13,7 @@
  */
 import type { WorkflowRow } from '../../../shared/types/workflows';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import type { IPCResponse } from './api';
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -52,11 +53,7 @@ function requireElectron(): NonNullable<Window['electron']> {
  */
 export async function listWorkflows({ projectId }: { projectId: number }): Promise<WorkflowRow[]> {
   const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:listWorkflows', { projectId }) as {
-    success: boolean;
-    data?: WorkflowRow[];
-    error?: string;
-  };
+  const res = await electron.invoke('cyboflow:listWorkflows', { projectId }) as IPCResponse<WorkflowRow[]>;
   if (!res.success) throw new Error(res.error ?? 'listWorkflows failed');
   return res.data ?? [];
 }
@@ -69,15 +66,11 @@ export async function startRun({
   workflowId,
   projectId,
 }: {
-  workflowId: number;
+  workflowId: string;
   projectId: number;
 }): Promise<StartRunResult> {
   const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:startRun', { workflowId, projectId }) as {
-    success: boolean;
-    data?: StartRunResult;
-    error?: string;
-  };
+  const res = await electron.invoke('cyboflow:startRun', { workflowId, projectId }) as IPCResponse<StartRunResult>;
   if (!res.success) throw new Error(res.error ?? 'startRun failed');
   if (!res.data) throw new Error('startRun: no data in response');
   return res.data;
@@ -143,10 +136,7 @@ export async function approveRun({
     runId,
     approvalId,
     decision,
-  }) as {
-    success: boolean;
-    error?: string;
-  };
+  }) as IPCResponse<unknown>;
   if (!res.success) throw new Error(res.error ?? 'approveRun failed');
 }
 

@@ -137,6 +137,32 @@ the renderer never accesses SQLite directly. SQL is hand-written (no ORM); use p
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
 
+### Schema reconciliation
+
+When modifying DDL for a table, run TWO greps and cover every match in `files_owned`
+(or document exclusions in `plan_decisions`):
+
+1. Inline-DDL consumers: `grep -rn 'CREATE TABLE.*<table>' main/src/ frontend/src/`
+2. Migration-file loaders: `grep -rn 'readFileSync.*<NNN>\|join.*migrations.*<NNN>' main/src/`
+
+Verify the column block with full `diff`, never `grep -A N` (the count is fragile and
+silently truncates). `schema.sql` (fresh install) and the highest-numbered migration
+(upgrade path) must be bidirectionally equivalent — every migration `CREATE TABLE IF NOT
+EXISTS` must be a no-op after `schema.sql` runs. When adding a column to a shipped
+migration, also search every test file's INSERT/SELECT for the old column list — missing
+columns surface as runtime `undefined`, not typecheck errors.
+
+### Extract-shared-utility refactors: prove completeness
+
+Any task that extracts a shared fixture, helper, type, or constant MUST grep the
+PRE-refactor pattern across the entire codebase (`main/src/ frontend/src/`) — not just
+the files already in the planner's sample. Every match that is a direct substitute for
+the new utility appears in `files_owned`; intentional exclusions (different shape,
+deferred epic, manual lifecycle) get a one-sentence note in `plan_decisions`. A plan that
+lists some but not all matches without exclusion notes leaves the codebase half-migrated.
+Recent regressions: TASK-603 (2 inline DDL sites), TASK-604 (5 inline `dbAdapter` copies),
+TASK-605 (2 `mkdtempSync` leaks) all shipped with the same root cause.
+
 ### `@cyboflow-hidden` annotation
 
 Mark intentionally-unreachable code at the top of the file (whole-component case) or
@@ -201,5 +227,15 @@ see `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts`.
 not the canonical client file it re-exports from. Mocking the re-export target works only
 by accident of ESM hoisting and breaks silently if the shim direction is ever flipped.
 Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:22`.
+
+### vitest config must wire `setupFiles` and `globals: true`
+
+Both workspace `vitest.config.ts` files set `globals: true` + `setupFiles:
+['./src/test/setup.ts']`. Do not flip to `globals: false` — `frontend/src/test/setup.ts`
+calls `expect.extend(...)` from `@testing-library/jest-dom` at module load, which throws
+`ReferenceError: expect is not defined` under `globals: false` and breaks every spec in
+the workspace. When adding a new `vitest.config.ts` in either workspace, mirror the
+existing files; before planning a test-wiring task, grep both `@testing-library/jest-dom`
+and `test/setup.ts` — do not rely on a `.test.*` glob.
 
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.

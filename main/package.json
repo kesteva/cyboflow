@@ -10,7 +10,7 @@
     "copy:assets": "mkdirp dist/main/src/database/migrations && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest",
+    "test": "vitest run",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage"
   },

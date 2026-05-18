@@ -25,43 +25,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
 import type { AppServices } from '../types';
-import type { LoggerLike, DatabaseLike } from '../../orchestrator/types';
-
-// ---------------------------------------------------------------------------
-// Schema for WorkflowRegistry (matching workflowRegistry.test.ts inline schema)
-// ---------------------------------------------------------------------------
-
-const REGISTRY_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  workflow_path TEXT NOT NULL,
-  permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id INTEGER NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
-  permission_mode_snapshot TEXT NOT NULL,
-  worktree_path TEXT,
-  branch_name TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id)
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
-`;
+import type { LoggerLike } from '../../orchestrator/types';
+import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
+import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,14 +40,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 function makeSilentLogger(): LoggerLike {
@@ -256,12 +216,10 @@ describe('registerCyboflowHandlers — cyboflow:listWorkflows', () => {
 
 describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   let db: Database.Database;
-  let tmpDir: string;
 
   beforeEach(() => {
     vi.resetModules();
     db = createTestDb();
-    tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-ipc-test-'));
   });
 
   it('registers a handler for the channel', async () => {
@@ -287,7 +245,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
     );
 
     const result = await invoke(handlers, 'cyboflow:startRun', {
-      workflowId: 1,
+      workflowId: 'some-workflow-id',
       projectId: 999,
     }) as { success: boolean; error?: string };
 
@@ -296,53 +254,56 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   });
 
   it('returns { success: true, data: { runId, worktreePath, branchName } } on happy path', async () => {
-    const { registerCyboflowHandlers } = await import('../cyboflow');
-    const services = makeServices(db);
+    await withTempDir('cyboflow-ipc-test-', async (tmpDir) => {
+      vi.resetModules();
+      const { registerCyboflowHandlers } = await import('../cyboflow');
+      const services = makeServices(db);
 
-    // Stub worktreeManager so no real FS work is done.
-    const wm = services.worktreeManager as unknown as {
-      createDeterministicWorktree: ReturnType<typeof vi.fn>;
-    };
-    wm.createDeterministicWorktree.mockResolvedValue({
-      worktreePath: `${tmpDir}/worktree`,
-      branchName: 'cyboflow/test-run',
+      // Stub worktreeManager so no real FS work is done.
+      const wm = services.worktreeManager as unknown as {
+        createDeterministicWorktree: ReturnType<typeof vi.fn>;
+      };
+      wm.createDeterministicWorktree.mockResolvedValue({
+        worktreePath: `${tmpDir}/worktree`,
+        branchName: 'cyboflow/test-run',
+      });
+
+      const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
+      getProjectById.mockReturnValue({ id: 1, path: tmpDir, name: 'test-project' });
+
+      const { ipcMain, handlers } = makeHandlerCapture();
+      registerCyboflowHandlers(
+        ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+        services,
+      );
+
+      // First, seed workflows for projectId 1 so the registry has a workflow row
+      await invoke(handlers, 'cyboflow:listWorkflows', { projectId: 1 });
+
+      // Retrieve the workflowId that was just seeded
+      interface IdRow { id: string }
+      const row = db
+        .prepare('SELECT id FROM workflows WHERE project_id = 1 LIMIT 1')
+        .get() as IdRow | undefined;
+      expect(row).toBeDefined();
+      const workflowId = row!.id;
+
+      const result = await invoke(handlers, 'cyboflow:startRun', {
+        workflowId,
+        projectId: 1,
+      }) as {
+        success: boolean;
+        data?: { runId: string; worktreePath: string; branchName: string };
+        error?: string;
+      };
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(typeof result.data!.runId).toBe('string');
+      expect(result.data!.runId.length).toBeGreaterThan(0);
+      expect(result.data!.worktreePath).toBeTruthy();
+      expect(result.data!.branchName).toBeTruthy();
     });
-
-    const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
-    getProjectById.mockReturnValue({ id: 1, path: tmpDir, name: 'test-project' });
-
-    const { ipcMain, handlers } = makeHandlerCapture();
-    registerCyboflowHandlers(
-      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
-      services,
-    );
-
-    // First, seed workflows for projectId 1 so the registry has a workflow row
-    await invoke(handlers, 'cyboflow:listWorkflows', { projectId: 1 });
-
-    // Retrieve the workflowId that was just seeded
-    interface IdRow { id: number }
-    const row = db
-      .prepare('SELECT id FROM workflows WHERE project_id = 1 LIMIT 1')
-      .get() as IdRow | undefined;
-    expect(row).toBeDefined();
-    const workflowId = row!.id;
-
-    const result = await invoke(handlers, 'cyboflow:startRun', {
-      workflowId,
-      projectId: 1,
-    }) as {
-      success: boolean;
-      data?: { runId: string; worktreePath: string; branchName: string };
-      error?: string;
-    };
-
-    expect(result.success).toBe(true);
-    expect(result.data).toBeDefined();
-    expect(typeof result.data!.runId).toBe('string');
-    expect(result.data!.runId.length).toBeGreaterThan(0);
-    expect(result.data!.worktreePath).toBeTruthy();
-    expect(result.data!.branchName).toBeTruthy();
   });
 });
 

@@ -16,7 +16,7 @@ interface WorkflowPickerProps {
 
 export function WorkflowPicker({ projectId }: WorkflowPickerProps) {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,7 +72,7 @@ export function WorkflowPicker({ projectId }: WorkflowPickerProps) {
       {!isLoading && workflows.length > 0 && (
         <select
           value={selectedId ?? ''}
-          onChange={(e) => setSelectedId(Number(e.target.value))}
+          onChange={(e) => setSelectedId(e.target.value)}
           className="w-full rounded border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
           aria-label="Select workflow"
         >
