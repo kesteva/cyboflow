@@ -1,12 +1,18 @@
 /**
  * Shared SQL fixture for cyboflow registry tests.
  *
- * Source of truth: main/src/database/schema.sql (post-TASK-598 reconciliation).
- * Any column added to workflows or workflow_runs in schema.sql MUST be added
- * here too. The fixture intentionally inlines the DDL (rather than reading
- * schema.sql at test runtime) so the test surface is hermetic — reading
- * schema.sql at runtime would couple tests to the file's exact byte layout,
- * which is fragile.
+ * Source of truth:
+ *   - REGISTRY_SCHEMA (workflows, workflow_runs):
+ *       main/src/database/schema.sql (post-TASK-598 reconciliation).
+ *   - GATE_SCHEMA additions (approvals, raw_events):
+ *       main/src/database/migrations/006_cyboflow_schema.sql.
+ * Any column added to those tables at the canonical site MUST be
+ * mirrored here too.
+ *
+ * The fixture intentionally inlines the DDL (rather than reading the canonical
+ * files at test runtime) so the test surface is hermetic — reading the source
+ * files at runtime would couple tests to their exact byte layout, which is
+ * fragile.
  *
  * GATE_SCHEMA extends REGISTRY_SCHEMA with the approvals + raw_events tables
  * needed by the day-3 gate integration harness (tests/helpers/cyboflowTestHarness.ts).
@@ -49,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workfl
 /**
  * GATE_SCHEMA extends REGISTRY_SCHEMA with the approvals + raw_events tables
  * needed by the day-3 gate integration harness.
+ * Source of truth for these tables: main/src/database/migrations/006_cyboflow_schema.sql.
  */
 export const GATE_SCHEMA = REGISTRY_SCHEMA + `
 CREATE TABLE IF NOT EXISTS approvals (
@@ -62,7 +69,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   decided_at DATETIME,
   decided_by TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
+  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at);
 
@@ -72,7 +79,7 @@ CREATE TABLE IF NOT EXISTS raw_events (
   event_type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
+  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
 `;
