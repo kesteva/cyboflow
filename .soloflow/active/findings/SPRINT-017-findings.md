@@ -1,11 +1,21 @@
 ---
 sprint: SPRINT-017
-pending_count: 4
-last_updated: "2026-05-18T22:30:00.000Z"
+pending_count: 5
+last_updated: "2026-05-18T23:15:00.000Z"
 ---
 # Findings Queue
 
 SPRINT-017 started with missing infra: docker; tests deferred.
+
+## FIND-SPRINT-017-6
+- **source:** TASK-616 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/approvals.ts:4-8
+- **description:** The file-header docstring listing the procedures exposed by `cyboflow.approvals` was updated in TASK-406 to include `approveRestOfRun` but was not updated in TASK-616 to include `rejectRestOfRun`. The new procedure is correctly defined and documented inline (lines 121-149), but the top-of-file procedure index is now stale — readers grepping the header to enumerate the surface will miss `rejectRestOfRun`. Pure docstring; no behavioral impact.
+- **suggested_action:** Add `*   - rejectRestOfRun   : mutation → { decided: number } (TASK-616 — per-run batch reject)` line after the `approveRestOfRun` bullet at line 8.
+- **resolved_by:** 
 
 ## FIND-SPRINT-017-5
 - **source:** TASK-608 (code-reviewer)
