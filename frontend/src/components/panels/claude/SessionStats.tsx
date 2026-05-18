@@ -72,7 +72,7 @@ export const SessionStats: React.FC<SessionStatsProps> = ({ sessionId }) => {
         setLoading(true);
         const response = await API.sessions.getStatistics(sessionId);
         if (response.success && response.data) {
-          setStatistics(response.data);
+          setStatistics(response.data as SessionStatistics);
         } else {
           setError(response.error || 'Failed to load statistics');
         }
