@@ -70,12 +70,14 @@ function makeLoggerLike(services: AppServices): LoggerLike {
   }
   // The Logger class exposes info/warn/error but not debug, and its signatures
   // only accept (message: string, error?: Error).  Wrap to satisfy LoggerLike.
+  // Stringify the optional context and append it to the message so callers
+  // that pass { path, error, ... } bags don't silently lose those fields.
   const logger = services.logger;
   return {
-    info:  (msg) => logger.info(msg),
-    warn:  (msg) => logger.warn(msg),
-    error: (msg) => logger.error(msg),
-    debug: (msg) => console.debug(msg),
+    info:  (msg: string, ctx?: Record<string, unknown>) => logger.info(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
+    warn:  (msg: string, ctx?: Record<string, unknown>) => logger.warn(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
+    error: (msg: string, ctx?: Record<string, unknown>) => logger.error(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
+    debug: (msg: string, ctx?: Record<string, unknown>) => console.debug(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
   };
 }
 
