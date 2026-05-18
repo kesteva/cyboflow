@@ -1,5 +1,5 @@
 ---
-id: TASK-589
+id: TASK-649
 idea: SPRINT-007-compound
 status: ready
 created: 2026-05-14T00:00:00Z
@@ -94,7 +94,7 @@ test_strategy:
      );
    });
    ```
-   The cast `logger as unknown as Logger` mirrors how production logger usage is typed. If TASK-587 (the constructor-DI task) lands first and adds a 5th `db` arg, this construction takes a 5th arg too; the order of the two tasks doesn't matter for this step — apply the merge resolution at execution time.
+   The cast `logger as unknown as Logger` mirrors how production logger usage is typed. If TASK-647 (the constructor-DI task) lands first and adds a 5th `db` arg, this construction takes a 5th arg too; the order of the two tasks doesn't matter for this step — apply the merge resolution at execution time.
 
 3. **Add a new test case asserting `warn` is called on the assertTransitionAllowed catch branch.** The production code at `claudeCodeManager.ts:341-347` calls `logger?.warn(...)` if `assertTransitionAllowed` throws. With hardcoded literals `('running', 'completed', payload.runId)`, the call does not throw in practice — but `transitionToAwaitingReview` at line 386-396 (in `tryTransitionToAwaitingReview`) DOES throw `TransitionRejectedError` whenever the `workflow_runs` row is missing (the v1 default state). However, that method is private and not invoked by `setupProcessHandlers` directly. The cleaner approach is to test the warn-path through the `RawEventsSink` constructor failure mode, which is exercised every time `parseCliOutput` feeds invalid JSON.
 
@@ -119,7 +119,7 @@ test_strategy:
 
 4. **Decide on the legacy `undefined` test cases.** The existing 7 tests in the file pass `undefined` as the logger arg. After step 2, the `beforeEach` constructs the `manager` once with the spy logger, and every test uses it — no per-test override is needed. Verify by reading through tests AC-1 through AC-7: every one of them uses `manager.callSetupProcessHandlers(pty, ...)` against the `beforeEach`-constructed manager. No test rebuilds the manager mid-test. Single-construction refactor is sufficient.
 
-   Edge case: AC-5 (degraded mode test) constructs a fresh state by toggling `setSharedDb(null)`. If TASK-587 lands first, AC-5 is gone (replaced by the constructor-throw test). If this task (TASK-589) lands first, AC-5 stays as-is and uses the spy logger via `beforeEach` — no change needed; the toggle of `sharedDb` is orthogonal to the logger.
+   Edge case: AC-5 (degraded mode test) constructs a fresh state by toggling `setSharedDb(null)`. If TASK-647 lands first, AC-5 is gone (replaced by the constructor-throw test). If this task (TASK-649) lands first, AC-5 stays as-is and uses the spy logger via `beforeEach` — no change needed; the toggle of `sharedDb` is orthogonal to the logger.
 
 5. **Run the verification gates** (paste exact commands; all must exit 0 before reporting COMPLETED):
    ```bash
