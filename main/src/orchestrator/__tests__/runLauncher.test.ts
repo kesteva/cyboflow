@@ -20,9 +20,10 @@ import { RunLauncher } from '../runLauncher';
 import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { LoggerLike, DatabaseLike } from '../types';
+import type { LoggerLike } from '../types';
 import type { McpConfigWriter } from '../mcpConfigWriter';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,14 +34,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql: string) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 function makeLogger(): LoggerLike {

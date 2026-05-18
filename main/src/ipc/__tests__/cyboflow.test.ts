@@ -29,8 +29,9 @@ import { mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { AppServices } from '../types';
-import type { LoggerLike, DatabaseLike } from '../../orchestrator/types';
+import type { LoggerLike } from '../../orchestrator/types';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,14 +42,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 function makeSilentLogger(): LoggerLike {

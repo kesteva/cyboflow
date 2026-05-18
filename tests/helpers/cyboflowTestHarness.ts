@@ -17,10 +17,11 @@ import { RunLauncher } from '../../main/src/orchestrator/runLauncher';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
 import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
-import type { DatabaseLike, LoggerLike } from '../../main/src/orchestrator/types';
+import type { LoggerLike } from '../../main/src/orchestrator/types';
 import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
 import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
+import { dbAdapter } from '../../main/src/orchestrator/__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Null logger (suppresses noise during tests)
@@ -78,10 +79,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   db.exec(GATE_SCHEMA);
 
   // Adapt better-sqlite3 to DatabaseLike interface
-  const dbLike: DatabaseLike = {
-    prepare: (sql: string) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) => db.transaction(fn) as (...args: unknown[]) => T,
-  };
+  const dbLike = dbAdapter(db);
 
   const runQueueRegistry = new RunQueueRegistry();
   const approvalRouter = new ApprovalRouter(
