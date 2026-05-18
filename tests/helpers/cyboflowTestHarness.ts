@@ -14,6 +14,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options, HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { WorkflowRegistry } from '../../main/src/orchestrator/workflowRegistry';
 import { RunLauncher } from '../../main/src/orchestrator/runLauncher';
+import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../../main/src/orchestrator/runLauncher';
+import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
 import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
@@ -249,8 +251,16 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
         throw new Error(`launchPair: could not find seeded workflow rows for ${workflowA}/${workflowB}`);
       }
 
-      // RunLauncher (no MCP config writer — the gate uses SDK PreToolUse, not a bridge)
-      const runLauncher = new RunLauncher(dbLike, workflowRegistry, worktreeManager, nullLogger);
+      // RunLauncher — stub MCP collaborators: the gate uses SDK PreToolUse, not a bridge,
+      // so MCP config writes are no-ops.  All 4 collaborators are required by the constructor.
+      const stubOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => '' };
+      const stubBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '' };
+      const stubNodeResolver: NodeResolver = { getNodePath: async () => process.execPath };
+      const stubMcpConfigWriter = new McpConfigWriter();
+      const runLauncher = new RunLauncher(
+        dbLike, workflowRegistry, worktreeManager, nullLogger,
+        stubMcpConfigWriter, stubOrchSocketProvider, stubBridgeScriptResolver, stubNodeResolver,
+      );
 
       const [launchA, launchB] = await Promise.all([
         runLauncher.launch(wfRowA.id, projectPath),

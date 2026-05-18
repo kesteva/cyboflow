@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 /**
  * Unit tests for useReviewQueueKeyboard.
  *
@@ -19,17 +18,21 @@ import type { Approval } from '../../../../shared/types/approvals';
 // tRPC mock — use vi.hoisted so variables are available before vi.mock hoisting
 // ---------------------------------------------------------------------------
 
-const { mockApproveMutate, mockRejectMutate } = vi.hoisted(() => ({
-  mockApproveMutate: vi.fn().mockResolvedValue(undefined),
-  mockRejectMutate:  vi.fn().mockResolvedValue(undefined),
+const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate, mockRejectRestOfRunMutate } = vi.hoisted(() => ({
+  mockApproveMutate:           vi.fn().mockResolvedValue(undefined),
+  mockRejectMutate:            vi.fn().mockResolvedValue(undefined),
+  mockApproveRestOfRunMutate:  vi.fn().mockResolvedValue({ decided: 0 }),
+  mockRejectRestOfRunMutate:   vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
 vi.mock('../../utils/trpcClient', () => ({
   trpc: {
     cyboflow: {
       approvals: {
-        approve: { mutate: mockApproveMutate },
-        reject:  { mutate: mockRejectMutate  },
+        approve:           { mutate: mockApproveMutate           },
+        reject:            { mutate: mockRejectMutate            },
+        approveRestOfRun:  { mutate: mockApproveRestOfRunMutate  },
+        rejectRestOfRun:   { mutate: mockRejectRestOfRunMutate   },
       },
     },
   },
@@ -140,6 +143,7 @@ describe('useReviewQueueKeyboard — y/n mutations on single items', () => {
     act(() => { press('y'); });
     expect(mockApproveMutate).toHaveBeenCalledTimes(1);
     expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'a' });
+    expect(mockApproveRestOfRunMutate).not.toHaveBeenCalled();
     expect(result.current.focusedIndex).toBe(0); // index unchanged
   });
 
@@ -164,23 +168,22 @@ describe('useReviewQueueKeyboard — y/n mutations on group items', () => {
     vi.clearAllMocks();
   });
 
-  it('y on a group item calls approve.mutate for each member', () => {
-    const queue: QueueItem[] = [groupItem(['g1', 'g2', 'g3'])];
+  it('y on a group item calls approveRestOfRun.mutate once with the group runId', () => {
+    const queue: QueueItem[] = [groupItem(['g1', 'g2', 'g3'], 'run-42')];
     renderHook(() => useReviewQueueKeyboard(queue));
     act(() => { press('y'); });
-    expect(mockApproveMutate).toHaveBeenCalledTimes(3);
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g1' });
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g2' });
-    expect(mockApproveMutate).toHaveBeenCalledWith({ approvalId: 'g3' });
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-42' });
+    expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 
-  it('n on a group item calls reject.mutate for each member', () => {
-    const queue: QueueItem[] = [groupItem(['r1', 'r2'])];
+  it('n on a group item calls rejectRestOfRun.mutate once with the group runId -- not per-member reject', () => {
+    const queue: QueueItem[] = [groupItem(['r1', 'r2', 'r3'], 'run-42')];
     renderHook(() => useReviewQueueKeyboard(queue));
     act(() => { press('n'); });
-    expect(mockRejectMutate).toHaveBeenCalledTimes(2);
-    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r1' });
-    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r2' });
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledTimes(1);
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-42' });
+    expect(mockRejectMutate).not.toHaveBeenCalled();
   });
 });
 
@@ -277,6 +280,65 @@ describe('useReviewQueueKeyboard — modifier key guard', () => {
       fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
     });
     expect(mockRejectMutate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Focus guard for non-input focusable elements (e.g. Radix focus traps)
+// ---------------------------------------------------------------------------
+
+describe('useReviewQueueKeyboard — focus guard for non-input focusable elements', () => {
+  let focusableDiv: HTMLDivElement;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    focusableDiv = document.createElement('div');
+    focusableDiv.tabIndex = 0;
+    document.body.appendChild(focusableDiv);
+  });
+
+  afterEach(() => {
+    document.body.removeChild(focusableDiv);
+    // Restore focus to body so other tests are not affected.
+    document.body.focus();
+  });
+
+  it('j is a no-op when a Radix-style focusable <div> holds focus', () => {
+    const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    focusableDiv.focus();
+    expect(document.activeElement).toBe(focusableDiv);
+
+    act(() => {
+      fireEvent.keyDown(window, { key: 'j', metaKey: false, ctrlKey: false, altKey: false });
+    });
+
+    expect(result.current.focusedIndex).toBe(0);
+  });
+
+  it('y is a no-op when a Radix-style focusable <div> holds focus (no mutation fires)', () => {
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    focusableDiv.focus();
+    expect(document.activeElement).toBe(focusableDiv);
+
+    act(() => {
+      fireEvent.keyDown(window, { key: 'y', metaKey: false, ctrlKey: false, altKey: false });
+    });
+
+    expect(mockApproveMutate).not.toHaveBeenCalled();
+    expect(mockApproveRestOfRunMutate).not.toHaveBeenCalled();
+  });
+
+  it('j still advances focusedIndex when document.activeElement is document.body', () => {
+    const { result } = renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    // jsdom starts with body as activeElement; call focus() explicitly to be certain.
+    document.body.focus();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      press('j');
+    });
+
+    expect(result.current.focusedIndex).toBe(1);
   });
 });
 

@@ -2,11 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Modal, ModalBody } from './ui/Modal';
 
 // Type for preferences IPC response
-interface IPCResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-}
+import type { IPCResponse } from '../utils/api';
 
 interface DiscordPopupProps {
   isOpen: boolean;

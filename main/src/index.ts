@@ -28,12 +28,16 @@ import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
-import { EventEmitter } from 'node:events';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import type { DatabaseLike } from './orchestrator/types';
+import { WorkflowRegistry } from './orchestrator/workflowRegistry';
+import { RunLauncher } from './orchestrator/runLauncher';
+import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
+import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
+import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -539,6 +543,64 @@ async function initializeServices() {
     getMainWindow: () => mainWindow
   });
 
+  // ---------------------------------------------------------------------------
+  // Cyboflow orchestrator collaborators — constructed here so they are eager
+  // singletons assembled with the rest of AppServices (not lazy on first IPC).
+  // ---------------------------------------------------------------------------
+  const cyboflowLogger = makeLoggerLike(logger);
+  const cyboflowDb = makeDatabaseLike(databaseService);
+  const workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
+  const mcpConfigWriter = new McpConfigWriter();
+
+  // Concrete publisher: adapts BrowserWindow.webContents.send to the
+  // StreamEventPublisher interface.  This is the only place in the codebase
+  // that calls win.webContents.send for cyboflow stream events, keeping
+  // the electron import out of main/src/orchestrator/.
+  const cyboflowPublisher: StreamEventPublisher = {
+    publish: (runId, event) => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed()) return;
+      win.webContents.send(`cyboflow:stream:${runId}`, event);
+    },
+  };
+
+  // OrchSocketProvider — TODO(epic 7): permissionIpcServer is not yet on
+  // AppServices.  The sentinel throws at call time so any code path that
+  // reaches getSocketPath() surfaces a loud, traceable error instead of
+  // silently producing a broken socket path.
+  const orchSocketProvider: OrchSocketProvider = {
+    getSocketPath: () => {
+      throw new Error('cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)');
+    },
+  };
+
+  // BridgeScriptResolver — TODO(epic 7): ASAR extraction of the bridge
+  // script is not yet implemented.  The sentinel throws at call time so
+  // missing wiring fails loudly rather than resolving to a phantom path.
+  const bridgeScriptResolver: BridgeScriptResolver = {
+    getScriptPath: () => {
+      throw new Error('cyboflow: bridgeScriptResolver not yet wired (epic 7 owns ASAR extraction)');
+    },
+  };
+
+  // NodeResolver — returns the process's own node executable path as a
+  // best-effort fallback.  A proper findExecutableInPath ladder is epic 7.
+  const nodeResolver: NodeResolver = {
+    getNodePath: async () => process.execPath,
+  };
+
+  const runLauncher = new RunLauncher(
+    cyboflowDb,
+    workflowRegistry,
+    worktreeManager,
+    cyboflowLogger,
+    mcpConfigWriter,
+    orchSocketProvider,
+    bridgeScriptResolver,
+    nodeResolver,
+    cyboflowPublisher,
+  );
+
   const services: AppServices = {
     app,
     configManager,
@@ -559,6 +621,7 @@ async function initializeServices() {
     logger,
     archiveProgressManager,
     analyticsManager,
+    cyboflow: { workflowRegistry, runLauncher },
   };
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
@@ -601,19 +664,9 @@ app.whenReady().then(async () => {
     // type-erasure cast (as unknown as DatabaseLike) that previously bypassed
     // the structural check and would have thrown at runtime if any orchestrator
     // code called db.prepare() or db.transaction().
-    const db: DatabaseLike = {
-      prepare: (sql) => databaseService.getDb().prepare(sql),
-      transaction: (fn) => databaseService.getDb().transaction(fn),
-    };
-    // Logger adapter: Logger class satisfies info/warn/error but does not
-    // declare `debug`. Provide an inline adapter that satisfies LoggerLike.
-    const loggerLike: import('./orchestrator/types').LoggerLike = {
-      info: (msg: string) => logger.info(msg),
-      warn: (msg: string) => logger.warn(msg),
-      error: (msg: string) => logger.error(msg),
-      debug: (msg: string) => logger.info(`[debug] ${msg}`),
-    };
-    orchestrator = new Orchestrator({ db, logger: loggerLike, eventBus: new EventEmitter(), runQueues });
+    const db = makeDatabaseLike(databaseService);
+    const loggerLike = makeLoggerLike(logger);
+    orchestrator = new Orchestrator({ db, logger: loggerLike, runQueues });
     await orchestrator.start();
     if (!mainWindow) {
       throw new Error(

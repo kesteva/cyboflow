@@ -74,7 +74,8 @@ export interface StuckDetectorDeps {
   claudeManager: ClaudeManagerLike;
   /** Optional — when omitted, stale_socket classification is skipped. */
   permissionServer?: PermissionServerLike;
-  eventBus: EventEmitter;
+  /** Per-component event emitter for publishing 'runs:stuck' events. */
+  emitter: EventEmitter;
   logger: LoggerLike;
 }
 
@@ -86,7 +87,7 @@ export class StuckDetector {
   private readonly db: DatabaseLike;
   private readonly claudeManager: ClaudeManagerLike;
   private readonly permissionServer: PermissionServerLike | undefined;
-  private readonly eventBus: EventEmitter;
+  private readonly emitter: EventEmitter;
   private readonly logger: LoggerLike;
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -105,7 +106,7 @@ export class StuckDetector {
     this.db = deps.db;
     this.claudeManager = deps.claudeManager;
     this.permissionServer = deps.permissionServer;
-    this.eventBus = deps.eventBus;
+    this.emitter = deps.emitter;
     this.logger = deps.logger;
 
     this.stmtStaleApprovals = this.db.prepare(
@@ -278,7 +279,7 @@ export class StuckDetector {
         reason,
         detectedAt,
       };
-      this.eventBus.emit('runs:stuck', event);
+      this.emitter.emit('runs:stuck', event);
     }
   }
 }

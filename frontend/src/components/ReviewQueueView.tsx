@@ -6,11 +6,7 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
 import OnboardingCard, { dismissOnboarding } from './OnboardingCard';
 
 // Type for IPC response
-interface IPCResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-}
+import type { IPCResponse } from '../utils/api';
 
 function itemId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.id : item.items[0].id;
@@ -30,9 +26,7 @@ export default function ReviewQueueView() {
   // One-shot ref guards against writing the preference more than once.
   const onboardingDismissedRef = useRef(false);
 
-  useEffect(() => {
-    useReviewQueueStore.getState().init();
-  }, []);
+  useEffect(() => useReviewQueueStore.getState().init(), []);
 
   // Read the onboarding preference on mount to initialise lifted state.
   useEffect(() => {

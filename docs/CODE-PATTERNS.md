@@ -89,6 +89,12 @@ to a canonical example — read those for the actual implementation.
 - **Key exports:** `getDevDebugLogPath(stream)`, `appendDevDebugLog(stream, level, source, message, originalConsole?)`. Pass the pre-override `originalConsole.error` from inside `console.*` overrides to avoid recursion.
 - **Canonical example:** `main/src/index.ts` console-wrapper overrides and frontend webContents listener.
 
+### `main/src/orchestrator/__test_fixtures__/dbAdapter`
+
+- **Path:** `main/src/orchestrator/__test_fixtures__/dbAdapter.ts`
+- **Use it for:** Wrapping a `better-sqlite3` `Database` into the `DatabaseLike` (`{ prepare, transaction }`) shape required by orchestrator and tRPC handler tests. Do NOT clone locally — the `: DatabaseLike` return-type annotation is the build-time tripwire that catches future widening of `DatabaseLike`.
+- **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`; recurring drift fixed in FIND-SPRINT-017-11.
+
 ## Recurring Patterns
 
 ### Shared types as the cross-package contract

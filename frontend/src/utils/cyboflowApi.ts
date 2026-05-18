@@ -1,9 +1,9 @@
 /**
  * cyboflowApi — typed wrappers over the IPC surface for the cyboflow orchestrator.
  *
- * Currently routes through the existing `window.electron` IPC bridge.
- * When tRPC lands in epic 6, swap the internals of each function; component
- * call sites are unchanged.
+ * Currently routes through the raw-IPC bridge; tRPC migration is a separate
+ * future task (see docs/ARCHITECTURE.md "cyboflow.* transport status").
+ * Component call sites are unchanged when the internals are swapped.
  *
  * IPC channels:
  *   cyboflow:listWorkflows  — list workflows for a project (+ auto-seed)
@@ -83,7 +83,7 @@ export async function startRun({
  * function that removes the listener when the subscriber unmounts or the
  * runId changes.
  *
- * When tRPC lands: migrate to `trpc.cyboflow.events.onStreamEvent({ runId })`.
+ * When tRPC migration lands (TBD-tRPC-cutover): migrate to `trpc.cyboflow.events.onStreamEvent({ runId })`.
  */
 export function subscribeToStreamEvents({
   runId,
@@ -106,9 +106,9 @@ export function subscribeToStreamEvents({
 /**
  * Return a point-in-time snapshot of the MCP server's health.
  *
- * Routes through the generic invoke() bridge until the tRPC ipcLink lands
- * (orchestrator-and-trpc-router epic), at which point swap to
- * `trpc.cyboflow.health.mcpServer.query()`.
+ * Routes through the raw-IPC bridge; tRPC migration is a separate future task
+ * (TBD-tRPC-cutover, see docs/ARCHITECTURE.md "cyboflow.* transport status").
+ * When tRPC migration lands, swap to `trpc.cyboflow.health.mcpServer.query()`.
  */
 export async function getMcpHealth(): Promise<McpServerHealth> {
   const electron = requireElectron();

@@ -7,28 +7,28 @@
  *   cyboflow:approveRun     — approve / deny an approval request (stub; epic 7)
  *   cyboflow:mcp-health     — returns current MCP server health snapshot
  *
- * Collaborators (WorkflowRegistry, RunLauncher) are constructed lazily on
- * first call using the injected AppServices.  When epic 6 (orchestrator-and-
- * trpc-router) lands, replace the lazy-init blocks with proper singletons
- * instantiated during app startup.
+ * This file is the LIVE transport for the cyboflow.* procedure surface.
+ * The renderer (frontend/src/utils/cyboflowApi.ts) calls these channels via
+ * electron.invoke — NOT via the tRPC client.
+ *
+ * tRPC routers under main/src/orchestrator/trpc/routers/ are placeholders;
+ * this raw-IPC surface is the live transport for cyboflow.* procedures.
+ * See docs/ARCHITECTURE.md "cyboflow.* transport status" for the full decision.
+ *
+ * WorkflowRegistry and RunLauncher are constructed eagerly in main/src/index.ts
+ * as part of AppServices assembly (services.cyboflow.*). Handlers read these
+ * pre-built instances from services rather than constructing singletons here.
  */
 import { IpcMain } from 'electron';
 import * as os from 'os';
-import * as path from 'path';
 import type { AppServices } from './types';
-import { WorkflowRegistry, DEFAULT_SOLOFLOW_WORKFLOWS } from '../orchestrator/workflowRegistry';
-import { RunLauncher } from '../orchestrator/runLauncher';
-import type { StreamEventPublisher } from '../orchestrator/runLauncher';
-import type { LoggerLike } from '../orchestrator/types';
+import { resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows } from '../orchestrator/workflowRegistry';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
-// Module-level lazy singletons (reset on each hot-reload in dev; fine for prod)
+// OrchestratorHealth singleton (injected after McpServerLifecycle is wired)
 // ---------------------------------------------------------------------------
-
-let _workflowRegistry: WorkflowRegistry | null = null;
-let _runLauncher: RunLauncher | null = null;
 
 /**
  * Module-level OrchestratorHealth singleton.
@@ -55,77 +55,6 @@ export function setCyboflowHealth(health: OrchestratorHealth): void {
   _orchestratorHealth = health;
 }
 
-/**
- * Build a LoggerLike from AppServices.logger (which may be undefined or a
- * Logger instance whose method signatures don't fully match LoggerLike).
- * Falls back to a console-based shim.
- */
-function makeLoggerLike(services: AppServices): LoggerLike {
-  if (!services.logger) {
-    return {
-      info:  (msg, ctx) => console.info(msg, ctx ?? ''),
-      warn:  (msg, ctx) => console.warn(msg, ctx ?? ''),
-      error: (msg, ctx) => console.error(msg, ctx ?? ''),
-      debug: (msg, ctx) => console.debug(msg, ctx ?? ''),
-    };
-  }
-  // The Logger class exposes info/warn/error but not debug, and its signatures
-  // only accept (message: string, error?: Error).  Wrap to satisfy LoggerLike.
-  // Stringify the optional context and append it to the message so callers
-  // that pass { path, error, ... } bags don't silently lose those fields.
-  const logger = services.logger;
-  return {
-    info:  (msg: string, ctx?: Record<string, unknown>) => logger.info(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
-    warn:  (msg: string, ctx?: Record<string, unknown>) => logger.warn(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
-    error: (msg: string, ctx?: Record<string, unknown>) => logger.error(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
-    debug: (msg: string, ctx?: Record<string, unknown>) => console.debug(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
-  };
-}
-
-function getWorkflowRegistry(services: AppServices): WorkflowRegistry {
-  if (!_workflowRegistry) {
-    // WorkflowRegistry expects a DatabaseLike (narrow interface with .prepare / .transaction).
-    // DatabaseService wraps better-sqlite3 internally; getDb() exposes the raw handle that
-    // satisfies DatabaseLike.
-    _workflowRegistry = new WorkflowRegistry(
-      services.databaseService.getDb(),
-      makeLoggerLike(services),
-    );
-  }
-  return _workflowRegistry;
-}
-
-function getRunLauncher(services: AppServices): RunLauncher {
-  if (!_runLauncher) {
-    // Concrete publisher: adapts BrowserWindow.webContents.send to the
-    // StreamEventPublisher interface.  This is the only place in the codebase
-    // that calls win.webContents.send for cyboflow stream events, keeping
-    // the electron import out of main/src/orchestrator/.
-    const publisher: StreamEventPublisher = {
-      publish: (runId, event) => {
-        const win = services.getMainWindow();
-        if (!win || win.isDestroyed()) return;
-        win.webContents.send(`cyboflow:stream:${runId}`, event);
-      },
-    };
-
-    _runLauncher = new RunLauncher(
-      services.databaseService.getDb(),
-      getWorkflowRegistry(services),
-      services.worktreeManager,
-      makeLoggerLike(services),
-      // MCP collaborators (orchSocketProvider, bridgeScriptResolver, nodeResolver)
-      // are intentionally omitted here; those are wired in epic 6.
-      undefined, // mcpConfigWriter
-      undefined, // orchSocketProvider
-      undefined, // bridgeScriptResolver
-      undefined, // nodeResolver
-      publisher,
-    );
-  }
-  return _runLauncher;
-}
-
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -145,19 +74,16 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
     async (_event, args: { projectId: number }) => {
       try {
         const { projectId } = args;
-        const registry = getWorkflowRegistry(services);
 
-        let workflows = registry.listByProject(projectId);
+        let workflows = services.cyboflow.workflowRegistry.listByProject(projectId);
 
         if (workflows.length === 0) {
-          // Auto-seed the 5 SoloFlow defaults, resolving paths from $HOME.
+          // Auto-seed the 5 SoloFlow defaults, resolving paths from the plugin root.
           const homeDir = os.homedir();
-          const descriptors = DEFAULT_SOLOFLOW_WORKFLOWS.map((wf) => ({
-            name: wf.name,
-            path: path.join(homeDir, wf.pathFromHome),
-          }));
-          registry.seed(projectId, descriptors);
-          workflows = registry.listByProject(projectId);
+          const { root: pluginRoot } = resolveSoloFlowPluginRoot(homeDir);
+          const descriptors = buildDefaultSoloFlowWorkflows(pluginRoot);
+          services.cyboflow.workflowRegistry.seed(projectId, descriptors);
+          workflows = services.cyboflow.workflowRegistry.listByProject(projectId);
         }
 
         return { success: true, data: workflows };
@@ -190,8 +116,7 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
           return { success: false, error: `Project ${projectId} not found` };
         }
 
-        const launcher = getRunLauncher(services);
-        const { runId, worktreePath, branchName } = await launcher.launch(
+        const { runId, worktreePath, branchName } = await services.cyboflow.runLauncher.launch(
           workflowId,
           project.path,
         );
@@ -236,3 +161,4 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
     return _orchestratorHealth.getMcpServerStatus();
   });
 }
+

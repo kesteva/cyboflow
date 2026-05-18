@@ -78,3 +78,18 @@ export type ApproveRestOfRunInput = { runId: string };
  * Returns 0 (not an error) if the run has no pending approvals.
  */
 export type ApproveRestOfRunResult = { decided: number };
+
+/**
+ * Input type for the `cyboflow.approvals.rejectRestOfRun` mutation.
+ *
+ * Scoped to a single run — never affects approvals from other runs.
+ */
+export type RejectRestOfRunInput = { runId: string };
+
+/**
+ * Result type for the `cyboflow.approvals.rejectRestOfRun` mutation.
+ *
+ * `decided` is the count of pending approvals that were rejected in this call.
+ * Returns 0 (not an error) if the run has no pending approvals.
+ */
+export type RejectRestOfRunResult = { decided: number };
