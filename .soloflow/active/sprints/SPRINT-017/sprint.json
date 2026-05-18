@@ -6,10 +6,6 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-600": {
-      "status": "in_progress",
-      "started": "2026-05-18T21:08:22.102Z"
-    },
     "TASK-608": {
       "status": "pending"
     },
