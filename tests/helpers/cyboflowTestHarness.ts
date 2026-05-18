@@ -20,69 +20,7 @@ import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
 import type { DatabaseLike, LoggerLike } from '../../main/src/orchestrator/types';
 import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
-
-// ---------------------------------------------------------------------------
-// DB schema — minimal tables needed for the gate test
-// ---------------------------------------------------------------------------
-
-const GATE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflows (
-  id TEXT PRIMARY KEY,
-  project_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  spec_json TEXT NOT NULL DEFAULT '{}',
-  workflow_path TEXT,
-  permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
-  permission_mode_snapshot TEXT NOT NULL,
-  worktree_path TEXT,
-  branch_name TEXT,
-  policy_json TEXT,
-  stuck_at DATETIME,
-  stuck_reason TEXT,
-  error_message TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  started_at DATETIME,
-  ended_at DATETIME,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  tool_input_json TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
-  decided_at DATETIME,
-  decided_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id)
-);
-CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
-`;
+import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
 
 // ---------------------------------------------------------------------------
 // Null logger (suppresses noise during tests)
