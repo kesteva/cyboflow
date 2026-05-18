@@ -154,13 +154,13 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
   /**
    * cyboflow:startRun
    *
-   * Args: { workflowId: number, projectId: number }
+   * Args: { workflowId: string, projectId: number }
    * Returns: { success: true, data: { runId, worktreePath, branchName } }
    *        | { success: false, error: string }
    */
   ipcMain.handle(
     'cyboflow:startRun',
-    async (_event, args: { workflowId: number; projectId: number }) => {
+    async (_event, args: { workflowId: string; projectId: number }) => {
       try {
         const { workflowId, projectId } = args;
 

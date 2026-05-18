@@ -4,23 +4,23 @@
 
 -- 1. workflows: user-authored workflow definitions
 CREATE TABLE IF NOT EXISTS workflows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT PRIMARY KEY,
   project_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  workflow_path TEXT NOT NULL,
+  spec_json TEXT NOT NULL DEFAULT '{}',
+  workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, name)
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 2. workflow_runs: one row per execution attempt; carries the 8-state machine
 CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY,
-  workflow_id INTEGER NOT NULL,
+  workflow_id TEXT NOT NULL,
   project_id INTEGER NOT NULL,
-  worktree_path TEXT,
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
-  permission_mode_snapshot TEXT NOT NULL,
+  permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
+  worktree_path TEXT,
   branch_name TEXT,
   policy_json TEXT,                   -- nullable snapshot of approval/tool policy at start
   stuck_at DATETIME,                  -- nullable; populated by stuck-detector (epic 10)

@@ -125,12 +125,12 @@ describe('006_cyboflow_schema — workflow_runs CHECK constraint', () => {
     // Insert a parent workflow row first so the FK chain is satisfied
     freshDb
       .prepare(
-        `INSERT INTO workflows (project_id, name, workflow_path, permission_mode)
-         VALUES (1, 'Test Workflow', '/tmp/wf.md', 'default')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
 
-    const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: number };
+    const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     // Now try to insert a workflow_runs row with an invalid status
     expect(() => {
@@ -163,12 +163,12 @@ describe('006_cyboflow_schema — workflow_runs CHECK constraint', () => {
 
       freshDb
         .prepare(
-          `INSERT INTO workflows (project_id, name, workflow_path, permission_mode)
-           VALUES (1, 'Test Workflow', '/tmp/wf.md', 'default')`
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+           VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
         )
         .run();
 
-      const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: number };
+      const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
       expect(() => {
         freshDb
@@ -196,12 +196,12 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
     // Set up the FK chain: workflows → workflow_runs → approvals
     freshDb
       .prepare(
-        `INSERT INTO workflows (project_id, name, workflow_path, permission_mode)
-         VALUES (1, 'Test Workflow', '/tmp/wf.md', 'default')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
 
-    const wfRow1 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: number };
+    const wfRow1 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     freshDb
       .prepare(
@@ -230,12 +230,12 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
 
     freshDb
       .prepare(
-        `INSERT INTO workflows (project_id, name, workflow_path, permission_mode)
-         VALUES (1, 'Test Workflow', '/tmp/wf.md', 'default')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
 
-    const wfRow2 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: number };
+    const wfRow2 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     freshDb
       .prepare(
@@ -271,12 +271,12 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
 
       freshDb
         .prepare(
-          `INSERT INTO workflows (project_id, name, workflow_path, permission_mode)
-           VALUES (1, 'Test Workflow', '/tmp/wf.md', 'default')`
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+           VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
         )
         .run();
 
-      const wfRow3 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: number };
+      const wfRow3 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
       freshDb
         .prepare(
