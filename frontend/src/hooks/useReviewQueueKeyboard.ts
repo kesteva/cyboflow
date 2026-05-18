@@ -19,8 +19,8 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * Meta / Ctrl / Alt modifier combinations are ignored so as not to collide
  * with OS shortcuts (Cmd-K, Ctrl-N, etc.).
  *
- * For group items, y/n issue one mutation per member via Promise.all (batched).
- * TASK-406 will replace this with a single atomic per-run mutation.
+ * Group `y` dispatches `approveRestOfRun` atomically; group `n` fans out
+ * per-member because no `rejectRestOfRun` exists in v1.
  *
  * Implementation note: focusedIndex and queue are tracked via refs so the
  * keydown handler always reads the latest values without being recreated on
@@ -95,11 +95,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             if (focused.kind === 'single') {
               void trpc.cyboflow.approvals.approve.mutate({ approvalId: focused.approval.id });
             } else {
-              void Promise.all(
-                focused.items.map((a) =>
-                  trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id }),
-                ),
-              );
+              void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId: focused.runId });
             }
           }
           break;
