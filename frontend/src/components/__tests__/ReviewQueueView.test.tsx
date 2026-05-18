@@ -9,7 +9,7 @@ import type { QueueItem } from '../../utils/reviewQueueSelectors';
 
 // Mutable state shared between mock factory and test helpers
 let mockQueue: Approval[] = [];
-const mockInit = vi.fn();
+const mockInit = vi.fn(() => () => {});
 
 // Default view: map each approval to a single non-blocking QueueItem
 function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
