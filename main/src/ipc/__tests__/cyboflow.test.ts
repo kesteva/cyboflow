@@ -37,27 +37,33 @@ import type { LoggerLike, DatabaseLike } from '../../orchestrator/types';
 
 const REGISTRY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS workflows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT PRIMARY KEY,
   project_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  workflow_path TEXT NOT NULL,
+  spec_json TEXT NOT NULL DEFAULT '{}',
+  workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(project_id, name)
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY,
-  workflow_id INTEGER NOT NULL,
+  workflow_id TEXT NOT NULL,
   project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
   permission_mode_snapshot TEXT NOT NULL,
   worktree_path TEXT,
   branch_name TEXT,
+  policy_json TEXT,
+  stuck_at DATETIME,
+  stuck_reason TEXT,
+  error_message TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+  started_at DATETIME,
+  ended_at DATETIME,
+  FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
@@ -287,7 +293,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
     );
 
     const result = await invoke(handlers, 'cyboflow:startRun', {
-      workflowId: 1,
+      workflowId: 'some-workflow-id',
       projectId: 999,
     }) as { success: boolean; error?: string };
 
@@ -321,7 +327,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
     await invoke(handlers, 'cyboflow:listWorkflows', { projectId: 1 });
 
     // Retrieve the workflowId that was just seeded
-    interface IdRow { id: number }
+    interface IdRow { id: string }
     const row = db
       .prepare('SELECT id FROM workflows WHERE project_id = 1 LIMIT 1')
       .get() as IdRow | undefined;
