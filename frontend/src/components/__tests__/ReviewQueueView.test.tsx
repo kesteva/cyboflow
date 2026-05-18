@@ -61,6 +61,24 @@ describe('ReviewQueueView', () => {
     expect(mockInit).toHaveBeenCalledTimes(1);
   });
 
+  it('invokes the unsubscribe returned by init() when the component unmounts', () => {
+    // mockInit returns a fresh spy unsubscribe for each render so we can
+    // assert that React called it as the useEffect cleanup.
+    const mockUnsubscribe = vi.fn();
+    mockInit.mockReturnValueOnce(mockUnsubscribe);
+
+    const { unmount } = render(<ReviewQueueView />);
+
+    // Before unmount the cleanup must not have fired yet.
+    expect(mockUnsubscribe).not.toHaveBeenCalled();
+
+    // Unmounting triggers React's useEffect cleanup → should invoke the
+    // unsubscribe returned by init().
+    unmount();
+
+    expect(mockUnsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('renders one card per approval in queue', () => {
     mockQueue = [
       { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
