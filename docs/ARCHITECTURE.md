@@ -79,6 +79,20 @@ Electron `ipcMain` handlers, one file per domain (`session.ts`, `git.ts`, `panel
 Currently raw Electron IPC; the target architecture (per system design §4) is `electron-trpc`
 for typed renderer ↔ orchestrator calls. `index.ts` registers all handlers at app start.
 
+#### cyboflow.* transport status
+
+Raw IPC handlers in `main/src/ipc/cyboflow.ts` own the `cyboflow.*` surface today
+(`cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:approveRun`, `cyboflow:mcp-health`).
+The tRPC routers under `main/src/orchestrator/trpc/routers/` (`runs.ts`, `approvals.ts`,
+`workflows.ts`) carry the SHAPE of the v2 contract but every procedure body is a placeholder
+— none of those procs is wired to a real implementation. The renderer (`frontend/src/utils/cyboflowApi.ts`)
+routes via `electron.invoke`, not via the tRPC client.
+
+The migration from raw IPC to tRPC is owned by a future task (placeholder ID: TBD-tRPC-cutover).
+Until that migration lands, the tRPC routers serve as documented type contracts for the
+renderer's future tRPC client, not as live transports. Each placeholder proc is annotated
+with the raw-IPC equivalent so the migration executor can grep-replace stubs with minimal diff.
+
 ### Renderer (`frontend/src/`)
 
 - **`components/panels/`** — Per-panel React components. Panel types: `claude/`, `codex/` (to

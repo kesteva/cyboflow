@@ -7,10 +7,17 @@
  *   cyboflow:approveRun     — approve / deny an approval request (stub; epic 7)
  *   cyboflow:mcp-health     — returns current MCP server health snapshot
  *
- * Collaborators (WorkflowRegistry, RunLauncher) are constructed lazily on
- * first call using the injected AppServices.  When epic 6 (orchestrator-and-
- * trpc-router) lands, replace the lazy-init blocks with proper singletons
- * instantiated during app startup.
+ * This file is the LIVE transport for the cyboflow.* procedure surface.
+ * The renderer (frontend/src/utils/cyboflowApi.ts) calls these channels via
+ * electron.invoke — NOT via the tRPC client.
+ *
+ * tRPC routers under main/src/orchestrator/trpc/routers/ are placeholders;
+ * this raw-IPC surface is the live transport for cyboflow.* procedures.
+ * See docs/ARCHITECTURE.md "cyboflow.* transport status" for the full decision.
+ *
+ * Lazy-init singletons remain pending TASK-608 (B11). Collaborators
+ * (WorkflowRegistry, RunLauncher) are constructed lazily on first call using
+ * the injected AppServices.
  */
 import { IpcMain } from 'electron';
 import * as os from 'os';
