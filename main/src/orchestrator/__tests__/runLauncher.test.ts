@@ -22,41 +22,7 @@ import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { LoggerLike, DatabaseLike } from '../types';
 import type { McpConfigWriter } from '../mcpConfigWriter';
-
-// ---------------------------------------------------------------------------
-// Schema (mirrors workflowRegistry.test.ts)
-// ---------------------------------------------------------------------------
-
-const REGISTRY_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflows (
-  id TEXT PRIMARY KEY,
-  project_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  spec_json TEXT NOT NULL DEFAULT '{}',
-  workflow_path TEXT,
-  permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
-  permission_mode_snapshot TEXT NOT NULL,
-  worktree_path TEXT,
-  branch_name TEXT,
-  policy_json TEXT,
-  stuck_at DATETIME,
-  stuck_reason TEXT,
-  error_message TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  started_at DATETIME,
-  ended_at DATETIME,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-);
-`;
+import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 
 // ---------------------------------------------------------------------------
 // Helpers
