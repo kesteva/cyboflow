@@ -417,6 +417,52 @@ describe('resolveSoloFlowPluginRoot', () => {
     expect(result.source).toBe('fallback');
     expect(result.root).toContain('soloflow-dev');
   });
+
+  it('whitespace-only SOLOFLOW_PLUGIN_ROOT is not treated as an override — falls through to discovery', () => {
+    // The resolver guards with `envOverride.trim() !== ''` so a value of e.g.
+    // '   ' (spaces only) must NOT return source:'env'.  Instead it should
+    // fall through to filesystem discovery (or fallback).
+    const fakeHome = mkdtempSync(join(tmpdir(), 'resolve-ws-fallback-'));
+    // Build one real version dir so we land on 'discovered' rather than
+    // 'fallback' — that lets us assert the guard without a console.warn spy.
+    const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+    mkdirSync(join(cacheDir, '0.10.5'), { recursive: true });
+
+    const result = resolveSoloFlowPluginRoot(fakeHome, {
+      SOLOFLOW_PLUGIN_ROOT: '   ',
+    });
+    expect(result.source).toBe('discovered');
+    expect(result.root).toBe(join(cacheDir, '0.10.5'));
+  });
+
+  it('SOLOFLOW_PLUGIN_ROOT with surrounding whitespace is trimmed before returning', () => {
+    // The resolver calls `.trim()` on the env-var value so a path written
+    // with accidental leading/trailing spaces still resolves correctly.
+    const fakeRoot = '/trimmed/soloflow/path';
+    const result = resolveSoloFlowPluginRoot('/home/test', {
+      SOLOFLOW_PLUGIN_ROOT: `  ${fakeRoot}  `,
+    });
+    expect(result.source).toBe('env');
+    expect(result.root).toBe(fakeRoot);
+  });
+
+  it('falls back when cacheDir exists but contains only non-semver entries', () => {
+    // If the cache directory exists but holds only directories whose names do
+    // not match the semver pattern (e.g. 'latest', '.DS_Store', 'node_modules'),
+    // the resolver must skip them all and fall through to the fallback path.
+    const fakeHome = mkdtempSync(join(tmpdir(), 'resolve-nonsemver-'));
+    const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+    for (const nonSemverName of ['latest', '.DS_Store', 'node_modules', '0.10']) {
+      mkdirSync(join(cacheDir, nonSemverName), { recursive: true });
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = resolveSoloFlowPluginRoot(fakeHome, {});
+    warnSpy.mockRestore();
+
+    expect(result.source).toBe('fallback');
+    expect(result.root).toContain('soloflow-dev');
+  });
 });
 
 // ---------------------------------------------------------------------------
