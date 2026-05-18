@@ -609,7 +609,10 @@ exposeElectronTRPC();
 // Outer map: channel string → Inner map: user callback → ipcRenderer wrapper.
 // This ensures off() removes the exact wrapper that on() registered, not the
 // bare callback (which would be a no-op since ipcRenderer never saw it directly).
-const electronListenerWrappers = new Map<string, Map<(...args: unknown[]) => void, (...args: unknown[]) => void>>();
+const electronListenerWrappers = new Map<
+  string,
+  Map<(...args: unknown[]) => void, (event: Electron.IpcRendererEvent, ...args: unknown[]) => void>
+>();
 
 // Expose electron event listeners and utilities for permission requests
 contextBridge.exposeInMainWorld('electron', {
