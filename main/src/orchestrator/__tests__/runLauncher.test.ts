@@ -346,3 +346,141 @@ describe('RunLauncher.launch', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// launch — error handling
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch error handling', () => {
+  /**
+   * Builds a minimal workflow + run seed and returns the workflowId and cannedRunId.
+   * The registry stub manually inserts the workflow_runs row (mimicking createRun).
+   */
+  function makeErrorHandlingFixture(db: Database.Database) {
+    const workflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+    ).run(workflowId);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+
+    const fakeRegistry = {
+      getById: (id: string) => {
+        const row = db.prepare(
+          'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+        ).get(id);
+        return row ?? null;
+      },
+      createRun: vi.fn(() => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'default' as const };
+      }),
+    } as unknown as WorkflowRegistry;
+
+    return { workflowId, cannedRunId, fakeRegistry };
+  }
+
+  it('marks run failed when createDeterministicWorktree throws', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('git worktree add failed')),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+
+      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('git worktree add failed');
+
+      interface RunRow { status: string; error_message: string | null }
+      const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
+
+      expect(row.status).toBe('failed');
+      expect(row.error_message).not.toBeNull();
+      expect(row.error_message).toContain('git worktree add failed');
+    });
+  });
+
+  it('marks run failed when mcpConfigWriter.writeForRun throws', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+
+      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
+      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: cannedWorktreePath,
+          branchName: cannedBranchName,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      const fakeMcpConfigWriter = {
+        writeForRun: vi.fn().mockRejectedValue(new Error('mcp.json write denied')),
+      } as unknown as McpConfigWriter;
+
+      const fakeOrchSocketProvider: OrchSocketProvider = { getSocketPath: () => 'stub-socket' };
+      const fakeBridgeScriptResolver: BridgeScriptResolver = { getScriptPath: () => '/stub/bridge.js' };
+      const fakeNodeResolver: NodeResolver = { getNodePath: async () => '/usr/local/bin/node' };
+
+      const launcher = new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        fakeMcpConfigWriter,
+        fakeOrchSocketProvider,
+        fakeBridgeScriptResolver,
+        fakeNodeResolver,
+      );
+
+      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('mcp.json write denied');
+
+      interface RunRow { status: string; error_message: string | null }
+      const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
+
+      expect(row.status).toBe('failed');
+      expect(row.error_message).not.toBeNull();
+      expect(row.error_message).toContain('mcp.json write denied');
+    });
+  });
+
+  it('does not orphan a row in queued state when worktree creation fails', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+
+      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('disk full');
+
+      interface RunRow { status: string; error_message: string | null }
+      const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
+
+      // Must not remain orphaned in 'queued' or 'starting'
+      expect(row.status).not.toBe('queued');
+      expect(row.status).not.toBe('starting');
+      expect(row.status).toBe('failed');
+      expect(row.error_message).not.toBeNull();
+    });
+  });
+});

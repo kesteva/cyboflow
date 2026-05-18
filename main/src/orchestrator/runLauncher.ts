@@ -78,46 +78,65 @@ export class RunLauncher {
 
     const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId);
 
-    const { worktreePath, branchName } = await this.worktreeManager.createDeterministicWorktree(
-      projectPath,
-      workflow.name,
-      runId,
-    );
-
-    // Write the per-run .mcp.json into the worktree so Claude can discover
-    // the cyboflow-permissions bridge.  Only executed when all four collaborators
-    // are injected (they are optional to preserve backward-compat with existing
-    // tests and call-sites that pre-date this task).
-    if (
-      this.mcpConfigWriter &&
-      this.orchSocketProvider &&
-      this.bridgeScriptResolver &&
-      this.nodeResolver
-    ) {
-      const nodeExecutablePath = await this.nodeResolver.getNodePath();
-      await this.mcpConfigWriter.writeForRun({
+    try {
+      const { worktreePath, branchName } = await this.worktreeManager.createDeterministicWorktree(
+        projectPath,
+        workflow.name,
         runId,
+      );
+
+      // Write the per-run .mcp.json into the worktree so Claude can discover
+      // the cyboflow-permissions bridge.  Only executed when all four collaborators
+      // are injected (they are optional to preserve backward-compat with existing
+      // tests and call-sites that pre-date this task).
+      if (
+        this.mcpConfigWriter &&
+        this.orchSocketProvider &&
+        this.bridgeScriptResolver &&
+        this.nodeResolver
+      ) {
+        const nodeExecutablePath = await this.nodeResolver.getNodePath();
+        await this.mcpConfigWriter.writeForRun({
+          runId,
+          worktreePath,
+          orchSocketPath: this.orchSocketProvider.getSocketPath(),
+          bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
+          nodeExecutablePath,
+        });
+      }
+
+      this.db
+        .prepare(
+          'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        )
+        .run(worktreePath, branchName, 'starting', runId);
+
+      this.logger.info('RunLauncher: run started', {
+        runId,
+        workflowId,
         worktreePath,
-        orchSocketPath: this.orchSocketProvider.getSocketPath(),
-        bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
-        nodeExecutablePath,
+        branchName,
       });
+
+      return { runId, worktreePath, branchName, permissionMode };
+    } catch (err) {
+      const errMsg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
+      try {
+        this.db
+          .prepare(
+            "UPDATE workflow_runs SET status = 'failed', error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .run(errMsg, runId);
+      } catch (dbErr) {
+        this.logger.error('RunLauncher: failed to mark run as failed after launch error', {
+          runId,
+          originalError: errMsg,
+          dbError: dbErr instanceof Error ? dbErr.message : String(dbErr),
+        });
+      }
+      this.logger.error('RunLauncher: launch failed', { runId, workflowId, error: errMsg });
+      throw err;
     }
-
-    this.db
-      .prepare(
-        'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      )
-      .run(worktreePath, branchName, 'starting', runId);
-
-    this.logger.info('RunLauncher: run started', {
-      runId,
-      workflowId,
-      worktreePath,
-      branchName,
-    });
-
-    return { runId, worktreePath, branchName, permissionMode };
   }
 
   /**
