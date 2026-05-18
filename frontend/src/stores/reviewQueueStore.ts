@@ -160,8 +160,8 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
     init: () => {
       // Idempotency guard: if already initialized, return the cached unsubscribe.
       if (initialized) {
-        // cachedUnsubscribe is always set before initialized is set to true.
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        // cachedUnsubscribe is set synchronously after subscribe() returns, before
+        // any re-entry can occur on this event-loop turn.
         return cachedUnsubscribe!;
       }
 
@@ -212,7 +212,10 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
         onError: (err: unknown) => {
           console.error('[reviewQueueStore] onApprovalCreated subscription error:', err);
           setConnectionStatus('disconnected');
-          // Callers should call init() again to reconnect.
+          // Clear closure state so a subsequent init() re-subscribes.
+          subscription.unsubscribe();
+          initialized = false;
+          cachedUnsubscribe = null;
         },
       });
 

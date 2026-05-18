@@ -242,6 +242,42 @@ describe('init() idempotency', () => {
     expect(mockListPendingQuery).toHaveBeenCalledTimes(2);
   });
 
+  it('onError resets closure state so a subsequent init() re-subscribes', () => {
+    // First init — captures the onError callback
+    let capturedOnError: ((err: unknown) => void) | undefined;
+    mockSubscribe = vi.fn().mockImplementation((_input, handlers: { onError?: (err: unknown) => void }) => {
+      capturedOnError = handlers.onError;
+      return { unsubscribe: mockSubscribeUnsubscribe };
+    });
+
+    const unsub1 = useReviewQueueStore.getState().init();
+    activeUnsub = unsub1;
+
+    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    expect(capturedOnError).toBeDefined();
+
+    // Trigger the subscription error
+    capturedOnError!(new Error('connection lost'));
+
+    // The store should be disconnected and closure state cleared
+    expect(useReviewQueueStore.getState().connectionStatus).toBe('disconnected');
+    expect(mockSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+
+    // Now a second init() should NOT be a no-op — it must re-subscribe
+    // Reset mockSubscribeUnsubscribe for the fresh subscription
+    mockSubscribeUnsubscribe = vi.fn();
+    mockSubscribe = vi.fn().mockImplementation((_input, handlers: { onError?: (err: unknown) => void }) => {
+      capturedOnError = handlers.onError;
+      return { unsubscribe: mockSubscribeUnsubscribe };
+    });
+
+    const unsub2 = useReviewQueueStore.getState().init();
+    activeUnsub = unsub2;
+
+    expect(mockSubscribe).toHaveBeenCalledTimes(1); // second subscribe call
+    expect(mockListPendingQuery).toHaveBeenCalledTimes(2); // listPending called again
+  });
+
   it('StrictMode double-invoke — exactly one live subscription after both mount effects settle', () => {
     // React StrictMode in development invokes effects twice: mount → cleanup → mount.
     // Simulate: init() → unsubscribe() → init()
