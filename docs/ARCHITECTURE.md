@@ -81,17 +81,32 @@ for typed renderer ↔ orchestrator calls. `index.ts` registers all handlers at 
 
 #### cyboflow.* transport status
 
-Raw IPC handlers in `main/src/ipc/cyboflow.ts` own the `cyboflow.*` surface today
-(`cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:approveRun`, `cyboflow:mcp-health`).
-The tRPC routers under `main/src/orchestrator/trpc/routers/` (`runs.ts`, `approvals.ts`,
-`workflows.ts`) carry the SHAPE of the v2 contract but every procedure body is a placeholder
-— none of those procs is wired to a real implementation. The renderer (`frontend/src/utils/cyboflowApi.ts`)
-routes via `electron.invoke`, not via the tRPC client.
+Four buckets describe the current state:
 
-The migration from raw IPC to tRPC is owned by a future task (placeholder ID: TBD-tRPC-cutover).
-Until that migration lands, the tRPC routers serve as documented type contracts for the
-renderer's future tRPC client, not as live transports. Each placeholder proc is annotated
-with the raw-IPC equivalent so the migration executor can grep-replace stubs with minimal diff.
+**Raw-IPC live** — handlers in `main/src/ipc/cyboflow.ts` that the renderer calls today via
+`electron.invoke` (`frontend/src/utils/cyboflowApi.ts`):
+- `cyboflow:listWorkflows` — list/seed workflows for a project.
+- `cyboflow:startRun` — launch a new workflow run.
+- `cyboflow:mcp-health` — point-in-time MCP server health snapshot.
+
+Note: `cyboflow:mcp-health` has no v2 tRPC counterpart on the AppRouter shape.
+The migration from raw IPC to tRPC for the above procs is owned by a future task
+(placeholder ID: TBD-tRPC-cutover).
+
+**Raw-IPC stub** — handler present in `main/src/ipc/cyboflow.ts` but returns NOT_IMPLEMENTED:
+- `cyboflow:approveRun` — approve / deny a day-3 gate approval. Full implementation
+  lands in the approval-router epic.
+
+**tRPC live (real body)** — procedures in the tRPC routers with a real implementation wired today:
+- `runs.cancelAndRestart` — cancels a stuck run and enqueues a fresh run; delegates to
+  `cancelAndRestartHandler` once `setCancelAndRestartDeps()` is called at boot.
+
+**tRPC stub (active caller throws)** — procedures the renderer already calls via the tRPC
+client; each currently throws NOT_IMPLEMENTED because the DB is not yet wired into context:
+- `runs.getStuckInspection` — called by `StuckInspectorModal`.
+- `approvals.listPending`, `approvals.approve`, `approvals.reject`,
+  `approvals.approveRestOfRun` — called by `PendingApprovalCard`, `useReviewQueueKeyboard`,
+  and `reviewQueueStore`. Full implementation lands in the approval-router epic.
 
 ### Renderer (`frontend/src/`)
 

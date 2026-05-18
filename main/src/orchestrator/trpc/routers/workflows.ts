@@ -14,12 +14,12 @@ import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 export const workflowsRouter = router({
   /** List all workflows for the current user. */
   list: protectedProcedure
-    // PLACEHOLDER — raw-IPC equivalent (cyboflow:listWorkflows) in main/src/ipc/cyboflow.ts is the live surface. Migration owner: TBD.
+    // STUB — raw-IPC equivalent (cyboflow:listWorkflows) in main/src/ipc/cyboflow.ts is the live surface. TBD-tRPC-cutover migration replaces this stub.
     .query(() => throwNotImplemented('workflow-runs')),
 
   /** Get a single workflow by ID. */
   get: protectedProcedure
     .input(z.object({ workflowId: z.string() }))
-    // PLACEHOLDER — raw-IPC equivalent (cyboflow:listWorkflows) in main/src/ipc/cyboflow.ts is the live surface. Migration owner: TBD.
+    // STUB — raw-IPC equivalent (cyboflow:listWorkflows) in main/src/ipc/cyboflow.ts is the live surface. TBD-tRPC-cutover migration replaces this stub.
     .query(() => throwNotImplemented('workflow-runs')),
 });
