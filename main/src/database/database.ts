@@ -1327,7 +1327,7 @@ export class DatabaseService {
   }
 
   private reconcileWorkflowsSchema(): void {
-    interface SqliteTableInfo { name: string }
+    interface SqliteTableInfo { name: string; dflt_value: unknown; notnull: number }
     const tableExists = this.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'")
       .get();
@@ -1338,6 +1338,7 @@ export class DatabaseService {
       .all() as SqliteTableInfo[];
     const has = (name: string): boolean => cols.some((c) => c.name === name);
 
+    // Tier 1: add columns introduced post-006.
     if (!has('workflow_path')) {
       this.db.prepare("ALTER TABLE workflows ADD COLUMN workflow_path TEXT").run();
       console.log('[Database] Reconciled workflows: added workflow_path column');
@@ -1345,6 +1346,44 @@ export class DatabaseService {
     if (!has('permission_mode')) {
       this.db.prepare("ALTER TABLE workflows ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default'").run();
       console.log('[Database] Reconciled workflows: added permission_mode column');
+    }
+
+    // Tier 2: rebuild the table to the canonical 006 shape if any column-level
+    // drift remains. The pre-006-edit shape declared spec_json TEXT NOT NULL
+    // without a default; the seed INSERT omits spec_json (relying on the
+    // declared default), so without this rebuild every seed transaction
+    // rolls back on a NOT NULL constraint violation and the workflows table
+    // stays empty. SQLite has no ALTER COLUMN, so the only fix is recreate.
+    const colsAfterTier1 = this.db
+      .prepare("PRAGMA table_info(workflows)")
+      .all() as SqliteTableInfo[];
+    const specJson = colsAfterTier1.find((c) => c.name === 'spec_json');
+    const hasDescription = colsAfterTier1.some((c) => c.name === 'description');
+    const hasUpdatedAt = colsAfterTier1.some((c) => c.name === 'updated_at');
+    const specJsonLacksDefault = specJson !== undefined && specJson.dflt_value == null;
+
+    if (specJsonLacksDefault || hasDescription || hasUpdatedAt) {
+      console.log('[Database] Reconciling workflows: rebuilding table to canonical 006 shape');
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE workflows_reconcile_new (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          spec_json TEXT NOT NULL DEFAULT '{}',
+          workflow_path TEXT,
+          permission_mode TEXT NOT NULL DEFAULT 'default',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO workflows_reconcile_new (id, project_id, name, spec_json, workflow_path, permission_mode, created_at)
+          SELECT id, project_id, name, COALESCE(spec_json, '{}'), workflow_path, permission_mode, created_at
+          FROM workflows;
+        DROP TABLE workflows;
+        ALTER TABLE workflows_reconcile_new RENAME TO workflows;
+        CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
+        COMMIT;
+      `);
+      console.log('[Database] Reconciled workflows: table rebuilt');
     }
   }
 
