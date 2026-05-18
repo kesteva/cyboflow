@@ -31,6 +31,11 @@ interface IPCResponse<T = unknown> {
   command?: string;
 }
 
+// IPCDataResponse<T> is like IPCResponse<T> but with data required (non-optional).
+// Use for IPC channels that always return data on success and whose callers access
+// .data fields directly after an `if (result.success)` check.
+type IPCDataResponse<T> = Omit<IPCResponse<T>, 'data'> & { data: T };
+
 interface ElectronAPI {
   // Generic invoke method for direct IPC calls
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
@@ -40,9 +45,10 @@ interface ElectronAPI {
   getAppVersion: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
-  // Version checking
-  checkForUpdates: () => Promise<IPCResponse<VersionUpdateInfo>>;
-  getVersionInfo: () => Promise<IPCResponse<{
+  // Version checking — use IPCDataResponse so callers can access .data fields directly
+  // after `if (result.success)` without narrowing for undefined.
+  checkForUpdates: () => Promise<IPCDataResponse<VersionUpdateInfo>>;
+  getVersionInfo: () => Promise<IPCDataResponse<{
     current: string;
     workingDirectory?: string;
     cyboflowDirectory?: string;
@@ -65,19 +71,24 @@ interface ElectronAPI {
   // Session management
   sessions: {
     getAll: () => Promise<IPCResponse<Session[]>>;
-    getAllWithProjects: () => Promise<IPCResponse<Session[]>>;
-    getArchivedWithProjects: () => Promise<IPCResponse<Session[]>>;
+    // getAllWithProjects returns ProjectWithSessions[] (Project + sessions + folders),
+    // but that type is locally defined in DraggableProjectTreeView / ProjectTreeView.
+    // Typed as unknown[] here; callers cast to their local interface.
+    getAllWithProjects: () => Promise<IPCResponse<unknown[]>>;
+    getArchivedWithProjects: () => Promise<IPCResponse<unknown[]>>;
     get: (sessionId: string) => Promise<IPCResponse<Session>>;
     create: (request: CreateSessionRequest) => Promise<IPCResponse<Session>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
-    getOutput: (sessionId: string, limit?: number) => Promise<IPCResponse<string[]>>;
+    // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
+    getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getJsonMessages: (sessionId: string) => Promise<IPCResponse<ClaudeJsonMessage[]>>;
-    getStatistics: (sessionId: string) => Promise<IPCResponse<unknown>>; // SessionStatistics is locally typed in SessionStats.tsx
+    // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data
+    getStatistics: (sessionId: string) => Promise<IPCDataResponse<unknown>>;
     getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    generateCompactedContext: (sessionId: string) => Promise<IPCResponse<void>>;
+    generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
     markViewed: (sessionId: string) => Promise<IPCResponse<void>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
@@ -86,11 +97,12 @@ interface ElectronAPI {
     getExecutionDiff: (sessionId: string, executionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     gitCommit: (sessionId: string, message: string) => Promise<IPCResponse<void>>;
     gitDiff: (sessionId: string) => Promise<IPCResponse<GitDiffResult>>;
-    getCombinedDiff: (sessionId: string, executionIds?: number[]) => Promise<IPCResponse<GitDiffResult>>;
+    getCombinedDiff: (sessionId: string, executionIds?: number[]) => Promise<IPCDataResponse<GitDiffResult>>;
 
     // Script operations
-    hasRunScript: (sessionId: string) => Promise<IPCResponse<boolean>>;
-    getRunningSession: () => Promise<IPCResponse<Session | null>>;
+    // IPCDataResponse so callers can use response.data directly after success check
+    hasRunScript: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
+    getRunningSession: () => Promise<IPCResponse<string | null>>;
     runScript: (sessionId: string) => Promise<IPCResponse<void>>;
     stopScript: (sessionId?: string) => Promise<IPCResponse<void>>;
     runTerminalCommand: (sessionId: string, command: string) => Promise<IPCResponse<void>>;
@@ -98,8 +110,8 @@ interface ElectronAPI {
     preCreateTerminal: (sessionId: string) => Promise<IPCResponse<void>>;
     resizeTerminal: (sessionId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
 
-    // Prompt operations
-    getPrompts: (sessionId: string) => Promise<IPCResponse<unknown[]>>; // PromptMarker is locally typed in consumers
+    // Prompt operations — PromptMarker is locally typed; IPCDataResponse for direct .data access
+    getPrompts: (sessionId: string) => Promise<IPCDataResponse<unknown[]>>;
 
     // Git merge operations
     mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -110,8 +122,9 @@ interface ElectronAPI {
     abortRebaseAndUseClaude: (sessionId: string) => Promise<IPCResponse<void>>;
     squashAndRebaseToMain: (sessionId: string, commitMessage: string) => Promise<IPCResponse<void>>;
     rebaseToMain: (sessionId: string) => Promise<IPCResponse<void>>;
-    hasChangesToRebase: (sessionId: string) => Promise<IPCResponse<boolean>>;
-    getGitCommands: (sessionId: string) => Promise<IPCResponse<GitCommands>>;
+    // IPCDataResponse so callers can use response.data directly after success check
+    hasChangesToRebase: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
+    getGitCommands: (sessionId: string) => Promise<IPCDataResponse<GitCommands>>;
     generateName: (prompt: string) => Promise<IPCResponse<string>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -146,8 +159,9 @@ interface ElectronAPI {
 
   // Project management
   projects: {
-    getAll: () => Promise<IPCResponse<Project[]>>;
-    getActive: () => Promise<IPCResponse<Project>>;
+    // IPCDataResponse so callers can do response.data.find(...) directly after success check
+    getAll: () => Promise<IPCDataResponse<Project[]>>;
+    getActive: () => Promise<IPCResponse<Project | null>>;
     create: (projectData: Omit<Project, 'id' | 'created_at' | 'updated_at'>) => Promise<IPCResponse<Project>>;
     activate: (projectId: string) => Promise<IPCResponse<void>>;
     update: (projectId: string, updates: Partial<Project>) => Promise<IPCResponse<void>>;
@@ -156,7 +170,7 @@ interface ElectronAPI {
     reorder: (projectOrders: Array<{ id: number; displayOrder: number }>) => Promise<IPCResponse<void>>;
     listBranches: (projectId: string) => Promise<IPCResponse<{ name: string; isCurrent: boolean; hasWorktree: boolean }[]>>;
     refreshGitStatus: (projectId: number) => Promise<IPCResponse<void>>;
-    runScript: (projectId: number) => Promise<IPCResponse<void>>;
+    runScript: (projectId: number) => Promise<IPCResponse<{ sessionId: string }>>;
     getRunningScript: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     stopScript: (projectId?: number) => Promise<IPCResponse<void>>;
   };
@@ -179,17 +193,18 @@ interface ElectronAPI {
     move: (folderId: string, parentFolderId: string | null) => Promise<IPCResponse<void>>;
   };
 
-  // Configuration
+  // Configuration — IPCDataResponse so callers can access .data fields directly after success check
   config: {
-    get: () => Promise<IPCResponse<AppConfig>>;
+    get: () => Promise<IPCDataResponse<AppConfig>>;
     update: (updates: Record<string, unknown>) => Promise<IPCResponse<void>>;
     getSessionPreferences: () => Promise<IPCResponse<SessionCreationPreferences>>;
     updateSessionPreferences: (preferences: SessionCreationPreferences) => Promise<IPCResponse<void>>;
   };
 
-  // Prompts
+  // Prompts — IPCDataResponse so callers can use response.data directly after success check
+  // PromptHistoryItem is locally typed in consumers (PromptHistory.tsx, PromptHistoryModal.tsx)
   prompts: {
-    getAll: () => Promise<IPCResponse<unknown[]>>; // PromptHistoryItem is locally typed in consumers
+    getAll: () => Promise<IPCDataResponse<unknown[]>>;
     getByPromptId: (promptId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
@@ -212,21 +227,22 @@ interface ElectronAPI {
     getPending: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
-  // Stravu MCP integration with OAuth
+  // Stravu MCP integration with OAuth — IPCDataResponse for methods whose callers access .data directly
   stravu: {
-    getConnectionStatus: () => Promise<IPCResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
-    initiateAuth: () => Promise<IPCResponse<{ authUrl: string; sessionId: string }>>;
-    checkAuthStatus: (sessionId: string) => Promise<IPCResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
+    getConnectionStatus: () => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
+    initiateAuth: () => Promise<IPCDataResponse<{ authUrl: string; sessionId: string }>>;
+    checkAuthStatus: (sessionId: string) => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
     disconnect: () => Promise<IPCResponse<void>>;
     getNotebooks: () => Promise<IPCResponse<unknown[]>>; // Caller does not consume .data directly
-    getNotebook: (notebookId: string) => Promise<IPCResponse<{ content: string }>>;
-    searchNotebooks: (query: string, limit?: number) => Promise<IPCResponse<unknown[]>>; // Caller does not consume .data directly
+    getNotebook: (notebookId: string) => Promise<IPCDataResponse<{ content: string }>>;
+    // searchNotebooks returns StravuNotebook[] locally typed in StravuFileSearch.tsx
+    searchNotebooks: (query: string, limit?: number) => Promise<IPCDataResponse<unknown[]>>;
   };
 
-  // Dashboard
+  // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access
   dashboard: {
-    getProjectStatus: (projectId: number) => Promise<IPCResponse<unknown>>; // ProjectDashboardData is locally typed in consumers
-    getProjectStatusProgressive: (projectId: number) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
+    getProjectStatus: (projectId: number) => Promise<IPCDataResponse<unknown>>;
+    getProjectStatusProgressive: (projectId: number) => Promise<IPCDataResponse<unknown>>; // Caller does not consume .data directly
     onUpdate: (callback: (data: Record<string, unknown>) => void) => () => void;
     onSessionUpdate: (callback: (data: { type: string; projectId?: number; sessionId?: string; data: unknown }) => void) => () => void;
   };
@@ -295,10 +311,12 @@ interface ElectronAPI {
     renamePanel: (panelId: string, name: string) => Promise<IPCResponse<void>>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse<void>>;
     sendInput: (panelId: string, input: string, images?: Array<{ name: string; dataUrl: string; type: string }>) => Promise<IPCResponse<void>>;
-    getOutput: (panelId: string, limit?: number) => Promise<IPCResponse<string[]>>;
+    // getOutput returns SessionOutput[] — IPCDataResponse so callers can pass directly to setSessionOutputs
+    getOutput: (panelId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getConversationMessages: (panelId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getJsonMessages: (panelId: string) => Promise<IPCResponse<ClaudeJsonMessage[]>>;
-    getPrompts: (panelId: string) => Promise<IPCResponse<unknown[]>>; // PromptMarker is locally typed in consumers
+    // PromptMarker is locally typed; IPCDataResponse for direct .data access
+    getPrompts: (panelId: string) => Promise<IPCDataResponse<unknown[]>>;
     continue: (panelId: string, input: string, model?: string) => Promise<IPCResponse<void>>;
     stop: (panelId: string) => Promise<IPCResponse<void>>;
     resizeTerminal: (panelId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
