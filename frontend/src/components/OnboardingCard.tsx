@@ -1,11 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
 // Type for IPC response
-interface IPCResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-}
+import type { IPCResponse } from '../utils/api';
 
 /**
  * Writes the onboarding-dismissed preference via IPC.

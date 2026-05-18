@@ -6,11 +6,7 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
 import OnboardingCard, { dismissOnboarding } from './OnboardingCard';
 
 // Type for IPC response
-interface IPCResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-}
+import type { IPCResponse } from '../utils/api';
 
 function itemId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.id : item.items[0].id;
