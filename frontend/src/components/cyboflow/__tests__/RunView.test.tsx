@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 /**
  * RunView subscription lifecycle tests (TASK-602).
  *
