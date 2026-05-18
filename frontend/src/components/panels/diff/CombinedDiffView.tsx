@@ -311,7 +311,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
         console.log('Refreshing executions after file save');
         const response = await API.sessions.getExecutions(sessionId);
         if (response.success) {
-          setExecutions(response.data);
+          setExecutions(response.data ?? []);
         }
       } catch (err) {
         console.error('Failed to refresh executions:', err);
@@ -355,7 +355,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
     // Reload executions to reflect the new commit
     const response = await API.sessions.getExecutions(sessionId);
     if (response.success) {
-      setExecutions(response.data);
+      setExecutions(response.data ?? []);
     }
   }, [sessionId]);
 
@@ -377,7 +377,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
       // Reload executions to reflect the new revert commit
       const response = await API.sessions.getExecutions(sessionId);
       if (response.success) {
-        setExecutions(response.data);
+        setExecutions(response.data ?? []);
         // Clear selection to show the new revert commit
         setSelectedExecutions([]);
       }
@@ -474,7 +474,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
       // Reload executions to reflect the deletion
       const response = await API.sessions.getExecutions(sessionId);
       if (response.success) {
-        setExecutions(response.data);
+        setExecutions(response.data ?? []);
       }
       
       // Reload the diff to get the current state
@@ -521,7 +521,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
       // Reload executions and diff
       const response = await API.sessions.getExecutions(sessionId);
       if (response.success) {
-        setExecutions(response.data);
+        setExecutions(response.data ?? []);
       }
       
       // Reload the uncommitted changes diff if selected
