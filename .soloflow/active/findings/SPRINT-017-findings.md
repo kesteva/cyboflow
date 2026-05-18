@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-017
 pending_count: 2
-last_updated: "2026-05-18T21:00:00.000Z"
+last_updated: "2026-05-18T21:30:00.000Z"
 ---
 # Findings Queue
 
@@ -26,3 +26,12 @@ SPRINT-017 started with missing infra: docker; tests deferred.
 - **description:** `Orchestrator.start()` constructs `StuckDetector` with `emitter: new EventEmitter()` — a fresh, inline-constructed emitter that is never stored on `this`, never exposed via a getter, and never returned. Combined with `private detector?: StuckDetector` and `StuckDetector.emitter` being a `private readonly` field with no accessor, this means every `runs:stuck` event emitted by `StuckDetector.transitionRunsToStuck()` (stuckDetector.ts:282) is unreachable by any subscriber outside the test harness. This is functionally equivalent to a `void` sink — the per-component emitter pattern documented in ARCHITECTURE.md §Orchestrator says "callers subscribe directly", but no caller can subscribe to *this* emitter because it has no public reference. The decision to drop the shared `eventBus` was correct (path b in the TASK-586 plan); the implementation choice of an *inline-anonymous* emitter, however, recreates the same "did anyone wire this?" failure mode that motivated the drop — except now the symptom is invisible until a subscriber is added. The TASK-586 plan's "Hardest Decision" section anticipated this: "When the first real consumer needs cross-producer event aggregation, that consumer's plan will design the bus." That consumer's plan will need to add either (a) an `emitter` getter on `Orchestrator`, (b) an `emitter` getter on `StuckDetector` plus exposing `detector` on `Orchestrator`, or (c) accept `emitter` as an optional `OrchestratorDeps` field so the caller owns the lifecycle.
 - **suggested_action:** When the first `runs:stuck` consumer task lands (likely in the stream-parser-to-main or admin-UI epic), add an `Orchestrator.onStuck(listener)` method (or expose `stuckEmitter: EventEmitter` as a read-only getter) so subscription paths are part of the public surface. Until then, leave the inline emitter — it correctly isolates the dead-event surface from the renderer and matches the "no speculative wiring" decision. This finding is a forward-looking reminder, not a blocker for TASK-586.
 - **resolved_by:** 
+
+## FIND-SPRINT-017-3
+- **type:** scope_deviation
+- **source:** TASK-600 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/utils/cyboflowApi.ts
+- **description:** required to meet AC: plan step 6 explicitly instructs updating the cyboflow comment in this file; it was listed as files_readonly but the plan implementation step targets it directly
+- **resolved_by:** verifier — plan-prescribed: TASK-600 step 6 explicitly instructs rewriting the "When tRPC lands in epic 6, swap the internals" comment in frontend/src/utils/cyboflowApi.ts. The file also appears in files_owned (line 12) alongside files_readonly (line 20) — plan-frontmatter inconsistency, but files_owned authorizes the edit and step 6 prescribes it.
