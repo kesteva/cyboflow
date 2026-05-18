@@ -68,7 +68,7 @@ export class RunLauncher {
    * Returns the runId, worktreePath, branchName, and snapshotted permissionMode.
    */
   async launch(
-    workflowId: number,
+    workflowId: string,
     projectPath: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
