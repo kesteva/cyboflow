@@ -37,6 +37,8 @@ export interface WorkflowRunRow {
   stuck_at?: string | null;
   stuck_reason?: string | null;
   error_message?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
   created_at: string;
   updated_at: string;
 }
