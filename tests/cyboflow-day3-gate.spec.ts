@@ -59,6 +59,7 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
   beforeAll(async () => {
     if (!claudeAvailable) return;
 
+    // Manual lifecycle (not withTempDir) because beforeAll/afterAll need shared dir across tests.
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-day3-'));
     execSync('git init', { cwd: projectPath });
     execSync('git config user.email "test@cyboflow.local"', { cwd: projectPath });
