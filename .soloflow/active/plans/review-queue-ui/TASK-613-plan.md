@@ -1,8 +1,8 @@
 ---
 id: TASK-613
 idea: IDEA-009
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - vitest.config.frontend.ts
   - package.json
@@ -23,22 +23,21 @@ acceptance_criteria:
     verification: "test ! -f vitest.config.frontend.ts (exit 0)."
   - criterion: "`test:unit:frontend` script is removed from root package.json."
     verification: "grep -n 'test:unit:frontend' package.json returns no match."
-  - criterion: "No `// @vitest-environment jsdom` pragma remains in any frontend test file."
+  - criterion: No `// @vitest-environment jsdom` pragma remains in any frontend test file.
     verification: "grep -rn '@vitest-environment jsdom' frontend/ returns no matches."
   - criterion: "`pnpm --filter frontend test` exits 0 with test count ≥ 96."
-    verification: "Command exits 0. Test count matches the post-SPRINT-010 baseline — no test silently skipped."
-  - criterion: "No remaining reference to deleted artifacts outside .soloflow/."
+    verification: Command exits 0. Test count matches the post-SPRINT-010 baseline — no test silently skipped.
+  - criterion: No remaining reference to deleted artifacts outside .soloflow/.
     verification: "grep -rn 'test:unit:frontend' . --exclude-dir=node_modules --exclude-dir=.soloflow --exclude-dir=.git returns 0 matches AND grep -rn 'vitest.config.frontend' . --exclude-dir=node_modules --exclude-dir=.soloflow --exclude-dir=.git returns 0 matches."
-  - criterion: "No CI workflow or doc references the deleted script or config."
+  - criterion: No CI workflow or doc references the deleted script or config.
     verification: "grep -rn 'test:unit:frontend\\|vitest.config.frontend' .github docs README.md CLAUDE.md returns 0 matches (skip files that don't exist)."
 depends_on: []
 estimated_complexity: low
 epic: review-queue-ui
 test_strategy:
   needed: false
-  justification: "Pure config consolidation — no new behaviour to test. The AC `pnpm --filter frontend test exits 0` is itself the regression gate."
+  justification: Pure config consolidation — no new behaviour to test. The AC `pnpm --filter frontend test exits 0` is itself the regression gate.
 ---
-
 # Consolidate dual frontend vitest configurations into a single canonical config
 
 ## Objective

@@ -1,9 +1,9 @@
 ---
 id: TASK-586
 idea: SPRINT-006-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/orchestrator/types.ts
   - main/src/orchestrator/Orchestrator.ts
@@ -20,9 +20,9 @@ files_readonly:
   - .soloflow/active/plans/orchestrator-and-trpc-router/EPIC-orchestrator-and-trpc-router.md
   - .soloflow/active/plans/orchestrator-and-trpc-router/TASK-253-plan.md
 acceptance_criteria:
-  - criterion: "OrchestratorDeps no longer declares an `eventBus` field"
+  - criterion: OrchestratorDeps no longer declares an `eventBus` field
     verification: "grep -nE '\\beventBus\\b' main/src/orchestrator/types.ts returns 0 matches"
-  - criterion: "Orchestrator.ts constructor doc no longer mentions `eventBus`"
+  - criterion: Orchestrator.ts constructor doc no longer mentions `eventBus`
     verification: "grep -nE '\\beventBus\\b' main/src/orchestrator/Orchestrator.ts returns 0 matches"
   - criterion: "Orchestrator.test.ts no longer constructs a placeholder `EventEmitter` for the eventBus dep — the beforeEach `eventBus = new EventEmitter()` line and every `new Orchestrator({ ..., eventBus, ... })` arg is gone"
     verification: "grep -nE '\\beventBus\\b' main/src/orchestrator/__tests__/Orchestrator.test.ts returns 0 matches"
@@ -30,12 +30,12 @@ acceptance_criteria:
     verification: "grep -nE '\\beventBus\\b' main/src/index.ts returns 0 matches; if no other code in main/src/index.ts uses `EventEmitter`, then `grep -nE \"import.*\\bEventEmitter\\b.*from 'node:events'\" main/src/index.ts` returns 0 matches"
   - criterion: "docs/ARCHITECTURE.md §Orchestrator (or new equivalent section) documents the post-drop contract: collaborators are `db`, `logger`, `runQueues`. Future cross-orchestrator events (ApprovalRouter→renderer) flow via the per-component EventEmitter (e.g. ApprovalRouter extends EventEmitter and emits `approvalCreated` on itself; the events tRPC sub-router subscribes to that emitter directly when stream-parser-to-main lands) — no shared eventBus."
     verification: "grep -nE 'Orchestrator|orchestrator' docs/ARCHITECTURE.md returns at least 1 match in a section header; the section body mentions the three remaining deps (db, logger, runQueues) and explicitly notes the eventBus removal decision"
-  - criterion: "Main process typecheck passes — proves no other file referenced the dropped field"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
-  - criterion: "Main process unit tests pass — proves the Orchestrator + downstream tests still work with the narrower deps surface"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: Main process typecheck passes — proves no other file referenced the dropped field
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
+  - criterion: Main process unit tests pass — proves the Orchestrator + downstream tests still work with the narrower deps surface
+    verification: pnpm --filter main test exits 0
   - criterion: "Repo-wide sweep: zero remaining `eventBus` identifier matches inside main/src/orchestrator/ except inside a leading comment describing the historical removal"
     verification: "grep -rn --include='*.ts' '\\beventBus\\b' main/src/orchestrator/ returns 0 matches"
 depends_on: []
@@ -45,7 +45,6 @@ test_strategy:
   needed: false
   justification: "Pure removal of an unused dependency field. The existing Orchestrator.test.ts covers start/stop/idempotence/drainAll — those behaviors are unchanged by the field drop and remain green after editing the test fixtures to remove the placeholder eventBus. Sibling-test scan: `main/src/orchestrator/__tests__/` contains `Orchestrator.test.ts`, `approvalRouter.test.ts`, `RunQueueRegistry.test.ts` — only `Orchestrator.test.ts` references eventBus (verified by `grep -n eventBus main/src/orchestrator/__tests__/*.ts` showing matches only in Orchestrator.test.ts). The edits to Orchestrator.test.ts ARE the test-fixture update; no NEW test cases warranted since no NEW behavior is introduced."
 ---
-
 # Resolve unused `eventBus` in OrchestratorDeps — drop it
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-616
 idea: IDEA-009
-status: ready
+status: in-flight
 created: "2026-05-15T00:00:00Z"
 files_owned:
   - shared/types/approvals.ts
@@ -31,25 +31,25 @@ acceptance_criteria:
   - criterion: "`useReviewQueueKeyboard.ts` `case 'n':` group branch calls `trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId: focused.runId })` exactly once and contains no per-member `Promise.all` reject fan-out."
     verification: "grep -n 'rejectRestOfRun' frontend/src/hooks/useReviewQueueKeyboard.ts returns >=1 match. The hook source contains no `Promise.all` calls (verified by grep -n 'Promise.all' frontend/src/hooks/useReviewQueueKeyboard.ts returning 0 matches after TASK-612 already removed the y-side fan-out)."
   - criterion: "Per-run scoping test: 3 pending approvals in run-A + 2 pending in run-B -> `rejectRestOfRunHandler(db, 'run-A')` returns `{ decided: 3 }`, run-A's 3 rows become `status='rejected'`, run-B's 2 rows remain `status='pending'`."
-    verification: "Vitest case in main/src/trpc/__tests__/approvals.test.ts named `rejects all pending for run-A and leaves run-B pending` passes."
+    verification: Vitest case in main/src/trpc/__tests__/approvals.test.ts named `rejects all pending for run-A and leaves run-B pending` passes.
   - criterion: "Nonexistent runId test: `rejectRestOfRunHandler(db, 'nonexistent-run')` returns `{ decided: 0 }` and does not throw."
     verification: "Vitest case `returns { decided: 0 } for a nonexistent runId without throwing` passes for the reject handler."
   - criterion: "Sweep test: grep across `main/src`, `frontend/src`, `shared/types` for `rejectAll|reject_all|rejectGlobal` (excluding `__tests__`) returns zero matches."
-    verification: "Vitest case `codebase contains no global reject-all symbol (sweep)` runs the grep at runtime and asserts empty output."
+    verification: Vitest case `codebase contains no global reject-all symbol (sweep)` runs the grep at runtime and asserts empty output.
   - criterion: "Component test: group card with 3 items from run-X -> clicking Reject calls `mockRejectRestOfRunMutate` exactly once with `{ runId: 'run-X' }` AND `mockRejectMutate` is NOT called."
     verification: "Vitest case in frontend/src/components/__tests__/PendingApprovalCard.test.tsx named `group card with 3 items from run-X -> Reject calls rejectRestOfRun({ runId: run-X }) exactly once` passes."
   - criterion: "Keyboard hook test: pressing `n` on a 3-item group fires `mockRejectRestOfRunMutate` exactly once with the group runId AND `mockRejectMutate` (per-item) is NOT called."
-    verification: "Vitest case in frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts named `n on a group item calls rejectRestOfRun.mutate once with the group runId -- not per-member reject` passes; the existing fan-out test for n is replaced."
+    verification: Vitest case in frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts named `n on a group item calls rejectRestOfRun.mutate once with the group runId -- not per-member reject` passes; the existing fan-out test for n is replaced.
   - criterion: "Single-item `n` keyboard path unchanged: pressing `n` on a single item still calls `reject.mutate({ approvalId })` once."
-    verification: "Existing vitest case `n calls reject.mutate with the focused approval id` continues to pass unmodified."
+    verification: Existing vitest case `n calls reject.mutate with the focused approval id` continues to pass unmodified.
   - criterion: "Single-item Reject mouse path unchanged: clicking Reject on a single-card item still calls `reject.mutate({ approvalId })` once."
-    verification: "Existing vitest case `Reject button calls reject.mutate with the approval id` continues to pass unmodified."
+    verification: Existing vitest case `Reject button calls reject.mutate with the approval id` continues to pass unmodified.
   - criterion: "EPIC scope updated: `EPIC-review-queue-ui.md` removes the `Reject-rest-of-run (symmetric to approve-rest) -- deferred to v1.1` Out-of-scope entry and adds a bullet under In scope: `Per-run rejectRestOfRun mutation; group-card Reject and keyboard n use it`."
     verification: "grep -n 'rejectRestOfRun' .soloflow/active/plans/review-queue-ui/EPIC-review-queue-ui.md returns >=1 match in the In scope section AND grep -n 'Reject-rest-of-run.*deferred' .soloflow/active/plans/review-queue-ui/EPIC-review-queue-ui.md returns 0 matches."
   - criterion: "Whole-tree typecheck clean: `pnpm typecheck` exits 0."
-    verification: "Command exit code 0."
+    verification: Command exit code 0.
   - criterion: "Frontend + main test suites pass: `pnpm --filter frontend test` exits 0 (existing test count + 2 new cases for hook + 1 new case for card); `pnpm --filter main test` exits 0 (existing 3 cases + 3 new reject-side cases = 6 in approvals.test.ts)."
-    verification: "Both commands exit 0."
+    verification: Both commands exit 0.
 depends_on:
   - TASK-612
   - TASK-614
@@ -60,7 +60,7 @@ test_strategy:
   needed: true
   justification: "New tRPC mutation surface + handler + 2 frontend call-site swaps. Each layer has a sibling test file from TASK-406 that already encodes the approve-side contract; the reject-side mirror tests are required to keep the assertion-coverage symmetric. Without the new test cases, a future executor could regress the atomic group-reject behaviour without any gate firing."
   targets:
-    - behavior: "rejectRestOfRunHandler decides all pending approvals for the given runId and does NOT affect other runs"
+    - behavior: rejectRestOfRunHandler decides all pending approvals for the given runId and does NOT affect other runs
       test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
     - behavior: "rejectRestOfRunHandler returns { decided: 0 } for a nonexistent runId without throwing"
@@ -79,7 +79,6 @@ test_strategy:
       test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx
       type: component
 ---
-
 # Introduce rejectRestOfRun mutation for atomic group-reject symmetry
 
 ## Objective

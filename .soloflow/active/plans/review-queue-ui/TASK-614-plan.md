@@ -1,8 +1,8 @@
 ---
 id: TASK-614
 idea: IDEA-009
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useReviewQueueKeyboard.ts
   - frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
@@ -11,7 +11,7 @@ files_readonly:
   - frontend/src/App.tsx
   - frontend/src/components/PendingApprovalCard.tsx
 acceptance_criteria:
-  - criterion: "The keyboard handler returns early when document.activeElement is not document.body and not null."
+  - criterion: The keyboard handler returns early when document.activeElement is not document.body and not null.
     verification: "grep -n 'document.activeElement' frontend/src/hooks/useReviewQueueKeyboard.ts shows a guard at the top of handleKeyDown that returns when activeElement is neither document.body nor null."
   - criterion: "Existing input-element guards (HTMLInputElement, HTMLTextAreaElement, contentEditable) continue to short-circuit unchanged."
     verification: "grep -n 'HTMLInputElement\\|HTMLTextAreaElement\\|isContentEditable' frontend/src/hooks/useReviewQueueKeyboard.ts still matches three lines."
@@ -27,19 +27,18 @@ estimated_complexity: low
 epic: review-queue-ui
 test_strategy:
   needed: true
-  justification: "New control-flow branch (focus-guard short-circuit). Positive + negative cases prove the guard is neither too tight nor too loose."
+  justification: New control-flow branch (focus-guard short-circuit). Positive + negative cases prove the guard is neither too tight nor too loose.
   targets:
     - behavior: "j is a no-op when an unrelated focusable <div> has focus (Radix focus-trap simulation)"
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "y is a no-op when an unrelated focusable element has focus (no mutation fires)"
+    - behavior: y is a no-op when an unrelated focusable element has focus (no mutation fires)
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
-    - behavior: "j still fires when document.activeElement === document.body (default state)"
+    - behavior: j still fires when document.activeElement === document.body (default state)
       test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts
       type: unit
 ---
-
 # Tighten global keyboard shortcut scoping in useReviewQueueKeyboard
 
 ## Objective

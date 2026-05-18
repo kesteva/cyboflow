@@ -1,8 +1,8 @@
 ---
 id: TASK-600
 idea: SPRINT-009-compound
-status: ready
-created: 2026-05-15T00:00:00Z
+status: in-flight
+created: "2026-05-15T00:00:00Z"
 files_owned:
   - main/src/ipc/cyboflow.ts
   - docs/ARCHITECTURE.md
@@ -25,8 +25,8 @@ acceptance_criteria:
     verification: "grep -rn 'NOT_IMPLEMENTED\\|throwNotImplemented' main/src/orchestrator/trpc/routers/runs.ts main/src/orchestrator/trpc/routers/approvals.ts main/src/orchestrator/trpc/routers/workflows.ts returns 0 matches OR every remaining match is annotated `// pending TASK-XXX (epic 7)` with a real future task ID"
   - criterion: "main/src/ipc/cyboflow.ts and the tRPC runs/approvals/workflows routers do not BOTH expose the same conceptual procedure (`startRun`, `listWorkflows`, `approveRun`) — exactly one transport owns each"
     verification: "manual: for each procedure (listWorkflows, startRun, approveRun) confirm exactly one of {ipc/cyboflow.ts handler block, trpc/routers/{runs,approvals,workflows}.ts proc body} is non-stub"
-  - criterion: "All existing tests continue to pass after the transport decision lands"
-    verification: "pnpm --filter main test exits 0 and pnpm --filter main typecheck exits 0"
+  - criterion: All existing tests continue to pass after the transport decision lands
+    verification: pnpm --filter main test exits 0 and pnpm --filter main typecheck exits 0
 depends_on: []
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
@@ -34,7 +34,6 @@ test_strategy:
   needed: false
   justification: "This is a documentation + architectural-decision task plus a redundancy-deletion sweep. The behavior surface is unchanged — the existing test suite (cyboflow.test.ts, router.test.ts) already exercises the surviving handlers; no new tests are needed because no new logic is added. If the decision is to keep raw IPC, the existing cyboflow.test.ts suite continues to be the contract; if the decision is to move to tRPC, that move belongs to a follow-up task with its own test_strategy. Sibling tests (router.test.ts, cyboflow.test.ts) must remain green; that is enforced by the final AC running pnpm --filter main test."
 ---
-
 # Decide and document transport layer (tRPC vs raw IPC) for cyboflow.*
 
 ## Objective
