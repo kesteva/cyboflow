@@ -10,6 +10,7 @@
  *
  * See also: docs/ARCHITECTURE.md §Orchestrator, ROADMAP-001 §6.3.
  */
+import { EventEmitter } from 'node:events';
 import type { OrchestratorDeps } from './types';
 import { StuckDetector, type ClaudeManagerLike } from './stuckDetector';
 
@@ -24,7 +25,7 @@ export class Orchestrator {
    * Construct an Orchestrator with all collaborators provided by the caller.
    * No globals, no top-level singletons, no Electron imports.
    *
-   * @param deps - Injected dependencies: db, logger, eventBus, runQueues.
+   * @param deps - Injected dependencies: db, logger, runQueues.
    */
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -54,7 +55,7 @@ export class Orchestrator {
       db: this.deps.db,
       claudeManager,
       permissionServer: this.deps.permissionServer,
-      eventBus: this.deps.eventBus,
+      emitter: new EventEmitter(),
       logger: this.deps.logger,
     });
 

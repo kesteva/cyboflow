@@ -3,9 +3,8 @@
  *
  * Standalone-typecheck invariant: this file must NOT import from
  * 'electron', 'better-sqlite3', 'fs', or any concrete service in
- * main/src/services/*. Only node:events and primitive types are allowed.
+ * main/src/services/*. Only primitive types are allowed.
  */
-import { EventEmitter } from 'node:events';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
 
@@ -57,7 +56,6 @@ export interface LoggerLike {
 export interface OrchestratorDeps {
   db: DatabaseLike;
   logger: LoggerLike;
-  eventBus: EventEmitter;
   runQueues: RunQueueRegistry;
   /**
    * Optional: narrow interface for querying whether a Claude SDK run is
