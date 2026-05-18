@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 /**
  * Sidebar MCP health dot rendering tests.
  *

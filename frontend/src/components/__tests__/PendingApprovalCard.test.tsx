@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 /**
  * Tests for PendingApprovalCard (and the approvalFormatters utilities).
  *
