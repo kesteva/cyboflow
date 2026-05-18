@@ -16,7 +16,7 @@ import { execSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { approveRestOfRunHandler } from '../routers/approvals';
+import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../routers/approvals';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -150,6 +150,73 @@ describe('approveRestOfRun handler', () => {
       `grep -rn "approveAll\\|approve_all\\|approveGlobal" ` +
       `"${repoRoot}/main/src" "${repoRoot}/frontend/src" "${repoRoot}/shared/types" ` +
       `--exclude-dir=__tests__ || true`,
+      { encoding: 'utf8' },
+    );
+
+    // The grep should return empty output (no matches outside test files).
+    expect(result.trim()).toBe('');
+  });
+});
+
+describe('rejectRestOfRun handler', () => {
+  // -------------------------------------------------------------------------
+  // Test 1: decides all pending for runId, does not affect other run's approvals
+  // -------------------------------------------------------------------------
+  it('rejects all pending for run-A and leaves run-B pending', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+
+    // Seed 3 pending approvals in run-A and 2 in run-B.
+    const runAIds = seedPendingApprovals(db, 'run-A', 3);
+    const runBIds = seedPendingApprovals(db, 'run-B', 2);
+
+    // Call rejectRestOfRun for run-A only.
+    const result = await rejectRestOfRunHandler(adapter, 'run-A');
+    expect(result).toEqual({ decided: 3 });
+
+    // --- Assert: run-A's 3 approvals are now 'rejected' ---
+    for (const id of runAIds) {
+      const row = db
+        .prepare(`SELECT status FROM approvals WHERE id = ?`)
+        .get(id) as { status: string };
+      expect(row.status).toBe('rejected');
+    }
+
+    // --- Assert: run-B's 2 approvals are still 'pending' ---
+    for (const id of runBIds) {
+      const row = db
+        .prepare(`SELECT status FROM approvals WHERE id = ?`)
+        .get(id) as { status: string };
+      expect(row.status).toBe('pending');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 2: nonexistent runId returns { decided: 0 } without throwing
+  // -------------------------------------------------------------------------
+  it('returns { decided: 0 } for a nonexistent runId without throwing', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+
+    const result = await rejectRestOfRunHandler(adapter, 'nonexistent-run');
+    expect(result).toEqual({ decided: 0 });
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 3: sweep — no global reject-all symbol in production source
+  // -------------------------------------------------------------------------
+  it('codebase contains no global reject-all symbol (sweep)', () => {
+    // Run grep from the project root (process.cwd() in the main workspace is
+    // the main/ package directory; we need to go one level up to the repo root).
+    // The --exclude-dir=__tests__ flag prevents this test file's own assertion
+    // strings from triggering a false positive.
+    // cyboflowMcpServer.ts is excluded: its `rejectAllPending` function rejects
+    // IPC socket requests — unrelated to the approvals system and predates this task.
+    const repoRoot = join(process.cwd(), '..');
+    const result = execSync(
+      `grep -rn "rejectAll\\|reject_all\\|rejectGlobal" ` +
+      `"${repoRoot}/main/src" "${repoRoot}/frontend/src" "${repoRoot}/shared/types" ` +
+      `--exclude-dir=__tests__ --exclude=cyboflowMcpServer.ts || true`,
       { encoding: 'utf8' },
     );
 

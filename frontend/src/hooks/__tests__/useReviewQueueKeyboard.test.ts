@@ -18,10 +18,11 @@ import type { Approval } from '../../../../shared/types/approvals';
 // tRPC mock — use vi.hoisted so variables are available before vi.mock hoisting
 // ---------------------------------------------------------------------------
 
-const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate } = vi.hoisted(() => ({
+const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate, mockRejectRestOfRunMutate } = vi.hoisted(() => ({
   mockApproveMutate:           vi.fn().mockResolvedValue(undefined),
   mockRejectMutate:            vi.fn().mockResolvedValue(undefined),
   mockApproveRestOfRunMutate:  vi.fn().mockResolvedValue({ decided: 0 }),
+  mockRejectRestOfRunMutate:   vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
 vi.mock('../../utils/trpcClient', () => ({
@@ -31,6 +32,7 @@ vi.mock('../../utils/trpcClient', () => ({
         approve:           { mutate: mockApproveMutate           },
         reject:            { mutate: mockRejectMutate            },
         approveRestOfRun:  { mutate: mockApproveRestOfRunMutate  },
+        rejectRestOfRun:   { mutate: mockRejectRestOfRunMutate   },
       },
     },
   },
@@ -175,13 +177,13 @@ describe('useReviewQueueKeyboard — y/n mutations on group items', () => {
     expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 
-  it('n on a group item calls reject.mutate for each member', () => {
-    const queue: QueueItem[] = [groupItem(['r1', 'r2'])];
+  it('n on a group item calls rejectRestOfRun.mutate once with the group runId -- not per-member reject', () => {
+    const queue: QueueItem[] = [groupItem(['r1', 'r2', 'r3'], 'run-42')];
     renderHook(() => useReviewQueueKeyboard(queue));
     act(() => { press('n'); });
-    expect(mockRejectMutate).toHaveBeenCalledTimes(2);
-    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r1' });
-    expect(mockRejectMutate).toHaveBeenCalledWith({ approvalId: 'r2' });
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledTimes(1);
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-42' });
+    expect(mockRejectMutate).not.toHaveBeenCalled();
   });
 });
 

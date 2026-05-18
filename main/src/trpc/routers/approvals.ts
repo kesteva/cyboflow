@@ -29,7 +29,7 @@
 export { approvalsRouter } from '../../orchestrator/trpc/routers/approvals';
 // (listPending is a procedure on approvalsRouter — re-exported above)
 import { withLock } from '../../utils/mutex';
-import type { ApproveRestOfRunResult } from '../../../../shared/types/approvals';
+import type { ApproveRestOfRunResult, RejectRestOfRunResult } from '../../../../shared/types/approvals';
 
 // ---------------------------------------------------------------------------
 // NO global approve-all exists in v1 — deliberate omission per IDEA-009 slice 8.
@@ -88,6 +88,64 @@ export async function approveRestOfRunHandler(
         // the remaining approvals.
         console.error(
           `[approveRestOfRun] Failed to approve ${row.id} for run ${runId}:`,
+          err,
+        );
+      }
+    }
+
+    return { decided };
+  });
+}
+
+/**
+ * Core implementation of the rejectRestOfRun logic — extracted for direct
+ * unit testing without the tRPC wrapping.
+ *
+ * Selects all pending approvals for the given `runId` and sets each to
+ * `status='rejected'` under the per-run mutex.  Best-effort: if a single
+ * approval update fails, the error is logged and iteration continues.
+ *
+ * @param db     - A narrow DatabaseLike surface (prepare + run).
+ * @param runId  - The workflow_runs.id to scope the operation to.
+ * @returns `{ decided: number }` — count of approvals rejected in this call.
+ */
+export async function rejectRestOfRunHandler(
+  db: {
+    prepare: (sql: string) => {
+      all: (...params: unknown[]) => unknown[];
+      run: (...params: unknown[]) => void;
+    };
+  },
+  runId: string,
+): Promise<RejectRestOfRunResult> {
+  return withLock(`run:${runId}`, async () => {
+    // Select all pending approval IDs for this run only.
+    const rows = db
+      .prepare(
+        `SELECT id FROM approvals WHERE run_id = ? AND status = 'pending'`,
+      )
+      .all(runId) as { id: string }[];
+
+    if (rows.length === 0) {
+      return { decided: 0 };
+    }
+
+    const now = new Date().toISOString();
+    let decided = 0;
+
+    for (const row of rows) {
+      try {
+        db.prepare(
+          `UPDATE approvals
+           SET status = 'rejected', decided_at = ?, decided_by = 'user'
+           WHERE id = ? AND status = 'pending'`,
+        ).run(now, row.id);
+        decided++;
+      } catch (err) {
+        // Best-effort: log and continue so a single failure does not block
+        // the remaining approvals.
+        console.error(
+          `[rejectRestOfRun] Failed to reject ${row.id} for run ${runId}:`,
           err,
         );
       }

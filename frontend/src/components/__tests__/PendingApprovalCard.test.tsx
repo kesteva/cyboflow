@@ -76,19 +76,21 @@ const groupItemRunX: QueueItem = {
 // tRPC mock
 // ---------------------------------------------------------------------------
 
-const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate } = vi.hoisted(() => ({
-  mockApproveMutate:          vi.fn().mockResolvedValue(undefined),
-  mockRejectMutate:           vi.fn().mockResolvedValue(undefined),
-  mockApproveRestOfRunMutate: vi.fn().mockResolvedValue({ decided: 0 }),
+const { mockApproveMutate, mockRejectMutate, mockApproveRestOfRunMutate, mockRejectRestOfRunMutate } = vi.hoisted(() => ({
+  mockApproveMutate:           vi.fn().mockResolvedValue(undefined),
+  mockRejectMutate:            vi.fn().mockResolvedValue(undefined),
+  mockApproveRestOfRunMutate:  vi.fn().mockResolvedValue({ decided: 0 }),
+  mockRejectRestOfRunMutate:   vi.fn().mockResolvedValue({ decided: 0 }),
 }));
 
 vi.mock('../../utils/trpcClient', () => ({
   trpc: {
     cyboflow: {
       approvals: {
-        approve:           { mutate: mockApproveMutate          },
-        reject:            { mutate: mockRejectMutate           },
-        approveRestOfRun:  { mutate: mockApproveRestOfRunMutate },
+        approve:           { mutate: mockApproveMutate           },
+        reject:            { mutate: mockRejectMutate            },
+        approveRestOfRun:  { mutate: mockApproveRestOfRunMutate  },
+        rejectRestOfRun:   { mutate: mockRejectRestOfRunMutate   },
       },
     },
   },
@@ -298,12 +300,15 @@ describe('PendingApprovalCard — group variant', () => {
     expect(mockApproveMutate).not.toHaveBeenCalled();
   });
 
-  it('Reject calls reject.mutate once per group member', async () => {
+  it('Reject calls rejectRestOfRun.mutate with the group runId — not per-item reject', async () => {
     render(<PendingApprovalCard item={groupItem} />);
     fireEvent.click(screen.getByText('Reject'));
     await waitFor(() => {
-      expect(mockRejectMutate).toHaveBeenCalledTimes(7);
+      expect(mockRejectRestOfRunMutate).toHaveBeenCalledTimes(1);
     });
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-group' });
+    // Per-item reject must NOT be called for a group card.
+    expect(mockRejectMutate).not.toHaveBeenCalled();
   });
 
   it('shows "blocked Nm" badge when isBlocking is true', () => {
@@ -326,5 +331,16 @@ describe('PendingApprovalCard — group variant', () => {
     });
     expect(mockApproveRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-X' });
     expect(mockApproveMutate).not.toHaveBeenCalled();
+  });
+
+  // TASK-616: group card with 3 items from run-X → Reject calls rejectRestOfRun once with runId
+  it('group card with 3 items from run-X -> Reject calls rejectRestOfRun({ runId: run-X }) exactly once', async () => {
+    render(<PendingApprovalCard item={groupItemRunX} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(mockRejectRestOfRunMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(mockRejectRestOfRunMutate).toHaveBeenCalledWith({ runId: 'run-X' });
+    expect(mockRejectMutate).not.toHaveBeenCalled();
   });
 });
