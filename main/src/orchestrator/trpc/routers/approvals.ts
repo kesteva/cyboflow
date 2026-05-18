@@ -28,6 +28,7 @@ export const approvalsRouter = router({
    * inferred AppRouter type carries the full UI-visible shape to the renderer.
    */
   listPending: protectedProcedure
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .query(async ({ ctx }): Promise<Approval[]> => {
       // ctx.db is not yet present in the local context (v1 context carries only
       // userId). Until the approval-router epic wires the DB into context, this
@@ -60,6 +61,7 @@ export const approvalsRouter = router({
    */
   approve: protectedProcedure
     .input(z.object({ approvalId: z.string(), message: z.string().optional() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<{ success: true }> => {
       void ctx;
       console.log(`[approvals.approve] STUB — approvalId=${input.approvalId}`);
@@ -73,6 +75,7 @@ export const approvalsRouter = router({
    */
   reject: protectedProcedure
     .input(z.object({ approvalId: z.string(), message: z.string().optional() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<{ success: true }> => {
       void ctx;
       console.log(`[approvals.reject] STUB — approvalId=${input.approvalId}`);
@@ -99,6 +102,7 @@ export const approvalsRouter = router({
    */
   approveRestOfRun: protectedProcedure
     .input(z.object({ runId: z.string() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<ApproveRestOfRunResult> => {
       void ctx;
       // TODO(approval-router epic): once ctx.db is wired, delegate to:
