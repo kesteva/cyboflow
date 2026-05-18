@@ -9,17 +9,17 @@
 export type PermissionMode = 'default' | 'acceptEdits' | 'dontAsk';
 
 export interface WorkflowRow {
-  id: number;
+  id: string;
   project_id: number;
   name: string;
-  workflow_path: string;
+  workflow_path: string | null;
   permission_mode: PermissionMode;
   created_at: string;
 }
 
 export interface WorkflowRunRow {
   id: string;
-  workflow_id: number;
+  workflow_id: string;
   project_id: number;
   status:
     | 'queued'
@@ -33,6 +33,10 @@ export interface WorkflowRunRow {
   permission_mode_snapshot: PermissionMode;
   worktree_path: string | null;
   branch_name: string | null;
+  policy_json?: string | null;
+  stuck_at?: string | null;
+  stuck_reason?: string | null;
+  error_message?: string | null;
   created_at: string;
   updated_at: string;
 }

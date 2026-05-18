@@ -7,15 +7,14 @@
  * 3. Integration: git branch is actually created in a temp repo (requires `git` in PATH)
  *
  * The path/branch-scheme unit tests stub only `_createAtPath` (the git logic)
- * and use a real temp directory so `mkdir` can run normally without mocking.
+ * and use withTempDir so `mkdir` can run normally without mocking.
  * The integration test uses a real temp git repo initialised via execSync.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { describe, it, expect, vi } from 'vitest';
 import { execSync } from 'child_process';
 import { join } from 'path';
-import { tmpdir } from 'os';
 import { WorktreeManager } from '../worktreeManager';
+import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
 // Type helper to reach _createAtPath for spying.
@@ -38,104 +37,98 @@ interface WorktreeManagerWithPrivates {
 
 describe('WorktreeManager.createDeterministicWorktree', () => {
   describe('path matches scheme', () => {
-    let tmpDir: string;
-
-    beforeEach(() => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'worktree-unit-'));
-    });
-
-    afterEach(() => {
-      try {
-        rmSync(tmpDir, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup failures
-      }
-    });
-
     it('worktreePath ends with .cyboflow/worktrees/<workflowName>/<runId8>', async () => {
-      const manager = new WorktreeManager();
-      const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
-      const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
+      await withTempDir('worktree-unit-', async (tmpDir) => {
+        const manager = new WorktreeManager();
+        const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
+        const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
 
-      const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
-        worktreePath: expectedWorktreePath,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
+        const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
+          worktreePath: expectedWorktreePath,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        });
+
+        const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
+
+        expect(result.worktreePath).toMatch(/\.cyboflow[/\\]worktrees[/\\]sprint[/\\]a3f2b1c0$/);
+
+        stub.mockRestore();
       });
-
-      const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
-
-      expect(result.worktreePath).toMatch(/\.cyboflow[/\\]worktrees[/\\]sprint[/\\]a3f2b1c0$/);
-
-      stub.mockRestore();
     });
 
     it('branchName matches cyboflow/<workflowName>/<runId8>', async () => {
-      const manager = new WorktreeManager();
-      const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
-      const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
+      await withTempDir('worktree-unit-', async (tmpDir) => {
+        const manager = new WorktreeManager();
+        const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
+        const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
 
-      const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
-        worktreePath: expectedWorktreePath,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
+        const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
+          worktreePath: expectedWorktreePath,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        });
+
+        const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
+
+        expect(result.branchName).toBe('cyboflow/sprint/a3f2b1c0');
+
+        stub.mockRestore();
       });
-
-      const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
-
-      expect(result.branchName).toBe('cyboflow/sprint/a3f2b1c0');
-
-      stub.mockRestore();
     });
 
     it('uses only the first 8 chars of runId', async () => {
-      const manager = new WorktreeManager();
-      const capturedBranch: { name: string } = { name: '' };
-      const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'compound', '12345678');
+      await withTempDir('worktree-unit-', async (tmpDir) => {
+        const manager = new WorktreeManager();
+        const capturedBranch: { name: string } = { name: '' };
+        const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'compound', '12345678');
 
-      const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockImplementation(
-        async (_projectPath: unknown, _wtp: unknown, branchName: unknown) => {
-          capturedBranch.name = branchName as string;
-          return {
-            worktreePath: expectedWorktreePath,
-            baseCommit: 'abc123',
-            baseBranch: 'HEAD',
-          };
-        }
-      );
+        const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockImplementation(
+          async (_projectPath: unknown, _wtp: unknown, branchName: unknown) => {
+            capturedBranch.name = branchName as string;
+            return {
+              worktreePath: expectedWorktreePath,
+              baseCommit: 'abc123',
+              baseBranch: 'HEAD',
+            };
+          }
+        );
 
-      await manager.createDeterministicWorktree(
-        tmpDir,
-        'compound',
-        '1234567890abcdef1234567890abcdef',
-      );
+        await manager.createDeterministicWorktree(
+          tmpDir,
+          'compound',
+          '1234567890abcdef1234567890abcdef',
+        );
 
-      expect(capturedBranch.name).toBe('cyboflow/compound/12345678');
+        expect(capturedBranch.name).toBe('cyboflow/compound/12345678');
 
-      stub.mockRestore();
+        stub.mockRestore();
+      });
     });
 
     it('_createAtPath is called with the computed worktreePath and branchName', async () => {
-      const manager = new WorktreeManager();
-      const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
-      const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
+      await withTempDir('worktree-unit-', async (tmpDir) => {
+        const manager = new WorktreeManager();
+        const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
+        const expectedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', 'a3f2b1c0');
 
-      const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
-        worktreePath: expectedWorktreePath,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
+        const stub = vi.spyOn(manager as unknown as WorktreeManagerWithPrivates, '_createAtPath').mockResolvedValue({
+          worktreePath: expectedWorktreePath,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        });
+
+        await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
+
+        expect(stub).toHaveBeenCalledWith(
+          tmpDir,
+          expectedWorktreePath,
+          'cyboflow/sprint/a3f2b1c0',
+          undefined,
+        );
+
+        stub.mockRestore();
       });
-
-      await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
-
-      expect(stub).toHaveBeenCalledWith(
-        tmpDir,
-        expectedWorktreePath,
-        'cyboflow/sprint/a3f2b1c0',
-        undefined,
-      );
-
-      stub.mockRestore();
     });
   });
 
@@ -144,39 +137,28 @@ describe('WorktreeManager.createDeterministicWorktree', () => {
   // -------------------------------------------------------------------------
 
   describe('branch matches scheme (integration)', () => {
-    let tmpDir: string;
-
-    beforeEach(() => {
-      tmpDir = mkdtempSync(join(tmpdir(), 'worktree-manager-test-'));
-      // Init a git repo with an initial commit so worktree add works
-      execSync('git init', { cwd: tmpDir, stdio: 'pipe' });
-      execSync('git config user.email "test@example.com"', { cwd: tmpDir, stdio: 'pipe' });
-      execSync('git config user.name "Test"', { cwd: tmpDir, stdio: 'pipe' });
-      execSync('git commit --allow-empty -m "init"', { cwd: tmpDir, stdio: 'pipe' });
-    });
-
-    afterEach(() => {
-      try {
-        rmSync(tmpDir, { recursive: true, force: true });
-      } catch {
-        // ignore cleanup failures
-      }
-    });
-
     it('creates branch cyboflow/<workflowName>/<runId8> in the repo', async () => {
-      const manager = new WorktreeManager();
-      const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
+      await withTempDir('worktree-manager-test-', async (tmpDir) => {
+        // Init a git repo with an initial commit so worktree add works
+        execSync('git init', { cwd: tmpDir, stdio: 'pipe' });
+        execSync('git config user.email "test@example.com"', { cwd: tmpDir, stdio: 'pipe' });
+        execSync('git config user.name "Test"', { cwd: tmpDir, stdio: 'pipe' });
+        execSync('git commit --allow-empty -m "init"', { cwd: tmpDir, stdio: 'pipe' });
 
-      const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
+        const manager = new WorktreeManager();
+        const runId = 'a3f2b1c09d8e7f6b5a4c3d2e1f0a9b8c';
 
-      expect(result.branchName).toBe('cyboflow/sprint/a3f2b1c0');
+        const result = await manager.createDeterministicWorktree(tmpDir, 'sprint', runId);
 
-      // Verify git branch exists
-      const branches = execSync('git branch --list "cyboflow/sprint/a3f2b1c0"', { cwd: tmpDir }).toString().trim();
-      expect(branches).toContain('cyboflow/sprint/a3f2b1c0');
+        expect(result.branchName).toBe('cyboflow/sprint/a3f2b1c0');
 
-      // Verify worktree path
-      expect(result.worktreePath).toMatch(/\.cyboflow[/\\]worktrees[/\\]sprint[/\\]a3f2b1c0$/);
+        // Verify git branch exists
+        const branches = execSync('git branch --list "cyboflow/sprint/a3f2b1c0"', { cwd: tmpDir }).toString().trim();
+        expect(branches).toContain('cyboflow/sprint/a3f2b1c0');
+
+        // Verify worktree path
+        expect(result.worktreePath).toMatch(/\.cyboflow[/\\]worktrees[/\\]sprint[/\\]a3f2b1c0$/);
+      });
     });
   });
 });

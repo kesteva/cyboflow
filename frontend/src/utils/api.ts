@@ -3,9 +3,11 @@ import type { CreateSessionRequest } from '../types/session';
 import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 
-// Type for IPC response
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic type parameter default for flexible API responses
-export interface IPCResponse<T = any> {
+// Type for IPC response.
+// T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
+// This enforces the type-contract at each IPC call site and prevents silent regressions
+// on field renames (e.g. the crystalDirectory → cyboflowDirectory incident).
+export interface IPCResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
@@ -13,8 +15,9 @@ export interface IPCResponse<T = any> {
   command?: string;
 }
 
-// Type for Git error response
-export interface GitErrorResponse extends IPCResponse {
+// Type for Git error response.
+// Extends IPCResponse<unknown> because the .data field is not consumed by GitErrorResponse callers.
+export interface GitErrorResponse extends IPCResponse<unknown> {
   gitError?: {
     command?: string;
     commands?: string[];

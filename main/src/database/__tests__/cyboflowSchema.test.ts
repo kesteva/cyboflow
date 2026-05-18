@@ -125,20 +125,22 @@ describe('006_cyboflow_schema — workflow_runs CHECK constraint', () => {
     // Insert a parent workflow row first so the FK chain is satisfied
     freshDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, spec_json)
-         VALUES ('wf-1', 1, 'Test Workflow', '{}')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
+
+    const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     // Now try to insert a workflow_runs row with an invalid status
     expect(() => {
       freshDb
         .prepare(
           `INSERT INTO workflow_runs
-             (id, workflow_id, project_id, worktree_path, status, policy_json)
-           VALUES ('wr-1', 'wf-1', 1, '/tmp/worktree', 'foo', '{}')`
+             (id, workflow_id, project_id, status, permission_mode_snapshot)
+           VALUES ('wr-1', ?, 1, 'foo', 'default')`
         )
-        .run();
+        .run(wfRow.id);
     }).toThrow(/CHECK constraint failed/);
 
     freshDb.close();
@@ -161,19 +163,21 @@ describe('006_cyboflow_schema — workflow_runs CHECK constraint', () => {
 
       freshDb
         .prepare(
-          `INSERT INTO workflows (id, project_id, name, spec_json)
-           VALUES ('wf-1', 1, 'Test Workflow', '{}')`
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+           VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
         )
         .run();
+
+      const wfRow = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
       expect(() => {
         freshDb
           .prepare(
             `INSERT INTO workflow_runs
-               (id, workflow_id, project_id, worktree_path, status, policy_json)
-             VALUES ('wr-1', 'wf-1', 1, '/tmp/worktree', ?, '{}')`
+               (id, workflow_id, project_id, status, permission_mode_snapshot)
+             VALUES ('wr-1', ?, 1, ?, 'default')`
           )
-          .run(status);
+          .run(wfRow.id, status);
       }).not.toThrow();
 
       freshDb.close();
@@ -192,18 +196,20 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
     // Set up the FK chain: workflows → workflow_runs → approvals
     freshDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, spec_json)
-         VALUES ('wf-1', 1, 'Test Workflow', '{}')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
+
+    const wfRow1 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     freshDb
       .prepare(
         `INSERT INTO workflow_runs
-           (id, workflow_id, project_id, worktree_path, status, policy_json)
-         VALUES ('wr-1', 'wf-1', 1, '/tmp/worktree', 'running', '{}')`
+           (id, workflow_id, project_id, status, permission_mode_snapshot)
+         VALUES ('wr-1', ?, 1, 'running', 'default')`
       )
-      .run();
+      .run(wfRow1.id);
 
     // Now try to insert an approvals row with an invalid status
     expect(() => {
@@ -224,18 +230,20 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
 
     freshDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, spec_json)
-         VALUES ('wf-1', 1, 'Test Workflow', '{}')`
+        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+         VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
       )
       .run();
+
+    const wfRow2 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
     freshDb
       .prepare(
         `INSERT INTO workflow_runs
-           (id, workflow_id, project_id, worktree_path, status, policy_json)
-         VALUES ('wr-1', 'wf-1', 1, '/tmp/worktree', 'running', '{}')`
+           (id, workflow_id, project_id, status, permission_mode_snapshot)
+         VALUES ('wr-1', ?, 1, 'running', 'default')`
       )
-      .run();
+      .run(wfRow2.id);
 
     // Insert without specifying status — should default to 'pending'
     freshDb
@@ -263,18 +271,20 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
 
       freshDb
         .prepare(
-          `INSERT INTO workflows (id, project_id, name, spec_json)
-           VALUES ('wf-1', 1, 'Test Workflow', '{}')`
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+           VALUES ('wf-test', 1, 'Test Workflow', '/tmp/wf.md', 'default')`
         )
         .run();
+
+      const wfRow3 = freshDb.prepare('SELECT id FROM workflows LIMIT 1').get() as { id: string };
 
       freshDb
         .prepare(
           `INSERT INTO workflow_runs
-             (id, workflow_id, project_id, worktree_path, status, policy_json)
-           VALUES ('wr-1', 'wf-1', 1, '/tmp/worktree', 'running', '{}')`
+             (id, workflow_id, project_id, status, permission_mode_snapshot)
+           VALUES ('wr-1', ?, 1, 'running', 'default')`
         )
-        .run();
+        .run(wfRow3.id);
 
       expect(() => {
         freshDb
