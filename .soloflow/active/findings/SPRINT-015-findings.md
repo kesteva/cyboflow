@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-015
-pending_count: 11
-last_updated: "2026-05-17T00:00:00.000Z"
+pending_count: 12
+last_updated: "2026-05-17T13:30:00.000Z"
 ---
 # Findings Queue
 
@@ -150,4 +150,14 @@ last_updated: "2026-05-17T00:00:00.000Z"
 - **location:** main/src/orchestrator/__tests__/cancelAndRestart.test.ts:51, main/src/orchestrator/__tests__/approvalRouter.test.ts:59, main/src/orchestrator/__tests__/stuckDetector.test.ts:90, main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:90, main/src/orchestrator/__tests__/inspectorQueries.test.ts:64
 - **description:** TASK-604 extracted `dbAdapter` into `main/src/orchestrator/__test_fixtures__/dbAdapter.ts` and migrated the 4 sites enumerated in files_owned. But 5 additional test files outside scope still define identical `function dbAdapter(db: Database.Database): DatabaseLike` helpers with the exact same body (`prepare: (sql) => db.prepare(sql)` + the standard `transaction<T>` cast). These are direct drop-in replacement candidates — same signature, same body. (A 6th site, `main/src/trpc/__tests__/approvals.test.ts:39`, uses a narrower bespoke shape and is NOT substitutable.) Same DRY rationale as TASK-604: any future widening of `DatabaseLike` (e.g. adding `pragma()`) requires updating 5 silently-drifting copies. Mirrors FIND-SPRINT-015-10's "planner discovered only the listed sites" pattern.
 - **suggested_action:** Spawn a low-complexity follow-up task that owns the 5 listed test files and replaces each inline `function dbAdapter(...)` block with `import { dbAdapter } from '<rel>/__test_fixtures__/dbAdapter';`. Leave `main/src/trpc/__tests__/approvals.test.ts` alone (different shape, intentional local narrowing).
-- **resolved_by:**
+- **resolved_by:*
+
+## FIND-SPRINT-015-16
+- **source:** TASK-605 (code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/utils/gitignoreWriter.test.ts:11-13, main/src/orchestrator/__tests__/workflowRegistry.test.ts:88
+- **description:** TASK-605 created the `withTempDir` helper and migrated the 6 sites listed in `files_owned`. Two additional `mkdtempSync` sites outside that scope leak their temp dirs with no cleanup whatsoever — same class of leak the task targeted, just missed by the planner's discovery grep. (1) `gitignoreWriter.test.ts:11-13` defines `makeTempDir()` which calls `mkdtempSync(...,'gitignore-test-')` and is invoked from many `it` blocks; no `afterEach`/`afterAll` hook exists in the file. (2) `workflowRegistry.test.ts:88` calls `mkdtempSync(...,'workflow-registry-test-')` in `beforeEach` with no matching cleanup hook in the file. Both leave directories named `gitignore-test-*` and `workflow-registry-test-*` in `$TMPDIR` after every test run. The TASK-605 AC check (`ls $TMPDIR | grep -E 'runlauncher-test-|cyboflow-ipc-test-|cyboflow-gate-wf-|cyboflow-day3-'`) intentionally only covers the 4 prefixes the task was scoped to, so this leakage is invisible to the in-scope verification but real. Mirrors the same "planner discovered only the listed sites" pattern as FIND-SPRINT-015-10 and FIND-SPRINT-015-15.
+- **suggested_action:** Spawn a low-complexity follow-up task that owns the two files and migrates each `it` body to `await withTempDir('gitignore-test-', ...)` / `await withTempDir('workflow-registry-test-', ...)` — replacing `makeTempDir()` in `gitignoreWriter.test.ts` and the `beforeEach` temp-dir creation in `workflowRegistry.test.ts`. Verify post-migration with `ls $TMPDIR | grep -E 'gitignore-test-|workflow-registry-test-'` returning no rows after `pnpm --filter main test`.
+- **resolved_by:*
