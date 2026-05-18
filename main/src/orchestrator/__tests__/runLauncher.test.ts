@@ -16,7 +16,7 @@ import { randomUUID } from 'crypto';
 import { join } from 'path';
 import Database from 'better-sqlite3';
 import { RunLauncher } from '../runLauncher';
-import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../runLauncher';
+import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { LoggerLike } from '../types';
@@ -481,6 +481,135 @@ describe('RunLauncher.launch error handling', () => {
       expect(row.status).not.toBe('starting');
       expect(row.status).toBe('failed');
       expect(row.error_message).not.toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunLauncher.launch — StreamEventPublisher integration
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch publisher', () => {
+  it('calls publisher.publish with run_started event after status update', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      // Seed a workflow row
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
+      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+
+      const fakeRegistry = {
+        getById: (id: string) => {
+          const row = db.prepare(
+            'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+          ).get(id);
+          return row ?? null;
+        },
+        createRun: vi.fn(() => {
+          db.prepare(
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+          ).run(cannedRunId, workflowId, 1);
+          return { runId: cannedRunId, permissionMode: 'default' as const };
+        }),
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: cannedWorktreePath,
+          branchName: cannedBranchName,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      // Spy publisher satisfying StreamEventPublisher interface
+      const publishSpy = vi.fn();
+      const spyPublisher: StreamEventPublisher = { publish: publishSpy };
+
+      const launcher = new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        undefined, // mcpConfigWriter
+        undefined, // orchSocketProvider
+        undefined, // bridgeScriptResolver
+        undefined, // nodeResolver
+        spyPublisher,
+      );
+
+      const result = await launcher.launch(workflowId, tmpDir);
+
+      // publisher.publish must have been called at least once
+      expect(publishSpy).toHaveBeenCalled();
+
+      // The runId arg must match the returned runId
+      const firstCall = publishSpy.mock.calls[0] as [string, { type: string; payload: unknown; timestamp: string }];
+      expect(firstCall[0]).toBe(result.runId);
+
+      // The event must have type 'run_started'
+      expect(firstCall[1].type).toBe('run_started');
+    });
+  });
+
+  it('launch succeeds without a publisher (publisher is optional)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
+      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+
+      const fakeRegistry = {
+        getById: (id: string) => {
+          const row = db.prepare(
+            'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+          ).get(id);
+          return row ?? null;
+        },
+        createRun: vi.fn(() => {
+          db.prepare(
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+          ).run(cannedRunId, workflowId, 1);
+          return { runId: cannedRunId, permissionMode: 'default' as const };
+        }),
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: cannedWorktreePath,
+          branchName: cannedBranchName,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      // No publisher passed — 9th arg omitted entirely
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+      const result = await launcher.launch(workflowId, tmpDir);
+
+      expect(result.runId).toBe(cannedRunId);
     });
   });
 });
