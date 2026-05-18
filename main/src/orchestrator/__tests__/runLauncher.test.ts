@@ -10,7 +10,7 @@
  * Tests use withTempDir for filesystem isolation (auto-cleanup on exit).
  * The launch test uses an in-memory SQLite DB for the workflow_runs assertion.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
@@ -45,6 +45,30 @@ function makeLogger(): LoggerLike {
   };
 }
 
+// Shared stubs for the 4 required MCP collaborators.
+// All tests that construct RunLauncher must pass these (or equivalent stubs)
+// now that the constructor throws if any are missing.
+
+const fakeMcpConfigWriter: McpConfigWriter = {
+  writeForRun: vi.fn().mockResolvedValue('/fake/.mcp.json'),
+} as unknown as McpConfigWriter;
+
+const fakeOrchSocketProvider: OrchSocketProvider = {
+  getSocketPath: () => '/tmp/stub-orch.sock',
+};
+
+const fakeBridgeScriptResolver: BridgeScriptResolver = {
+  getScriptPath: () => '/stub/bridge.js',
+};
+
+const fakeNodeResolver: NodeResolver = {
+  getNodePath: async () => '/usr/local/bin/node',
+};
+
+// Reset all vi.fn() call history before each test so the module-level shared
+// stubs (fakeMcpConfigWriter, etc.) do not accumulate state across tests.
+beforeEach(() => vi.clearAllMocks());
+
 // ---------------------------------------------------------------------------
 // ensureGitignoreEntry
 // ---------------------------------------------------------------------------
@@ -55,7 +79,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger());
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       writeFileSync(gitignorePath, 'node_modules\n', 'utf-8');
@@ -72,7 +96,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger());
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       const original = 'node_modules\n.cyboflow/worktrees/\n';
@@ -93,7 +117,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger());
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       const original = '.cyboflow/worktrees\n';
@@ -112,7 +136,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger());
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       expect(existsSync(gitignorePath)).toBe(false);
@@ -130,7 +154,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger());
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       writeFileSync(gitignorePath, 'dist/\n', 'utf-8');
@@ -195,7 +219,7 @@ describe('RunLauncher.launch', () => {
         }),
       } as unknown as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger);
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const result = await launcher.launch(workflowId, tmpDir);
 
@@ -230,7 +254,7 @@ describe('RunLauncher.launch', () => {
 
       const fakeWorktree = {} as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       await expect(launcher.launch('nonexistent-id', tmpDir)).rejects.toThrow('not found');
     });
@@ -394,7 +418,7 @@ describe('RunLauncher.launch error handling', () => {
         createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('git worktree add failed')),
       } as unknown as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('git worktree add failed');
 
@@ -469,7 +493,7 @@ describe('RunLauncher.launch error handling', () => {
         createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('disk full')),
       } as unknown as WorktreeManager;
 
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('disk full');
 
@@ -542,10 +566,10 @@ describe('RunLauncher.launch publisher', () => {
         fakeRegistry,
         fakeWorktree,
         logger,
-        undefined, // mcpConfigWriter
-        undefined, // orchSocketProvider
-        undefined, // bridgeScriptResolver
-        undefined, // nodeResolver
+        fakeMcpConfigWriter,
+        fakeOrchSocketProvider,
+        fakeBridgeScriptResolver,
+        fakeNodeResolver,
         spyPublisher,
       );
 
@@ -619,11 +643,126 @@ describe('RunLauncher.launch publisher', () => {
         }),
       } as unknown as WorktreeManager;
 
-      // No publisher passed — 9th arg omitted entirely
-      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger);
+      // No publisher passed — 9th arg omitted entirely (publisher is still optional)
+      const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
       const result = await launcher.launch(workflowId, tmpDir);
 
       expect(result.runId).toBe(cannedRunId);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunLauncher constructor validation
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher constructor validation', () => {
+  function makeMinimalArgs() {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const fakeRegistry = {} as WorkflowRegistry;
+    const fakeWorktree = {} as WorktreeManager;
+    const logger = makeLogger();
+    return { adapter, fakeRegistry, fakeWorktree, logger };
+  }
+
+  it('throws when mcpConfigWriter is missing', () => {
+    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
+    expect(
+      () => new RunLauncher(
+        adapter, fakeRegistry, fakeWorktree, logger,
+        undefined as unknown as McpConfigWriter,
+        fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      ),
+    ).toThrow('RunLauncher: missing required collaborator mcpConfigWriter');
+  });
+
+  it('throws when orchSocketProvider is missing', () => {
+    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
+    expect(
+      () => new RunLauncher(
+        adapter, fakeRegistry, fakeWorktree, logger,
+        fakeMcpConfigWriter,
+        undefined as unknown as OrchSocketProvider,
+        fakeBridgeScriptResolver, fakeNodeResolver,
+      ),
+    ).toThrow('RunLauncher: missing required collaborator orchSocketProvider');
+  });
+
+  it('throws when bridgeScriptResolver is missing', () => {
+    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
+    expect(
+      () => new RunLauncher(
+        adapter, fakeRegistry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider,
+        undefined as unknown as BridgeScriptResolver,
+        fakeNodeResolver,
+      ),
+    ).toThrow('RunLauncher: missing required collaborator bridgeScriptResolver');
+  });
+
+  it('throws when nodeResolver is missing', () => {
+    const { adapter, fakeRegistry, fakeWorktree, logger } = makeMinimalArgs();
+    expect(
+      () => new RunLauncher(
+        adapter, fakeRegistry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver,
+        undefined as unknown as NodeResolver,
+      ),
+    ).toThrow('RunLauncher: missing required collaborator nodeResolver');
+  });
+
+  it('launch always calls mcpConfigWriter.writeForRun (unconditional)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const workflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(workflowId);
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
+      const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+
+      const fakeRegistry = {
+        getById: (id: string) => {
+          const row = db.prepare(
+            'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+          ).get(id);
+          return row ?? null;
+        },
+        createRun: vi.fn(() => {
+          db.prepare(
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+          ).run(cannedRunId, workflowId, 1);
+          return { runId: cannedRunId, permissionMode: 'default' as const };
+        }),
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: cannedWorktreePath,
+          branchName: cannedBranchName,
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      const writeForRunSpy = vi.fn().mockResolvedValue(join(cannedWorktreePath, '.mcp.json'));
+      const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
+
+      const launcher = new RunLauncher(
+        adapter, fakeRegistry, fakeWorktree, logger,
+        spyMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      await launcher.launch(workflowId, tmpDir);
+
+      // Must have been called — the if-guard has been removed
+      expect(writeForRunSpy).toHaveBeenCalledOnce();
     });
   });
 });

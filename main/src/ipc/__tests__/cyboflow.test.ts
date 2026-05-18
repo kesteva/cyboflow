@@ -27,6 +27,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import type { AppServices } from '../types';
 import type { LoggerLike } from '../../orchestrator/types';
+import { RunLauncher } from '../../orchestrator/runLauncher';
+import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../../orchestrator/runLauncher';
+import type { McpConfigWriter } from '../../orchestrator/mcpConfigWriter';
+import { WorkflowRegistry } from '../../orchestrator/workflowRegistry';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -256,7 +260,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
   it('returns { success: true, data: { runId, worktreePath, branchName } } on happy path', async () => {
     await withTempDir('cyboflow-ipc-test-', async (tmpDir) => {
       vi.resetModules();
-      const { registerCyboflowHandlers } = await import('../cyboflow');
+      const { registerCyboflowHandlers, _setRunLauncherForTest } = await import('../cyboflow');
       const services = makeServices(db);
 
       // Stub worktreeManager so no real FS work is done.
@@ -270,6 +274,39 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
 
       const getProjectById = services.sessionManager.getProjectById as ReturnType<typeof vi.fn>;
       getProjectById.mockReturnValue({ id: 1, path: tmpDir, name: 'test-project' });
+
+      // Build a RunLauncher with benign test stubs for the epic-7 sentinels so
+      // the happy-path test exercises the IPC wiring boundary without hitting the
+      // throwing orchSocketProvider / bridgeScriptResolver sentinels.
+      const stubMcpConfigWriter: McpConfigWriter = {
+        writeForRun: vi.fn().mockResolvedValue(`${tmpDir}/.mcp.json`),
+      } as unknown as McpConfigWriter;
+      const stubOrchSocketProvider: OrchSocketProvider = {
+        getSocketPath: () => '/tmp/test-orch.sock',
+      };
+      const stubBridgeScriptResolver: BridgeScriptResolver = {
+        getScriptPath: () => '/tmp/test-bridge.js',
+      };
+      const stubNodeResolver: NodeResolver = {
+        getNodePath: async () => process.execPath,
+      };
+
+      const testWorktreeManager = services.worktreeManager;
+      const testLogger: LoggerLike = {
+        info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+      };
+      const testRegistry = new WorkflowRegistry(db, testLogger);
+      const testLauncher = new RunLauncher(
+        dbAdapter(db),
+        testRegistry,
+        testWorktreeManager,
+        testLogger,
+        stubMcpConfigWriter,
+        stubOrchSocketProvider,
+        stubBridgeScriptResolver,
+        stubNodeResolver,
+      );
+      _setRunLauncherForTest(testLauncher);
 
       const { ipcMain, handlers } = makeHandlerCapture();
       registerCyboflowHandlers(
