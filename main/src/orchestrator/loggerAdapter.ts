@@ -37,3 +37,26 @@ export function makeLoggerLike(logger?: Logger): LoggerLike {
     debug: (msg: string, ctx?: Record<string, unknown>) => console.debug(ctx ? `${msg} ${JSON.stringify(ctx)}` : msg),
   };
 }
+
+/**
+ * Build a DatabaseLike adapter from a databaseService-like object.  Mirrors
+ * the inline pattern previously duplicated in main/src/index.ts for the
+ * cyboflow services bootstrap and the tRPC orchestrator bootstrap.
+ *
+ * The structural-typed `databaseService` param keeps this module's
+ * standalone-typecheck invariant intact (no import from
+ * main/src/services/database).
+ */
+import type { DatabaseLike } from './types';
+
+export function makeDatabaseLike(databaseService: {
+  getDb: () => {
+    prepare: DatabaseLike['prepare'];
+    transaction: DatabaseLike['transaction'];
+  };
+}): DatabaseLike {
+  return {
+    prepare: (sql) => databaseService.getDb().prepare(sql),
+    transaction: (fn) => databaseService.getDb().transaction(fn),
+  };
+}

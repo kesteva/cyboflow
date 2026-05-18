@@ -37,7 +37,7 @@ import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
-import { makeLoggerLike } from './orchestrator/loggerAdapter';
+import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -548,13 +548,7 @@ async function initializeServices() {
   // singletons assembled with the rest of AppServices (not lazy on first IPC).
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
-  // Inline adapter: expose the narrow DatabaseLike surface by delegating to
-  // the underlying better-sqlite3 handle.  Using getDb() here matches the
-  // pattern used for the tRPC orchestrator below.
-  const cyboflowDb: import('./orchestrator/types').DatabaseLike = {
-    prepare: (sql) => databaseService.getDb().prepare(sql),
-    transaction: (fn) => databaseService.getDb().transaction(fn),
-  };
+  const cyboflowDb = makeDatabaseLike(databaseService);
   const workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
   const mcpConfigWriter = new McpConfigWriter();
 
@@ -670,18 +664,8 @@ app.whenReady().then(async () => {
     // type-erasure cast (as unknown as DatabaseLike) that previously bypassed
     // the structural check and would have thrown at runtime if any orchestrator
     // code called db.prepare() or db.transaction().
-    const db: DatabaseLike = {
-      prepare: (sql) => databaseService.getDb().prepare(sql),
-      transaction: (fn) => databaseService.getDb().transaction(fn),
-    };
-    // Logger adapter: Logger class satisfies info/warn/error but does not
-    // declare `debug`. Provide an inline adapter that satisfies LoggerLike.
-    const loggerLike: import('./orchestrator/types').LoggerLike = {
-      info: (msg: string) => logger.info(msg),
-      warn: (msg: string) => logger.warn(msg),
-      error: (msg: string) => logger.error(msg),
-      debug: (msg: string) => logger.info(`[debug] ${msg}`),
-    };
+    const db = makeDatabaseLike(databaseService);
+    const loggerLike = makeLoggerLike(logger);
     orchestrator = new Orchestrator({ db, logger: loggerLike, runQueues });
     await orchestrator.start();
     if (!mainWindow) {
