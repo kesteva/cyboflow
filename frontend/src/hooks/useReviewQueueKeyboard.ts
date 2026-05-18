@@ -6,9 +6,16 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * Provides Vim/Superhuman-style keyboard triage for the review queue.
  *
  * Registers a window-level keydown listener for j, k, y, n when the hook is
- * mounted (i.e. when the review queue rail is visible).  The input-element
- * guard prevents these keys from firing while the user types in an
- * <input>, <textarea>, or contenteditable element.
+ * mounted (i.e. when the review queue rail is visible).
+ *
+ * Focus-guard contract (evaluated top-to-bottom inside handleKeyDown):
+ *   1. Modifier-key guard — ignore Cmd/Ctrl/Alt combos.
+ *   2. Focus guard — return early if `document.activeElement` is neither
+ *      `document.body` nor `null`.  This prevents the shortcuts from firing
+ *      when any focusable element (e.g. a Radix focus-trap <div>, a custom
+ *      button, a modal overlay) holds focus, not just text-input elements.
+ *   3. Input-element guard — retained for defence-in-depth in cases where
+ *      `document.activeElement` hasn't settled yet or an iframe is involved.
  *
  * Key map:
  *   j — focus next item (clamps at last item)
@@ -63,6 +70,11 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
     function handleKeyDown(event: KeyboardEvent): void {
       // Ignore modifier-key combos (Cmd-K, Ctrl-N, Alt-J, etc.).
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      // Focus guard: only fire when no element has focus (body or null).
+      // Prevents shortcuts from activating while Radix modals, custom focus
+      // traps, or any other focusable non-input element holds keyboard focus.
+      if (document.activeElement !== document.body && document.activeElement !== null) return;
 
       // Guard: ignore events when focus is inside a text-input element.
       const target = event.target;
