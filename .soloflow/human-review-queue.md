@@ -290,3 +290,37 @@ _No items._
   level: sprint
   severity: low
   created_at: "2026-05-18T00:00:00.000Z"
+
+- task: SPRINT-017
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_017_review_queue_visual_flow
+  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
+  action: "Visually verify the review-queue triage flow on the running `pnpm dev` Electron window: (a) press `j`/`k` to navigate the queue; (b) press `y` on a group card and confirm a single atomic `approveRestOfRun` mutation fires; (c) press `n` on a group card and confirm a single atomic `rejectRestOfRun` mutation fires (TASK-616 — symmetric to approve); (d) confirm pressing `y`/`n` while an input or button has focus is a no-op (TASK-614 focus guard); (e) confirm the group-card Reject button (mouse) dispatches `rejectRestOfRun` exactly once, not per-item. Per-task unit tests cover each of these at the component/hook level, but Pass 1 visual verification was unable to drive the Electron renderer (see dedup_key=visual_web_electron_unreachable)."
+  blocked_checks:
+    - "Pass 1 visual_web — sprint-touched flows for TASK-612/614/616/611 not exercised end-to-end"
+  level: sprint
+  severity: medium
+  created_at: "2026-05-18T22:05:00.000Z"
+  affected_tasks:
+    - TASK-611
+    - TASK-612
+    - TASK-614
+    - TASK-616
+
+- task: SPRINT-017
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
+  action: "[Recurrence — already filed under SPRINT-015] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive Electron renderer (preload-injected electronTRPC missing on standalone Vite port 4521). To unblock for future sprints: set verification.visual_web=false, OR add a launch script exposing CDP for Playwright attach, OR add a Playwright-Electron driver path."
+  blocked_checks:
+    - "Pass 1 visual_web — SPRINT-017 review-queue flows not exercised"
+  level: sprint
+  severity: low
+  created_at: "2026-05-18T22:05:00.000Z"
+  affected_tasks:
+    - TASK-611
+    - TASK-612
+    - TASK-614
+    - TASK-616

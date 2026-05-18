@@ -6,6 +6,7 @@
  *   - approve           : mutation → { success: true } (stub — full impl in approval-router epic)
  *   - reject            : mutation → { success: true } (stub — full impl in approval-router epic)
  *   - approveRestOfRun  : mutation → { decided: number } (TASK-406 — per-run batch approve)
+ *   - rejectRestOfRun   : mutation → { decided: number } (TASK-616 — per-run batch reject)
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
@@ -13,7 +14,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
-import type { Approval, ApproveRestOfRunResult } from '../../../../../shared/types/approvals';
+import type { Approval, ApproveRestOfRunResult, RejectRestOfRunResult } from '../../../../../shared/types/approvals';
 
 export const approvalsRouter = router({
   /**
@@ -28,6 +29,7 @@ export const approvalsRouter = router({
    * inferred AppRouter type carries the full UI-visible shape to the renderer.
    */
   listPending: protectedProcedure
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .query(async ({ ctx }): Promise<Approval[]> => {
       // ctx.db is not yet present in the local context (v1 context carries only
       // userId). Until the approval-router epic wires the DB into context, this
@@ -60,6 +62,7 @@ export const approvalsRouter = router({
    */
   approve: protectedProcedure
     .input(z.object({ approvalId: z.string(), message: z.string().optional() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<{ success: true }> => {
       void ctx;
       console.log(`[approvals.approve] STUB — approvalId=${input.approvalId}`);
@@ -73,6 +76,7 @@ export const approvalsRouter = router({
    */
   reject: protectedProcedure
     .input(z.object({ approvalId: z.string(), message: z.string().optional() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<{ success: true }> => {
       void ctx;
       console.log(`[approvals.reject] STUB — approvalId=${input.approvalId}`);
@@ -99,6 +103,7 @@ export const approvalsRouter = router({
    */
   approveRestOfRun: protectedProcedure
     .input(z.object({ runId: z.string() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
     .mutation(async ({ input, ctx }): Promise<ApproveRestOfRunResult> => {
       void ctx;
       // TODO(approval-router epic): once ctx.db is wired, delegate to:
@@ -111,6 +116,36 @@ export const approvalsRouter = router({
       throw new TRPCError({
         code: 'NOT_IMPLEMENTED',
         message: `approveRestOfRun is not wired yet (approval-router epic). runId=${input.runId}`,
+      });
+    }),
+
+  /**
+   * Reject all pending approval gates for the given run.
+   *
+   * Scoped to a single run — never affects approvals from other runs.
+   * Best-effort: if one approval update fails, iteration continues and the
+   * count reflects only the successfully rejected items.
+   *
+   * Delegates to `rejectRestOfRunHandler` in main/src/trpc/routers/approvals.ts
+   * once `ctx.db` is wired into context (approval-router epic).  For now,
+   * throws NOT_IMPLEMENTED — the handler function is directly exercised by
+   * unit tests with an injected DB instance (FIND-SPRINT-011-8 mitigation).
+   */
+  rejectRestOfRun: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    // STUB — tRPC is the actual call path (PendingApprovalCard / useReviewQueueKeyboard / reviewQueueStore); implementation pending approval-router epic.
+    .mutation(async ({ input, ctx }): Promise<RejectRestOfRunResult> => {
+      void ctx;
+      // TODO(approval-router epic): once ctx.db is wired, delegate to:
+      //   import { rejectRestOfRunHandler } from '../../../trpc/routers/approvals';
+      //   return rejectRestOfRunHandler(ctx.db, input.runId);
+      //
+      // Until then, throw NOT_IMPLEMENTED so the group-card Reject click
+      // surfaces a visible UI error instead of silently no-op'ing while the
+      // subscription stream optimistically removes cards (FIND-SPRINT-011-8).
+      throw new TRPCError({
+        code: 'NOT_IMPLEMENTED',
+        message: `rejectRestOfRun is not wired yet (approval-router epic). runId=${input.runId}`,
       });
     }),
 });

@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -9,7 +8,7 @@ import type { QueueItem } from '../../utils/reviewQueueSelectors';
 
 // Mutable state shared between mock factory and test helpers
 let mockQueue: Approval[] = [];
-const mockInit = vi.fn();
+const mockInit = vi.fn(() => () => {});
 
 // Default view: map each approval to a single non-blocking QueueItem
 function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
@@ -59,6 +58,24 @@ describe('ReviewQueueView', () => {
   it('calls init() once on mount', () => {
     render(<ReviewQueueView />);
     expect(mockInit).toHaveBeenCalledTimes(1);
+  });
+
+  it('invokes the unsubscribe returned by init() when the component unmounts', () => {
+    // mockInit returns a fresh spy unsubscribe for each render so we can
+    // assert that React called it as the useEffect cleanup.
+    const mockUnsubscribe = vi.fn();
+    mockInit.mockReturnValueOnce(mockUnsubscribe);
+
+    const { unmount } = render(<ReviewQueueView />);
+
+    // Before unmount the cleanup must not have fired yet.
+    expect(mockUnsubscribe).not.toHaveBeenCalled();
+
+    // Unmounting triggers React's useEffect cleanup → should invoke the
+    // unsubscribe returned by init().
+    unmount();
+
+    expect(mockUnsubscribe).toHaveBeenCalledTimes(1);
   });
 
   it('renders one card per approval in queue', () => {

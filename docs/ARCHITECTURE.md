@@ -35,9 +35,33 @@ branding, IPC transport, and Crystal-specific features are being progressively r
 
 ## Major Components / Layers
 
-### Orchestrator (`main/src/services/`)
+### Orchestrator (`main/src/orchestrator/`)
 
-Core business logic. Key services:
+`Orchestrator` (`main/src/orchestrator/Orchestrator.ts`) is the single lifecycle entry
+point for the cyboflow main process. It is constructed via constructor injection and
+accepts exactly three collaborators:
+
+- **`db: DatabaseLike`** — narrow interface over better-sqlite3; no concrete import.
+- **`logger: LoggerLike`** — structured log surface (info/warn/error/debug).
+- **`runQueues: RunQueueRegistry`** — per-run mutation queue; `drainAll()` is awaited in `stop()`.
+
+`start()` is idempotent; `stop()` drains all run queues before resolving.
+
+**Event bus decision (SPRINT-006):** A shared `eventBus: EventEmitter` field was removed
+from `OrchestratorDeps` (it was never read by any caller after TASK-253). Cross-component
+events (e.g., `runs:stuck` from `StuckDetector`) use per-component `EventEmitter` instances
+created internally by each producer — not a top-level shared bus. Future `ApprovalRouter →
+renderer` notifications follow the same per-producer pattern: each component owns its
+emitter and callers subscribe directly.
+
+Standalone-typecheck invariant: the entire `main/src/orchestrator/` subtree must compile
+without transitive imports from `electron`, `better-sqlite3`, or any service in
+`main/src/services/*`. This keeps the orchestrator extractable to a standalone Node process
+for the team-tier v2 target (ROADMAP-001 §6.3).
+
+### Services (`main/src/services/`)
+
+Core business logic services. Key components:
 - **`cliManagerFactory.ts` / `panels/claude/claudeCodeManager.ts`** — PTY-based Claude Code
   session lifecycle via `@homebridge/node-pty-prebuilt-multiarch`. Inherits `AbstractCliManager`.
 - **`simpleTaskQueue.ts`** — In-process concurrency queue (no Redis). Used for session
@@ -54,6 +78,35 @@ Core business logic. Key services:
 Electron `ipcMain` handlers, one file per domain (`session.ts`, `git.ts`, `panels.ts`, etc.).
 Currently raw Electron IPC; the target architecture (per system design §4) is `electron-trpc`
 for typed renderer ↔ orchestrator calls. `index.ts` registers all handlers at app start.
+
+#### cyboflow.* transport status
+
+Four buckets describe the current state:
+
+**Raw-IPC live** — handlers in `main/src/ipc/cyboflow.ts` that the renderer calls today via
+`electron.invoke` (`frontend/src/utils/cyboflowApi.ts`):
+- `cyboflow:listWorkflows` — list/seed workflows for a project.
+- `cyboflow:startRun` — launch a new workflow run.
+- `cyboflow:mcp-health` — point-in-time MCP server health snapshot.
+
+Note: `cyboflow:mcp-health` has no v2 tRPC counterpart on the AppRouter shape.
+The migration from raw IPC to tRPC for the above procs is owned by a future task
+(placeholder ID: TBD-tRPC-cutover).
+
+**Raw-IPC stub** — handler present in `main/src/ipc/cyboflow.ts` but returns NOT_IMPLEMENTED:
+- `cyboflow:approveRun` — approve / deny a day-3 gate approval. Full implementation
+  lands in the approval-router epic.
+
+**tRPC live (real body)** — procedures in the tRPC routers with a real implementation wired today:
+- `runs.cancelAndRestart` — cancels a stuck run and enqueues a fresh run; delegates to
+  `cancelAndRestartHandler` once `setCancelAndRestartDeps()` is called at boot.
+
+**tRPC stub (active caller throws)** — procedures the renderer already calls via the tRPC
+client; each currently throws NOT_IMPLEMENTED because the DB is not yet wired into context:
+- `runs.getStuckInspection` — called by `StuckInspectorModal`.
+- `approvals.listPending`, `approvals.approve`, `approvals.reject`,
+  `approvals.approveRestOfRun`, `approvals.rejectRestOfRun` — called by `PendingApprovalCard`, `useReviewQueueKeyboard`,
+  and `reviewQueueStore`. Full implementation lands in the approval-router epic.
 
 ### Renderer (`frontend/src/`)
 

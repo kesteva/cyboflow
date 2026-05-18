@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 /**
  * StatusBar component tests — covers the three McpHealthStatus states.
  *

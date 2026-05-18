@@ -45,21 +45,25 @@ export const runsRouter = router({
   /** List workflow runs, optionally filtered by project. */
   list: protectedProcedure
     .input(z.object({ projectId: z.string().optional() }))
+    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
     .query(() => throwNotImplemented('workflow-runs')),
 
   /** Start a new workflow run for the given workflow and project. */
   start: protectedProcedure
     .input(z.object({ workflowId: z.string(), projectId: z.string() }))
+    // STUB — raw-IPC equivalent (cyboflow:startRun) in main/src/ipc/cyboflow.ts is the live surface. TBD-tRPC-cutover migration replaces this stub.
     .mutation(() => throwNotImplemented('workflow-runs')),
 
   /** Cancel a running workflow run by ID. */
   cancel: protectedProcedure
     .input(z.object({ runId: z.string() }))
+    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
     .mutation(() => throwNotImplemented('workflow-runs')),
 
   /** Get a single workflow run by ID. */
   get: protectedProcedure
     .input(z.object({ runId: z.string() }))
+    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
     .query(() => throwNotImplemented('workflow-runs')),
 
   /**
@@ -131,6 +135,7 @@ export const runsRouter = router({
       if (ctx.userId !== 'local') {
         throw new TRPCError({ code: 'FORBIDDEN' });
       }
+      // STUB — tRPC is the actual call path (StuckInspectorModal); implementation pending workflow-runs epic.
       // DB not yet wired into tRPC context (approval-router epic).
       // Throw NOT_IMPLEMENTED so the modal surfaces a visible error rather than
       // silently returning empty data.

@@ -21,6 +21,7 @@ Ship the load-bearing UI surface of Cyboflow: a workspace-scoped, always-visible
   - Pin items in awaiting_review > 3 min with "blocked Nm" badge
   - Collapse repeated approvals (same run + same tool + same payload signature) into a count card
   - Per-run `approveRestOfRun` mutation; group-card Approve uses it
+  - Per-run `rejectRestOfRun` mutation; group-card Reject and keyboard `n` use it
   - Explicit absence of any global approve-all symbol (sweep test enforces)
   - `reviewQueueStore` Zustand slice with full-state resync on mount and on tRPC reconnect
   - tRPC v11 router scaffolding (`cyboflow.approvals`, `cyboflow.events`) — the contract layer this epic produces
@@ -30,7 +31,6 @@ Ship the load-bearing UI surface of Cyboflow: a workspace-scoped, always-visible
 - **Out of scope:**
   - The `ApprovalRouter` orchestrator service that actually creates approvals and replies on the permission socket (owned by IDEA-008 / a future approval-router epic). This epic stubs the create/decide path and consumes whatever the orchestrator produces.
   - Filter-by-workflow, search, prioritization beyond the blocking-pin
-  - Reject-rest-of-run (symmetric to approve-rest) — deferred to v1.1
   - Auto-approval policies, AI-assisted triage, allowlist UI
   - Cross-machine sync, team queues, auth — out of v1 entirely
   - Linux/Windows dock-badge equivalents — v1 is macOS

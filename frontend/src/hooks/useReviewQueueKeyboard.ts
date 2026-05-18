@@ -6,9 +6,16 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * Provides Vim/Superhuman-style keyboard triage for the review queue.
  *
  * Registers a window-level keydown listener for j, k, y, n when the hook is
- * mounted (i.e. when the review queue rail is visible).  The input-element
- * guard prevents these keys from firing while the user types in an
- * <input>, <textarea>, or contenteditable element.
+ * mounted (i.e. when the review queue rail is visible).
+ *
+ * Focus-guard contract (evaluated top-to-bottom inside handleKeyDown):
+ *   1. Modifier-key guard — ignore Cmd/Ctrl/Alt combos.
+ *   2. Focus guard — return early if `document.activeElement` is neither
+ *      `document.body` nor `null`.  This prevents the shortcuts from firing
+ *      when any focusable element (e.g. a Radix focus-trap <div>, a custom
+ *      button, a modal overlay) holds focus, not just text-input elements.
+ *   3. Input-element guard — retained for defence-in-depth in cases where
+ *      `document.activeElement` hasn't settled yet or an iframe is involved.
  *
  * Key map:
  *   j — focus next item (clamps at last item)
@@ -19,8 +26,8 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * Meta / Ctrl / Alt modifier combinations are ignored so as not to collide
  * with OS shortcuts (Cmd-K, Ctrl-N, etc.).
  *
- * For group items, y/n issue one mutation per member via Promise.all (batched).
- * TASK-406 will replace this with a single atomic per-run mutation.
+ * Group `y` dispatches `approveRestOfRun` atomically; group `n` dispatches
+ * `rejectRestOfRun` atomically (TASK-616 — symmetric to `approveRestOfRun`).
  *
  * Implementation note: focusedIndex and queue are tracked via refs so the
  * keydown handler always reads the latest values without being recreated on
@@ -64,6 +71,11 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
       // Ignore modifier-key combos (Cmd-K, Ctrl-N, Alt-J, etc.).
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
+      // Focus guard: only fire when no element has focus (body or null).
+      // Prevents shortcuts from activating while Radix modals, custom focus
+      // traps, or any other focusable non-input element holds keyboard focus.
+      if (document.activeElement !== document.body && document.activeElement !== null) return;
+
       // Guard: ignore events when focus is inside a text-input element.
       const target = event.target;
       if (target instanceof HTMLInputElement) return;
@@ -95,11 +107,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             if (focused.kind === 'single') {
               void trpc.cyboflow.approvals.approve.mutate({ approvalId: focused.approval.id });
             } else {
-              void Promise.all(
-                focused.items.map((a) =>
-                  trpc.cyboflow.approvals.approve.mutate({ approvalId: a.id }),
-                ),
-              );
+              void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId: focused.runId });
             }
           }
           break;
@@ -111,11 +119,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             if (focused.kind === 'single') {
               void trpc.cyboflow.approvals.reject.mutate({ approvalId: focused.approval.id });
             } else {
-              void Promise.all(
-                focused.items.map((a) =>
-                  trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id }),
-                ),
-              );
+              void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId: focused.runId });
             }
           }
           break;
