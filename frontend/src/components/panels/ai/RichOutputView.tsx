@@ -216,6 +216,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         const allMessages = [...userPrompts];
         if (outputResponse.success && outputResponse.data && Array.isArray(outputResponse.data)) {
           // JSON messages are already in the correct format from getJsonMessages
+          // FIXME(SPRINT-015): local UserPromptMessage diverges from ClaudeJsonMessage — see FIND-SPRINT-015-12; resolve in B5 follow-up
           allMessages.push(...(outputResponse.data as unknown as UserPromptMessage[]));
         }
         
