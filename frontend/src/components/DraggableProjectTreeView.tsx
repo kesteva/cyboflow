@@ -637,9 +637,10 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
       setIsLoading(true);
       const response = await API.sessions.getAllWithProjects();
       if (response.success && response.data) {
-        
-        setProjectsWithSessions(response.data);
-        
+        const projects = response.data as ProjectWithSessions[];
+
+        setProjectsWithSessions(projects);
+
         // Try to load saved UI state
         let savedState = null;
         try {
@@ -650,7 +651,7 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
         } catch (error) {
           console.error('[DraggableProjectTreeView] Failed to load saved UI state:', error);
         }
-        
+
         if (savedState && savedState.expandedProjects && savedState.expandedFolders) {
           // Use saved state
           setExpandedProjects(new Set(savedState.expandedProjects));
@@ -659,12 +660,12 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
           // Fall back to auto-expand logic
           const projectsToExpand = new Set<number>();
           const foldersToExpand = new Set<string>();
-          
-          response.data.forEach((project: ProjectWithSessions) => {
+
+          projects.forEach((project: ProjectWithSessions) => {
             if (project.sessions.length > 0) {
               projectsToExpand.add(project.id);
             }
-            
+
             // Auto-expand folders that contain sessions
             if (project.folders && project.folders.length > 0) {
               project.folders.forEach(folder => {
@@ -675,16 +676,16 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
               });
             }
           });
-          
+
           // Also expand the project containing the active session
           if (activeSessionId) {
-            response.data.forEach((project: ProjectWithSessions) => {
+            projects.forEach((project: ProjectWithSessions) => {
               if (project.sessions.some(s => s.id === activeSessionId)) {
                 projectsToExpand.add(project.id);
               }
             });
           }
-          
+
           setExpandedProjects(projectsToExpand);
           setExpandedFolders(foldersToExpand);
         }
@@ -701,7 +702,7 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
       setIsLoadingArchived(true);
       const response = await API.sessions.getArchivedWithProjects();
       if (response.success && response.data) {
-        setArchivedProjectsWithSessions(response.data);
+        setArchivedProjectsWithSessions(response.data as ProjectWithSessions[]);
       }
     } catch (error) {
       console.error('Failed to load archived sessions:', error);
@@ -1195,7 +1196,7 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
       setShowValidationErrors(false);
       
       // Add the new project to the list without reloading everything
-      const newProjectWithSessions = { ...response.data, sessions: [], folders: [] };
+      const newProjectWithSessions: ProjectWithSessions = { ...(response.data as Project), sessions: [], folders: [] };
       setProjectsWithSessions(prev => [...prev, newProjectWithSessions]);
     } catch (error: unknown) {
       console.error('Failed to create project:', error);
@@ -1219,12 +1220,13 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
       );
 
       if (response.success && response.data) {
+        const newFolder = response.data;
         // Update the project with the new folder
         setProjectsWithSessions(prev => prev.map(project => {
           if (project.id === selectedProjectForFolder.id) {
             const updatedProject = {
               ...project,
-              folders: [...(project.folders || []), response.data]
+              folders: [...(project.folders || []), newFolder]
             };
             return updatedProject;
           }

@@ -35,7 +35,7 @@ export function StravuStatusIndicator() {
     try {
       const response = await API.stravu.getConnectionStatus();
       if (response.success) {
-        setConnectionState(response.data);
+        setConnectionState(response.data as ConnectionState);
       }
     } catch (error) {
       console.error('Failed to check Stravu connection status:', error);
