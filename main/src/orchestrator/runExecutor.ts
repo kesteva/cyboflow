@@ -111,6 +111,11 @@ export class RunExecutor {
     const prompt = await this.getPrompt(workflow);
     const overrides = await this.buildOptionsOverrides(runId, run, workflow);
 
+    // Wire event forwarding BEFORE spawning so no SDK-initialization events
+    // are lost — bridgeEvents registers listeners, spawnCliProcess starts the
+    // iterator that emits them.
+    await this.bridgeEvents(runId, panelId);
+
     await this.onLifecycleTransition(runId, 'spawning');
 
     this.logger.info('[RunExecutor] spawning Claude CLI process', {
@@ -127,7 +132,6 @@ export class RunExecutor {
       ...overrides,
     });
 
-    await this.bridgeEvents(runId, panelId);
     await this.onLifecycleTransition(runId, 'spawned');
   }
 
