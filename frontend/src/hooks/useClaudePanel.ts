@@ -225,7 +225,7 @@ export const useClaudePanel = (
         // Use panel-based API for Claude conversation data
         const response = await API.panels.getConversationMessages(panelId);
         if (response.success && response.data) {
-          setHasConversationHistory(response.data.length > 0);
+          setHasConversationHistory((response.data as unknown[]).length > 0);
         }
       } catch (error) {
         console.error('Failed to check conversation history:', error);
