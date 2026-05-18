@@ -2,14 +2,14 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { app } from 'electron';
 
-let customCrystalDir: string | undefined;
+let customCyboflowDir: string | undefined;
 
 /**
  * Sets a custom Cyboflow directory path. This should be called early in the
  * application lifecycle, before any services are initialized.
  */
-export function setCrystalDirectory(dir: string): void {
-  customCrystalDir = dir;
+export function setCyboflowDirectory(dir: string): void {
+  customCyboflowDir = dir;
 }
 
 /**
@@ -42,10 +42,10 @@ function isInstalledApp(): boolean {
  * otherwise falls back to the environment variable CYBOFLOW_DIR,
  * and finally defaults to ~/.cyboflow
  */
-export function getCrystalDirectory(): string {
+export function getCyboflowDirectory(): string {
   // 1. Check if custom directory was set programmatically
-  if (customCrystalDir) {
-    return customCrystalDir;
+  if (customCyboflowDir) {
+    return customCyboflowDir;
   }
 
   // 2. Check environment variable
@@ -74,15 +74,6 @@ export function getCrystalDirectory(): string {
 /**
  * Gets a subdirectory path within the Cyboflow directory
  */
-export function getCrystalSubdirectory(...subPaths: string[]): string {
-  return join(getCrystalDirectory(), ...subPaths);
+export function getCyboflowSubdirectory(...subPaths: string[]): string {
+  return join(getCyboflowDirectory(), ...subPaths);
 }
-
-/**
- * Alias for getCrystalSubdirectory using Cyboflow naming.
- * NOTE: getCrystalDirectory() already returns ~/.cyboflow paths — the
- * data-directory flip is complete. The legacy function name is preserved
- * for git-history clarity; both will be renamed in the
- * crystal-cuts-and-rebrand epic when call sites are swept.
- */
-export const getCyboflowSubdirectory = getCrystalSubdirectory;

@@ -3,7 +3,7 @@ import type { AppConfig } from '../types/config';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
-import { getCrystalDirectory } from '../utils/crystalDirectory';
+import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
 
 export class ConfigManager extends EventEmitter {
@@ -13,7 +13,7 @@ export class ConfigManager extends EventEmitter {
 
   constructor(defaultGitPath?: string) {
     super();
-    this.configDir = getCrystalDirectory();
+    this.configDir = getCyboflowDirectory();
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = {
       gitRepoPath: defaultGitPath || os.homedir(),
@@ -94,6 +94,21 @@ export class ConfigManager extends EventEmitter {
           ...loadedConfig.analytics
         }
       };
+
+      // One-time migration: enableCrystalFooter → enableCyboflowFooter (see TASK-561).
+      // We mutate `loadedConfig` so the existing merge above has already set
+      // `this.config.enableCyboflowFooter` if both keys were present; here we just
+      // ensure the legacy key never persists back to disk.
+      const legacy = (loadedConfig as Record<string, unknown>).enableCrystalFooter;
+      if (typeof legacy === 'boolean') {
+        // Only fill the new key if it's not already set (new wins on conflict).
+        if (this.config.enableCyboflowFooter === undefined) {
+          this.config.enableCyboflowFooter = legacy;
+        }
+        // Remove the legacy key from in-memory config and force a save.
+        delete (this.config as Record<string, unknown>).enableCrystalFooter;
+        await this.saveConfig();
+      }
     } catch (error) {
       // Config file doesn't exist, use defaults
       await this.saveConfig();

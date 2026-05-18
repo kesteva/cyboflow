@@ -16,7 +16,7 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { AnalyticsManager } from './services/analyticsManager';
 import { initializeCommitManager } from './services/commitManager';
-import { setCrystalDirectory } from './utils/crystalDirectory';
+import { setCyboflowDirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { setupAutoUpdater } from './autoUpdater';
@@ -35,6 +35,8 @@ import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import type { DatabaseLike } from './orchestrator/types';
 import * as fs from 'fs';
+import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
+import type { DevLogLevel } from './utils/devDebugLog';
 
 export let mainWindow: BrowserWindow | null = null;
 
@@ -95,8 +97,8 @@ const isDevelopment = process.env.NODE_ENV !== 'production' && !app.isPackaged;
 
 // Reset debug log files at startup in development mode
 if (isDevelopment) {
-  const frontendLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
-  const backendLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
+  const frontendLogPath = getDevDebugLogPath('frontend');
+  const backendLogPath = getDevDebugLogPath('backend');
 
   try {
     fs.writeFileSync(frontendLogPath, '');
@@ -119,14 +121,14 @@ for (let i = 0; i < args.length; i++) {
   if (arg.startsWith('--cyboflow-dir=') || arg.startsWith('--crystal-dir=')) {
     const flagName = arg.startsWith('--cyboflow-dir=') ? '--cyboflow-dir=' : '--crystal-dir=';
     const dir = arg.substring(flagName.length);
-    setCrystalDirectory(dir);
+    setCyboflowDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
     if (flagName === '--crystal-dir=') {
       console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
     }
   } else if ((arg === '--cyboflow-dir' || arg === '--crystal-dir') && i + 1 < args.length) {
     const dir = args[i + 1];
-    setCrystalDirectory(dir);
+    setCyboflowDirectory(dir);
     console.log(`[Main] Using custom Cyboflow directory: ${dir}`);
     if (arg === '--crystal-dir') {
       console.warn('[Main] --crystal-dir is deprecated; use --cyboflow-dir');
@@ -230,21 +232,8 @@ async function createWindow() {
     if (isDevelopment) {
       const levelNames = ['verbose', 'info', 'warning', 'error'];
       const levelName = levelNames[level] || 'unknown';
-      const timestamp = new Date().toISOString();
-      const logMessage = `[${timestamp}] [FRONTEND ${levelName.toUpperCase()}] ${message}`;
-      
-      // Always log to main console
-      
-      // Also write to debug log file for Claude Code to read
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
-      const logLine = `${logMessage} (${path.basename(sourceId)}:${line})\n`;
-      
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        // Don't crash if we can't write to the log file
-        console.error('Failed to write to debug log:', error);
-      }
+      const suffix = ` (${path.basename(sourceId)}:${line})`;
+      appendDevDebugLog('frontend', levelName as DevLogLevel, 'FRONTEND', `${message}${suffix}`, { error: originalError });
     } else {
       // In production, only log errors and warnings from renderer
       if (level >= 2) { // 2 = warning, 3 = error
@@ -268,17 +257,7 @@ async function createWindow() {
 
     // In development, also write to backend debug log file
     if (isDevelopment) {
-      const timestamp = new Date().toISOString();
-      const logMessage = `[${timestamp}] [BACKEND LOG] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
-      const logLine = `${logMessage}\n`;
-
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        // Don't crash if we can't write to the log file
-        originalLog('[Main] Failed to write to backend debug log:', error);
-      }
+      appendDevDebugLog('backend', 'log', 'BACKEND', message, { error: originalError });
     }
 
     // Forward to renderer
@@ -330,17 +309,7 @@ async function createWindow() {
 
       // In development, also write to backend debug log file
       if (isDevelopment) {
-        const timestamp = new Date().toISOString();
-        const logMessage = `[${timestamp}] [BACKEND ERROR] ${message}`;
-        const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
-        const logLine = `${logMessage}\n`;
-
-        try {
-          fs.appendFileSync(debugLogPath, logLine);
-        } catch (error) {
-          // Don't crash if we can't write to the log file
-          originalError('[Main] Failed to write to backend debug log:', error);
-        }
+        appendDevDebugLog('backend', 'error', 'BACKEND', message, { error: originalError });
       }
 
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -386,17 +355,7 @@ async function createWindow() {
 
     // In development, also write to backend debug log file
     if (isDevelopment) {
-      const timestamp = new Date().toISOString();
-      const logMessage = `[${timestamp}] [BACKEND WARNING] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
-      const logLine = `${logMessage}\n`;
-
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        // Don't crash if we can't write to the log file
-        originalWarn('[Main] Failed to write to backend debug log:', error);
-      }
+      appendDevDebugLog('backend', 'warn', 'BACKEND', message, { error: originalError });
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -433,17 +392,7 @@ async function createWindow() {
 
     // In development, also write to backend debug log file
     if (isDevelopment) {
-      const timestamp = new Date().toISOString();
-      const logMessage = `[${timestamp}] [BACKEND INFO] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
-      const logLine = `${logMessage}\n`;
-
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        // Don't crash if we can't write to the log file
-        originalInfo('[Main] Failed to write to backend debug log:', error);
-      }
+      appendDevDebugLog('backend', 'info', 'BACKEND', message, { error: originalError });
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -474,17 +423,7 @@ async function createWindow() {
 
     // In development, also write to backend debug log file
     if (isDevelopment) {
-      const timestamp = new Date().toISOString();
-      const logMessage = `[${timestamp}] [BACKEND DEBUG] ${message}`;
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-backend-debug.log');
-      const logLine = `${logMessage}\n`;
-
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        // Don't crash if we can't write to the log file
-        console.error('[Main] Failed to write to backend debug log:', error);
-      }
+      appendDevDebugLog('backend', 'debug', 'BACKEND', message, { error: originalError });
     }
 
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -627,20 +566,10 @@ async function initializeServices() {
   // Register console logging IPC handler for development
   if (isDevelopment) {
     ipcMain.handle('console:log', (event, logData) => {
-      const { level, args, timestamp, source } = logData;
+      const { level, args, source } = logData; // helper rebuilds its own ISO timestamp; original `timestamp` ignored for format uniformity
       const message = args.join(' ');
-      const logLine = `[${timestamp}] [${source.toUpperCase()} ${level.toUpperCase()}] ${message}\n`;
-      
-      // Write to debug log file
-      const debugLogPath = path.join(process.cwd(), 'cyboflow-frontend-debug.log');
-      try {
-        fs.appendFileSync(debugLogPath, logLine);
-      } catch (error) {
-        console.error('Failed to write console log to debug file:', error);
-      }
-      
-      // Also log to main console with prefix
-      console.log(`[Frontend ${level}] ${message}`);
+      appendDevDebugLog('frontend', level as DevLogLevel, source, message);
+      console.log(`[Frontend ${level}] ${message}`); // unchanged
     });
   }
   

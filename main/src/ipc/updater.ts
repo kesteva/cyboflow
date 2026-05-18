@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { commandExecutor } from '../utils/commandExecutor';
 import { getCurrentWorktreeName } from '../utils/worktreeUtils';
-import { getCrystalDirectory } from '../utils/crystalDirectory';
+import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 
 export function registerUpdaterHandlers(ipcMain: IpcMain, { app, versionChecker }: AppServices): void {
   // Version checking handlers
@@ -86,7 +86,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, { app, versionChecker 
         current: string;
         name: string;
         workingDirectory: string;
-        crystalDirectory: string;
+        cyboflowDirectory: string;
         buildDate?: string;
         gitCommit?: string;
         buildTimestamp?: number;
@@ -95,7 +95,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, { app, versionChecker 
         current: app.getVersion(),
         name: app.getName(),
         workingDirectory: process.cwd(),
-        crystalDirectory: getCrystalDirectory(),
+        cyboflowDirectory: getCyboflowDirectory(),
         buildDate,
         gitCommit,
         buildTimestamp

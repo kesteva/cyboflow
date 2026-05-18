@@ -1,9 +1,9 @@
 import { DatabaseService } from '../database/database';
 import { join } from 'path';
-import { getCrystalDirectory } from '../utils/crystalDirectory';
+import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 
 // Create and export a singleton instance
-const dbPath = join(getCrystalDirectory(), 'sessions.db');
+const dbPath = join(getCyboflowDirectory(), 'sessions.db');
 export const databaseService = new DatabaseService(dbPath);
 
 // Initialize the database schema and run migrations

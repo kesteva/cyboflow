@@ -58,7 +58,7 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
-  // Toggle between the new CyboflowRoot view and the legacy Crystal SessionView.
+  // Toggle between the new CyboflowRoot view and the legacy SessionView.
   // Default is the new Cyboflow view; the legacy toggle lets users fall back.
   const [useLegacyCrystalView, setUseLegacyCrystalView] = useState(false);
   const { currentError, clearError } = useErrorStore();
@@ -308,8 +308,8 @@ function App() {
       setUpdateVersionInfo(versionInfo);
       setIsUpdateDialogOpen(true);
       showNotification(
-        `🚀 Update Available - Crystal v${versionInfo.latest}`,
-        'A new version of Crystal is available!',
+        `🚀 Update Available - Cyboflow v${versionInfo.latest}`,
+        'A new version of Cyboflow is available!',
         '/favicon.ico',
         'version_update',
         `update:${versionInfo.latest}` // Deduplicate by version - only track once per version
@@ -385,7 +385,7 @@ function App() {
             onResize={startResize}
           />
           {/* Primary content area: CyboflowRoot when a project is active, else SessionView.
-              The "Legacy Crystal view" toggle lets users fall back to the Crystal surface.
+              The "Legacy Cyboflow view" toggle lets users fall back to the legacy surface.
               Deeper UI surgery is deferred to the crystal-cuts-and-rebrand epic. */}
           {activeProjectId !== null && !useLegacyCrystalView ? (
             <div className="flex flex-col flex-1 overflow-hidden">
@@ -396,9 +396,9 @@ function App() {
                 <button
                   onClick={() => setUseLegacyCrystalView(true)}
                   className="text-xs text-text-secondary hover:text-text-primary"
-                  title="Switch back to the legacy Crystal session view"
+                  title="Switch back to the legacy session view"
                 >
-                  Legacy Crystal view
+                  Legacy view
                 </button>
               </div>
               <div className="flex-1 overflow-hidden">

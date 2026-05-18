@@ -273,7 +273,7 @@ export default function ProjectSelector({ onProjectChange }: ProjectSelectorProp
 
                 <FieldWithTooltip
                   label="Repository Path"
-                  tooltip="Path to your git repository. This is where Crystal will create worktrees for parallel development."
+                  tooltip="Path to your git repository. This is where Cyboflow will create worktrees for parallel development."
                   required
                 >
                   <div className="space-y-3">
@@ -323,7 +323,7 @@ export default function ProjectSelector({ onProjectChange }: ProjectSelectorProp
                 
                 <FieldWithTooltip
                   label="Main Branch"
-                  tooltip="The main branch of your repository. Crystal will automatically detect this from your git configuration."
+                  tooltip="The main branch of your repository. Cyboflow will automatically detect this from your git configuration."
                 >
                   <Card variant="bordered" padding="md" className="text-text-secondary bg-surface-secondary">
                     <div className="flex items-center gap-2">

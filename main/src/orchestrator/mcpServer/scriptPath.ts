@@ -5,7 +5,7 @@
  * Used by both McpServerLifecycle (singleton spawn) and claudeCodeManager
  * (per-session .mcp.json injection) so both callers see the same script.
  *
- * Asar-extraction pattern lifted from Crystal's original claudeCodeManager
+ * Asar-extraction pattern lifted from the original claudeCodeManager
  * approach: if the candidate script path is inside an .asar archive
  * (packaged DMG), the script is extracted to ~/.cyboflow/ on first use
  * and subsequent calls return the extracted path.
@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import { getCrystalSubdirectory } from '../../utils/crystalDirectory';
+import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 
 /** Name of the MCP server script once extracted to the cyboflow directory. */
 const SCRIPT_FILENAME = 'cyboflowMcpServer.js';
@@ -44,7 +44,7 @@ export function resolveMcpServerScriptPath(dirOverride?: string): string {
     // Packaged path — script is inside the .asar archive.  Extract it so Node
     // can require/spawn it directly (spawning from inside .asar is unsupported).
     const scriptContent = fs.readFileSync(candidatePath, 'utf8');
-    const extractedPath = getCrystalSubdirectory(SCRIPT_FILENAME);
+    const extractedPath = getCyboflowSubdirectory(SCRIPT_FILENAME);
 
     // Ensure the target directory exists.
     const targetDir = path.dirname(extractedPath);
