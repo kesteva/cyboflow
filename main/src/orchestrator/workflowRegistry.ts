@@ -196,7 +196,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;
