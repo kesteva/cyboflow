@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-015
-pending_count: 10
-last_updated: "2026-05-18T22:30:00.000Z"
+pending_count: 11
+last_updated: "2026-05-17T00:00:00.000Z"
 ---
 # Findings Queue
 
@@ -141,3 +141,13 @@ last_updated: "2026-05-18T22:30:00.000Z"
 - **location:** main/src/services/cyboflow/__tests__/transitions.test.ts:27, main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:32
 - **description:** TASK-603 extracted the shared REGISTRY_SCHEMA/GATE_SCHEMA fixture and migrated the 4 files listed in files_owned. But the codebase contains TWO ADDITIONAL inline-DDL sites that the planner missed: (1) `main/src/services/cyboflow/__tests__/transitions.test.ts:27` declares its own `SCHEMA_DDL` with a workflows + workflow_runs DDL that already DRIFTS from schema.sql (has `description`, `updated_at` on workflows; omits `permission_mode`, `permission_mode_snapshot`, `workflow_path`, `branch_name`, `error_message` on workflow_runs); (2) `main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:32` declares a `MINIMAL_SCHEMA` with yet another divergent shape. Both files were added by TASK-452/TASK-153 before TASK-603 was planned, so the planner could have discovered them. The plan's preflight grep enumerated only 4 sites and missed these. The stated goal (`subsequent column additions are made in exactly one place`) is therefore NOT fully met — there are still 2 in-repo sites + schema.sql + migration 006 where DDL changes must be mirrored. Pairs with FIND-SPRINT-015-3's observation about discovery-pattern gaps.
 - **suggested_action:** Spawn a follow-on task that owns the two test files and migrates them to import REGISTRY_SCHEMA (or a new MINIMAL_SCHEMA variant) from the fixture module. Beforehand, decide whether `mcpQueryHandler.test.ts` actually needs a minimal-only subset (worth keeping its `MINIMAL_SCHEMA` separate) or can share REGISTRY_SCHEMA (now that REGISTRY_SCHEMA contains all required columns). Either way, `transitions.test.ts` has DDL that drifts from the canonical shape today — its tests may pass only because they use minimal INSERT/SELECT statements that don't touch the missing columns, but any code change that exercises full row shape will fail there first.
+
+## FIND-SPRINT-015-15
+- **source:** TASK-604 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/cancelAndRestart.test.ts:51, main/src/orchestrator/__tests__/approvalRouter.test.ts:59, main/src/orchestrator/__tests__/stuckDetector.test.ts:90, main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts:90, main/src/orchestrator/__tests__/inspectorQueries.test.ts:64
+- **description:** TASK-604 extracted `dbAdapter` into `main/src/orchestrator/__test_fixtures__/dbAdapter.ts` and migrated the 4 sites enumerated in files_owned. But 5 additional test files outside scope still define identical `function dbAdapter(db: Database.Database): DatabaseLike` helpers with the exact same body (`prepare: (sql) => db.prepare(sql)` + the standard `transaction<T>` cast). These are direct drop-in replacement candidates — same signature, same body. (A 6th site, `main/src/trpc/__tests__/approvals.test.ts:39`, uses a narrower bespoke shape and is NOT substitutable.) Same DRY rationale as TASK-604: any future widening of `DatabaseLike` (e.g. adding `pragma()`) requires updating 5 silently-drifting copies. Mirrors FIND-SPRINT-015-10's "planner discovered only the listed sites" pattern.
+- **suggested_action:** Spawn a low-complexity follow-up task that owns the 5 listed test files and replaces each inline `function dbAdapter(...)` block with `import { dbAdapter } from '<rel>/__test_fixtures__/dbAdapter';`. Leave `main/src/trpc/__tests__/approvals.test.ts` alone (different shape, intentional local narrowing).
+- **resolved_by:**
