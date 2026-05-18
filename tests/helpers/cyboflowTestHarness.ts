@@ -220,6 +220,8 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   const harness: CyboflowTestHarness = {
     async launchPair({ projectPath, workflowA, workflowB, promptA, promptB }) {
       // Write minimal workflow .md files to temp paths (no permission_mode frontmatter → default)
+      // Manual lifecycle (not withTempDir) because the dir must survive across launchPair/teardown.
+      // See main/src/__test_fixtures__/tmp.ts for the per-test withTempDir pattern.
       workflowFixturesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-wf-'));
       const tmpDir = workflowFixturesDir;
       const wfPathA = path.join(tmpDir, `${workflowA}.md`);
