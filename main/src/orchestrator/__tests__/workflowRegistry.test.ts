@@ -1,12 +1,13 @@
 /**
  * Unit tests for WorkflowRegistry.
  *
- * Behaviors covered (per TASK-351 test_strategy):
+ * Behaviors covered (per TASK-351 / TASK-601 test_strategy):
  * 1. seed inserts five workflows with correct names
  * 2. seed is idempotent (second call does not duplicate rows)
  * 3. frontmatter permission_mode parsing: present/absent/file-missing cases
  * 4. createRun snapshots permission_mode onto workflow_runs row
- * 5. missing .md file falls back to 'default' and logs WARN
+ * 5. missing .md file falls back to 'default' and logs ERROR (TASK-601: raised from WARN)
+ * 6. resolveSoloFlowPluginRoot: env-var override, highest-semver discovery, fallback
  *
  * All tests use an in-memory better-sqlite3 instance with the workflow tables
  * applied inline — no file I/O for the DB itself.  Workflow .md files are
@@ -15,10 +16,10 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { writeFileSync, mkdtempSync } from 'fs';
+import { writeFileSync, mkdirSync, mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { WorkflowRegistry, type WorkflowDescriptor } from '../workflowRegistry';
+import { WorkflowRegistry, resolveSoloFlowPluginRoot, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
@@ -37,13 +38,18 @@ function createTestDb(): Database.Database {
 }
 
 /** Creates a fake LoggerLike that records calls for assertion. */
-function makeLogger(): LoggerLike & { warnCalls: Array<{ message: string; context?: Record<string, unknown> }> } {
+function makeLogger(): LoggerLike & {
+  warnCalls: Array<{ message: string; context?: Record<string, unknown> }>;
+  errorCalls: Array<{ message: string; context?: Record<string, unknown> }>;
+} {
   const warnCalls: Array<{ message: string; context?: Record<string, unknown> }> = [];
+  const errorCalls: Array<{ message: string; context?: Record<string, unknown> }> = [];
   return {
     warnCalls,
+    errorCalls,
     info: vi.fn(),
     warn: (message, context) => warnCalls.push({ message, context }),
-    error: vi.fn(),
+    error: (message, context) => errorCalls.push({ message, context }),
     debug: vi.fn(),
   };
 }
@@ -169,15 +175,17 @@ describe('WorkflowRegistry', () => {
       expect(row.permission_mode).toBe('default');
     });
 
-    it('missing .md file logs WARN with the path', () => {
+    it('missing .md file logs ERROR with the path (TASK-601: raised from WARN to fail-loud)', () => {
       const nonExistentPath = join(tmpDir, 'does-not-exist.md');
       registry.seed(1, [{ name: 'prune', path: nonExistentPath }]);
 
-      expect(logger.warnCalls.length).toBeGreaterThan(0);
-      const warnMsg = logger.warnCalls[0].message;
-      expect(warnMsg).toContain('could not read workflow file');
-      const warnCtx = logger.warnCalls[0].context;
-      expect(warnCtx?.path).toBe(nonExistentPath);
+      // TASK-601: the log level was raised from WARN to ERROR so missing
+      // workflow files are fail-loud rather than silently swallowed.
+      expect(logger.errorCalls.length).toBeGreaterThan(0);
+      const errMsg = logger.errorCalls[0].message;
+      expect(errMsg).toContain('could not read workflow file');
+      const errCtx = logger.errorCalls[0].context;
+      expect(errCtx?.path).toBe(nonExistentPath);
     });
 
     it('missing .md file does not throw and still inserts the row', () => {
@@ -350,5 +358,62 @@ describe('WorkflowRegistry', () => {
       expect(run!.stuck_reason).toBe('no_progress');
       expect(run!.error_message).toBe('subprocess exited');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveSoloFlowPluginRoot (TASK-601)
+// ---------------------------------------------------------------------------
+
+describe('resolveSoloFlowPluginRoot', () => {
+  it('returns env-var value when SOLOFLOW_PLUGIN_ROOT is set', () => {
+    const fakeRoot = '/custom/soloflow/path';
+    const result = resolveSoloFlowPluginRoot('/home/test', {
+      SOLOFLOW_PLUGIN_ROOT: fakeRoot,
+    });
+    expect(result.source).toBe('env');
+    expect(result.root).toBe(fakeRoot);
+  });
+
+  it('env-var wins even when the filesystem has installed versions', () => {
+    // Build a fake cache dir with a real version subdirectory.
+    const fakeHome = mkdtempSync(join(tmpdir(), 'resolve-test-'));
+    const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+    mkdirSync(join(cacheDir, '0.10.3'), { recursive: true });
+
+    const overridePath = '/override/path';
+    const result = resolveSoloFlowPluginRoot(fakeHome, {
+      SOLOFLOW_PLUGIN_ROOT: overridePath,
+    });
+    expect(result.source).toBe('env');
+    expect(result.root).toBe(overridePath);
+  });
+
+  it('picks the highest semver from a fixture dir with multiple versions', () => {
+    // Build a fake plugin cache with 0.9.12, 0.10.3, and 0.10.10 subdirectories.
+    // The resolver must pick 0.10.10 (highest semver), not 0.10.3 (lexicographic
+    // sort would incorrectly rank 0.10.3 > 0.10.10 since '3' > '1' char-by-char).
+    const fakeHome = mkdtempSync(join(tmpdir(), 'resolve-semver-'));
+    const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+    for (const ver of ['0.9.12', '0.10.3', '0.10.10']) {
+      mkdirSync(join(cacheDir, ver), { recursive: true });
+    }
+
+    const result = resolveSoloFlowPluginRoot(fakeHome, {});
+    expect(result.source).toBe('discovered');
+    expect(result.root).toBe(join(cacheDir, '0.10.10'));
+  });
+
+  it('returns fallback when no versions are installed', () => {
+    // Point at a homeDir where the cache directory does not exist at all.
+    const fakeHome = mkdtempSync(join(tmpdir(), 'resolve-fallback-'));
+    // Do NOT create the cacheDir — readdirSync should throw ENOENT.
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = resolveSoloFlowPluginRoot(fakeHome, {});
+    warnSpy.mockRestore();
+
+    expect(result.source).toBe('fallback');
+    expect(result.root).toContain('soloflow-dev');
   });
 });
