@@ -1,7 +1,7 @@
 /**
- * RunExecutor — translates a runId into the synthetic panelId/sessionId shape
- * that ClaudeCodeManager.spawnCliProcess() expects, and exposes four protected
- * extension hooks for sibling tasks (TASK-641–644) to override.
+ * RunExecutor — translates a runId into the panelId/sessionId shape that
+ * ClaudeCodeManager.spawnCliProcess() expects (panelId === runId === sessionId),
+ * and exposes four protected extension hooks for sibling tasks (TASK-641–644) to override.
  *
  * Standalone-typecheck invariant (ROADMAP-001 §6.3):
  * This module must NOT import 'electron', 'better-sqlite3', or any concrete
@@ -148,7 +148,7 @@ export class RunExecutor {
    *
    * 1. Load the workflow_runs row (throws if missing).
    * 2. Load the workflow row (throws if missing).
-   * 3. Derive synthetic panelId and sessionId from runId.
+   * 3. Set panelId === runId === sessionId (invariant: no prefix).
    * 4. Call getPrompt() to retrieve the prompt (default: throws NOT_IMPLEMENTED).
    * 5. Call buildOptionsOverrides() to get optional spawn-option overrides.
    * 6. Call bridgeEvents() to wire event forwarding; store returned handle.
@@ -176,10 +176,11 @@ export class RunExecutor {
       );
     }
 
-    // Deterministic synthetic identifiers — panelId and sessionId are derived
-    // from runId so ClaudeCodeManager can track them without a separate lookup.
-    const panelId = `run-${runId}`;
-    const sessionId = `run-${runId}`;
+    // Invariant: panelId === runId === sessionId across the orchestrator surface.
+    // The `p.panelId !== runId` guard in bridgeEvents() keys on raw runId; ApprovalRouter's
+    // workflow_runs UPDATE keys on runId. Any other value here silently breaks both.
+    const panelId = runId;
+    const sessionId = runId;
 
     // Store the panelId so cancel() can look it up.
     this.activePanelIds.set(runId, panelId);
@@ -311,8 +312,8 @@ export class RunExecutor {
    * disposed when the run terminates or is canceled.
    *
    * @param runId   The workflow run ID.
-   * @param _panelId The synthetic panel ID used by ClaudeCodeManager (unused
-   *                 by the bridge which uses runId directly).
+   * @param _panelId The panel ID (per invariant, equals runId; unused by the bridge
+   *                 which keys directly on runId).
    */
   protected async bridgeEvents(runId: string, _panelId: string): Promise<RunEventBridge | void> {
     if (!this.publisher || !this.db || !this.source) {
@@ -326,6 +327,14 @@ export class RunExecutor {
       publisher: this.publisher,
       db: this.db,
       logger: this.logger,
+      // skipPersistence: true — ClaudeCodeManager.runSdkQuery already constructs its
+      // own EventRouter + RawEventsSink pipeline (claudeCodeManager.ts:247-255) and
+      // calls router.emitForRun() for every SDK event (line ~341). Without this flag,
+      // each event would be INSERTed twice into raw_events — once by the CCM-owned sink
+      // and once by the bridge's own sink. FIND-SPRINT-021-5 identified this as a
+      // latent double-INSERT regression that becomes active the moment the panelId
+      // mismatch fixed in TASK-663 is effective.
+      skipPersistence: true,
       onFirstMessage: () => this.onLifecycleTransition(runId, 'sdk_initialized'),
     });
   }

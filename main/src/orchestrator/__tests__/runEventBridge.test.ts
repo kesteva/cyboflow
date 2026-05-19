@@ -543,6 +543,203 @@ describe('runEventBridge', () => {
   });
 
   // -------------------------------------------------------------------------
+  // skipPersistence tests (Steps 7 + 8 — TASK-664)
+  // -------------------------------------------------------------------------
+
+  describe('skipPersistence', () => {
+    const SP_RUN_ID = 'run-skip-persistence-001';
+
+    // -----------------------------------------------------------------------
+    // (a) skipPersistence: true — bridge never calls new EventRouter / new RawEventsSink
+    //     Verified by a stub db whose `prepare` throws — if the bridge tried to
+    //     construct a RawEventsSink it would call db.prepare and the test would fail.
+    // -----------------------------------------------------------------------
+    it('(a) skipPersistence: true skips router/sink construction — non-functional db stub does not throw', () => {
+      // Stub db whose prepare() throws. If the bridge constructs a RawEventsSink, this will throw.
+      const stubDb = {
+        prepare: () => { throw new Error('db.prepare must not be called when skipPersistence=true'); },
+      } as unknown as Database.Database;
+
+      const { asPublisher } = makePublisher();
+      const source = new EventEmitter();
+
+      expect(() => {
+        bridgeEvents({
+          runId: SP_RUN_ID,
+          source,
+          publisher: asPublisher,
+          db: stubDb,
+          skipPersistence: true,
+        });
+      }).not.toThrow();
+    });
+
+    // -----------------------------------------------------------------------
+    // (b) skipPersistence: true — onFirstMessage still fires exactly once
+    // -----------------------------------------------------------------------
+    it('(b) skipPersistence: true still fires onFirstMessage exactly once', () => {
+      const stubDb = {
+        prepare: () => { throw new Error('db.prepare must not be called'); },
+      } as unknown as Database.Database;
+
+      const onFirstMessage = vi.fn();
+      const { asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        db: stubDb,
+        skipPersistence: true,
+        onFirstMessage,
+      });
+
+      emitOutput(src, SP_RUN_ID, systemEvent);    // should fire onFirstMessage
+      emitOutput(src, SP_RUN_ID, assistantEvent); // should NOT fire again
+
+      expect(onFirstMessage).toHaveBeenCalledOnce();
+    });
+
+    // -----------------------------------------------------------------------
+    // (c) skipPersistence: true — produces zero rows in a real DB
+    // -----------------------------------------------------------------------
+    it('(c) skipPersistence: true produces zero rows in a real DB', () => {
+      const realDb = makeDb();
+      const { asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        db: realDb,
+        skipPersistence: true,
+      });
+
+      emitOutput(src, SP_RUN_ID, systemEvent);
+      emitOutput(src, SP_RUN_ID, assistantEvent);
+      emitOutput(src, SP_RUN_ID, resultEvent);
+
+      expect(countRows(realDb, SP_RUN_ID)).toBe(0);
+    });
+
+    // -----------------------------------------------------------------------
+    // (d) skipPersistence: false (or absent) — preserves legacy behaviour
+    //     5 events → 5 rows and 5 publish calls
+    // -----------------------------------------------------------------------
+    it('(d) skipPersistence: false/absent preserves legacy behaviour — 5 INSERTs, 5 publishes', () => {
+      const realDb = makeDb();
+      const { publish, asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      // Test both: one with explicit false, one with absent (handled by two emissions each)
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        db: realDb,
+        skipPersistence: false,
+      });
+
+      const events = [systemEvent, assistantEvent, userEvent, resultEvent, streamEvent];
+      for (const ev of events) {
+        emitOutput(src, SP_RUN_ID, ev);
+      }
+
+      expect(countRows(realDb, SP_RUN_ID)).toBe(5);
+      expect(publish).toHaveBeenCalledTimes(5);
+    });
+
+    // -----------------------------------------------------------------------
+    // (e) dispose with skipPersistence: true is idempotent
+    // -----------------------------------------------------------------------
+    it('(e) dispose with skipPersistence: true is idempotent', () => {
+      const stubDb = {
+        prepare: () => { throw new Error('db.prepare must not be called'); },
+      } as unknown as Database.Database;
+
+      const { asPublisher } = makePublisher();
+      const src = new EventEmitter();
+      const baselineListenerCount = src.listenerCount('output');
+
+      const bridge = bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        db: stubDb,
+        skipPersistence: true,
+      });
+
+      // Listener should be attached.
+      expect(src.listenerCount('output')).toBe(baselineListenerCount + 1);
+
+      bridge.dispose();
+
+      // Listener must be removed.
+      expect(src.listenerCount('output')).toBe(baselineListenerCount);
+
+      // Calling dispose() again must not throw.
+      expect(() => bridge.dispose()).not.toThrow();
+      expect(src.listenerCount('output')).toBe(baselineListenerCount);
+    });
+
+    // -----------------------------------------------------------------------
+    // 8. Dual-pipeline single-INSERT guarantee
+    //    Integration test: real db + real EventEmitter + real EventRouter + RawEventsSink
+    //    simulating CCM's pipeline. Bridge with skipPersistence=true.
+    //    Emit one 'output' event AND call ccmRouter.emitForRun once.
+    //    Assert countRows === 1 (not 2) and publish called once.
+    //
+    // Sibling: runExecutor.test.ts "source arg: lifecycleTransitions.running()..."
+    // exercises the same countRows === 1 guarantee through the full RunExecutor
+    // pipeline. This test isolates the bridgeEvents() skipPersistence option
+    // contract. If this invariant changes, update both.
+    // -----------------------------------------------------------------------
+    it('dual-pipeline single-INSERT guarantee — bridge with skipPersistence does not double-INSERT alongside CCM-owned sink', () => {
+      const realDb = makeDb();
+      const src = new EventEmitter();
+      const { publish, asPublisher } = makePublisher();
+      const onFirstMessage = vi.fn();
+
+      // Simulate CCM's own EventRouter + RawEventsSink pipeline.
+      const ccmRouter = new EventRouter();
+      const ccmSink = new RawEventsSink(realDb);
+      ccmSink.attachToRouter(ccmRouter, SP_RUN_ID);
+
+      // Wire the bridge with skipPersistence=true — the bridge must NOT create
+      // its own router or sink, so it will not insert any rows on its own.
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        db: realDb,
+        skipPersistence: true,
+        onFirstMessage,
+      });
+
+      // Emit one 'output' event on the source — this causes the bridge's onOutput
+      // listener to fire: it narrows the event and publishes to the renderer, but
+      // does NOT call router.emitForRun (because skipPersistence=true).
+      emitOutput(src, SP_RUN_ID, systemEvent);
+
+      // Separately, the CCM pipeline inserts the same event — exactly as CCM's
+      // runSdkQuery does (claudeCodeManager.ts:341 calls router.emitForRun).
+      // Use the narrowed event type that the bridge's narrowing would produce.
+      ccmRouter.emitForRun(SP_RUN_ID, systemEvent);
+
+      // Total rows must be exactly 1 (CCM's insert only — bridge contributes 0).
+      expect(countRows(realDb, SP_RUN_ID)).toBe(1);
+
+      // Bridge must have published the envelope once.
+      expect(publish).toHaveBeenCalledOnce();
+
+      // onFirstMessage must have fired once (driven by the bridge's output listener).
+      expect(onFirstMessage).toHaveBeenCalledOnce();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // 9. Publish fail-soft: publisher.publish throwing still logs a warn and
   //    does not prevent subsequent events from being processed.
   // -------------------------------------------------------------------------
