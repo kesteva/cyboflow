@@ -1,9 +1,9 @@
 ---
-pending_count: 21
+pending_count: 23
 buckets:
   decisions: 1
-  actions: 4
-  testing: 13
+  actions: 5
+  testing: 14
   deferred_visual: 3
 items: []
 ---
@@ -78,6 +78,19 @@ items: []
     - TASK-570
     - TASK-596
     - TASK-597
+
+- task: TASK-652
+  type: action_required
+  bucket: actions
+  dedup_key: main_workspace_better_sqlite3_abi_mismatch
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-652-plan.md
+  action: "Run `pnpm electron:rebuild` to resolve better-sqlite3 NODE_MODULE_VERSION 136 vs 127 mismatch. After rebuild, re-run `cd main && pnpm exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts` to confirm the 25 DB-bootstrap failures (all on `new Database(:memory:)`) clear. Pre-existing env drift, identical failure mode on parent commit; TASK-652 is a pure-extraction refactor and only modified frontmatter parsing — 7/7 markdownFrontmatter and 9/9 workflowPromptReader tests pass."
+  blocked_checks:
+    - "AC4: workflowRegistry.test.ts (25 DB-instantiation tests) — pre-existing env block, not a TASK-652 regression"
+  level: ground_truth
+  severity: medium
+  created_at: "2026-05-19T20:14:47.585Z"
+  updated_at: "2026-05-19T20:14:47.585Z"
 
 ## Testing
 
@@ -239,6 +252,16 @@ items: []
   created_at: "2026-05-19T15:35:00.000Z"
   affected_tasks:
     - TASK-569
+
+- task: TASK-660
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-660-plan.md
+  action: "Manual smoke: run `pnpm dev`, click Start Run on the seeded prune workflow, then `grep \"orchSocketProvider not yet wired\" cyboflow-backend-debug.log` should return zero matches against entries timestamped AFTER the TASK-660 commits (a3d2c50 / 02fc7df / 596948b). The current log file has stale entries from before the fix landed (lines 151-152, 393-394 dated 18:53Z and 19:15Z — commits land on branch created 19:37Z) so the file must be retruncated by a fresh `pnpm dev` launch before the assertion is meaningful."
+  blocked_checks:
+    - AC5 — no orchSocketProvider sentinel error in cyboflow-backend-debug.log post-fix
+  level: requirements
+  severity: medium
 
 ## Deferred Visual
 
