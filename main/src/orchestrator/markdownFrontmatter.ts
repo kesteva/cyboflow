@@ -3,7 +3,7 @@
  * for SoloFlow workflow files and ad-hoc markdown inputs.
  *
  * Shared by workflowPromptReader.readWorkflowPrompt and
- * WorkflowRegistry.parseFrontmatter. Do NOT inline a copy of this regex
+ * WorkflowRegistry.extractPermissionMode. Do NOT inline a copy of this regex
  * anywhere else under main/src/orchestrator/.
  */
 export function parseMarkdownFrontmatter(md: string): {

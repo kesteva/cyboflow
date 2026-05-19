@@ -6,9 +6,10 @@
  * or any concrete service in main/src/services/*.  All collaborators are
  * injected via the constructor.
  *
- * Frontmatter parsing note: the inline parser intentionally avoids js-yaml
- * or any third-party YAML library.  It handles the flat `key: value` blocks
- * used by SoloFlow workflow .md files and nothing more complex.
+ * Frontmatter parsing note: the parser lives in markdownFrontmatter.ts and
+ * intentionally avoids js-yaml or any third-party YAML library.  It handles
+ * the flat `key: value` blocks used by SoloFlow workflow .md files and
+ * nothing more complex.
  */
 import { readFileSync, readdirSync } from 'fs';
 import { parseMarkdownFrontmatter } from './markdownFrontmatter';
