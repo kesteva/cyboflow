@@ -78,6 +78,148 @@ export function transitionToAwaitingReview(
   tx.immediate(params);
 }
 
+// ---------------------------------------------------------------------------
+// transitionToRunning
+// ---------------------------------------------------------------------------
+
+export interface TransitionToRunningParams {
+  runId: string;
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'running' WHERE id = ? AND status = 'starting'.
+ * Throws TransitionRejectedError if the run is no longer in 'starting' state.
+ */
+export function transitionToRunning(
+  db: Database.Database,
+  params: TransitionToRunningParams,
+): void {
+  assertTransitionAllowed('starting', 'running', params.runId);
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'running', updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status = 'starting'`,
+  ).run({ runId: params.runId });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot transition run ${params.runId} to running: not in 'starting' state`,
+      { runId: params.runId, expectedStatus: 'starting', entity: 'workflow_run' },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transitionToCompleted
+// ---------------------------------------------------------------------------
+
+export interface TransitionToCompletedParams {
+  runId: string;
+  /**
+   * Only 'running' may complete directly per ALLOWED_TRANSITIONS.
+   * awaiting_review -> completed is NOT a valid transition; the run must return
+   * to 'running' first (via approvalRouter.respond) before it can complete.
+   */
+  fromStatus: 'running';
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'completed' WHERE id = ? AND status = @fromStatus.
+ * Sets ended_at = CURRENT_TIMESTAMP on the same UPDATE.
+ * Throws TransitionRejectedError if the row was not in the expected status.
+ */
+export function transitionToCompleted(
+  db: Database.Database,
+  params: TransitionToCompletedParams,
+): void {
+  assertTransitionAllowed(params.fromStatus, 'completed', params.runId);
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status = @fromStatus`,
+  ).run({ runId: params.runId, fromStatus: params.fromStatus });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot transition run ${params.runId} to completed: not in '${params.fromStatus}' state`,
+      { runId: params.runId, expectedStatus: params.fromStatus, entity: 'workflow_run' },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transitionToFailed
+// ---------------------------------------------------------------------------
+
+export interface TransitionToFailedParams {
+  runId: string;
+  fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck';
+  errorMessage: string;
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'failed' WHERE id = ? AND status = @fromStatus.
+ * Sets error_message and ended_at = CURRENT_TIMESTAMP on the same UPDATE.
+ * Throws TransitionRejectedError if the row was not in the expected status.
+ */
+export function transitionToFailed(
+  db: Database.Database,
+  params: TransitionToFailedParams,
+): void {
+  assertTransitionAllowed(params.fromStatus, 'failed', params.runId);
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'failed',
+            error_message = @errorMessage,
+            ended_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status = @fromStatus`,
+  ).run({ runId: params.runId, fromStatus: params.fromStatus, errorMessage: params.errorMessage });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot transition run ${params.runId} to failed: not in '${params.fromStatus}' state`,
+      { runId: params.runId, expectedStatus: params.fromStatus, entity: 'workflow_run' },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transitionToCanceled
+// ---------------------------------------------------------------------------
+
+export interface TransitionToCanceledParams {
+  runId: string;
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'canceled' WHERE id = ? AND status NOT IN
+ * ('canceled', 'failed', 'completed'). Sets ended_at = CURRENT_TIMESTAMP.
+ *
+ * Design divergence from other helpers: this transition does NOT take a
+ * `fromStatus` parameter because cancel is valid from ANY non-terminal source
+ * state (queued, starting, running, awaiting_review, stuck). Forcing callers to
+ * pass a fromStatus would require a SELECT-then-UPDATE round trip. The SQL guard
+ * `status NOT IN (...)` is sufficient; assertTransitionAllowed is deliberately
+ * skipped here.
+ *
+ * Throws TransitionRejectedError if the row is already in a terminal state
+ * (canceled, failed, completed) — i.e. changes === 0.
+ */
+export function transitionToCanceled(
+  db: Database.Database,
+  params: TransitionToCanceledParams,
+): void {
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status NOT IN ('canceled', 'failed', 'completed')`,
+  ).run({ runId: params.runId });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot transition run ${params.runId} to canceled: already in a terminal state`,
+      { runId: params.runId, expectedStatus: 'canceled', entity: 'workflow_run' },
+    );
+  }
+}
+
 export interface TransitionFromAwaitingReviewParams {
   runId: string;
   approvalId: string;
