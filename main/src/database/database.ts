@@ -1320,10 +1320,41 @@ export class DatabaseService {
 
     // Post-006 reconciler. SQLite has no column-level IF NOT EXISTS, so a
     // migration file edited in-place after some installs already applied
-    // its earlier shape cannot be re-run idempotently. This block probes
-    // the workflows table for the post-edit columns and adds them when
-    // missing. Fresh installs no-op (columns already created by 006).
+    // its earlier shape cannot be re-run idempotently. These blocks probe
+    // the workflows and workflow_runs tables for post-edit columns and add
+    // them when missing. Fresh installs no-op (columns already created by 006).
     this.reconcileWorkflowsSchema();
+    this.reconcileWorkflowRunsSchema();
+  }
+
+  private reconcileWorkflowRunsSchema(): void {
+    interface SqliteTableInfo { name: string; dflt_value: unknown; notnull: number }
+    const tableExists = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_runs'")
+      .get();
+    if (!tableExists) return;
+
+    const cols = this.db
+      .prepare("PRAGMA table_info(workflow_runs)")
+      .all() as SqliteTableInfo[];
+    const has = (name: string): boolean => cols.some((c) => c.name === name);
+
+    if (!has('permission_mode_snapshot')) {
+      this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN permission_mode_snapshot TEXT NOT NULL DEFAULT 'default'").run();
+      console.log('[Database] Reconciled workflow_runs: added permission_mode_snapshot column');
+    }
+    if (!has('branch_name')) {
+      this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN branch_name TEXT").run();
+      console.log('[Database] Reconciled workflow_runs: added branch_name column');
+    }
+    if (!has('error_message')) {
+      this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN error_message TEXT").run();
+      console.log('[Database] Reconciled workflow_runs: added error_message column');
+    }
+    // Tier 2 rebuild (status CHECK constraint, stuck_detected_at cleanup) is
+    // intentionally deferred — current code paths don't depend on the CHECK,
+    // and the orphan column does no harm. If a future change requires it,
+    // mirror the workflows Tier-2 pattern above.
   }
 
   private reconcileWorkflowsSchema(): void {

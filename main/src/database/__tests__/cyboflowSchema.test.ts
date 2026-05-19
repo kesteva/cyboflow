@@ -529,6 +529,115 @@ describe('006_cyboflow_schema — existing-install migration runner integration'
 // better-sqlite3 version at time of writing: ^11.7.0 (ships SQLite 3.x).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 7a. Post-006 reconciler: workflow_runs schema drift from in-place 006 edits.
+//
+// Mirrors the existing workflows-table reconciler (database.ts:reconcileWorkflowsSchema)
+// but for workflow_runs. Reproduces the bug where an installed user's DB had
+// `file_migration_applied:006_cyboflow_schema.sql = true` but the table was missing
+// permission_mode_snapshot / branch_name / error_message because their install ran
+// 006 BEFORE those columns were added to the file in-place.
+// ---------------------------------------------------------------------------
+
+describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place edits)', () => {
+  let tmpDbDir: string;
+
+  afterEach(() => {
+    rmSync(tmpDbDir, { recursive: true, force: true });
+  });
+
+  it('adds permission_mode_snapshot, branch_name, error_message when a pre-edit 006 install re-initializes', () => {
+    tmpDbDir = mkdtempSync(join(tmpdir(), 'cyboflow-schema-runs-reconcile-'));
+    const dbPath = join(tmpDbDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '..', 'migrations');
+
+    // Step 1: First initialize applies current (post-edit) 006 — all columns
+    // present. We then mutate the DB to simulate a pre-edit install.
+    const svc1 = new DatabaseService(dbPath);
+    svc1.setMigrationsDirForTesting(realMigrationsDir);
+    svc1.initialize();
+
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      BEGIN;
+      DROP TABLE workflow_runs;
+      CREATE TABLE workflow_runs (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        project_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        worktree_path TEXT,
+        policy_json TEXT,
+        stuck_at DATETIME,
+        stuck_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME,
+        ended_at DATETIME,
+        FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+      );
+      COMMIT;
+    `);
+    rawDb.close();
+
+    // Sanity: confirm the simulated pre-edit shape is missing the 3 columns.
+    const probe = new Database(dbPath);
+    interface ColInfo { name: string }
+    const colsBefore = probe.prepare("PRAGMA table_info(workflow_runs)").all() as ColInfo[];
+    const colNamesBefore = colsBefore.map((c) => c.name);
+    expect(colNamesBefore).not.toContain('permission_mode_snapshot');
+    expect(colNamesBefore).not.toContain('branch_name');
+    expect(colNamesBefore).not.toContain('error_message');
+    probe.close();
+
+    // Step 2: Re-initialize. The reconciler must add all 3 missing columns.
+    const svc2 = new DatabaseService(dbPath);
+    svc2.setMigrationsDirForTesting(realMigrationsDir);
+    svc2.initialize();
+
+    const finalDb = new Database(dbPath);
+    const colsAfter = finalDb.prepare("PRAGMA table_info(workflow_runs)").all() as ColInfo[];
+    const colNamesAfter = colsAfter.map((c) => c.name);
+    expect(colNamesAfter).toContain('permission_mode_snapshot');
+    expect(colNamesAfter).toContain('branch_name');
+    expect(colNamesAfter).toContain('error_message');
+
+    // Inserting a workflow + workflow_runs row with permission_mode_snapshot
+    // must succeed end-to-end — this was the failing path that motivated the fix.
+    finalDb.exec(`
+      INSERT INTO workflows (id, project_id, name, spec_json)
+        VALUES ('wf-reconcile', 1, 'test', '{}');
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+        VALUES ('run-reconcile', 'wf-reconcile', 1, 'queued', 'acceptEdits');
+    `);
+    interface Row { permission_mode_snapshot: string }
+    const row = finalDb
+      .prepare("SELECT permission_mode_snapshot FROM workflow_runs WHERE id = 'run-reconcile'")
+      .get() as Row;
+    expect(row.permission_mode_snapshot).toBe('acceptEdits');
+    finalDb.close();
+  });
+
+  it('is a no-op on a fresh install where all columns already exist', () => {
+    tmpDbDir = mkdtempSync(join(tmpdir(), 'cyboflow-schema-runs-noop-'));
+    const dbPath = join(tmpDbDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '..', 'migrations');
+
+    const errorSpy = vi.spyOn(console, 'error');
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    // Re-initialize to exercise the reconciler against an already-canonical shape.
+    const svc2 = new DatabaseService(dbPath);
+    svc2.setMigrationsDirForTesting(realMigrationsDir);
+    svc2.initialize();
+
+    expect(errorSpy.mock.calls).toHaveLength(0);
+    errorSpy.mockRestore();
+  });
+});
+
 describe('006_cyboflow_schema — EXPLAIN QUERY PLAN uses idx_raw_events_run_id', () => {
   it('EXPLAIN QUERY PLAN for the canonical raw_events tail-read uses idx_raw_events_run_id', () => {
     // Use an in-memory DB with the migration applied directly — no need for
