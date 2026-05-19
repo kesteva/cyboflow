@@ -477,6 +477,7 @@ describe('ApprovalRouter', () => {
   // -------------------------------------------------------------------------
   // Case 8: 'approvalCreated' event is emitted after the transaction commits
   // -------------------------------------------------------------------------
+  // (Case 8 below — Cases 9-11 cover clearPendingForRun)
   it("emits 'approvalCreated' event after requestApproval transaction commits", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
@@ -506,5 +507,140 @@ describe('ApprovalRouter', () => {
       .get(runId) as { id: string }).id;
     await router.respond(approvalId, { behavior: 'allow' });
     await approvalPromise;
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 9: clearPendingForRun resolves in-flight entry with deny,
+  //         socketReply NOT called, DB row updated to 'rejected'
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun resolves in-flight pending entry with deny; socketReply NOT called; DB row rejected', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-009';
+    seedRun(db, runId, 'running');
+
+    // Start an approval request — do not await the decision yet.
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo hi' }, socketReply);
+
+    // Wait for the transaction to commit so the entry is in this.pending.
+    await qf.getOrCreate(runId).onIdle();
+
+    // Confirm the entry is in-flight.
+    expect(router.getPending()).toHaveLength(1);
+
+    // Simulate run termination.
+    router.clearPendingForRun(runId);
+
+    // The awaiting promise must resolve (not hang) with a deny-shaped decision.
+    const decision = await approvalPromise;
+    expect(decision.behavior).toBe('deny');
+    expect(decision.message).toMatch(/terminated/i);
+
+    // socketReply must NOT have been called.
+    expect(socketReply.mock.calls).toHaveLength(0);
+
+    // getPending() must be empty.
+    expect(router.getPending()).toHaveLength(0);
+
+    // DB row must be 'rejected' with decided_by='system'.
+    const approvalId = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string }).id;
+    const approval = db
+      .prepare("SELECT status, decided_by FROM approvals WHERE id = ?")
+      .get(approvalId) as { status: string; decided_by: string };
+    expect(approval.status).toBe('rejected');
+    expect(approval.decided_by).toBe('system');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 10: clearPendingForRun on a runId with zero pending entries is a
+  //          silent no-op
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun on a runId with no pending entries is a silent no-op', () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    // No entries in pending — clearPendingForRun must not throw and must be
+    // a no-op (no DB writes, no errors).
+    expect(() => router.clearPendingForRun('run-nonexistent')).not.toThrow();
+    expect(router.getPending()).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 11: Two pending entries for different runIds — clearPendingForRun
+  //          only clears the targeted run; the other entry remains intact
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun only clears the targeted runId; unrelated entries remain intact', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReplyA = vi.fn<(decision: ApprovalDecision) => void>();
+    const socketReplyB = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runIdA = 'run-101A';
+    const runIdB = 'run-101B';
+    seedRun(db, runIdA, 'running');
+    seedRun(db, runIdB, 'running');
+
+    // Register two approval requests for two DIFFERENT runs.
+    const promiseA = router.requestApproval(runIdA, 'tool_a', {}, socketReplyA);
+    const promiseB = router.requestApproval(runIdB, 'tool_b', {}, socketReplyB);
+
+    // Wait for both queue tasks to commit.
+    await Promise.all([
+      qf.getOrCreate(runIdA).onIdle(),
+      qf.getOrCreate(runIdB).onIdle(),
+    ]);
+
+    expect(router.getPending()).toHaveLength(2);
+
+    // Clear only run-101A.
+    router.clearPendingForRun(runIdA);
+
+    // promiseA should resolve with deny.
+    const decisionA = await promiseA;
+    expect(decisionA.behavior).toBe('deny');
+    expect(decisionA.message).toMatch(/terminated/i);
+
+    // socketReplyA must NOT have been called.
+    expect(socketReplyA.mock.calls).toHaveLength(0);
+
+    // run-101B entry must still be in-flight.
+    const stillPending = router.getPending();
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0].runId).toBe(runIdB);
+
+    // DB row for run-101A must be rejected.
+    const approvalA = db
+      .prepare("SELECT status FROM approvals WHERE run_id = ?")
+      .get(runIdA) as { status: string };
+    expect(approvalA.status).toBe('rejected');
+
+    // DB row for run-101B must still be pending.
+    const approvalB = db
+      .prepare("SELECT status FROM approvals WHERE run_id = ?")
+      .get(runIdB) as { status: string };
+    expect(approvalB.status).toBe('pending');
+
+    // socketReplyB also not called (no decision yet).
+    expect(socketReplyB.mock.calls).toHaveLength(0);
+
+    // Clean up: resolve run-101B so the test can finish.
+    const approvalIdB = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ?")
+      .get(runIdB) as { id: string }).id;
+    await router.respond(approvalIdB, { behavior: 'deny' });
+    await promiseB;
   });
 });
