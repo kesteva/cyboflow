@@ -21,6 +21,7 @@
  */
 
 import { readFileSync } from 'fs';
+import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 
 // ---------------------------------------------------------------------------
 // Error class
@@ -67,7 +68,7 @@ export function readWorkflowPrompt(workflowPath: string): WorkflowPrompt {
     );
   }
 
-  const { frontmatter, body } = splitFrontmatter(raw);
+  const { frontmatter, body } = parseMarkdownFrontmatter(raw);
   const trimmedBody = body.trim();
   if (trimmedBody.length === 0) {
     throw new WorkflowPromptReadError(
@@ -79,41 +80,3 @@ export function readWorkflowPrompt(workflowPath: string): WorkflowPrompt {
   return { prompt: trimmedBody, systemPromptAppend };
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Split a markdown string into its frontmatter key-value map and the body
- * that follows.  Handles both LF and CRLF line endings.  Strips surrounding
- * single/double quotes from values.  When no `--- … ---` block is found the
- * entire input is returned as the body with an empty frontmatter map.
- *
- * This mirrors the regex shape used by `WorkflowRegistry.parseFrontmatter`
- * (`main/src/orchestrator/workflowRegistry.ts:174-192`) so CRLF behaviour and
- * quote-stripping behave identically across both parsers.  A shared parser was
- * intentionally NOT extracted here — see the "Hardest Decision" section in the
- * TASK-641 plan.
- */
-function splitFrontmatter(md: string): { frontmatter: Record<string, string>; body: string } {
-  const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (!match) {
-    return { frontmatter: {}, body: md };
-  }
-  const fmBlock = match[1];
-  const body = md.slice(match[0].length);
-  const out: Record<string, string> = {};
-  for (const line of fmBlock.split(/\r?\n/)) {
-    const m = line.match(/^([a-zA-Z0-9_-]+)\s*:\s*(.*?)\s*$/);
-    if (!m) continue;
-    let val = m[2];
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
-      val = val.slice(1, -1);
-    }
-    out[m[1]] = val;
-  }
-  return { frontmatter: out, body };
-}
