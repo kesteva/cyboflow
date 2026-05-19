@@ -52,6 +52,7 @@ function makeLogger(): LoggerLike {
 function makeSpawner(): ClaudeSpawnerLike {
   return {
     spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockResolvedValue(undefined),
+    abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
   };
 }
 
@@ -237,6 +238,263 @@ describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () 
 });
 
 // ---------------------------------------------------------------------------
+// TASK-650: New tests for cancel surface, bridge handle, ExecutionPhase,
+// and preToolUseHook threading.
+// ---------------------------------------------------------------------------
+
+import type { RunEventBridge } from '../runEventBridge';
+
+describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fires dispose', () => {
+  it('(i) execute() stores a real RunEventBridge handle and disposes it on completion (teardownRun via finally)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+
+    await executor.execute(run.id);
+
+    // After execute() completes, teardownRun should have called dispose() once.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
+  it('(ii) cancel() calls spawner.abort with synthetic panelId AND fires bridge.dispose()', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    // Latch to control when spawnCliProcess resolves — so cancel() runs while execute() is in-flight.
+    let resolveSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await spawnBlocked;
+    });
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+
+    // Start execute() in background — it blocks on spawnCliProcess.
+    const executePromise = executor.execute(run.id);
+
+    // Give microtasks a chance to register the panelId in activePanelIds
+    // (bridgeEvents and panelId storage run before spawnCliProcess).
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cancel while execute() is still blocked.
+    await executor.cancel();
+
+    // Verify abort was called with the synthetic panelId.
+    expect(spawner.abort).toHaveBeenCalledOnce();
+    expect(spawner.abort).toHaveBeenCalledWith(`run-${run.id}`);
+
+    // Verify bridge.dispose() was called by cancel() via teardownRun.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+
+    // Unblock execute() so it can finish (it may throw because abort was called).
+    resolveSpawn();
+    // We don't care about execute()'s final state — cancel already cleaned up.
+    await executePromise.catch(() => {});
+  });
+
+  it('(ii-b) double-cancel is idempotent — abort called once, dispose called once', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    let resolveSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await spawnBlocked;
+    });
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executePromise = executor.execute(run.id);
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cancel twice.
+    await executor.cancel();
+    await executor.cancel(); // second cancel — no-op
+
+    expect(spawner.abort).toHaveBeenCalledOnce();
+    expect(disposeSpy).toHaveBeenCalledOnce();
+
+    resolveSpawn();
+    await executePromise.catch(() => {});
+  });
+});
+
+describe('RunExecutor.execute — terminal phase triggers teardownRun via finally', () => {
+  it('(iii) bridge.dispose() fires when execute() completes normally (finally arm)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('(iii-b) bridge.dispose() fires even when spawnCliProcess throws (finally arm on error path)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('spawn failed'));
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    await expect(executor.execute(run.id)).rejects.toThrow('spawn failed');
+
+    // Despite the error, dispose() must have been called.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () => {
+  it('(iv) returns { preToolUseHook } when workflow.permission_mode is "default"', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'default' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    // The spawner should have been called with a preToolUseHook function.
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(typeof capturedOverrides!.preToolUseHook).toBe('function');
+  });
+
+  it('(iv-b) returns {} (no preToolUseHook) when permission_mode is "dontAsk"', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'dontAsk' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    // For 'dontAsk', buildPreToolUseHook returns undefined so no hook is set.
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.preToolUseHook).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RunLauncher integration tests
 // ---------------------------------------------------------------------------
 
@@ -317,6 +575,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockImplementation(async () => {
           callOrder.push('spawnCliProcess');
         }),
+        abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
       };
 
       const runQueueRegistry = new RunQueueRegistry();
@@ -420,6 +679,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockImplementation(async () => {
           executeCalled = true;
         }),
+        abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
       };
 
       const runQueueRegistry = new RunQueueRegistry();
