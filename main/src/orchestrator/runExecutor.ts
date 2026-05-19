@@ -1,7 +1,7 @@
 /**
- * RunExecutor — translates a runId into the synthetic panelId/sessionId shape
- * that ClaudeCodeManager.spawnCliProcess() expects, and exposes four protected
- * extension hooks for sibling tasks (TASK-641–644) to override.
+ * RunExecutor — translates a runId into the panelId/sessionId shape that
+ * ClaudeCodeManager.spawnCliProcess() expects (panelId === runId === sessionId),
+ * and exposes four protected extension hooks for sibling tasks (TASK-641–644) to override.
  *
  * Standalone-typecheck invariant (ROADMAP-001 §6.3):
  * This module must NOT import 'electron', 'better-sqlite3', or any concrete
@@ -148,7 +148,7 @@ export class RunExecutor {
    *
    * 1. Load the workflow_runs row (throws if missing).
    * 2. Load the workflow row (throws if missing).
-   * 3. Derive synthetic panelId and sessionId from runId.
+   * 3. Set panelId === runId === sessionId (invariant: no prefix).
    * 4. Call getPrompt() to retrieve the prompt (default: throws NOT_IMPLEMENTED).
    * 5. Call buildOptionsOverrides() to get optional spawn-option overrides.
    * 6. Call bridgeEvents() to wire event forwarding; store returned handle.
@@ -176,10 +176,11 @@ export class RunExecutor {
       );
     }
 
-    // Deterministic synthetic identifiers — panelId and sessionId are derived
-    // from runId so ClaudeCodeManager can track them without a separate lookup.
-    const panelId = `run-${runId}`;
-    const sessionId = `run-${runId}`;
+    // Invariant: panelId === runId === sessionId across the orchestrator surface.
+    // The bridge filter at runEventBridge.ts:158 keys on raw runId; ApprovalRouter's
+    // workflow_runs UPDATE keys on runId. Any other value here silently breaks both.
+    const panelId = runId;
+    const sessionId = runId;
 
     // Store the panelId so cancel() can look it up.
     this.activePanelIds.set(runId, panelId);
