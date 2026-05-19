@@ -3,10 +3,15 @@
  * and the renderer's `cyboflow:stream:<runId>` channel.
  *
  * Integration contract for TASK-640 (RunExecutor):
- *   After ClaudeCodeManager.spawnCliProcess(options) succeeds with options.panelId === runId,
- *   call `bridgeEvents({ runId, source: claudeCodeManager, publisher, db, logger })` once.
+ *   After ClaudeCodeManager.spawnCliProcess(options) succeeds, call
+ *   `bridgeEvents({ runId, source: claudeCodeManager, publisher, db, logger })` once.
  *   Hold the returned RunEventBridge until 'exit' (TASK-644 will call bridge.dispose() in its
  *   status-transition handler) or cancel.
+ *
+ *   NOTE: current wiring passes options.panelId = `run-${runId}` (runExecutor.ts:181).
+ *   The bridge filter at :153 keys on raw runId, so the filter never matches and onFirstMessage
+ *   never fires. See FIND-SPRINT-021-4 — the panelId/runId alignment is tracked as a bug and
+ *   will be resolved in the backlog task that fixes it. Update this comment when that lands.
  *
  * Per-event sequence (synchronous):
  *   1. TypedEventNarrowing.narrow(data)  — validate/narrow the raw SDK payload
