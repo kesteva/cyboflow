@@ -1,7 +1,7 @@
 ---
-pending_count: 18
+pending_count: 19
 buckets:
-  decisions: 0
+  decisions: 1
   actions: 3
   testing: 11
   deferred_visual: 4
@@ -11,7 +11,14 @@ items: []
 
 ## Decisions
 
-_No items._
+- task: TASK-571
+  type: HUMAN_NEEDED
+  bucket: decisions
+  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-571-plan.md
+  verdict_notes: "Verifier confirmed AC1 verbatim _reverseCheck form (bare z.infer<typeof claudeStreamEventSchema>) is unimplementable: .passthrough() schemas add [k: string]: unknown to inferred types, and concrete TS interfaces in shared/types/claudeStream.ts (files_readonly) lack index signatures, producing TS2322. The executor workaround DeepKnownFields<z.infer<...>> compiles but FAILS to catch optional-field TS->Zod drift — the primary scenario the plan was written to solve. Empirically: adding bogus_optional_drift?: string to SystemCompactEvent produces ZERO typecheck errors. _reverseCheck as implemented adds essentially zero net drift-detection vs _typeCheck alone for the optional-field case. Required-field drift IS caught."
+  action: "Pick one path forward before merge: (1) accept gap, update plan to AC the DeepKnownFields form and update the bridge comment to admit the optional-field gap; (2) adopt option B from plan (export type ClaudeStreamEvent = z.infer<typeof schema>) which eliminates drift surface but requires touching 50+ consumer sites; (3) drop .passthrough() in non-leaf schemas (requires relaxing files_readonly to allow editing schemas.test.ts assertion of passthrough preservation). The executor logged FIND-SPRINT-020-2; verifier added FIND-SPRINT-020-3."
+  severity: medium
+  level: design
 
 ## Actions
 
