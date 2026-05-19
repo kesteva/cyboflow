@@ -108,7 +108,16 @@ export async function cancelHandler(
     // Step 2: deny all pending approvals BEFORE killing the executor.
     deps.approvalRouter.clearPendingForRun(runId);
     // Step 3: terminate the SDK AsyncIterator.
-    await executor.cancel();
+    // Wrapped in try/catch so a rejection here does NOT leave the run stuck
+    // forever — the DB write in step 4 still applies.
+    try {
+      await executor.cancel();
+    } catch (err: unknown) {
+      deps.logger?.error('[cancel] executor.cancel rejected — proceeding to DB write', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Step 4: DB write — guarded UPDATE so we handle concurrent terminal transitions.
