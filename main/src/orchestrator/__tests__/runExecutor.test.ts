@@ -1270,8 +1270,11 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     const publisher: StreamEventPublisher = { publish: vi.fn() };
     const source = new EventEmitter();
 
+    // Hoist spawner before construction so the mock is installed directly (matches
+    // the dominant pattern in this file, e.g. lines 181, 462, 487 above).
+    const spawner = makeSpawner();
     const executor = new TestableRunExecutor(
-      makeSpawner(),
+      spawner,
       registry,
       makeLogger(),
       undefined,
@@ -1282,7 +1285,6 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     );
 
     // Emit with the WRONG panelId (old "run-<runId>" prefix) — bridge must drop it.
-    const spawner = executor['spawner'] as ClaudeSpawnerLike;
     (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       source.emit('output', {
         panelId: `run-${run.id}`,
