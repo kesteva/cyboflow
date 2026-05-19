@@ -12,6 +12,8 @@ files_owned:
   - docs/signing/builds/_template/GATEKEEPER_TEST_TEMPLATE.md
   - docs/signing/builds/0.3.5/FIRST_SIGNED_BUILD_LOG.md
   - docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md
+  - .soloflow/human-review-queue.md
+  - .soloflow/active/plans/apple-signing-notarization-setup/EPIC-apple-signing-notarization-setup.md
 files_readonly:
   - .soloflow/active/plans/apple-signing-notarization-setup/EPIC-apple-signing-notarization-setup.md
   - .soloflow/active/plans/apple-signing-notarization-setup/TASK-055-plan.md

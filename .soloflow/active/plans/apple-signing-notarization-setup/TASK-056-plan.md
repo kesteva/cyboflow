@@ -4,9 +4,9 @@ idea: IDEA-002
 status: in-flight
 created: "2026-05-11T00:00:00Z"
 files_owned:
-  - docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md
+  - docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md
 files_readonly:
-  - docs/signing/FIRST_SIGNED_BUILD_LOG.md
+  - docs/signing/builds/0.3.5/FIRST_SIGNED_BUILD_LOG.md
   - .soloflow/active/research/ROADMAP-001-research-risks.md
 acceptance_criteria:
   - criterion: The signed-and-notarized DMG from TASK-055 launches on a clean macOS user account with no Gatekeeper warning dialog
@@ -15,8 +15,8 @@ acceptance_criteria:
     verification: "Inside the launched app, perform any action that spawns Claude Code or any PTY subprocess (the simplest trigger is creating a session). Confirm via `ps -ef | grep -i claude` from a separate Terminal that a child process actually launched. Alternatively, open Console.app, filter on the app process, and confirm no `EXC_BAD_INSTRUCTION` or `Code Signature Invalid` errors in the last 5 minutes."
   - criterion: The app can write to its data directory under hardened runtime
     verification: "After running the app for at least 30 seconds with one session-creation interaction, confirm the data dir contains a populated SQLite DB: `test -s ~/.cyboflow/cyboflow.db || test -s ~/.crystal/crystal.db` exits 0. (Either dir name passes — the rebrand to ~/.cyboflow is owned by a different epic.)"
-  - criterion: "`docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md` records: test user account name (anonymized), macOS version, DMG SHA256, the three CLI verification outputs verbatim, and any anomalies observed during runtime smoke"
-    verification: "`test -f docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md` AND `grep -c 'macOS\\|SHA256\\|spctl' docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md` is >= 3"
+  - criterion: "`docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` records: test user account name (anonymized), macOS version, DMG SHA256, the three CLI verification outputs verbatim, and any anomalies observed during runtime smoke"
+    verification: "`test -f docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` AND `grep -c 'macOS\\|SHA256\\|spctl' docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` is >= 3"
 depends_on:
   - TASK-055
 estimated_complexity: medium
