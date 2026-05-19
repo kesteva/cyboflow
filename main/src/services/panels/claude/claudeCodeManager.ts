@@ -38,6 +38,13 @@ interface ClaudeSpawnOptions {
    * behaviour is preserved.  Cyboflow workflow run launches pass `true`.
    */
   strictMcpConfig?: boolean;
+  /**
+   * Per-spawn system prompt append from workflow frontmatter `system_prompt_append`.
+   * When present, appended AFTER the dbSession-derived append (single blank line
+   * separator). Falsy values are no-ops — behavior is unchanged from the
+   * dbSession-only path.
+   */
+  systemPromptAppend?: string;
 }
 
 /**
@@ -414,7 +421,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   private composeSystemPromptAppend(options: ClaudeSpawnOptions): string | undefined {
     const dbSession = this.sessionManager.getDbSession(options.sessionId);
-    return this.buildSystemPromptAppend(dbSession ? { ...dbSession } : { id: options.sessionId });
+    const sessionAppend = this.buildSystemPromptAppend(dbSession ? { ...dbSession } : { id: options.sessionId });
+    const perSpawn = options.systemPromptAppend?.trim();
+    if (!perSpawn) return sessionAppend;
+    if (!sessionAppend) return perSpawn;
+    return `${sessionAppend}\n\n${perSpawn}`;
   }
 
   /**
