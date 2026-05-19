@@ -103,8 +103,7 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/**/*.node",
-      "main/dist/services/**/*.js",
-      "main/dist/orchestrator/mcpServer/**/*.js"
+      "main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js"
     ],
     "afterSign": "build/afterSign.js",
     "mac": {
