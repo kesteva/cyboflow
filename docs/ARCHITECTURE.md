@@ -195,6 +195,10 @@ the source tree under `main/src/`). Any future subprocess script added under
 targeted `asarUnpack` entry using the corresponding `main/dist/main/src/...`
 path — avoid broad wildcards to minimise the unpacked-tree size.
 
+See also `docs/packaging/root-deps-policy.md` for the workspace dependency
+policy (which deps belong in `main/package.json` vs. root `package.json`, and
+the list of confirmed dead dependencies pending removal).
+
 ## Decisions & Trade-offs
 
 See `docs/cyboflow_system_design.md` §2 (stack), §3 (fork rationale, cuts), §4 (principles).
