@@ -1130,7 +1130,7 @@ export function DraggableProjectTreeView({ sessionSortAscending }: DraggableProj
         prompt: '', // No initial prompt
         worktreeTemplate: 'untitled', // Simple name - backend will make it unique
         count: 1,
-        permissionMode: 'ignore', // Use default permission mode
+        permissionMode: 'approve', // Use default permission mode
         toolType: 'claude',
         projectId: project.id,
         autoCommit: true,

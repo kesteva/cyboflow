@@ -40,7 +40,7 @@ export class ConfigManager extends EventEmitter {
         },
         claudeConfig: {
           model: 'auto',
-          permissionMode: 'ignore',
+          permissionMode: 'approve',
           ultrathink: false
         },
         showAdvanced: false,
@@ -183,7 +183,7 @@ export class ConfigManager extends EventEmitter {
       },
       claudeConfig: {
         model: 'auto',
-        permissionMode: 'ignore',
+        permissionMode: 'approve',
         ultrathink: false
       },
       showAdvanced: false,

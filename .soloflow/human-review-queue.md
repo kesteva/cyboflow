@@ -1,9 +1,9 @@
 ---
-pending_count: 18
+pending_count: 22
 buckets:
-  decisions: 0
-  actions: 3
-  testing: 11
+  decisions: 1
+  actions: 4
+  testing: 13
   deferred_visual: 4
 items: []
 ---
@@ -11,7 +11,14 @@ items: []
 
 ## Decisions
 
-_No items._
+- task: TASK-571
+  type: HUMAN_NEEDED
+  bucket: decisions
+  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-571-plan.md
+  verdict_notes: "Verifier confirmed AC1 verbatim _reverseCheck form (bare z.infer<typeof claudeStreamEventSchema>) is unimplementable: .passthrough() schemas add [k: string]: unknown to inferred types, and concrete TS interfaces in shared/types/claudeStream.ts (files_readonly) lack index signatures, producing TS2322. The executor workaround DeepKnownFields<z.infer<...>> compiles but FAILS to catch optional-field TS->Zod drift — the primary scenario the plan was written to solve. Empirically: adding bogus_optional_drift?: string to SystemCompactEvent produces ZERO typecheck errors. _reverseCheck as implemented adds essentially zero net drift-detection vs _typeCheck alone for the optional-field case. Required-field drift IS caught."
+  action: "Pick one path forward before merge: (1) accept gap, update plan to AC the DeepKnownFields form and update the bridge comment to admit the optional-field gap; (2) adopt option B from plan (export type ClaudeStreamEvent = z.infer<typeof schema>) which eliminates drift surface but requires touching 50+ consumer sites; (3) drop .passthrough() in non-leaf schemas (requires relaxing files_readonly to allow editing schemas.test.ts assertion of passthrough preservation). The executor logged FIND-SPRINT-020-2; verifier added FIND-SPRINT-020-3."
+  severity: medium
+  level: design
 
 ## Actions
 
@@ -335,3 +342,50 @@ _No items._
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
+
+- task: SPRINT-020
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-020/sprint.json
+  action: "[Recurrence — already filed under SPRINT-015/SPRINT-017] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive the Electron renderer. Navigated to http://localhost:4521 (Vite was up because user has pnpm dev running), but the page renders empty and the console shows 'Could not find electronTRPC global. Check that exposeElectronTRPC has been called in your preload file.' — exactly the limitation CLAUDE.md documents. SPRINT-020 sprint-level Pass 1 visual_web was therefore not run. Same three resolution paths still apply: (a) set verification.visual_web=false, (b) launch the Electron app with CDP exposure for Playwright to attach, or (c) run tests/*.spec.ts manually via `pnpm test` after `pnpm dev`."
+  blocked_checks:
+    - Pass 1 visual_web — SPRINT-020 create-session/Settings/CLI-panel flows touched by TASK-569 not exercised end-to-end
+    - Pass 1 visual_web — SPRINT-020 review-queue interaction with deny-on-terminate (TASK-597) not exercised end-to-end
+    - Pass 1 visual_web — SPRINT-020 stream rendering for widened ToolResultContent (TASK-570 ripple) not exercised in the live Electron renderer
+  level: sprint
+  severity: low
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-569
+    - TASK-570
+    - TASK-596
+    - TASK-597
+
+- task: SPRINT-020
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_020_toolresult_widen_frontend_ripple
+  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-570-plan.md
+  action: "Cross-task ripple from TASK-570: shared/types/claudeStream.ts:46-51 ToolResultBlock.content is now `string | Array<{type, text}>`. TASK-570 fixed `main/src/utils/formatters.ts` with a type-guard and tests, but the two frontend consumers were NOT updated and have NO test coverage: (1) `frontend/src/utils/formatters.ts:38` does `Tool result: ${item.content}` — when content is now an array this stringifies to `[object Object],[object Object]` instead of the joined text. (2) `frontend/src/utils/toolFormatter.ts:281-315 and 417-423` make repeated `toolResult.content.includes('error:')`, `JSON.parse(toolResult.content)`, and `makePathsRelative(toolResult.content)` calls — when content is an array, `.includes('error:')` silently returns false (Array.prototype.includes checks array membership of the literal string, not substring match), `JSON.parse(array)` throws ('Unexpected token o in JSON' or similar via toString coercion), and makePathsRelative most likely also breaks. The TypeScript checker doesn't catch these because `Array<X>.includes(string)` is structurally valid (returns false for any string). Verify in the live Electron renderer with a real Bash/Edit tool_result that produces array-form content: confirm error tinting still works (or doesn't) and confirm no console-side TypeError or `[object Object]` rendering in `cyboflow-frontend-debug.log`. If broken: port the formatters.ts type-guard (`typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent)`, or join the array's .text fields) into both frontend files and add tests mirroring main/src/utils/formatters.test.ts."
+  blocked_checks:
+    - "End-of-sprint cross-task verification: widened ToolResultContent does not break tool-result rendering in the frontend (frontend/src/utils/formatters.ts:38 + frontend/src/utils/toolFormatter.ts:281-315 + :417-423)"
+  level: requirements
+  severity: medium
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-570
+
+- task: SPRINT-020
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_020_permission_mode_sessionmanager_fallback
+  plan_ref: .soloflow/active/plans/approval-router-and-permission-fix/TASK-569-plan.md
+  action: "Residual app-layer 'ignore' default after TASK-569's flip — `main/src/services/sessionManager.ts:453` falls back to `'ignore'` when `project.default_permission_mode` is null/undefined for main-repo session auto-creation (`project.default_permission_mode || 'ignore'`). TASK-569's verification grep used pattern `defaultPermissionMode\\s*\\|\\|\\s*['\"]ignore['\"]` (camelCase) which does NOT match the snake-case attribute access here, so the sweep missed it. Same issue at `main/src/database/database.ts:1523` (`createProject(... defaultPermissionMode || 'ignore' ...)`) — though that path was excluded by plan as a 'schema contract', the runtime fallback in `createProject` is an APP default that fires when callers omit the arg. Effect: legacy projects whose `default_permission_mode` column is NULL (or older projects created before TASK-569's flip) will still spawn main-repo sessions with `permissionMode='ignore'`, bypassing the approve-by-default intent of the epic. Decide: (a) flip the runtime fallback at sessionManager.ts:453 to `'approve'` and update the inline comment, (b) accept the gap as 'legacy behaviour preserved' and document it in the epic plan, or (c) add a one-shot DB migration that backfills default_permission_mode='approve' for any project where it's null. Same call applies to database.ts:1523 createProject fallback."
+  blocked_checks:
+    - "End-of-sprint approve-by-default invariant: every newly-spawned session — including main-repo auto-creation paths and legacy projects with NULL default_permission_mode — defaults to permissionMode='approve'"
+  level: requirements
+  severity: medium
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-569

@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   rationale TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
   decided_at DATETIME,
-  decided_by TEXT,                   -- 'user' | 'auto-policy' | 'timeout'
+  decided_by TEXT,                   -- 'user' | 'auto-policy' | 'system' | 'timeout'
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );

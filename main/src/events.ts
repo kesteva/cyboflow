@@ -641,7 +641,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           // Prepare initial custom state for the Claude panel
           const claudeConfig = session.claudeConfig || {};
           const customState: ClaudePanelState = {
-            permissionMode: claudeConfig.permissionMode || 'ignore',
+            permissionMode: claudeConfig.permissionMode || 'approve',
             model: claudeConfig.model || 'auto'
           };
 

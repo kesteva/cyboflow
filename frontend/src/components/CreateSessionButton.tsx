@@ -49,7 +49,7 @@ export function CreateSessionButton() {
         prompt: '', // No initial prompt
         worktreeTemplate: 'untitled', // Simple name - backend will make it unique
         count: 1,
-        permissionMode: 'ignore', // Use default permission mode
+        permissionMode: 'approve', // Use default permission mode
         toolType,
         projectId: activeProject.id,
         autoCommit: true,
