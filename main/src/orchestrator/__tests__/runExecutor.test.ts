@@ -18,7 +18,7 @@ import { randomUUID } from 'crypto';
 import { join } from 'path';
 import Database from 'better-sqlite3';
 import { RunExecutor } from '../runExecutor';
-import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions } from '../runExecutor';
+import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike } from '../runExecutor';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
 import type {
@@ -89,7 +89,7 @@ function makeWorkflowRunRow(overrides?: Partial<WorkflowRunRow>): WorkflowRunRow
  * prompt, so execute() can complete without hitting NOT_IMPLEMENTED.
  */
 class TestableRunExecutor extends RunExecutor {
-  protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+  protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
     return 'test prompt';
   }
 }
@@ -155,17 +155,17 @@ describe('RunExecutor.execute — missing rows', () => {
 });
 
 describe('RunExecutor.execute — default getPrompt sentinel', () => {
-  it('(d) default getPrompt throws NOT_IMPLEMENTED', async () => {
+  it('(d) default getPrompt throws NOT_IMPLEMENTED when no promptReader injected', async () => {
     const run = makeWorkflowRunRow();
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    // Use base RunExecutor (no getPrompt override) to confirm sentinel
+    // Use base RunExecutor with no promptReader — confirms sentinel still fires
     const executor = new RunExecutor(makeSpawner(), registry, makeLogger());
 
-    await expect(executor.execute(run.id)).rejects.toThrow('NOT_IMPLEMENTED: getPrompt');
+    await expect(executor.execute(run.id)).rejects.toThrow('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected');
   });
 });
 
@@ -209,7 +209,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () 
     const callOrder: string[] = [];
 
     class OrderTrackingExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'order-tracking prompt';
       }
 
@@ -258,7 +258,7 @@ describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fir
     const fakeBridge: RunEventBridge = { dispose: disposeSpy };
 
     class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'test prompt';
       }
 
@@ -300,7 +300,7 @@ describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
     });
 
     class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'test prompt';
       }
 
@@ -356,7 +356,7 @@ describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
     });
 
     class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'test prompt';
       }
 
@@ -396,7 +396,7 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
     const fakeBridge: RunEventBridge = { dispose: disposeSpy };
 
     class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'test prompt';
       }
 
@@ -425,7 +425,7 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
     const fakeBridge: RunEventBridge = { dispose: disposeSpy };
 
     class BridgeReturningExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'test prompt';
       }
 
@@ -491,6 +491,80 @@ describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () =>
     expect(capturedOverrides).not.toBeNull();
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     expect(capturedOverrides!.preToolUseHook).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-661: New tests for WorkflowPromptReaderLike wiring and systemPromptAppend
+// ---------------------------------------------------------------------------
+
+/** Stub reader backed by an in-memory map for unit tests. */
+function makeStubReader(entries: Record<string, { prompt: string; systemPromptAppend: string }>): WorkflowPromptReaderLike {
+  return {
+    read: (workflowPath: string) => {
+      const entry = entries[workflowPath];
+      if (!entry) {
+        const err = new Error(`WorkflowPromptReadError: no entry for ${workflowPath}`);
+        err.name = 'WorkflowPromptReadError';
+        throw err;
+      }
+      return entry;
+    },
+  };
+}
+
+describe('RunExecutor — getPrompt reads workflow file via injected reader', () => {
+  it('getPrompt reads workflow file via injected reader', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: '' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.prompt).toBe('do the sprint');
+  });
+
+  it('getPrompt throws WorkflowPromptReadError when file is missing — error bubbles up from execute()', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/missing/file.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const reader = makeStubReader({}); // empty — will throw on any read
+    const executor = new RunExecutor(makeSpawner(), registry, makeLogger(), reader);
+
+    await expect(executor.execute(run.id)).rejects.toThrow('WorkflowPromptReadError');
+  });
+
+  it('buildOptionsOverrides includes systemPromptAppend from frontmatter', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md', permission_mode: 'dontAsk' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: 'always use TypeScript' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.systemPromptAppend).toBe('always use TypeScript');
   });
 });
 
