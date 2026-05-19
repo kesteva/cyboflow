@@ -618,6 +618,96 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     finalDb.close();
   });
 
+  it('rebuilds the table when worktree_path is NOT NULL (canonical is nullable) or stuck_detected_at orphan column exists', () => {
+    tmpDbDir = mkdtempSync(join(tmpdir(), 'cyboflow-schema-runs-tier2-'));
+    const dbPath = join(tmpDbDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '..', 'migrations');
+
+    // Step 1: bootstrap canonical 006 then mutate to a pre-edit drifted shape.
+    const svc1 = new DatabaseService(dbPath);
+    svc1.setMigrationsDirForTesting(realMigrationsDir);
+    svc1.initialize();
+
+    const rawDb = new Database(dbPath);
+    // FK refs need to be off here because we'd otherwise need to cascade-handle approvals/raw_events.
+    rawDb.exec(`
+      PRAGMA foreign_keys=OFF;
+      BEGIN;
+      DROP TABLE workflow_runs;
+      CREATE TABLE workflow_runs (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        project_id INTEGER NOT NULL,
+        worktree_path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        policy_json TEXT,
+        stuck_at DATETIME,
+        stuck_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME,
+        ended_at DATETIME,
+        stuck_detected_at INTEGER,
+        FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+      );
+      COMMIT;
+      PRAGMA foreign_keys=ON;
+    `);
+    // Seed a workflow + a workflow_runs row so we can verify data preservation.
+    rawDb.exec(`
+      INSERT INTO workflows (id, project_id, name, spec_json)
+        VALUES ('wf-preserve', 1, 'preserve test', '{}');
+      INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status)
+        VALUES ('run-preserve', 'wf-preserve', 1, '/tmp/preserve-worktree', 'completed');
+    `);
+    rawDb.close();
+
+    // Step 2: re-initialize. Tier 1 adds permission_mode_snapshot/branch_name/error_message,
+    // Tier 2 rebuilds to drop the NOT NULL on worktree_path and remove stuck_detected_at.
+    const svc2 = new DatabaseService(dbPath);
+    svc2.setMigrationsDirForTesting(realMigrationsDir);
+    svc2.initialize();
+
+    interface ColInfo { name: string; notnull: number; dflt_value: unknown }
+    const finalDb = new Database(dbPath);
+    const cols = finalDb.prepare("PRAGMA table_info(workflow_runs)").all() as ColInfo[];
+    const colByName = (n: string): ColInfo | undefined => cols.find((c) => c.name === n);
+
+    // worktree_path must now be nullable.
+    expect(colByName('worktree_path')?.notnull).toBe(0);
+
+    // stuck_detected_at orphan column must be gone.
+    expect(cols.some((c) => c.name === 'stuck_detected_at')).toBe(false);
+
+    // permission_mode_snapshot must default to 'default' per canonical 006.
+    const pms = colByName('permission_mode_snapshot');
+    expect(pms?.notnull).toBe(1);
+    expect(String(pms?.dflt_value)).toContain("'default'");
+
+    // Existing row must survive the rebuild.
+    interface PreservedRow { id: string; worktree_path: string; status: string; permission_mode_snapshot: string }
+    const preserved = finalDb
+      .prepare("SELECT id, worktree_path, status, permission_mode_snapshot FROM workflow_runs WHERE id = 'run-preserve'")
+      .get() as PreservedRow | undefined;
+    expect(preserved).toBeDefined();
+    expect(preserved?.worktree_path).toBe('/tmp/preserve-worktree');
+    expect(preserved?.status).toBe('completed');
+    expect(preserved?.permission_mode_snapshot).toBe('default');
+
+    // INSERT without worktree_path must succeed (the failing path that motivated Tier 2).
+    finalDb.exec(`
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+        VALUES ('run-no-worktree', 'wf-preserve', 1, 'queued', 'acceptEdits');
+    `);
+    interface CheckRow { worktree_path: string | null }
+    const noWorktree = finalDb
+      .prepare("SELECT worktree_path FROM workflow_runs WHERE id = 'run-no-worktree'")
+      .get() as CheckRow;
+    expect(noWorktree.worktree_path).toBeNull();
+
+    finalDb.close();
+  });
+
   it('is a no-op on a fresh install where all columns already exist', () => {
     tmpDbDir = mkdtempSync(join(tmpdir(), 'cyboflow-schema-runs-noop-'));
     const dbPath = join(tmpDbDir, 'test.db');

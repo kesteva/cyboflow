@@ -1351,10 +1351,65 @@ export class DatabaseService {
       this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN error_message TEXT").run();
       console.log('[Database] Reconciled workflow_runs: added error_message column');
     }
-    // Tier 2 rebuild (status CHECK constraint, stuck_detected_at cleanup) is
-    // intentionally deferred — current code paths don't depend on the CHECK,
-    // and the orphan column does no harm. If a future change requires it,
-    // mirror the workflows Tier-2 pattern above.
+
+    // Tier 2: rebuild to canonical 006 shape if column-level drift remains
+    // that ALTER TABLE cannot fix. Two known cases from in-place 006 edits:
+    //   (a) worktree_path declared NOT NULL — canonical is nullable; INSERTs
+    //       that omit worktree_path fail with NOT NULL constraint.
+    //   (b) extra stuck_detected_at column from an earlier in-place edit
+    //       that was later renamed/removed in the canonical shape.
+    // SQLite has no ALTER COLUMN, so the only fix is recreate. PRAGMA
+    // foreign_keys=OFF is required because approvals.run_id and
+    // raw_events.run_id FK into workflow_runs(id) ON DELETE CASCADE.
+    const colsAfterTier1 = this.db
+      .prepare("PRAGMA table_info(workflow_runs)")
+      .all() as SqliteTableInfo[];
+    const worktreePath = colsAfterTier1.find((c) => c.name === 'worktree_path');
+    const hasStuckDetectedAt = colsAfterTier1.some((c) => c.name === 'stuck_detected_at');
+    const worktreePathIsNotNull = worktreePath !== undefined && worktreePath.notnull === 1;
+
+    if (worktreePathIsNotNull || hasStuckDetectedAt) {
+      console.log('[Database] Reconciling workflow_runs: rebuilding table to canonical 006 shape');
+      this.db.exec(`
+        PRAGMA foreign_keys=OFF;
+        BEGIN;
+        CREATE TABLE workflow_runs_reconcile_new (
+          id TEXT PRIMARY KEY,
+          workflow_id TEXT NOT NULL,
+          project_id INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
+          permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
+          worktree_path TEXT,
+          branch_name TEXT,
+          policy_json TEXT,
+          stuck_at DATETIME,
+          stuck_reason TEXT,
+          error_message TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          started_at DATETIME,
+          ended_at DATETIME,
+          FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+        );
+        INSERT INTO workflow_runs_reconcile_new (
+          id, workflow_id, project_id, status, permission_mode_snapshot,
+          worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
+          error_message, created_at, updated_at, started_at, ended_at
+        )
+          SELECT
+            id, workflow_id, project_id, status, permission_mode_snapshot,
+            worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
+            error_message, created_at, updated_at, started_at, ended_at
+          FROM workflow_runs;
+        DROP TABLE workflow_runs;
+        ALTER TABLE workflow_runs_reconcile_new RENAME TO workflow_runs;
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+      `);
+      console.log('[Database] Reconciled workflow_runs: table rebuilt');
+    }
   }
 
   private reconcileWorkflowsSchema(): void {
