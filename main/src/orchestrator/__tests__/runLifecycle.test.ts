@@ -362,4 +362,41 @@ describe('cancelHandler', () => {
     expect(getStatus(db, runId)).toBe('canceled');
     expect(getEndedAt(db, runId)).not.toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // executor.cancel() rejection: DB still reaches 'canceled', logger.error called
+  // -------------------------------------------------------------------------
+
+  it('resolves { canceled: true } and marks DB canceled even when executor.cancel rejects', async () => {
+    const runId = randomUUID();
+    seedRun(db, runId, 'running');
+
+    const loggerError = vi.fn();
+    const cancelMock = vi.fn().mockRejectedValue(new Error('iter broken'));
+
+    const deps: CancelDeps = {
+      db: dbAdapter(db),
+      approvalRouter: { clearPendingForRun: vi.fn() },
+      lookupExecutor: (_id: string) => (_id === runId ? { cancel: cancelMock } : null),
+      logger: {
+        error: loggerError,
+        info: vi.fn(),
+        warn: vi.fn(),
+        debug: vi.fn(),
+      },
+    };
+
+    const result = await cancelHandler(runId, deps);
+
+    // Handler must resolve (not reject) despite executor.cancel throwing.
+    expect(result).toEqual({ canceled: true });
+    // DB row must reach 'canceled'.
+    expect(getStatus(db, runId)).toBe('canceled');
+    // logger.error must have been called exactly once with the runId.
+    expect(loggerError).toHaveBeenCalledTimes(1);
+    expect(loggerError).toHaveBeenCalledWith(
+      expect.stringContaining('[cancel]'),
+      expect.objectContaining({ runId }),
+    );
+  });
 });
