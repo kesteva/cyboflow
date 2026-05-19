@@ -422,7 +422,7 @@ export const BaseCliPanel: React.FC<BaseCliPanelProps> = ({
                     Permission Mode
                   </label>
                   <select 
-                    value={settings.defaultPermissionMode || 'ignore'}
+                    value={settings.defaultPermissionMode || 'approve'}
                     onChange={(e) => onSettingsChange({ 
                       ...settings, 
                       defaultPermissionMode: e.target.value as 'approve' | 'ignore' 

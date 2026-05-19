@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import { Card } from '../ui/Card';
 import { Checkbox } from '../ui/Input';
-import { Shield, ShieldOff, Sparkles, Brain, Target, Zap, Paperclip, X, FileText } from 'lucide-react';
+import { Shield, Sparkles, Brain, Target, Zap, Paperclip, X, FileText } from 'lucide-react';
 import FilePathAutocomplete from '../FilePathAutocomplete';
 import type { AttachedImage, AttachedText } from '../../types/session';
 
@@ -286,45 +286,18 @@ export const ClaudeCodeConfigComponent: React.FC<ClaudeCodeConfigProps> = ({
           <label className="block text-sm font-medium text-text-secondary mb-2">
             Permission Mode
           </label>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 gap-2">
             <Card
-              variant={config.permissionMode === 'ignore' ? 'interactive' : 'bordered'}
+              variant="bordered"
               padding="sm"
-              className={`relative cursor-pointer transition-all ${
-                config.permissionMode === 'ignore'
-                  ? 'border-interactive bg-interactive/10'
-                  : ''
-              } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-              onClick={() => !disabled && onChange({ ...config, permissionMode: 'ignore' })}
+              className={`relative ${disabled ? 'opacity-50' : ''} border-status-success bg-status-success/10`}
             >
               <div className="flex flex-col items-center gap-1 py-2">
-                <ShieldOff className={`w-5 h-5 ${config.permissionMode === 'ignore' ? 'text-interactive' : 'text-text-tertiary'}`} />
-                <span className={`text-sm font-medium ${config.permissionMode === 'ignore' ? 'text-interactive' : ''}`}>Skip</span>
-                <span className="text-xs opacity-75">Default</span>
+                <Shield className="w-5 h-5 text-status-success" />
+                <span className="text-sm font-medium text-status-success">Manual Approve</span>
+                <span className="text-xs opacity-75">Required</span>
               </div>
-              {config.permissionMode === 'ignore' && (
-                <div className="absolute top-1 right-1 w-2 h-2 bg-interactive rounded-full" />
-              )}
-            </Card>
-            
-            <Card
-              variant={config.permissionMode === 'approve' ? 'interactive' : 'bordered'}
-              padding="sm"
-              className={`relative cursor-pointer transition-all ${
-                config.permissionMode === 'approve'
-                  ? 'border-status-success bg-status-success/10'
-                  : ''
-              } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-              onClick={() => !disabled && onChange({ ...config, permissionMode: 'approve' })}
-            >
-              <div className="flex flex-col items-center gap-1 py-2">
-                <Shield className={`w-5 h-5 ${config.permissionMode === 'approve' ? 'text-status-success' : ''}`} />
-                <span className={`text-sm font-medium ${config.permissionMode === 'approve' ? 'text-status-success' : ''}`}>Manual</span>
-                <span className="text-xs opacity-75">Approve</span>
-              </div>
-              {config.permissionMode === 'approve' && (
-                <div className="absolute top-1 right-1 w-2 h-2 bg-status-success rounded-full" />
-              )}
+              <div className="absolute top-1 right-1 w-2 h-2 bg-status-success rounded-full" />
             </Card>
           </div>
         </div>
