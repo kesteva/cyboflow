@@ -16,6 +16,8 @@ import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
 } from '../../cancelAndRestartHandler';
+import type { DatabaseLike, LoggerLike } from '../../types';
+import type { ApprovalRouter } from '../../approvalRouter';
 
 // ---------------------------------------------------------------------------
 // cancelAndRestart dependency bag
@@ -41,6 +43,88 @@ export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
   cancelAndRestartDeps = deps;
 }
 
+// ---------------------------------------------------------------------------
+// cancel dependency bag
+//
+// Mirrors the cancelAndRestartDeps pattern above. Injected at boot by
+// main/src/index.ts via setCancelDeps() once DB, ApprovalRouter, and
+// RunExecutor lookup are available. Until wired, the mutation throws
+// METHOD_NOT_SUPPORTED.
+// ---------------------------------------------------------------------------
+
+export interface CancelDeps {
+  db: DatabaseLike;
+  approvalRouter: Pick<ApprovalRouter, 'clearPendingForRun'>;
+  /**
+   * Look up the RunExecutor for the given runId.
+   * Returns null when no executor is active (e.g. run already finished before
+   * the cancel request arrived).
+   */
+  lookupExecutor: (runId: string) => { cancel(): Promise<void> } | null;
+  logger?: LoggerLike;
+}
+
+let cancelDeps: CancelDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the cancel mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, ApprovalRouter,
+ * and RunExecutor registry have been initialized.
+ *
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setCancelDeps(deps: CancelDeps): void {
+  cancelDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// cancelHandler — extracted for direct testability
+//
+// The tRPC cancel mutation delegates to this function so that tests can
+// exercise the ordering invariant (clearPendingForRun -> executor.cancel ->
+// DB write to status='canceled') without wiring the full tRPC context.
+// ---------------------------------------------------------------------------
+
+/**
+ * Cancels an in-flight workflow run.
+ *
+ * Execution order:
+ *   1. Look up the RunExecutor for runId. If not found, skip steps 2-3.
+ *   2. `deps.approvalRouter.clearPendingForRun(runId)` — deny pending
+ *      approvals BEFORE killing the executor.
+ *   3. `await executor.cancel()` — terminate the SDK AsyncIterator.
+ *   4. `UPDATE workflow_runs SET status='canceled'` — DB write last.
+ *      If the row is already terminal, returns `{ canceled: false, reason: 'already_terminal' }`.
+ *   5. Returns `{ canceled: true }` on success.
+ */
+export async function cancelHandler(
+  runId: string,
+  deps: CancelDeps,
+): Promise<{ canceled: true } | { canceled: false; reason: string }> {
+  const executor = deps.lookupExecutor(runId);
+
+  if (executor !== null) {
+    // Step 2: deny all pending approvals BEFORE killing the executor.
+    deps.approvalRouter.clearPendingForRun(runId);
+    // Step 3: terminate the SDK AsyncIterator.
+    await executor.cancel();
+  }
+
+  // Step 4: DB write — guarded UPDATE so we handle concurrent terminal transitions.
+  const result = deps.db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status NOT IN ('canceled', 'failed', 'completed')`,
+  ).run(runId) as { changes: number };
+
+  if (result.changes === 0) {
+    return { canceled: false, reason: 'already_terminal' };
+  }
+
+  return { canceled: true };
+}
+
 export const runsRouter = router({
   /** List workflow runs, optionally filtered by project. */
   list: protectedProcedure
@@ -57,8 +141,20 @@ export const runsRouter = router({
   /** Cancel a running workflow run by ID. */
   cancel: protectedProcedure
     .input(z.object({ runId: z.string() }))
-    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
-    .mutation(() => throwNotImplemented('workflow-runs')),
+    .mutation(async ({ ctx, input }): Promise<{ canceled: true } | { canceled: false; reason: string }> => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+
+      if (!cancelDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'cancel dependencies not wired yet (workflow-runs epic). Call setCancelDeps() at boot.',
+        });
+      }
+
+      return cancelHandler(input.runId, cancelDeps);
+    }),
 
   /** Get a single workflow run by ID. */
   get: protectedProcedure
