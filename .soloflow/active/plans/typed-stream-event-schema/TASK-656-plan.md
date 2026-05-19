@@ -1,7 +1,7 @@
 ---
 id: TASK-656
 idea: SPRINT-020
-status: needs-decision
+status: in-flight
 created: 2026-05-19T00:00:00Z
 files_owned:
   - main/src/services/streamParser/schemas.ts
@@ -21,7 +21,7 @@ acceptance_criteria:
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
     verification: "Exit code 0 for both."
 depends_on: []
-estimated_complexity: small (Option 1) | large (Option 2) | medium (Option 3)
+estimated_complexity: medium
 epic: typed-stream-event-schema
 test_strategy:
   needed: false
@@ -31,8 +31,8 @@ prerequisites: []
 
 # Resolve the _reverseCheck bidirectional drift-detection gap
 
-> **DECISION REQUIRED — humans only.**
-> Selected option: _____  (1 / 2 / 3 — pick one before implementation)
+> Selected option: 3 — Drop `.passthrough()` in non-leaf schemas.
+> Decided 2026-05-19 (kesteva). Rationale: smallest path that achieves the plan's primary goal of catching both required- and optional-field drift in both directions. The trade-off of losing silent absorption of unknown SDK fields at non-leaf schemas is acceptable / arguably a feature — new SDK fields will surface as `__unknown__` variants via the existing narrower fallback, forcing a deliberate schema update rather than silent drift.
 
 ## Problem
 
