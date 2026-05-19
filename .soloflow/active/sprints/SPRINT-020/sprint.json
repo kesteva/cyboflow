@@ -6,11 +6,25 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-569": { "status": "pending" },
-    "TASK-570": { "status": "pending" },
-    "TASK-571": { "status": "pending" },
-    "TASK-596": { "status": "pending" },
-    "TASK-597": { "status": "pending" }
+    "TASK-569": {
+      "status": "in_progress",
+      "started": "2026-05-19T14:36:40.181Z"
+    },
+    "TASK-570": {
+      "status": "in_progress",
+      "started": "2026-05-19T14:36:40.519Z"
+    },
+    "TASK-571": {
+      "status": "human_needed",
+      "started": "2026-05-19T14:36:40.791Z",
+      "verdict_at": "2026-05-19T14:54:29.290Z"
+    },
+    "TASK-596": {
+      "status": "pending"
+    },
+    "TASK-597": {
+      "status": "pending"
+    }
   },
   "run": {
     "branch": "soloflow/run-20260519-073215-SPRINT-020",
