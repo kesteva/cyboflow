@@ -1,7 +1,7 @@
 ---
 id: TASK-570
 title: Canonicalize block/content types — eliminate tri-package duplication
-status: ready
+status: in-flight
 epic: typed-stream-event-schema
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-004
@@ -23,17 +23,16 @@ acceptance_criteria:
     verification: "grep -nE 'interface (TextContent|ToolUseContent|ToolResultContent)' main/src/types/session.ts frontend/src/types/session.ts returns 0 matches."
   - criterion: "`ToolResultContent.content` accepts both wire shapes — plain string AND the array form `Array<{ type: string; text: string }>` — by virtue of being an alias of `ToolResultBlock`."
     verification: "grep -nE 'content: string \\| Array<\\{ type: string; text: string \\}>' shared/types/claudeStream.ts returns 1 match (the canonical), and `pnpm typecheck` passes after the alias change."
-  - criterion: "All callsites that previously imported `TextContent`/`ToolUseContent`/`ToolResultContent` from `main/src/types/session` or `frontend/src/types/session` continue to compile without modification."
+  - criterion: All callsites that previously imported `TextContent`/`ToolUseContent`/`ToolResultContent` from `main/src/types/session` or `frontend/src/types/session` continue to compile without modification.
     verification: "`pnpm typecheck` exits 0 across all workspaces."
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
-    verification: "Exit code 0 for both."
+    verification: Exit code 0 for both.
 estimated_complexity: medium
 test_strategy:
   needed: false
   justification: "This task is a purely type-level refactor — no runtime behavior changes. `pnpm typecheck` IS the test. The two `session.ts` files in main and frontend have no sibling `__tests__` directories (grep `main/src/types/__tests__` and `frontend/src/types/__tests__` return zero results), so there are no sibling tests to keep green. Behavioral tests already cover the consumers (e.g. `ClaudeMessageTransformer.ts` tests if any) and will catch any subtle type-narrowing breakage by virtue of failing to compile."
 prerequisites: []
 ---
-
 # Canonicalize block/content types
 
 ## Problem

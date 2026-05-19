@@ -1,8 +1,8 @@
 ---
 id: TASK-597
 idea: IDEA-014
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/services/panels/claude/claudeCodeManager.ts
@@ -19,11 +19,11 @@ acceptance_criteria:
     verification: "Read main/src/services/panels/claude/claudeCodeManager.ts:395-434 (makePreToolUseHook). The existing deny branch already handles this contract — confirm no new code is needed beyond a code comment explaining that the deny may originate from clearPendingForRun."
   - criterion: "New unit test cases in approvalRouter.test.ts cover: (a) clearPendingForRun with one active pending entry resolves the awaiting promise with behavior='deny' and message containing 'terminated', and updates the approvals row to status='rejected'; (b) clearPendingForRun on a runId with zero pending entries is a silent no-op (no throw, no DB write)."
     verification: "cd main && pnpm vitest run src/orchestrator/__tests__/approvalRouter.test.ts exits 0 with at least 2 new test cases ('clearPendingForRun rejects in-flight pending entries' and 'clearPendingForRun with no pending entries is a no-op')."
-  - criterion: "clearPendingForRun does NOT invoke socketReply for cleared entries — only resolve(). The socketReply path is reserved for explicit user/policy decisions in respond(); termination cleanup short-circuits the wire by resolving the Promise directly. A test asserts socketReply was NOT called after clearPendingForRun ran."
-    verification: "The new test case in approvalRouter.test.ts asserts socketReply.mock.calls has length 0 after clearPendingForRun returns."
+  - criterion: clearPendingForRun does NOT invoke socketReply for cleared entries — only resolve(). The socketReply path is reserved for explicit user/policy decisions in respond(); termination cleanup short-circuits the wire by resolving the Promise directly. A test asserts socketReply was NOT called after clearPendingForRun ran.
+    verification: The new test case in approvalRouter.test.ts asserts socketReply.mock.calls has length 0 after clearPendingForRun returns.
   - criterion: "clearPendingForRun is synchronous (returns void) — does NOT submit work through the per-run PQueue. This is intentional: termination is a one-shot cleanup, the run is being torn down, and queue submission would race with the per-run PQueue draining during shutdown."
     verification: "Read the new clearPendingForRun signature: it is `clearPendingForRun(runId: string): void` (no async, no await on this.getQueueForRun). A code comment in the body explains the deliberate non-queued ordering."
-  - criterion: "pnpm typecheck and pnpm lint are green for the main workspace."
+  - criterion: pnpm typecheck and pnpm lint are green for the main workspace.
     verification: "cd main && pnpm typecheck && pnpm lint both exit 0."
 depends_on: []
 estimated_complexity: medium
@@ -33,19 +33,18 @@ test_strategy:
   justification: "clearPendingForRun was a documented stub; the implementation has subtle invariants (deny-resolve without socketReply, no PQueue submission, idempotent on empty input) that need explicit unit coverage. The existing approvalRouter.test.ts already establishes the in-memory DB + real PQueue fixture pattern — extending it is the lowest-friction approach."
   targets:
     - behavior: "clearPendingForRun with one active pending entry resolves the awaiting requestApproval promise with behavior='deny', updates the approvals row to 'rejected', removes the entry from this.pending."
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "clearPendingForRun with no pending entries is a silent no-op — no throw, no DB writes, no socket calls."
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "clearPendingForRun with two pending entries for the same runId rejects both (covers the multi-entry case the body's loop must handle)."
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
-    - behavior: "clearPendingForRun does not invoke socketReply for cleared entries."
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: clearPendingForRun does not invoke socketReply for cleared entries.
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
 ---
-
 # Implement full clearPendingForRun body (TASK-304 approval-lifecycle cleanup)
 
 ## Objective
