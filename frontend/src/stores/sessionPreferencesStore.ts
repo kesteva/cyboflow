@@ -10,7 +10,7 @@ export interface SessionCreationPreferences {
   };
   claudeConfig: {
     model: 'auto' | 'sonnet' | 'opus' | 'haiku';
-    permissionMode: 'ignore' | 'approve';
+    permissionMode: 'approve' | 'ignore';
     ultrathink: boolean;
   };
   showAdvanced: boolean;
