@@ -410,6 +410,139 @@ describe('runEventBridge', () => {
   });
 
   // -------------------------------------------------------------------------
+  // onFirstMessage tests (5 new cases from TASK-662)
+  // -------------------------------------------------------------------------
+
+  describe('onFirstMessage', () => {
+    // -----------------------------------------------------------------------
+    // (i) fires exactly once across multiple output events
+    // -----------------------------------------------------------------------
+    it('onFirstMessage fires exactly once across multiple output events', () => {
+      const { asPublisher } = makePublisher();
+      const onFirstMessage = vi.fn();
+
+      bridgeEvents({ runId: RUN_ID, source, publisher: asPublisher, db, onFirstMessage });
+
+      emitOutput(source, RUN_ID, systemEvent);    // should fire
+      emitOutput(source, RUN_ID, assistantEvent); // should NOT fire again
+      emitOutput(source, RUN_ID, resultEvent);    // should NOT fire again
+
+      expect(onFirstMessage).toHaveBeenCalledOnce();
+    });
+
+    // -----------------------------------------------------------------------
+    // (ii) does not fire when no JSON output arrives
+    // -----------------------------------------------------------------------
+    it('onFirstMessage does not fire when no JSON output arrives', () => {
+      const { asPublisher } = makePublisher();
+      const onFirstMessage = vi.fn();
+
+      bridgeEvents({ runId: RUN_ID, source, publisher: asPublisher, db, onFirstMessage });
+
+      // emit non-json events and wrong panelId events
+      emitOutput(source, RUN_ID, 'some text', 'stdout');
+      emitOutput(source, 'different-run', systemEvent);
+
+      expect(onFirstMessage).not.toHaveBeenCalled();
+    });
+
+    // -----------------------------------------------------------------------
+    // (iii) throwing callback is caught and logged; does not break subsequent INSERT/publish
+    // -----------------------------------------------------------------------
+    it('onFirstMessage is fail-soft — throws are caught and logged', () => {
+      const mockLogger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      };
+      const { publish, asPublisher } = makePublisher();
+      const onFirstMessage = vi.fn(() => {
+        throw new Error('callback error');
+      });
+
+      bridgeEvents({ runId: RUN_ID, source, publisher: asPublisher, db, logger: mockLogger, onFirstMessage });
+
+      emitOutput(source, RUN_ID, systemEvent);
+      emitOutput(source, RUN_ID, assistantEvent);
+
+      // Both events inserted and published despite the throwing callback
+      expect(countRows(db, RUN_ID)).toBe(2);
+      expect(publish).toHaveBeenCalledTimes(2);
+
+      // onFirstMessage only attempted once
+      expect(onFirstMessage).toHaveBeenCalledOnce();
+
+      // A warn was logged
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('[runEventBridge] onFirstMessage threw'),
+        expect.objectContaining({ runId: RUN_ID }),
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // (iv) fires AFTER the first INSERT + publish complete (ordering guard)
+    // -----------------------------------------------------------------------
+    it('onFirstMessage fires AFTER the first INSERT + publish complete', () => {
+      const orderLog: string[] = [];
+
+      const publisher: StreamEventPublisher = {
+        publish(_runId) {
+          orderLog.push('publish');
+        },
+      };
+
+      const onFirstMessage = vi.fn(() => {
+        orderLog.push('onFirstMessage');
+      });
+
+      bridgeEvents({ runId: RUN_ID, source, publisher, db, onFirstMessage });
+
+      emitOutput(source, RUN_ID, systemEvent);
+
+      // After emitting, order should be: INSERT (via router), publish, onFirstMessage
+      // We verify that onFirstMessage came after publish
+      const publishIdx = orderLog.indexOf('publish');
+      const firstMsgIdx = orderLog.indexOf('onFirstMessage');
+      expect(publishIdx).toBeGreaterThanOrEqual(0);
+      expect(firstMsgIdx).toBeGreaterThan(publishIdx);
+
+      // Also verify INSERT happened before publish by checking row count at publish time
+      const rowCountsAtPublish: number[] = [];
+      const db2 = makeDb();
+      const source2 = new EventEmitter();
+      const publisher2: StreamEventPublisher = {
+        publish(runId) {
+          rowCountsAtPublish.push(countRows(db2, runId));
+        },
+      };
+      const onFirstMessage2 = vi.fn();
+      bridgeEvents({ runId: RUN_ID, source: source2, publisher: publisher2, db: db2, onFirstMessage: onFirstMessage2 });
+      emitOutput(source2, RUN_ID, systemEvent);
+      // INSERT must exist when publish fires (row count = 1 at publish time)
+      expect(rowCountsAtPublish[0]).toBe(1);
+    });
+
+    // -----------------------------------------------------------------------
+    // (v) callback receives the typed first event
+    // -----------------------------------------------------------------------
+    it('onFirstMessage callback receives the typed first event', () => {
+      const { asPublisher } = makePublisher();
+      let received: ClaudeStreamEvent | undefined;
+      const onFirstMessage = vi.fn((event: ClaudeStreamEvent) => {
+        received = event;
+      });
+
+      bridgeEvents({ runId: RUN_ID, source, publisher: asPublisher, db, onFirstMessage });
+
+      emitOutput(source, RUN_ID, systemEvent);
+
+      expect(received).toBeDefined();
+      expect((received as ClaudeStreamEvent & { type: string }).type).toBe('system');
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // 9. Publish fail-soft: publisher.publish throwing still logs a warn and
   //    does not prevent subsequent events from being processed.
   // -------------------------------------------------------------------------
