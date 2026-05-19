@@ -167,3 +167,14 @@ $ lipo -info dist-electron/mac-universal/Cyboflow.app/Contents/Resources/app.asa
 ```
 
 Both `x86_64` and `arm64` slices confirmed present.
+
+---
+
+## cyboflowMcpServer.js Unpacking (AC6)
+
+```
+$ test -f dist-electron/mac-universal/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js && echo "PRESENT" || echo "MISSING"
+<TODO: paste verbatim output — expected: "PRESENT">
+```
+
+File confirmed present under `app.asar.unpacked/`. This file is the sole `asarUnpack` entry under `main/dist/**` — its presence confirms the `package.json` `build.asarUnpack` path matches the tsc emit layout.
