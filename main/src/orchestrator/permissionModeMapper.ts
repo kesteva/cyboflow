@@ -10,10 +10,10 @@
  * Standalone-typecheck invariant: NO imports from 'electron', 'better-sqlite3',
  * or any concrete service in main/src/services/*.
  */
-import type { HookCallback, HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import { ApprovalRouter } from './approvalRouter';
 import type { LoggerLike } from './types';
+import { routePreToolUseThroughApprovalRouter } from './preToolUseHookHelper';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,59 +27,6 @@ import type { LoggerLike } from './types';
 export const ACCEPT_EDITS_AUTO_APPROVE_TOOLS = ['Edit', 'Write', 'MultiEdit'] as const;
 
 type AcceptEditsTool = (typeof ACCEPT_EDITS_AUTO_APPROVE_TOOLS)[number];
-
-// ---------------------------------------------------------------------------
-// Internal shared deferral helper
-// ---------------------------------------------------------------------------
-
-/**
- * Routes a PreToolUse input through ApprovalRouter and translates the
- * ApprovalDecision to a SDK HookJSONOutput. Wraps in try/catch so the SDK
- * always receives a well-formed response (mirroring claudeCodeManager.ts:507-518).
- */
-async function deferToApprovalRouter(
-  pretool: PreToolUseHookInput,
-  runId: string,
-  logger?: LoggerLike,
-): Promise<HookJSONOutput> {
-  try {
-    const decision = await ApprovalRouter.getInstance().requestApproval(
-      runId,
-      pretool.tool_name,
-      pretool.tool_input as Record<string, unknown>,
-      () => {},
-    );
-
-    if (decision.behavior === 'allow') {
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse' as const,
-          permissionDecision: 'allow' as const,
-          ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {}),
-        },
-      };
-    }
-
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse' as const,
-        permissionDecision: 'deny' as const,
-        ...(decision.message ? { permissionDecisionReason: decision.message } : {}),
-      },
-    };
-  } catch (err) {
-    logger?.error(
-      `[permissionModeMapper] PreToolUse hook failed for ${pretool.tool_name}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse' as const,
-        permissionDecision: 'deny' as const,
-        permissionDecisionReason: 'Internal approval-router error',
-      },
-    };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -105,7 +52,7 @@ export function buildPreToolUseHook(
     case 'default':
       return async (input, _toolUseId, _ctx) => {
         const pretool = input as PreToolUseHookInput;
-        return deferToApprovalRouter(pretool, runId, logger);
+        return routePreToolUseThroughApprovalRouter(pretool, runId, 'PermissionModeMapper', logger);
       };
 
     case 'acceptEdits':
@@ -123,7 +70,7 @@ export function buildPreToolUseHook(
           };
         }
 
-        return deferToApprovalRouter(pretool, runId, logger);
+        return routePreToolUseThroughApprovalRouter(pretool, runId, 'PermissionModeMapper', logger);
       };
 
     default: {
