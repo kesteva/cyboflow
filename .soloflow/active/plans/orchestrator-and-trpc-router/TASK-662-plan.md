@@ -1,7 +1,7 @@
 ---
 id: TASK-662
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runExecutor.ts
@@ -45,16 +45,16 @@ test_strategy:
   needed: true
   justification: "This task lights up the actual user-visible workflow lifecycle. Wrong wiring fails silently: status stays at 'starting' forever, OR transitions fire too early/late, OR errors are silently swallowed. Eight new unit tests pin the phase routing (3 in runExecutor), the first-message single-shot semantics (5 in runEventBridge), and the failed-path error propagation. Manual smoke is required because the SDK→DB→UI loop is only fully exercised under `pnpm dev`."
   targets:
-    - behavior: "onFirstMessage fires exactly once on the first JSON output event with the typed payload"
+    - behavior: onFirstMessage fires exactly once on the first JSON output event with the typed payload
       test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
-    - behavior: "onFirstMessage is fail-soft — a throwing callback does not break subsequent INSERT/publish"
+    - behavior: onFirstMessage is fail-soft — a throwing callback does not break subsequent INSERT/publish
       test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
-    - behavior: "onFirstMessage fires AFTER the first INSERT + publish so the running transition cannot race ahead of event delivery"
+    - behavior: onFirstMessage fires AFTER the first INSERT + publish so the running transition cannot race ahead of event delivery
       test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
-    - behavior: "onLifecycleTransition default routes each phase to the matching LifecycleTransitionsLike method"
+    - behavior: onLifecycleTransition default routes each phase to the matching LifecycleTransitionsLike method
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "execute() fires 'completed' phase on normal iterator terminate; lifecycleTransitions.completed called with fromStatus='running'"
@@ -64,7 +64,6 @@ test_strategy:
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
 ---
-
 # Light up workflow_runs lifecycle — wire onLifecycleTransition → transitionTo* and the first-message signal
 
 ## Objective

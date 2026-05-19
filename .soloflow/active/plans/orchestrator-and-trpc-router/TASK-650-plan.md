@@ -1,7 +1,7 @@
 ---
 id: TASK-650
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-18T17:45:00Z"
 files_owned:
   - main/src/orchestrator/runExecutor.ts
@@ -36,10 +36,10 @@ acceptance_criteria:
   - criterion: "buildOptionsOverrides default returns `{ preToolUseHook: buildPreToolUseHook(workflow.permission_mode as PermissionMode, runId, this.logger) }` when permission_mode is set, threading the mapper output into the spawn options."
     verification: "grep -nE 'buildPreToolUseHook' main/src/orchestrator/runExecutor.ts shows at least one match in the runExecutor source body (not just tests); a new unit test exercises the wired path."
   - criterion: "cyboflow.runs.cancel handler's `lookupExecutor` shape still resolves cleanly against the new RunExecutor surface; no signature mismatch between the structural type in runs.ts:63 and the new method."
-    verification: "pnpm --filter cyboflow-main typecheck passes (`tsc --noEmit` exit 0). The existing 29 runLifecycle.test.ts cases stay green unchanged."
+    verification: pnpm --filter cyboflow-main typecheck passes (`tsc --noEmit` exit 0). The existing 29 runLifecycle.test.ts cases stay green unchanged.
   - criterion: "New / updated runExecutor.test.ts cases cover: (i) execute() returns even when `bridgeEvents` produces a real RunEventBridge (handle stored), (ii) cancel() calls spawner.abort with the synthetic panelId AND fires bridge.dispose(), (iii) terminal onLifecycleTransition fires bridge.dispose() via teardownRun, (iv) buildOptionsOverrides threads the preToolUseHook returned by buildPreToolUseHook. All four pass."
     verification: "pnpm --filter cyboflow-main test -- runExecutor shows >= 4 new vitest cases for the integration paths; full suite exit 0."
-  - criterion: "Project-wide typecheck and lint pass."
+  - criterion: Project-wide typecheck and lint pass.
     verification: "pnpm typecheck && pnpm lint exit 0."
 depends_on:
   - TASK-640
@@ -55,13 +55,13 @@ test_strategy:
     - behavior: "RunExecutor.cancel() invokes spawner.abort(panelId) with the synthetic 'run-${runId}' panelId derived during execute()."
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
-    - behavior: "RunExecutor.cancel() calls bridge.dispose() exactly once for the active run; double-cancel is idempotent."
+    - behavior: RunExecutor.cancel() calls bridge.dispose() exactly once for the active run; double-cancel is idempotent.
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "buildOptionsOverrides() returns { preToolUseHook: <result of buildPreToolUseHook> } when workflow.permission_mode is set."
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
-    - behavior: "Terminal onLifecycleTransition phases (completed/failed/canceled) fire bridge.dispose() via teardownRun(runId)."
+    - behavior: Terminal onLifecycleTransition phases (completed/failed/canceled) fire bridge.dispose() via teardownRun(runId).
       test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "End-to-end smoke: a single execute() call drives spawn → bridgeEvents → SDK iterator drain → terminal transition → dispose, all via the public surface (with stub spawner). No assertion changes to existing 9 tests; new test validates the wired path."

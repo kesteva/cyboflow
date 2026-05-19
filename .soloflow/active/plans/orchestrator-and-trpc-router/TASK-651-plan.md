@@ -1,7 +1,7 @@
 ---
 id: TASK-651
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-18T17:45:00Z"
 files_owned:
   - main/src/orchestrator/preToolUseHookHelper.ts
@@ -23,10 +23,10 @@ acceptance_criteria:
   - criterion: "The `callerLabel` argument is used to prefix the log line so each delegate keeps its own log identity (e.g. `[PermissionModeMapper]` vs `[ClaudeCodeManager]`)."
     verification: "Unit test 'logger.error prefix matches callerLabel' asserts that two different callerLabel values produce two different log prefixes when the safe-deny branch fires."
   - criterion: "All existing tests pass: permissionModeMapper.test.ts (7 cases) and the claudeCodeManager pre-tool-use tests stay green."
-    verification: "pnpm --filter cyboflow-main test -- permissionModeMapper claudeCodeManager exit 0; counts at least 7 + N existing claudeCodeManager.test.ts cases."
+    verification: pnpm --filter cyboflow-main test -- permissionModeMapper claudeCodeManager exit 0; counts at least 7 + N existing claudeCodeManager.test.ts cases.
   - criterion: "New test file main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts exercises the helper directly with five cases: allow, deny-with-message, deny-without-message, updatedInput threading, and ApprovalRouter-throws safe-deny."
     verification: "test -f main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts; pnpm --filter cyboflow-main test -- preToolUseHookHelper reports >= 5 passing cases."
-  - criterion: "Typecheck and lint stay clean."
+  - criterion: Typecheck and lint stay clean.
     verification: "pnpm typecheck && pnpm lint exit 0."
 depends_on:
   - TASK-640
@@ -35,7 +35,7 @@ estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "Pure-extraction refactor with two callers; each branch (allow / deny-with-message / deny-without-message / updatedInput / safe-deny) needs at least one unit test on the new helper. The two existing test suites (permissionModeMapper.test.ts and claudeCodeManager.test.ts) become regression coverage for the delegation wiring."
+  justification: Pure-extraction refactor with two callers; each branch (allow / deny-with-message / deny-without-message / updatedInput / safe-deny) needs at least one unit test on the new helper. The two existing test suites (permissionModeMapper.test.ts and claudeCodeManager.test.ts) become regression coverage for the delegation wiring.
   targets:
     - behavior: "routePreToolUseThroughApprovalRouter returns permissionDecision:'allow' with updatedInput when ApprovalRouter returns { behavior: 'allow', updatedInput: {...} }."
       test_file: main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts

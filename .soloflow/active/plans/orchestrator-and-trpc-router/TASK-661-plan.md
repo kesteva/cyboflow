@@ -1,7 +1,7 @@
 ---
 id: TASK-661
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runExecutor.ts
