@@ -686,6 +686,8 @@ describe('lifecycle transitions', () => {
 // TASK-662 follow-up: source EventEmitter arg wires onFirstMessage → running()
 // ---------------------------------------------------------------------------
 
+import { EventRouter, RawEventsSink } from '../../services/streamParser';
+
 const RAW_EVENTS_DDL_EXEC = `
   CREATE TABLE IF NOT EXISTS raw_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -732,10 +734,19 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     };
     const spawner = makeSpawner();
 
-    // Use a real in-memory DB so bridgeEventsImpl can INSERT raw_events rows.
+    // Use a real in-memory DB so the CCM-style pipeline can INSERT raw_events rows.
     const db = new Database(':memory:');
     db.pragma('foreign_keys = OFF');
     db.exec(RAW_EVENTS_DDL_EXEC);
+
+    // Simulate CCM's own EventRouter + RawEventsSink pipeline — this is the sole
+    // persistence path when the bridge has skipPersistence: true (TASK-664).
+    // In production, ClaudeCodeManager.runSdkQuery constructs and wires these;
+    // here we wire them to the same source EventEmitter so that when the mock
+    // spawnCliProcess emits an 'output' event, both the bridge and the CCM-style
+    // sink see it simultaneously.
+    const ccmRouter = new EventRouter();
+    const ccmSink = new RawEventsSink(db);
 
     // The publisher collects envelopes — presence confirms the bridge fired.
     const publishedTypes: string[] = [];
@@ -747,6 +758,25 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 
     // source is the EventEmitter that will carry 'output' events.
     const source = new EventEmitter();
+
+    // Wire CCM-style sink BEFORE the bridge so ordering matches production.
+    // The CCM-side narrowing is done inline here (simulating runSdkQuery:341).
+    const { TypedEventNarrowing: TEN } = await import('../../services/streamParser');
+    const ccmNarrowing = new TEN();
+    ccmSink.attachToRouter(ccmRouter, run.id);
+    source.on('output', (payload: unknown) => {
+      if (
+        typeof payload !== 'object' ||
+        payload === null ||
+        !('panelId' in payload) ||
+        !('type' in payload) ||
+        !('data' in payload)
+      ) return;
+      const p = payload as { panelId: string; type: string; data: unknown };
+      if (p.panelId !== run.id || p.type !== 'json') return;
+      const typed = ccmNarrowing.narrow(p.data);
+      ccmRouter.emitForRun(run.id, typed);
+    });
 
     // Inject source as the 8th constructor arg.
     const executor = new TestableRunExecutor(
@@ -790,11 +820,15 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     expect(completed).toHaveBeenCalledOnce();
     expect(completed).toHaveBeenCalledWith(run.id, 'running');
 
-    // The bridge must have INSERTed at least one raw_events row (panelId === runId fix).
+    // TASK-664 cross-task interlock: exactly 1 raw_events row must exist.
+    // The CCM-style pipeline inserts 1 row; the bridge with skipPersistence: true
+    // contributes 0 additional rows. If this assertion fails with cnt=2, the
+    // skipPersistence flag is missing from RunExecutor.bridgeEvents(). If it
+    // fails with cnt=0, the CCM-style pipeline listener is broken.
     const rawRow = db
       .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
       .get(run.id) as { cnt: number };
-    expect(rawRow.cnt).toBeGreaterThanOrEqual(1);
+    expect(rawRow.cnt).toBe(1);
   });
 
   /**
