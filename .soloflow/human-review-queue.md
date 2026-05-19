@@ -1,10 +1,10 @@
 ---
-pending_count: 22
+pending_count: 21
 buckets:
   decisions: 1
   actions: 4
   testing: 13
-  deferred_visual: 4
+  deferred_visual: 3
 items: []
 ---
 # Human Review Queue
@@ -59,6 +59,25 @@ items: []
     - TASK-612
     - TASK-614
     - TASK-616
+
+- task: SPRINT-020
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-020/sprint.json
+  action: "[Recurrence — already filed under SPRINT-015/SPRINT-017] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive the Electron renderer. Navigated to http://localhost:4521 (Vite was up because user has pnpm dev running), but the page renders empty and the console shows 'Could not find electronTRPC global. Check that exposeElectronTRPC has been called in your preload file.' — exactly the limitation CLAUDE.md documents. SPRINT-020 sprint-level Pass 1 visual_web was therefore not run. Same three resolution paths still apply: (a) set verification.visual_web=false, (b) launch the Electron app with CDP exposure for Playwright to attach, or (c) run tests/*.spec.ts manually via `pnpm test` after `pnpm dev`."
+  blocked_checks:
+    - Pass 1 visual_web — SPRINT-020 create-session/Settings/CLI-panel flows touched by TASK-569 not exercised end-to-end
+    - Pass 1 visual_web — SPRINT-020 review-queue interaction with deny-on-terminate (TASK-597) not exercised end-to-end
+    - Pass 1 visual_web — SPRINT-020 stream rendering for widened ToolResultContent (TASK-570 ripple) not exercised in the live Electron renderer
+  level: sprint
+  severity: low
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-569
+    - TASK-570
+    - TASK-596
+    - TASK-597
 
 ## Testing
 
@@ -193,37 +212,66 @@ items: []
   level: requirements
   severity: medium
 
+- task: SPRINT-020
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_020_toolresult_widen_frontend_ripple
+  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-570-plan.md
+  action: "Cross-task ripple from TASK-570: shared/types/claudeStream.ts:46-51 ToolResultBlock.content is now `string | Array<{type, text}>`. TASK-570 fixed `main/src/utils/formatters.ts` with a type-guard and tests, but the two frontend consumers were NOT updated and have NO test coverage: (1) `frontend/src/utils/formatters.ts:38` does `Tool result: ${item.content}` — when content is now an array this stringifies to `[object Object],[object Object]` instead of the joined text. (2) `frontend/src/utils/toolFormatter.ts:281-315 and 417-423` make repeated `toolResult.content.includes('error:')`, `JSON.parse(toolResult.content)`, and `makePathsRelative(toolResult.content)` calls — when content is an array, `.includes('error:')` silently returns false (Array.prototype.includes checks array membership of the literal string, not substring match), `JSON.parse(array)` throws ('Unexpected token o in JSON' or similar via toString coercion), and makePathsRelative most likely also breaks. The TypeScript checker doesn't catch these because `Array<X>.includes(string)` is structurally valid (returns false for any string). Verify in the live Electron renderer with a real Bash/Edit tool_result that produces array-form content: confirm error tinting still works (or doesn't) and confirm no console-side TypeError or `[object Object]` rendering in `cyboflow-frontend-debug.log`. If broken: port the formatters.ts type-guard (`typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent)`, or join the array's .text fields) into both frontend files and add tests mirroring main/src/utils/formatters.test.ts."
+  blocked_checks:
+    - "End-of-sprint cross-task verification: widened ToolResultContent does not break tool-result rendering in the frontend (frontend/src/utils/formatters.ts:38 + frontend/src/utils/toolFormatter.ts:281-315 + :417-423)"
+  level: requirements
+  severity: medium
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-570
+
+- task: SPRINT-020
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_020_permission_mode_sessionmanager_fallback
+  plan_ref: .soloflow/active/plans/approval-router-and-permission-fix/TASK-569-plan.md
+  action: "Residual app-layer 'ignore' default after TASK-569's flip — `main/src/services/sessionManager.ts:453` falls back to `'ignore'` when `project.default_permission_mode` is null/undefined for main-repo session auto-creation (`project.default_permission_mode || 'ignore'`). TASK-569's verification grep used pattern `defaultPermissionMode\\s*\\|\\|\\s*['\"]ignore['\"]` (camelCase) which does NOT match the snake-case attribute access here, so the sweep missed it. Same issue at `main/src/database/database.ts:1523` (`createProject(... defaultPermissionMode || 'ignore' ...)`) — though that path was excluded by plan as a 'schema contract', the runtime fallback in `createProject` is an APP default that fires when callers omit the arg. Effect: legacy projects whose `default_permission_mode` column is NULL (or older projects created before TASK-569's flip) will still spawn main-repo sessions with `permissionMode='ignore'`, bypassing the approve-by-default intent of the epic. Decide: (a) flip the runtime fallback at sessionManager.ts:453 to `'approve'` and update the inline comment, (b) accept the gap as 'legacy behaviour preserved' and document it in the epic plan, or (c) add a one-shot DB migration that backfills default_permission_mode='approve' for any project where it's null. Same call applies to database.ts:1523 createProject fallback."
+  blocked_checks:
+    - "End-of-sprint approve-by-default invariant: every newly-spawned session — including main-repo auto-creation paths and legacy projects with NULL default_permission_mode — defaults to permissionMode='approve'"
+  level: requirements
+  severity: medium
+  created_at: "2026-05-19T15:35:00.000Z"
+  affected_tasks:
+    - TASK-569
+
 ## Deferred Visual
 
 - sprint: SPRINT-007
   type: deferred_visual
   bucket: deferred_visual
   source: shadow-sprint-verifier
-  action: "Live Electron end-of-sprint smoke. Prereq: run `pnpm electron:rebuild` (resolves better-sqlite3 NODE_MODULE_VERSION 137 vs 136 mismatch that crashed Electron during the SPRINT-007 verifier run). Then `pnpm dev`, create a session, run a prompt, open the Claude panel, and confirm `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/ and the panel renders messages. This is the load-bearing cross-task confirmation for SPRINT-007 (TASK-568 + TASK-572 jointly resolve FIND-SPRINT-005-9). Overlaps the existing per-task entries for TASK-568 and TASK-572 — running this one flow satisfies both."
+  action: "Live Electron end-of-sprint smoke. Prereq: run `pnpm electron:rebuild` (resolves better-sqlite3 NODE_MODULE_VERSION mismatch). Then `pnpm dev`, create a session, run a prompt, open the Claude panel, and confirm `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/ and the panel renders messages. NOTE (2026-05-19 review-queue run): verification attempted but blocked. There is currently NO UI affordance to add a Claude panel to an existing session — PanelTabBar (frontend/src/components/panels/PanelTabBar.tsx) has no `+`/add button, the legacy session-input bar that lazily created a Claude panel was removed (SessionView.tsx:484 'Legacy session-level prompt bar removed - now handled by panels'), and ProjectView.ensureClaudePanel() only fires from git operations. The Test session in DB has only a Diff panel; clicking it shows just File Changes. This add-panel-UI dead-end is in scope of IDEA-017's slice 'Cut the legacy Create New Session dialog and the play button' / 'Retire useLegacyCrystalView'. Once IDEA-017 settles the new shell, either (a) re-test if a Claude panel surface still exists in cyboflow, or (b) dismiss this entry if Claude panels are cut along with SessionView."
   blocked_checks:
     - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
   level: requirements
-  severity: high
+  severity: low
+  updated_at: "2026-05-19T19:00:00.000Z"
 
 - sprint: SPRINT-010
   type: deferred_visual
   bucket: deferred_visual
   source: shadow-sprint-verifier
   dedup_key: visual_web_electron_renderer_needs_full_electron
-  action: "End-of-sprint visual smoke for the review-queue-ui epic (TASK-401..TASK-407). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Run `pnpm dev` to launch Electron, then drive the six flows: (1) ReviewQueueView empty state, (2) PendingApprovalCard render with a realistic approval payload, (3) Blocking vs Pending section partitioning and the group variant, (4) j/k navigation focus ring (TASK-404), (5) y/n approve/reject keyboard, (6) approveRestOfRun group-card action (TASK-406). Confirm `cyboflow-frontend-debug.log` shows no errors and the dock badge reflects pending count (TASK-407). Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  action: "End-of-sprint visual smoke for the review-queue-ui epic (TASK-401..TASK-407). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global. Run `pnpm dev` to launch Electron, then drive the six flows: (1) ReviewQueueView empty state, (2) PendingApprovalCard render with a realistic approval payload, (3) Blocking vs Pending section partitioning and the group variant, (4) j/k navigation focus ring (TASK-404), (5) y/n approve/reject keyboard, (6) approveRestOfRun group-card action (TASK-406). Confirm `cyboflow-frontend-debug.log` shows no errors and the dock badge reflects pending count (TASK-407). NOTE (2026-05-19 review-queue run): the prior 'Alternative' note is now actionable — Peekaboo MCP capture works and `verification.visual_macos=true` is set in .soloflow/config.json (commit d189263). Next attempt should use `pnpm dev` + `mcp__peekaboo__image` with `app_target: 'Electron:WINDOW_TITLE:Cyboflow'` to capture each flow. Also note IDEA-017 may restructure the review-queue rail/shell — re-validate flow IDs against any layout changes before re-testing."
   blocked_checks:
     - "End-of-sprint cross-task visual verification of review-queue-ui flows (ReviewQueueView, PendingApprovalCard, group variant, j/k/y/n keyboard, approveRestOfRun, dock-badge sync)"
   level: visual
   severity: medium
   created_at: "2026-05-15T18:30:00.000Z"
-  updated_at: "2026-05-15T18:30:00.000Z"
+  updated_at: "2026-05-19T19:00:00.000Z"
 
 - sprint: SPRINT-013
   type: deferred_visual
   bucket: deferred_visual
   source: shadow-sprint-verifier
   dedup_key: visual_web_electron_renderer_needs_full_electron_sprint013
-  action: "End-of-sprint visual smoke for the stuck-detection + onboarding + MCP-health-indicator sprint (TASK-501..504, TASK-551..553). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (see CLAUDE.md, frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Run `pnpm dev` to launch Electron, then drive the seven flows: (1) StuckBadge surfaces on a PendingApprovalCard when a stuck event fires (TASK-501+502). (2) Cancel-and-restart button on a stuck card triggers the cancelAndRestart mutation and the card transitions to a new run within the per-run p-queue (TASK-502). (3) useStuckNotifications system notification fires once per session for the first stuck event (TASK-503). (4) 'Why stuck' button on a stuck card opens StuckInspectorModal with the four sections (transcript tail / approvals timeline / store snapshot / Cancel-and-restart CTA) rendered from getStuckInspection (TASK-504). (5) OnboardingCard renders for first-time users in ReviewQueueView, shows j/k/y/n hint, dismisses on 'Got it' AND on first y/n keypress, then never re-appears after preference write (TASK-551). (6) Creating a new project auto-writes `.cyboflow/worktrees/` to that project's .gitignore (TASK-552 — verifiable via filesystem, but UI confirmation that project creation succeeds without error is part of the same flow). (7) MCP server health dot in the StatusBar at the app shell footer cycles green/yellow/red with the live OrchestratorHealth status, tooltip surfaces lastError (TASK-553). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
+  action: "End-of-sprint visual smoke for the stuck-detection + onboarding + MCP-health-indicator sprint (TASK-501..504, TASK-551..553). Run `pnpm dev` to launch Electron, then drive the seven flows: (1) StuckBadge surfaces on a PendingApprovalCard when a stuck event fires (TASK-501+502). (2) Cancel-and-restart button on a stuck card triggers the cancelAndRestart mutation and the card transitions to a new run within the per-run p-queue (TASK-502). (3) useStuckNotifications system notification fires once per session for the first stuck event (TASK-503). (4) 'Why stuck' button on a stuck card opens StuckInspectorModal with the four sections (transcript tail / approvals timeline / store snapshot / Cancel-and-restart CTA) rendered from getStuckInspection (TASK-504). (5) OnboardingCard renders for first-time users in ReviewQueueView, shows j/k/y/n hint, dismisses on 'Got it' AND on first y/n keypress, then never re-appears after preference write (TASK-551). (6) Creating a new project auto-writes `.cyboflow/worktrees/` to that project's .gitignore (TASK-552 — verifiable via filesystem, but UI confirmation that project creation succeeds without error is part of the same flow). (7) MCP server health dot in the StatusBar at the app shell footer cycles green/yellow/red with the live OrchestratorHealth status, tooltip surfaces lastError (TASK-553). NOTE (2026-05-19 review-queue run): Peekaboo MCP capture is now working and `verification.visual_macos=true` is set (commit d189263) — use `mcp__peekaboo__image` with `app_target: 'Electron:WINDOW_TITLE:Cyboflow'` to capture each flow. Stuck-detection flows (1-4) require triggering a stuck event — confirm getStuckInspection is reachable before scheduling; if not, dismiss the stuck-related checks. Additional signal seen during today's run: `useStuckNotifications.ts:59` logs `TRPCClientError: No subscription-procedure on path cyboflow.events.onStuckDetected` on first restart (then absent on Tier-2 restart) — likely an init-order race, worth a closer look before flow 3 is rechecked."
   blocked_checks:
     - "End-of-sprint cross-task visual verification of stuck-detection flows (StuckBadge surface, cancel-and-restart button, useStuckNotifications fire, StuckInspectorModal 4 sections)"
     - "End-of-sprint cross-task visual verification of onboarding flow (OnboardingCard mount, 'Got it' dismiss path, y/n keypress dismiss path, never-re-appear preference contract)"
@@ -232,7 +280,7 @@ items: []
   level: visual
   severity: medium
   created_at: "2026-05-17T17:35:00.000Z"
-  updated_at: "2026-05-17T17:35:00.000Z"
+  updated_at: "2026-05-19T19:00:00.000Z"
   affected_tasks:
     - TASK-501
     - TASK-502
@@ -241,31 +289,6 @@ items: []
     - TASK-551
     - TASK-552
     - TASK-553
-
-- sprint: SPRINT-014
-  type: deferred_visual
-  bucket: deferred_visual
-  source: shadow-sprint-verifier
-  dedup_key: visual_web_electron_renderer_needs_full_electron_sprint014
-  action: "End-of-sprint visual smoke for the crystal-cuts-and-rebrand sprint (TASK-560/561/562/565/566/576/577/579). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global (CLAUDE.md; frontend/src/utils/trpcClient.ts uses `ipcLink` from `trpc-electron/renderer`). Verifier env has no Playwright/Electron binary on PATH and no live `pnpm dev` to attach to. Run `pnpm dev` to launch Electron, then drive four flows: (1) About dialog: open AboutDialog and confirm the 'Data Directory' row renders the path (tests the TASK-562 IPC-rename cross-task contract — producer in main/src/ipc/updater.ts emits `cyboflowDirectory`, consumer in frontend/src/components/AboutDialog.tsx reads `cyboflowDirectory`). (2) Settings modal: open Settings, confirm header reads 'Cyboflow Settings', 'Cyboflow Attribution' section is visible, the 'Include Cyboflow footer in commits' checkbox toggles + persists (tests TASK-561 + TASK-565 — settings write should round-trip the `enableCyboflowFooter` key and saved commits should carry the buildCommitFooter() output). (3) Update dialog (when an update is available, or via the 'Check for updates' button): confirm prose says 'A new version of Cyboflow is available.' and 'You are running the latest version of Cyboflow!' (TASK-560). (4) Create a session, run any prompt that produces a commit, then `git log -1 --pretty=%B` on the worktree and confirm the commit body ends with the canonical Cyboflow footer from buildCommitFooter (TASK-565 byte-level contract). Confirm `cyboflow-frontend-debug.log` shows no errors after each flow. Alternative: grant Warp Screen Recording, flip `verification.visual_macos=true`, and re-run via Peekaboo MCP."
-  blocked_checks:
-    - End-of-sprint cross-task visual verification of AboutDialog cyboflowDirectory IPC rename (TASK-562 producer × consumer)
-    - End-of-sprint cross-task visual verification of Settings modal cyboflow rebrand + enableCyboflowFooter round-trip (TASK-560 × TASK-561)
-    - End-of-sprint cross-task visual verification of UpdateDialog prose rebrand (TASK-560)
-    - End-of-sprint cross-task visual verification of buildCommitFooter byte-level output on a real commit (TASK-565)
-  level: visual
-  severity: medium
-  created_at: "2026-05-17T13:02:37.000Z"
-  updated_at: "2026-05-17T13:02:37.000Z"
-  affected_tasks:
-    - TASK-560
-    - TASK-561
-    - TASK-562
-    - TASK-565
-    - TASK-566
-    - TASK-576
-    - TASK-577
-    - TASK-579
 
 ## Overridden
 
@@ -342,50 +365,3 @@ items: []
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
-
-- task: SPRINT-020
-  type: config_gap
-  bucket: actions
-  dedup_key: visual_web_electron_unreachable
-  plan_ref: .soloflow/active/sprints/SPRINT-020/sprint.json
-  action: "[Recurrence — already filed under SPRINT-015/SPRINT-017] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive the Electron renderer. Navigated to http://localhost:4521 (Vite was up because user has pnpm dev running), but the page renders empty and the console shows 'Could not find electronTRPC global. Check that exposeElectronTRPC has been called in your preload file.' — exactly the limitation CLAUDE.md documents. SPRINT-020 sprint-level Pass 1 visual_web was therefore not run. Same three resolution paths still apply: (a) set verification.visual_web=false, (b) launch the Electron app with CDP exposure for Playwright to attach, or (c) run tests/*.spec.ts manually via `pnpm test` after `pnpm dev`."
-  blocked_checks:
-    - Pass 1 visual_web — SPRINT-020 create-session/Settings/CLI-panel flows touched by TASK-569 not exercised end-to-end
-    - Pass 1 visual_web — SPRINT-020 review-queue interaction with deny-on-terminate (TASK-597) not exercised end-to-end
-    - Pass 1 visual_web — SPRINT-020 stream rendering for widened ToolResultContent (TASK-570 ripple) not exercised in the live Electron renderer
-  level: sprint
-  severity: low
-  created_at: "2026-05-19T15:35:00.000Z"
-  affected_tasks:
-    - TASK-569
-    - TASK-570
-    - TASK-596
-    - TASK-597
-
-- task: SPRINT-020
-  type: action_required
-  bucket: testing
-  dedup_key: sprint_020_toolresult_widen_frontend_ripple
-  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-570-plan.md
-  action: "Cross-task ripple from TASK-570: shared/types/claudeStream.ts:46-51 ToolResultBlock.content is now `string | Array<{type, text}>`. TASK-570 fixed `main/src/utils/formatters.ts` with a type-guard and tests, but the two frontend consumers were NOT updated and have NO test coverage: (1) `frontend/src/utils/formatters.ts:38` does `Tool result: ${item.content}` — when content is now an array this stringifies to `[object Object],[object Object]` instead of the joined text. (2) `frontend/src/utils/toolFormatter.ts:281-315 and 417-423` make repeated `toolResult.content.includes('error:')`, `JSON.parse(toolResult.content)`, and `makePathsRelative(toolResult.content)` calls — when content is an array, `.includes('error:')` silently returns false (Array.prototype.includes checks array membership of the literal string, not substring match), `JSON.parse(array)` throws ('Unexpected token o in JSON' or similar via toString coercion), and makePathsRelative most likely also breaks. The TypeScript checker doesn't catch these because `Array<X>.includes(string)` is structurally valid (returns false for any string). Verify in the live Electron renderer with a real Bash/Edit tool_result that produces array-form content: confirm error tinting still works (or doesn't) and confirm no console-side TypeError or `[object Object]` rendering in `cyboflow-frontend-debug.log`. If broken: port the formatters.ts type-guard (`typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent)`, or join the array's .text fields) into both frontend files and add tests mirroring main/src/utils/formatters.test.ts."
-  blocked_checks:
-    - "End-of-sprint cross-task verification: widened ToolResultContent does not break tool-result rendering in the frontend (frontend/src/utils/formatters.ts:38 + frontend/src/utils/toolFormatter.ts:281-315 + :417-423)"
-  level: requirements
-  severity: medium
-  created_at: "2026-05-19T15:35:00.000Z"
-  affected_tasks:
-    - TASK-570
-
-- task: SPRINT-020
-  type: action_required
-  bucket: testing
-  dedup_key: sprint_020_permission_mode_sessionmanager_fallback
-  plan_ref: .soloflow/active/plans/approval-router-and-permission-fix/TASK-569-plan.md
-  action: "Residual app-layer 'ignore' default after TASK-569's flip — `main/src/services/sessionManager.ts:453` falls back to `'ignore'` when `project.default_permission_mode` is null/undefined for main-repo session auto-creation (`project.default_permission_mode || 'ignore'`). TASK-569's verification grep used pattern `defaultPermissionMode\\s*\\|\\|\\s*['\"]ignore['\"]` (camelCase) which does NOT match the snake-case attribute access here, so the sweep missed it. Same issue at `main/src/database/database.ts:1523` (`createProject(... defaultPermissionMode || 'ignore' ...)`) — though that path was excluded by plan as a 'schema contract', the runtime fallback in `createProject` is an APP default that fires when callers omit the arg. Effect: legacy projects whose `default_permission_mode` column is NULL (or older projects created before TASK-569's flip) will still spawn main-repo sessions with `permissionMode='ignore'`, bypassing the approve-by-default intent of the epic. Decide: (a) flip the runtime fallback at sessionManager.ts:453 to `'approve'` and update the inline comment, (b) accept the gap as 'legacy behaviour preserved' and document it in the epic plan, or (c) add a one-shot DB migration that backfills default_permission_mode='approve' for any project where it's null. Same call applies to database.ts:1523 createProject fallback."
-  blocked_checks:
-    - "End-of-sprint approve-by-default invariant: every newly-spawned session — including main-repo auto-creation paths and legacy projects with NULL default_permission_mode — defaults to permissionMode='approve'"
-  level: requirements
-  severity: medium
-  created_at: "2026-05-19T15:35:00.000Z"
-  affected_tasks:
-    - TASK-569
