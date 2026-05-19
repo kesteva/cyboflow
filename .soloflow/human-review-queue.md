@@ -1,9 +1,9 @@
 ---
-pending_count: 14
+pending_count: 18
 buckets:
   decisions: 0
-  actions: 1
-  testing: 9
+  actions: 3
+  testing: 11
   deferred_visual: 4
 items: []
 ---
@@ -23,6 +23,35 @@ _No items._
   severity: high
   level: goal_backward
   bucket: actions
+
+- task: SPRINT-015
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-015/sprint.json
+  action: "verification.visual_web is true and playwright_target.kind is 'electron', but the Playwright MCP tools cannot launch an Electron app — they drive a Chromium browser only. Navigating to http://localhost:4521 fails per CLAUDE.md (renderer depends on preload-injected electronTRPC and cannot bootstrap standalone). To unblock visual verification: either (a) set verification.visual_web=false for this repo, (b) add a launch script that exposes the Electron renderer over CDP for Playwright to attach to, or (c) run the existing tests/*.spec.ts suite manually via `pnpm test` after `pnpm dev`."
+  blocked_checks:
+    - Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling
+  level: sprint
+  severity: low
+  created_at: "2026-05-18T00:00:00.000Z"
+
+- task: SPRINT-017
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_web_electron_unreachable
+  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
+  action: "[Recurrence — already filed under SPRINT-015] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive Electron renderer (preload-injected electronTRPC missing on standalone Vite port 4521). To unblock for future sprints: set verification.visual_web=false, OR add a launch script exposing CDP for Playwright attach, OR add a Playwright-Electron driver path."
+  blocked_checks:
+    - Pass 1 visual_web — SPRINT-017 review-queue flows not exercised
+  level: sprint
+  severity: low
+  created_at: "2026-05-18T22:05:00.000Z"
+  affected_tasks:
+    - TASK-611
+    - TASK-612
+    - TASK-614
+    - TASK-616
 
 ## Testing
 
@@ -127,6 +156,34 @@ _No items._
     - AC6 end-to-end visible yellow→green transition
     - AC6 failure-path tooltip surfacing
   level: visual
+  severity: medium
+
+- task: SPRINT-017
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_017_review_queue_visual_flow
+  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
+  action: "Visually verify the review-queue triage flow on the running `pnpm dev` Electron window: (a) press `j`/`k` to navigate the queue; (b) press `y` on a group card and confirm a single atomic `approveRestOfRun` mutation fires; (c) press `n` on a group card and confirm a single atomic `rejectRestOfRun` mutation fires (TASK-616 — symmetric to approve); (d) confirm pressing `y`/`n` while an input or button has focus is a no-op (TASK-614 focus guard); (e) confirm the group-card Reject button (mouse) dispatches `rejectRestOfRun` exactly once, not per-item. Per-task unit tests cover each of these at the component/hook level, but Pass 1 visual verification was unable to drive the Electron renderer (see dedup_key=visual_web_electron_unreachable)."
+  blocked_checks:
+    - Pass 1 visual_web — sprint-touched flows for TASK-612/614/616/611 not exercised end-to-end
+  level: sprint
+  severity: medium
+  created_at: "2026-05-18T22:05:00.000Z"
+  affected_tasks:
+    - TASK-611
+    - TASK-612
+    - TASK-614
+    - TASK-616
+
+- task: TASK-584
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/apple-signing-notarization-setup/TASK-584-plan.md
+  action: "Manual packaged-build verification of the asarUnpack fix. Prereq: fix pre-existing TS error in frontend/vite.config.ts (the `test:` config block conflicts with `UserConfigExport` — likely needs `defineConfig` import from `vitest/config` instead of `vite`). After the build runs cleanly: (1) run `SKIP_SIGNING=1 pnpm run build:mac:arm64` (or with full signing creds); (2) confirm `find dist-electron/*.app -path \"*app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js\"` returns 1 match; (3) launch the packaged app, create a Claude session, verify backend logs at `~/.cyboflow/logs/` do NOT contain the ASAR-extraction warning from scriptPath.ts (`Detected ASAR packaging, extracting script` is gone), and that the spawned MCP subprocess loads directly from `app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js`. Plan AC #2 and AC #3 are blocked on this."
+  blocked_checks:
+    - "AC #2 — Post-unpack filesystem layout under app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js"
+    - "AC #3 — Runtime smoke confirming scriptPath.ts does not hit its ASAR-extraction fallback in the packaged build"
+  level: requirements
   severity: medium
 
 ## Deferred Visual
@@ -278,49 +335,3 @@ _No items._
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
-
-- task: SPRINT-015
-  type: config_gap
-  bucket: actions
-  dedup_key: visual_web_electron_unreachable
-  plan_ref: .soloflow/active/sprints/SPRINT-015/sprint.json
-  action: "verification.visual_web is true and playwright_target.kind is 'electron', but the Playwright MCP tools cannot launch an Electron app — they drive a Chromium browser only. Navigating to http://localhost:4521 fails per CLAUDE.md (renderer depends on preload-injected electronTRPC and cannot bootstrap standalone). To unblock visual verification: either (a) set verification.visual_web=false for this repo, (b) add a launch script that exposes the Electron renderer over CDP for Playwright to attach to, or (c) run the existing tests/*.spec.ts suite manually via `pnpm test` after `pnpm dev`."
-  blocked_checks:
-    - "Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling"
-  level: sprint
-  severity: low
-  created_at: "2026-05-18T00:00:00.000Z"
-
-- task: SPRINT-017
-  type: action_required
-  bucket: testing
-  dedup_key: sprint_017_review_queue_visual_flow
-  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
-  action: "Visually verify the review-queue triage flow on the running `pnpm dev` Electron window: (a) press `j`/`k` to navigate the queue; (b) press `y` on a group card and confirm a single atomic `approveRestOfRun` mutation fires; (c) press `n` on a group card and confirm a single atomic `rejectRestOfRun` mutation fires (TASK-616 — symmetric to approve); (d) confirm pressing `y`/`n` while an input or button has focus is a no-op (TASK-614 focus guard); (e) confirm the group-card Reject button (mouse) dispatches `rejectRestOfRun` exactly once, not per-item. Per-task unit tests cover each of these at the component/hook level, but Pass 1 visual verification was unable to drive the Electron renderer (see dedup_key=visual_web_electron_unreachable)."
-  blocked_checks:
-    - "Pass 1 visual_web — sprint-touched flows for TASK-612/614/616/611 not exercised end-to-end"
-  level: sprint
-  severity: medium
-  created_at: "2026-05-18T22:05:00.000Z"
-  affected_tasks:
-    - TASK-611
-    - TASK-612
-    - TASK-614
-    - TASK-616
-
-- task: SPRINT-017
-  type: config_gap
-  bucket: actions
-  dedup_key: visual_web_electron_unreachable
-  plan_ref: .soloflow/active/sprints/SPRINT-017/sprint.json
-  action: "[Recurrence — already filed under SPRINT-015] verification.visual_web=true with playwright_target.kind='electron'; Playwright MCP cannot drive Electron renderer (preload-injected electronTRPC missing on standalone Vite port 4521). To unblock for future sprints: set verification.visual_web=false, OR add a launch script exposing CDP for Playwright attach, OR add a Playwright-Electron driver path."
-  blocked_checks:
-    - "Pass 1 visual_web — SPRINT-017 review-queue flows not exercised"
-  level: sprint
-  severity: low
-  created_at: "2026-05-18T22:05:00.000Z"
-  affected_tasks:
-    - TASK-611
-    - TASK-612
-    - TASK-614
-    - TASK-616
