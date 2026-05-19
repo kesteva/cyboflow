@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-021
-pending_count: 2
-last_updated: "2026-05-19T21:30:00Z"
+pending_count: 3
+last_updated: "2026-05-19T13:45:00Z"
 ---
 
 # Findings Queue
@@ -24,4 +24,14 @@ last_updated: "2026-05-19T21:30:00Z"
 - **location:** main/src/orchestrator/markdownFrontmatter.ts:6 and main/src/orchestrator/workflowRegistry.ts:10-12
 - **description:** Two docstrings reference structures that no longer exist after the TASK-652 extraction. (a) `markdownFrontmatter.ts:6` says the helper is "Shared by workflowPromptReader.readWorkflowPrompt and WorkflowRegistry.parseFrontmatter" — but `parseFrontmatter` was deleted; the registry now consumes the helper from `extractPermissionMode`. (b) `workflowRegistry.ts:10-12` says "the inline parser intentionally avoids js-yaml" — the parser is no longer inline, it lives in `markdownFrontmatter.ts`. Both are cosmetic doc-drift introduced by the refactor; behavior and tests are correct.
 - **suggested_action:** Update `markdownFrontmatter.ts` header to "Shared by workflowPromptReader.readWorkflowPrompt and WorkflowRegistry.extractPermissionMode" (or generic: "any markdown caller in main/src/orchestrator that needs flat key:value frontmatter"). Update `workflowRegistry.ts` header note to reference `markdownFrontmatter.ts` instead of describing the parser as inline.
+- **resolved_by:**
+
+## FIND-SPRINT-021-3
+- **source:** TASK-661 (verifier)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/runExecutor.ts:103
+- **description:** TASK-661 plan AC2 prescribes a required constructor argument (`promptReader: WorkflowPromptReaderLike`) and Implementation Step 2 says "Update every test-file constructor call to pass a stub reader." Executor instead made the parameter optional (`promptReader?: WorkflowPromptReaderLike`) and left three pre-existing test sites calling the 3-arg form (`new RunExecutor(spawner, registry, logger)` at runExecutor.test.ts:166, 908; `new TestableRunExecutor(...)` is unaffected because TestableRunExecutor overrides `getPrompt`). The strict AC2 verification grep (`'private readonly promptReader: WorkflowPromptReaderLike'`) returns NO MATCH because of the `?`. Mitigations the executor added: a clear sentinel error ("RunExecutor.getPrompt: no WorkflowPromptReaderLike injected …") at runExecutor.ts:242, and a new test at runExecutor.test.ts:166 that pins the sentinel as a contract. Spirit of the AC (field stored, interface narrow, no concrete imports, integration site wires concrete adapter) is met; production call site at main/src/index.ts:610 passes the concrete reader. The deviation is a backward-compat hedge rather than a defect — but the AC verification grep is technically failing and a future contributor reading the AC literally will be surprised.
+- **suggested_action:** Pick one: (a) Make `promptReader` required and update the 3-arg constructor calls in runExecutor.test.ts:166 and runExecutor.test.ts:908 to pass `makeStubReader({})` (the integration test at :908 deliberately exercises the failure path — switching it to a stub reader works because the test only checks logger.error was called with executor failure; the failure source changes from "getPrompt NOT_IMPLEMENTED" to "WorkflowPromptReadError" but the test assertion is broad). Or (b) update AC2 retroactively to reflect the optional design — but that's an after-the-fact rewrite. Recommend (a) so the plan's literal AC matches the code.
 - **resolved_by:**
