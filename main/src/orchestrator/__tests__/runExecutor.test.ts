@@ -572,6 +572,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
 // TASK-662: Lifecycle transition tests
 // ---------------------------------------------------------------------------
 
+import { EventEmitter } from 'node:events';
 import type { LifecycleTransitionsLike } from '../runExecutor';
 
 function makeLifecycleTransitions(): { mock: LifecycleTransitionsLike } & {
@@ -678,6 +679,152 @@ describe('lifecycle transitions', () => {
 
     expect(failed).toHaveBeenCalledOnce();
     expect(failed).toHaveBeenCalledWith(run.id, 'running', 'SDK spawn failed with exit code 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-662 follow-up: source EventEmitter arg wires onFirstMessage → running()
+// ---------------------------------------------------------------------------
+
+const RAW_EVENTS_DDL_EXEC = `
+  CREATE TABLE IF NOT EXISTS raw_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`;
+
+/**
+ * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
+ * (panelId must equal runId; type must be 'json').
+ */
+function emitOutputEvent(source: EventEmitter, runId: string, data: unknown): void {
+  source.emit('output', {
+    panelId: runId,
+    sessionId: `run-${runId}`,
+    type: 'json',
+    data,
+    timestamp: new Date(),
+  });
+}
+
+describe('RunExecutor.bridgeEvents — source arg integration', () => {
+  /**
+   * End-to-end wire test: when a real `source` EventEmitter is injected along
+   * with publisher/db/lifecycleTransitions, an 'output' event on the source
+   * flows through bridgeEventsImpl → onFirstMessage →
+   * onLifecycleTransition('sdk_initialized') → lifecycleTransitions.running().
+   *
+   * This pins the fix introduced in the follow-up commit (9539688) which replaced
+   * `this.spawner as unknown as EventEmitter` with `this.source` — ensuring the
+   * real EventEmitter is used rather than the spawner adapter.
+   */
+  it('source arg: lifecycleTransitions.running() fires when source emits output event', async () => {
+    const { mock: lt, running, completed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    // Use a real in-memory DB so bridgeEventsImpl can INSERT raw_events rows.
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = OFF');
+    db.exec(RAW_EVENTS_DDL_EXEC);
+
+    // The publisher collects envelopes — presence confirms the bridge fired.
+    const publishedTypes: string[] = [];
+    const publisher: StreamEventPublisher = {
+      publish(_runId, envelope) {
+        publishedTypes.push((envelope as { type: string }).type);
+      },
+    };
+
+    // source is the EventEmitter that will carry 'output' events.
+    const source = new EventEmitter();
+
+    // Inject source as the 8th constructor arg.
+    const executor = new TestableRunExecutor(
+      spawner,
+      registry,
+      makeLogger(),
+      undefined,
+      lt,
+      publisher,
+      db,
+      source,
+    );
+
+    // spawnCliProcess emits one output event on the source to simulate the SDK
+    // delivering its first message, then resolves normally.
+    // The bridge filters on panelId === runId (the bare UUID, not the synthetic
+    // "run-<uuid>" prefix used by ClaudeCodeManager's own panelId).
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      emitOutputEvent(source, run.id, {
+        type: 'system',
+        subtype: 'init',
+        session_id: 'sess-test',
+        cwd: '/tmp',
+        model: 'claude-opus',
+        tools: [],
+        mcp_servers: [],
+        permissionMode: 'default',
+      });
+    });
+
+    await executor.execute(run.id);
+
+    // The bridge must have forwarded the event to the publisher.
+    expect(publishedTypes).toContain('system');
+
+    // onFirstMessage must have fired exactly once, driving 'sdk_initialized' → running().
+    expect(running).toHaveBeenCalledOnce();
+    expect(running).toHaveBeenCalledWith(run.id);
+
+    // execute() completed normally → completed() fires too.
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+  });
+
+  /**
+   * Backward-compat: when source is absent, bridgeEvents() short-circuits and
+   * running() is NOT called (the bridge is not wired).
+   */
+  it('source absent: bridgeEvents short-circuits; running() is not called', async () => {
+    const { mock: lt, running } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = OFF');
+    db.exec(RAW_EVENTS_DDL_EXEC);
+    const publisher: StreamEventPublisher = { publish: vi.fn() };
+
+    // No source — 8th arg omitted.
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeLogger(),
+      undefined,
+      lt,
+      publisher,
+      db,
+      // source intentionally absent
+    );
+
+    await executor.execute(run.id);
+
+    // running() must NOT have been called because bridgeEvents short-circuited.
+    expect(running).not.toHaveBeenCalled();
   });
 });
 
