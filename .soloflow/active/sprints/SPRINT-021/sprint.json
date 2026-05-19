@@ -6,12 +6,21 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-650": { "status": "pending" },
-    "TASK-651": { "status": "pending" },
-    "TASK-652": { "status": "pending" },
-    "TASK-660": { "status": "pending" },
-    "TASK-661": { "status": "pending" },
-    "TASK-662": { "status": "pending" }
+    "TASK-651": {
+      "status": "pending"
+    },
+    "TASK-652": {
+      "status": "pending"
+    },
+    "TASK-660": {
+      "status": "pending"
+    },
+    "TASK-661": {
+      "status": "pending"
+    },
+    "TASK-662": {
+      "status": "pending"
+    }
   },
   "playwright_target": {
     "kind": "electron",
