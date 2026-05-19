@@ -643,4 +643,130 @@ describe('ApprovalRouter', () => {
     await router.respond(approvalIdB, { behavior: 'deny' });
     await promiseB;
   });
+
+  // -------------------------------------------------------------------------
+  // Case 12: Two pending entries for the SAME runId — clearPendingForRun
+  //          rejects both (exercises the loop in clearPendingForRun).
+  //
+  //  Production code prevents two simultaneous requestApproval calls from
+  //  landing in this.pending for the same runId (the second throws
+  //  RunNotRunningError because the run is already in 'awaiting_review').
+  //  To reach the multi-entry path we manually reset the workflow_run status
+  //  between the two requests, bypassing the guard — a valid unit-test
+  //  technique since clearPendingForRun must handle whatever is in the Map.
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun with two pending entries for the same runId rejects both', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply1 = vi.fn<(decision: ApprovalDecision) => void>();
+    const socketReply2 = vi.fn<(decision: ApprovalDecision) => void>();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-012';
+    seedRun(db, runId, 'running');
+
+    // First requestApproval — moves run to 'awaiting_review'.
+    const promise1 = router.requestApproval(runId, 'tool_x', {}, socketReply1);
+    await qf.getOrCreate(runId).onIdle();
+
+    // Manually reset the run back to 'running' so a second requestApproval can
+    // succeed (bypasses the production guard — intentional for this unit test).
+    db.prepare(
+      `UPDATE workflow_runs SET status = 'running' WHERE id = ?`,
+    ).run(runId);
+
+    // Second requestApproval — also lands in this.pending.
+    const promise2 = router.requestApproval(runId, 'tool_y', {}, socketReply2);
+    await qf.getOrCreate(runId).onIdle();
+
+    // Two entries should be in-flight.
+    expect(router.getPending()).toHaveLength(2);
+
+    // Simulate run termination.
+    router.clearPendingForRun(runId);
+
+    // Both promises must resolve with deny.
+    const [decision1, decision2] = await Promise.all([promise1, promise2]);
+    expect(decision1.behavior).toBe('deny');
+    expect(decision1.message).toMatch(/terminated/i);
+    expect(decision2.behavior).toBe('deny');
+    expect(decision2.message).toMatch(/terminated/i);
+
+    // Neither socketReply must have been called.
+    expect(socketReply1.mock.calls).toHaveLength(0);
+    expect(socketReply2.mock.calls).toHaveLength(0);
+
+    // getPending() must be empty.
+    expect(router.getPending()).toHaveLength(0);
+
+    // Both DB rows must be 'rejected' with decided_by='system'.
+    const approvals = db
+      .prepare("SELECT status, decided_by FROM approvals WHERE run_id = ? ORDER BY created_at")
+      .all(runId) as { status: string; decided_by: string }[];
+    expect(approvals).toHaveLength(2);
+    for (const row of approvals) {
+      expect(row.status).toBe('rejected');
+      expect(row.decided_by).toBe('system');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 13: DB error during clearPendingForRun is swallowed — the method
+  //          does NOT throw and the awaiting Promise still resolves with deny.
+  //
+  //  The clearPendingForRun body wraps the DB UPDATE in try/catch and logs a
+  //  console.warn instead of re-throwing.  This invariant is critical:
+  //  termination must not propagate a DB error up into the runSdkQuery
+  //  finally block and corrupt the cleanup chain.
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun swallows a DB error and still resolves the pending promise with deny', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+    // Inject a DB adapter whose prepare() throws for UPDATE approvals statements
+    // but delegates everything else to the real DB so requestApproval can seed
+    // the entry normally.
+    const faultyAdapter: DatabaseLike = {
+      prepare(sql: string) {
+        // Throw only on the guarded UPDATE issued by clearPendingForRun.
+        if (
+          sql.includes("SET status = 'rejected'") &&
+          sql.includes("decided_by = 'system'")
+        ) {
+          throw new Error('simulated DB failure in clearPendingForRun');
+        }
+        return db.prepare(sql);
+      },
+      transaction: <T>(fn: (...args: unknown[]) => T) =>
+        db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
+    };
+
+    const router = ApprovalRouter.initialize(faultyAdapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-013';
+    seedRun(db, runId, 'running');
+
+    const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo test' }, socketReply);
+    await qf.getOrCreate(runId).onIdle();
+
+    expect(router.getPending()).toHaveLength(1);
+
+    // clearPendingForRun must not throw even though the DB call throws.
+    expect(() => router.clearPendingForRun(runId)).not.toThrow();
+
+    // The approval promise must still resolve with deny (not hang, not reject).
+    const decision = await approvalPromise;
+    expect(decision.behavior).toBe('deny');
+    expect(decision.message).toMatch(/terminated/i);
+
+    // The entry must have been removed from pending despite the DB error.
+    expect(router.getPending()).toHaveLength(0);
+
+    // socketReply must NOT have been called.
+    expect(socketReply.mock.calls).toHaveLength(0);
+  });
 });
