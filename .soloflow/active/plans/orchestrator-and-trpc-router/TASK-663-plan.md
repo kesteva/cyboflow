@@ -1,8 +1,8 @@
 ---
 id: TASK-663
 idea: IDEA-018
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runExecutor.ts
   - main/src/orchestrator/runEventBridge.ts
@@ -15,11 +15,11 @@ files_readonly:
   - main/src/index.ts
   - shared/types/workflows.ts
 acceptance_criteria:
-  - criterion: "RunExecutor.execute() passes panelId === runId (no `run-` prefix) to ClaudeSpawnerLike.spawnCliProcess"
+  - criterion: RunExecutor.execute() passes panelId === runId (no `run-` prefix) to ClaudeSpawnerLike.spawnCliProcess
     verification: "grep -n \"panelId = `run-\\${runId}`\" main/src/orchestrator/runExecutor.ts returns 0 matches; grep -n 'const panelId = runId' main/src/orchestrator/runExecutor.ts returns at least 1 match"
-  - criterion: "RunExecutor.execute() passes sessionId === runId to ClaudeSpawnerLike.spawnCliProcess"
+  - criterion: RunExecutor.execute() passes sessionId === runId to ClaudeSpawnerLike.spawnCliProcess
     verification: "grep -n \"sessionId = `run-\\${runId}`\" main/src/orchestrator/runExecutor.ts returns 0 matches; grep -n 'const sessionId = runId' main/src/orchestrator/runExecutor.ts returns at least 1 match"
-  - criterion: "The runEventBridge docblock at lines 11-14 no longer warns about the panelId/runId mismatch — the FIND-SPRINT-021-4 note is removed and replaced with the post-fix invariant statement (`panelId === runId === sessionId` is now the contract)"
+  - criterion: The runEventBridge docblock at lines 11-14 no longer warns about the panelId/runId mismatch — the FIND-SPRINT-021-4 note is removed and replaced with the post-fix invariant statement (`panelId === runId === sessionId` is now the contract)
     verification: "grep -n 'FIND-SPRINT-021' main/src/orchestrator/runEventBridge.ts returns 0 matches; grep -n 'panelId === runId === sessionId' main/src/orchestrator/runEventBridge.ts returns at least 1 match"
   - criterion: "Existing RunExecutor test (e) now asserts panelId === run.id (not `run-${run.id}`) and passes"
     verification: "grep -n \"toBe(`run-\\${run.id}`)\" main/src/orchestrator/__tests__/runExecutor.test.ts returns 0 matches inside the test labeled '(e)'; pnpm --filter main test -- runExecutor exits 0"
@@ -28,7 +28,7 @@ acceptance_criteria:
   - criterion: "pnpm --filter main typecheck exits 0 (no new 'electron' or 'better-sqlite3' imports introduced into main/src/orchestrator/runExecutor.ts; standalone-typecheck invariant preserved)"
     verification: "pnpm --filter main typecheck exits 0; grep -nE \"from 'electron'|from 'better-sqlite3'\" main/src/orchestrator/runExecutor.ts returns 0 matches"
   - criterion: "pnpm --filter main test exits 0 (no regression in runEventBridge, runExecutor, approvalRouter test suites)"
-    verification: "pnpm --filter main test exits 0"
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
@@ -36,14 +36,13 @@ test_strategy:
   needed: true
   justification: "Direct contract change with two existing test suites that pin the wrong invariant — the sibling test runExecutor.test.ts at lines 187-188 explicitly asserts panelId === `run-${run.id}`, which becomes the bug to lock in if not updated. Plus the integration scenario (bridge sees event, status flip happens) was the gap that hid this bug at sprint-level."
   targets:
-    - behavior: "RunExecutor.execute synthesises panelId === runId === sessionId (no `run-` prefix) and passes both to spawnCliProcess"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+    - behavior: RunExecutor.execute synthesises panelId === runId === sessionId (no `run-` prefix) and passes both to spawnCliProcess
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "Integration: RunExecutor wired with a real RunEventBridge + EventEmitter source receives an 'output' event whose payload.panelId === runId, INSERTs the raw_events row, fires onFirstMessage exactly once, and the resulting lifecycle transition `running` is invoked"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
 ---
-
 # Fix panelId/runId mismatch in RunExecutor that prevents runs from reaching `running` status
 
 ## Objective
