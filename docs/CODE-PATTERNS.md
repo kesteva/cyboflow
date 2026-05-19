@@ -123,6 +123,23 @@ component and a hook — see `frontend/src/components/ReviewQueue/StuckInspector
 and `frontend/src/hooks/useStuckNotifications.ts` (SPRINT-013 divergence) for the
 anti-pattern.
 
+**Claude stream block types** live in `shared/types/claudeStream.ts` — the single source of
+truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and the
+`ClaudeStreamEvent` discriminated union. Rules:
+
+- Import block types directly from `shared/types/claudeStream.ts`. Do NOT re-declare local
+  `interface ToolResult`/`TextBlock`/`ToolUseBlock` shadow types — a shadow that pins
+  `ToolResultBlock.content` back to `string` hides the array branch from TypeScript at every
+  downstream callsite (FIND-SPRINT-020-9 — both `toolFormatter.ts` files).
+- `ToolResultBlock.content` is `string | Array<{type: 'text'; text: string}>`. Always guard:
+  `typeof content === 'string' ? content : content.map(b => b.text).join('')`. Never call
+  `JSON.parse`, `.includes(...)`, or template-string interpolation on raw `content`.
+- The `@deprecated` re-exports in `{frontend,main}/src/types/session.ts` (`TextContent`,
+  `ToolUseContent`, `ToolResultContent`) are a temporary migration bridge — do not add new
+  consumers.
+- TS↔Zod drift bridge: `main/src/services/streamParser/schemas.ts` `_typeCheck` catches
+  required-field drift. Optional-field drift is a known gap (SPRINT-020 TASK-571 HUMAN_NEEDED).
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with
