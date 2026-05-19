@@ -39,6 +39,7 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { ClaudeSpawnerLike } from './orchestrator/runExecutor';
+import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
@@ -591,21 +592,22 @@ async function initializeServices() {
     getNodePath: async () => process.execPath,
   };
 
-  // Placeholder RunExecutor — wires the SDK substrate so the legacy
-  // permission-bridge sentinels (orchSocketProvider, bridgeScriptResolver) are
-  // never reached during launch().  TASK-661 replaces this with a fully-wired
-  // RunExecutor that uses the real ClaudeCodeManager spawner + WorkflowPromptReader.
-  // @cyboflow-hidden [TASK-661] replace nopSpawner + placeholder RunExecutor with
-  //   real ClaudeSpawnerLike (defaultCliManager) + WorkflowPromptReader wiring.
-  const nopSpawner: ClaudeSpawnerLike = {
-    spawnCliProcess: async () => {
-      cyboflowLogger.warn('[index] nopSpawner.spawnCliProcess called — placeholder; TASK-661 must wire the real spawner');
-    },
-    abort: async () => {
-      cyboflowLogger.warn('[index] nopSpawner.abort called — placeholder; TASK-661 must wire the real spawner');
-    },
+  // Concrete WorkflowPromptReaderLike adapter — delegates to readWorkflowPrompt()
+  // while keeping RunExecutor free of direct fs/concrete-module imports.
+  const promptReader = { read: (workflowPath: string) => readWorkflowPrompt(workflowPath) };
+
+  // ClaudeSpawnerLike adapter — wraps defaultCliManager so RunExecutor can call
+  // spawnCliProcess() and abort() via the narrow interface without importing the
+  // concrete class directly.  ClaudeCodeManager.spawnCliProcess() accepts a
+  // ClaudeSpawnOptions superset of ClaudeSpawnerOptions; abort delegates to
+  // killProcess() which performs the SDK abort + cleanup.
+  const spawnerAdapter: ClaudeSpawnerLike = {
+    spawnCliProcess: (options) => (defaultCliManager as unknown as { spawnCliProcess(opts: typeof options): Promise<void> }).spawnCliProcess(options),
+    abort: (panelId) => (defaultCliManager as unknown as { killProcess(id: string): Promise<void> }).killProcess(panelId),
   };
-  const placeholderRunExecutor = new RunExecutor(nopSpawner, workflowRegistry, cyboflowLogger);
+
+  // RunExecutor wired with the real ClaudeCodeManager spawner and WorkflowPromptReader.
+  const placeholderRunExecutor = new RunExecutor(spawnerAdapter, workflowRegistry, cyboflowLogger, promptReader);
 
   const runLauncher = new RunLauncher(
     cyboflowDb,
