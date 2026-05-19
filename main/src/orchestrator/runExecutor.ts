@@ -327,6 +327,14 @@ export class RunExecutor {
       publisher: this.publisher,
       db: this.db,
       logger: this.logger,
+      // skipPersistence: true — ClaudeCodeManager.runSdkQuery already constructs its
+      // own EventRouter + RawEventsSink pipeline (claudeCodeManager.ts:247-255) and
+      // calls router.emitForRun() for every SDK event (line ~341). Without this flag,
+      // each event would be INSERTed twice into raw_events — once by the CCM-owned sink
+      // and once by the bridge's own sink. FIND-SPRINT-021-5 identified this as a
+      // latent double-INSERT regression that becomes active the moment the panelId
+      // mismatch fixed in TASK-663 is effective.
+      skipPersistence: true,
       onFirstMessage: () => this.onLifecycleTransition(runId, 'sdk_initialized'),
     });
   }
