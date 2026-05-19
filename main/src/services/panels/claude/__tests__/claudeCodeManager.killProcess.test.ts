@@ -11,7 +11,7 @@
  * 2. killProcess with no active run: idempotent, no throw, maps still empty.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -138,6 +138,7 @@ function getProcesses(mgr: ClaudeCodeManager): Map<string, unknown> {
 describe('ClaudeCodeManager.killProcess', () => {
   let db: Database.Database;
   let mgr: ClaudeCodeManager;
+  let clearPendingForRunSpy: MockInstance;
 
   beforeEach(() => {
     db = createTestDb();
@@ -146,6 +147,12 @@ describe('ClaudeCodeManager.killProcess', () => {
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
     ClaudeCodeManager.setSharedDb(db);
     mgr = new ClaudeCodeManager(createMockSessionManager());
+    // Spy on clearPendingForRun to assert it is called from runSdkQuery's
+    // finally block (single-sourced), not directly from killProcess.
+    clearPendingForRunSpy = vi.spyOn(
+      ApprovalRouter.getInstance(),
+      'clearPendingForRun',
+    );
   });
 
   afterEach(() => {
@@ -184,6 +191,14 @@ describe('ClaudeCodeManager.killProcess', () => {
     expect(getPipelines(mgr).has(panelId)).toBe(false);
     expect(getSdkRuns(mgr).has(panelId)).toBe(false);
     expect(getProcesses(mgr).has(panelId)).toBe(false);
+
+    // clearPendingForRun must have been called exactly once with panelId,
+    // from runSdkQuery's finally block — not directly from killProcess.
+    // This guards the single-sourced disposal invariant: if the call ever
+    // moves to (or is duplicated in) killProcess, the call-count check will
+    // catch an erroneous double-call.
+    expect(clearPendingForRunSpy).toHaveBeenCalledOnce();
+    expect(clearPendingForRunSpy).toHaveBeenCalledWith(panelId);
   });
 
   // -------------------------------------------------------------------------
@@ -204,5 +219,9 @@ describe('ClaudeCodeManager.killProcess', () => {
     expect(getPipelines(mgr).has(panelId)).toBe(false);
     expect(getSdkRuns(mgr).has(panelId)).toBe(false);
     expect(getProcesses(mgr).has(panelId)).toBe(false);
+
+    // No runSdkQuery finally block was entered, so clearPendingForRun must not
+    // have been called at all (no pending approvals exist for a never-started run).
+    expect(clearPendingForRunSpy).not.toHaveBeenCalled();
   });
 });
