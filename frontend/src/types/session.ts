@@ -1,22 +1,14 @@
+import type { TextBlock, ToolUseBlock, ToolResultBlock } from '../../../shared/types/claudeStream';
+
 // Claude message content types
-export interface TextContent {
-  type: 'text';
-  text: string;
-}
+/** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
+export type TextContent = TextBlock;
 
-export interface ToolUseContent {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
+/** @deprecated import { ToolUseBlock } from 'shared/types/claudeStream' directly. */
+export type ToolUseContent = ToolUseBlock;
 
-export interface ToolResultContent {
-  type: 'tool_result';
-  tool_use_id: string;
-  content: string;
-  is_error?: boolean;
-}
+/** @deprecated import { ToolResultBlock } from 'shared/types/claudeStream' directly. */
+export type ToolResultContent = ToolResultBlock;
 
 export type MessageContent = TextContent | ToolUseContent | ToolResultContent;
 
