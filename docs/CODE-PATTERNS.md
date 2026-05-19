@@ -95,6 +95,15 @@ to a canonical example — read those for the actual implementation.
 - **Use it for:** Wrapping a `better-sqlite3` `Database` into the `DatabaseLike` (`{ prepare, transaction }`) shape required by orchestrator and tRPC handler tests. Do NOT clone locally — the `: DatabaseLike` return-type annotation is the build-time tripwire that catches future widening of `DatabaseLike`.
 - **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`; recurring drift fixed in FIND-SPRINT-017-11.
 
+### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
+
+The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
+
+1. Reuse the local `seedRun(db, runId, status)` helper at the top of `runLifecycle.test.ts` (will be hoisted into `__test_fixtures__/seed.ts` by a follow-up task), OR
+2. If you are writing a new test file before the shared fixture lands, copy the `seedRun` helper verbatim and add a TODO comment pointing at FIND-SPRINT-018-12 so the cleanup task can find it.
+
+A `workflow_runs` schema change (e.g. adding a NOT NULL column without a default) must currently touch every inline INSERT — keep the surface small until the shared `seedWorkflowRun` fixture lands.
+
 ## Recurring Patterns
 
 ### Shared types as the cross-package contract
