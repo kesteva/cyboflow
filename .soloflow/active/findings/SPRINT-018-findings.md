@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-018
-pending_count: 4
-last_updated: "2026-05-18T20:50:00Z"
+pending_count: 5
+last_updated: "2026-05-18T21:30:00Z"
 ---
 
 # Findings Queue
@@ -44,4 +44,14 @@ last_updated: "2026-05-18T20:50:00Z"
 - **location:** main/src/orchestrator/permissionModeMapper.ts:40-82 + main/src/services/panels/claude/claudeCodeManager.ts:481-519
 - **description:** `deferToApprovalRouter` in permissionModeMapper.ts is a near-verbatim duplicate of `ClaudeCodeManager.makePreToolUseHook`: identical try/catch shape, identical allow/deny branches, identical `updatedInput` and `permissionDecisionReason` spreads, identical safe-deny reason string `'Internal approval-router error'`, identical `() => {}` socketReply, identical `'PreToolUse' as const` / `'allow' as const` / `'deny' as const` literals. The only differences are the log-line prefix and the surrounding class vs. module shell. Same drift profile as FIND-SPRINT-018-3 (deriveEnvelopeType): TASK-643's `claudeCodeManager.ts` is in files_readonly, so the mapper correctly duplicated rather than edited the legacy panel — this is a cross-task cleanup, not a TASK-643 defect. Going forward, any change to the SDK's PreToolUseHookOutput contract (e.g. a new `decisionReason` shape, additional metadata field, or richer ApprovalDecision branches) must be applied in BOTH files or the legacy chat-panel path and the new RunExecutor path will silently diverge.
 - **suggested_action:** Hoist a shared `routePreToolUseThroughApprovalRouter(pretool, callerId, logger?, callerLabel?): Promise<HookJSONOutput>` helper into `main/src/orchestrator/` (e.g. a new `preToolUseHookHelper.ts`). Have both `permissionModeMapper.deferToApprovalRouter` and `claudeCodeManager.makePreToolUseHook` delegate to it. The `callerLabel` lets each call site keep its own log prefix without re-declaring the body. Verify both pipelines still pass their unit tests after the consolidation. Plan with `claudeCodeManager.ts` in files_owned and `permissionModeMapper.ts` in files_readonly (or both owned), since the consolidation must edit the legacy panel.
+- **resolved_by:**
+
+## FIND-SPRINT-018-5
+- **source:** TASK-644 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/cyboflow/transitions.ts:210-214 + main/src/orchestrator/cancelAndRestartHandler.ts:147-150 + main/src/orchestrator/trpc/routers/runs.ts:115-119
+- **description:** The terminal-status guard SQL `UPDATE workflow_runs SET status='canceled', ended_at=..., updated_at=... WHERE id=? AND status NOT IN ('canceled','failed','completed')` now appears verbatim in three locations: the canonical helper `transitionToCanceled`, the legacy `cancelAndRestartHandler`, and the new `cancelHandler` in `runs.ts`. The orchestrator/trpc/* tree cannot import from `main/src/services/*` per its repeatedly-stated standalone-typecheck invariant, so DRYing via `transitionToCanceled` is blocked. The inlined SQL is intentional, but the terminal-status set `('canceled','failed','completed')` is also a magic literal repeated in 3+ files — a future addition of a terminal status (e.g. 'abandoned') silently diverges between the helper and the orchestrator handlers.
+- **suggested_action:** Export `TERMINAL_RUN_STATUSES` (and a derived `TERMINAL_RUN_STATUSES_SQL_LITERAL` string like `"('canceled','failed','completed')"`) from `shared/types/cyboflow.ts` — both `services/*` and `orchestrator/*` can import shared/types without violating the standalone-typecheck invariant. All three call sites then build the WHERE clause via string interpolation of the SQL literal (still parameterized for the runId). Add a runtime assertion that the SQL literal matches `Array.from(TERMINAL_RUN_STATUSES)` on module load.
 - **resolved_by:**
