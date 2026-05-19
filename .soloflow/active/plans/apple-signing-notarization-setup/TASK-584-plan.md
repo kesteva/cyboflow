@@ -1,9 +1,9 @@
 ---
 id: TASK-584
 idea: SPRINT-006-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - package.json
   - docs/ARCHITECTURE.md
@@ -27,16 +27,16 @@ acceptance_criteria:
     verification: "grep -nE 'asarUnpack|app\\.asar\\.unpacked' docs/ARCHITECTURE.md returns at least 1 match in proximity to a section mentioning the permission bridge"
   - criterion: "Main process build succeeds (`pnpm run build:main` runs the standalone bundler step + tsc emit successfully)"
     verification: "pnpm run build:main exits 0; the resulting `main/dist/main/src/services/cyboflowPermissionBridge.js` and `cyboflowPermissionBridgeStandalone.js` both exist"
-  - criterion: "Top-level typecheck and lint pass"
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
+  - criterion: Top-level typecheck and lint pass
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
 prerequisites:
   - check: "find main/dist -name 'cyboflowPermissionBridge*' 2>/dev/null | grep -q '.'"
     fix: "Run `pnpm run build:main` first. The asarUnpack path-correction relies on observing the actual emit layout, and tsc must have emitted at least once."
     description: "Confirms the tsc emit layout is observable on disk; without a prior build, the executor cannot empirically verify the unpack paths point at real files."
     blocking: true
   - check: "command -v electron-builder >/dev/null 2>&1 || test -f node_modules/.bin/electron-builder"
-    fix: "Run `pnpm install` at the repo root. electron-builder is in devDependencies and a packaged build cannot be produced without it."
-    description: "A packaged build is required to verify the runtime AC (post-unpack file layout under app.asar.unpacked)."
+    fix: Run `pnpm install` at the repo root. electron-builder is in devDependencies and a packaged build cannot be produced without it.
+    description: A packaged build is required to verify the runtime AC (post-unpack file layout under app.asar.unpacked).
     blocking: true
   - check: "test -n \"$APPLE_TEAM_ID\" || test \"$SKIP_SIGNING\" = \"1\""
     fix: "Either export APPLE_TEAM_ID + APPLE_ID + APPLE_PASSWORD per docs/signing/APPLE_DEVELOPER_SETUP.md, or set SKIP_SIGNING=1 to use the unsigned build path (scripts/configure-build.js gates on these)."
@@ -49,7 +49,6 @@ test_strategy:
   needed: false
   justification: "The verification is empirical — `pnpm run build:main` + a packaged build + `find`-based path inspection. No unit-testable behavior exists for asarUnpack rules (electron-builder consumes them at build time and they cannot be exercised in vitest). Sibling-test scan: no test files exist at `main/__tests__/` or near `package.json`; the existing `build/afterSign.test.js` exercises the JAR-strip step, not asarUnpack. The packaged-build smoke captured in the done report IS the test."
 ---
-
 # Fix asarUnpack paths to match tsc output layout
 
 ## Objective

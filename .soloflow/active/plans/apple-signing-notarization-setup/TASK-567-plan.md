@@ -1,7 +1,7 @@
 ---
 id: TASK-567
 idea: IDEA-002
-status: ready
+status: in-flight
 created: "2026-05-12T00:00:00Z"
 files_owned:
   - docs/signing/APPLE_DEVELOPER_SETUP.md
@@ -23,7 +23,7 @@ acceptance_criteria:
     verification: "`test -f docs/signing/builds/0.3.5/FIRST_SIGNED_BUILD_LOG.md` exits 0. `grep -c 'submission ID\\|notarytool\\|lipo\\|codesign' docs/signing/builds/0.3.5/FIRST_SIGNED_BUILD_LOG.md` returns >= 4. `grep -c 'Notes for Future Builds' docs/signing/builds/0.3.5/FIRST_SIGNED_BUILD_LOG.md` returns 0."
   - criterion: "`docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` exists and is byte-identical to the pre-task `docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md`"
     verification: "`test -f docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` exits 0. `grep -c 'macOS\\|SHA256\\|spctl' docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` returns >= 3. `grep -c '6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494' docs/signing/builds/0.3.5/GATEKEEPER_ACCEPTANCE_TEST.md` returns >= 1 (post-staple DMG SHA256 preserved)."
-  - criterion: "The top-level `docs/signing/FIRST_SIGNED_BUILD_LOG.md` and `docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md` have been removed (or replaced with one-line stub redirects to `builds/0.3.5/`)"
+  - criterion: The top-level `docs/signing/FIRST_SIGNED_BUILD_LOG.md` and `docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md` have been removed (or replaced with one-line stub redirects to `builds/0.3.5/`)
     verification: "Run `ls docs/signing/FIRST_SIGNED_BUILD_LOG.md docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md 2>&1`. Either both files are absent (preferred), OR each file is <= 5 lines and contains the text 'moved to builds/0.3.5/' (stub option). The plan body chooses the 'delete' option; the stub option is only acceptable if executor finds an external reference that must not break."
   - criterion: "`docs/signing/builds/README.md` exists and documents the lifecycle: directory convention (`builds/<version>/`), copy-from-template instruction, and a list of required files per build"
     verification: "`test -f docs/signing/builds/README.md` exits 0. `grep -c 'builds/<version>' docs/signing/builds/README.md` >= 1. `grep -c 'BUILD_LOG_TEMPLATE\\|GATEKEEPER_TEST_TEMPLATE' docs/signing/builds/README.md` >= 2."
@@ -47,11 +47,10 @@ test_strategy:
   justification: "Pure docs/markdown reorganization with no code paths exercised. The acceptance-criteria greps ARE the test cases. Sibling-test scan: no test files exist under `docs/signing/` — confirmed `ls docs/signing/` returns only the three `.md` files this plan owns. No JS/TS test files are co-located with these docs."
 prerequisites:
   - check: "test -f docs/signing/FIRST_SIGNED_BUILD_LOG.md && test -f docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md && test -f docs/signing/APPLE_DEVELOPER_SETUP.md"
-    fix: "Source docs missing — restore from git (SPRINT-003 should have left these three files intact at the top level)."
+    fix: Source docs missing — restore from git (SPRINT-003 should have left these three files intact at the top level).
     description: "This task moves and rewrites the three existing signing docs; if any of them is already missing, the task cannot run."
     blocking: true
 ---
-
 # Define a lifecycle and template for per-build signing snapshot docs
 
 ## Objective
