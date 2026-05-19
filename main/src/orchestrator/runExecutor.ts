@@ -177,7 +177,7 @@ export class RunExecutor {
     }
 
     // Invariant: panelId === runId === sessionId across the orchestrator surface.
-    // The bridge filter at runEventBridge.ts:158 keys on raw runId; ApprovalRouter's
+    // The `p.panelId !== runId` guard in bridgeEvents() keys on raw runId; ApprovalRouter's
     // workflow_runs UPDATE keys on runId. Any other value here silently breaks both.
     const panelId = runId;
     const sessionId = runId;
