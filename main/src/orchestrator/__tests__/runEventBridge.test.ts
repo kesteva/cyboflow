@@ -690,6 +690,11 @@ describe('runEventBridge', () => {
     //    simulating CCM's pipeline. Bridge with skipPersistence=true.
     //    Emit one 'output' event AND call ccmRouter.emitForRun once.
     //    Assert countRows === 1 (not 2) and publish called once.
+    //
+    // Sibling: runExecutor.test.ts "source arg: lifecycleTransitions.running()..."
+    // exercises the same countRows === 1 guarantee through the full RunExecutor
+    // pipeline. This test isolates the bridgeEvents() skipPersistence option
+    // contract. If this invariant changes, update both.
     // -----------------------------------------------------------------------
     it('dual-pipeline single-INSERT guarantee — bridge with skipPersistence does not double-INSERT alongside CCM-owned sink', () => {
       const realDb = makeDb();

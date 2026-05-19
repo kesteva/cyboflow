@@ -825,6 +825,10 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     // contributes 0 additional rows. If this assertion fails with cnt=2, the
     // skipPersistence flag is missing from RunExecutor.bridgeEvents(). If it
     // fails with cnt=0, the CCM-style pipeline listener is broken.
+    //
+    // Sibling: runEventBridge.test.ts "dual-pipeline single-INSERT guarantee"
+    // tests this same invariant in isolation (bridgeEvents() only). Both must
+    // be updated together if the storage contract changes.
     const rawRow = db
       .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
       .get(run.id) as { cnt: number };
