@@ -21,6 +21,7 @@ import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { LoggerLike } from '../types';
 import type { McpConfigWriter } from '../mcpConfigWriter';
+import type { RunExecutor } from '../runExecutor';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -712,7 +713,7 @@ describe('RunLauncher constructor validation', () => {
     ).toThrow('RunLauncher: missing required collaborator nodeResolver');
   });
 
-  it('launch always calls mcpConfigWriter.writeForRun (unconditional)', async () => {
+  it('launch without runExecutor still calls mcpConfigWriter.writeForRun (legacy path regression guard)', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
@@ -761,8 +762,149 @@ describe('RunLauncher constructor validation', () => {
 
       await launcher.launch(workflowId, tmpDir);
 
-      // Must have been called — the if-guard has been removed
+      // Must have been called — no runExecutor supplied, so legacy path is active
       expect(writeForRunSpy).toHaveBeenCalledOnce();
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // SDK substrate guard — TASK-660
+  // -------------------------------------------------------------------------
+
+  /**
+   * Shared fixture factory for the three TASK-660 SDK-guard tests.
+   * Seeds a workflow row and returns a WorkflowRegistry stub + canned IDs.
+   */
+  async function makeSDKFixture(db: Database.Database, tmpDir: string) {
+    const workflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'prune', '/fake/path.md', 'default')",
+    ).run(workflowId);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'prune', cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/prune/${cannedRunId.slice(0, 8)}`;
+
+    const fakeRegistry = {
+      getById: (id: string) => {
+        const row = db.prepare(
+          'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+        ).get(id);
+        return row ?? null;
+      },
+      createRun: vi.fn(() => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'default' as const };
+      }),
+    } as unknown as WorkflowRegistry;
+
+    const fakeWorktree = {
+      createDeterministicWorktree: vi.fn().mockResolvedValue({
+        worktreePath: cannedWorktreePath,
+        branchName: cannedBranchName,
+        baseCommit: 'abc123',
+        baseBranch: 'HEAD',
+      }),
+    } as unknown as WorktreeManager;
+
+    // A RunExecutor stub — execute() resolves immediately (no real spawn)
+    const fakeRunExecutor = {
+      execute: vi.fn().mockResolvedValue(undefined),
+    } as unknown as RunExecutor;
+
+    return { workflowId, cannedRunId, cannedWorktreePath, cannedBranchName, fakeRegistry, fakeWorktree, fakeRunExecutor };
+  }
+
+  it('launch with runExecutor skips mcpConfigWriter.writeForRun', async () => {
+    await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
+
+      const writeForRunSpy = vi.fn().mockResolvedValue('/fake/.mcp.json');
+      const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
+
+      // orchSocketProvider and bridgeScriptResolver omitted (undefined) to prove
+      // they are never consulted when runExecutor is supplied.
+      const launcher = new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        spyMcpConfigWriter,
+        undefined as unknown as OrchSocketProvider,
+        undefined as unknown as BridgeScriptResolver,
+        undefined as unknown as NodeResolver,
+        undefined,
+        fakeRunExecutor,
+      );
+
+      await launcher.launch(workflowId, tmpDir);
+
+      // writeForRun must NOT be called on the SDK path
+      expect(writeForRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('launch with runExecutor skips orchSocketProvider.getSocketPath', async () => {
+    await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeLogger();
+
+      const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
+
+      // Sentinel: if getSocketPath() is called, the test fails immediately.
+      const throwingOrchSocketProvider: OrchSocketProvider = {
+        getSocketPath: () => {
+          throw new Error('TEST FAILURE: orchSocketProvider.getSocketPath called on SDK path');
+        },
+      };
+
+      const launcher = new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        fakeMcpConfigWriter,
+        throwingOrchSocketProvider,
+        undefined as unknown as BridgeScriptResolver,
+        undefined as unknown as NodeResolver,
+        undefined,
+        fakeRunExecutor,
+      );
+
+      // Must not throw from the sentinel
+      await expect(launcher.launch(workflowId, tmpDir)).resolves.not.toThrow();
+    });
+  });
+
+  it('constructor accepts SDK substrate with no legacy collaborators when runExecutor is provided', () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const fakeRegistry = {} as WorkflowRegistry;
+    const fakeWorktree = {} as WorktreeManager;
+    const logger = makeLogger();
+    const fakeRunExecutor = { execute: vi.fn() } as unknown as RunExecutor;
+
+    // Must NOT throw even though the four legacy collaborators are undefined
+    expect(
+      () => new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        undefined as unknown as McpConfigWriter,
+        undefined as unknown as OrchSocketProvider,
+        undefined as unknown as BridgeScriptResolver,
+        undefined as unknown as NodeResolver,
+        undefined,
+        fakeRunExecutor,
+      ),
+    ).not.toThrow();
   });
 });
