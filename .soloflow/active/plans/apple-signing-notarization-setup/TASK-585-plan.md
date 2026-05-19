@@ -1,9 +1,9 @@
 ---
 id: TASK-585
 idea: SPRINT-006-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - package.json
 files_readonly:
@@ -20,18 +20,18 @@ acceptance_criteria:
     verification: "Manual smoke in done report: launch packaged build; check `~/.cyboflow/logs/` and the packaged app's main-process console for any `Cannot find module 'electron-store'` error — must be absent. If the app uses electron-store at startup (e.g. for window-state restoration), the absence of MODULE_NOT_FOUND in logs is sufficient. If electron-store is only conditionally required, the executor should add a one-line `console.log('[smoke] electron-store version:', require('electron-store').version)` to a startup path temporarily and verify in the packaged build's logs."
   - criterion: "If path (a) was chosen: the root version matches main/package.json's `^11.0.0` exactly to avoid pnpm hoisting divergence"
     verification: "Run `node -e \"const r=require('./package.json'); const m=require('./main/package.json'); if (!r.dependencies['electron-store']) process.exit(0); if (r.dependencies['electron-store'] !== m.dependencies['electron-store']) { console.error('version mismatch'); process.exit(1); } process.exit(0);\"` exits 0"
-  - criterion: "Top-level `pnpm install` succeeds without warnings about missing peer deps for electron-store"
-    verification: "pnpm install exits 0; the install output does not contain new warnings mentioning electron-store"
-  - criterion: "Top-level typecheck and lint pass"
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
+  - criterion: Top-level `pnpm install` succeeds without warnings about missing peer deps for electron-store
+    verification: pnpm install exits 0; the install output does not contain new warnings mentioning electron-store
+  - criterion: Top-level typecheck and lint pass
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
 prerequisites:
   - check: "command -v electron-builder >/dev/null 2>&1 || test -f node_modules/.bin/electron-builder"
-    fix: "Run `pnpm install` at the repo root."
-    description: "A packaged build is required for the runtime-resolution AC; electron-builder must be available."
+    fix: Run `pnpm install` at the repo root.
+    description: A packaged build is required for the runtime-resolution AC; electron-builder must be available.
     blocking: true
   - check: "test -n \"$APPLE_TEAM_ID\" || test \"$SKIP_SIGNING\" = \"1\""
     fix: "Either export Apple signing creds per docs/signing/APPLE_DEVELOPER_SETUP.md, or set SKIP_SIGNING=1 for an unsigned build."
-    description: "configure-build.js gates on signing creds; without an explicit opt-out the build step may fail before the asar is assembled."
+    description: configure-build.js gates on signing creds; without an explicit opt-out the build step may fail before the asar is assembled.
     blocking: false
 depends_on: []
 estimated_complexity: low
@@ -40,7 +40,6 @@ test_strategy:
   needed: false
   justification: "Pure packaging verification — the AC is whether `require('electron-store')` resolves in a packaged build, which cannot be tested in vitest (no real asar assembly). Sibling-test scan: no test files exist at the package.json level. The packaged-build smoke captured in the done report IS the test."
 ---
-
 # Verify electron-store root package.json dep parity (or document why not)
 
 ## Objective
