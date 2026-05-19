@@ -36,7 +36,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState('');
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
-  const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve' | 'ignore'>('ignore');
+  const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve' | 'ignore'>('approve');
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
@@ -73,7 +73,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setAnthropicApiKey(data.anthropicApiKey || '');
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
-      setDefaultPermissionMode(data.defaultPermissionMode || 'ignore');
+      setDefaultPermissionMode(data.defaultPermissionMode || 'approve');
       setAutoCheckUpdates(data.autoCheckUpdates !== false); // Default to true
       setDevMode(data.devMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
@@ -297,7 +297,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       <div className="flex items-center gap-2 mb-1">
                         <ShieldOff className="w-4 h-4 text-text-tertiary" />
                         <span className="text-sm font-medium text-text-primary">Fast & Flexible</span>
-                        <span className="ml-auto px-2 py-0.5 text-xs bg-status-warning/20 text-status-warning rounded-full">Default</span>
                       </div>
                       <p className="text-xs text-text-tertiary leading-relaxed">
                         Claude executes commands quickly without asking permission. Great for development workflows.
@@ -317,6 +316,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       <div className="flex items-center gap-2 mb-1">
                         <Shield className="w-4 h-4 text-status-success" />
                         <span className="text-sm font-medium text-text-primary">Secure & Controlled</span>
+                        <span className="ml-auto px-2 py-0.5 text-xs bg-status-warning/20 text-status-warning rounded-full">Default</span>
                       </div>
                       <p className="text-xs text-text-tertiary leading-relaxed">
                         Claude asks for your approval before running potentially risky commands. Safer for production code.
