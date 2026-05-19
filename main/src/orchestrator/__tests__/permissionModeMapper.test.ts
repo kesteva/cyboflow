@@ -183,4 +183,66 @@ describe('buildPreToolUseHook', () => {
       },
     });
   });
+
+  // ─── Test 6: deny with no message → no permissionDecisionReason field ────
+
+  it('deny decision without message omits permissionDecisionReason from output', async () => {
+    // ApprovalDecision.message is optional; when absent the field must not
+    // appear in hookSpecificOutput (the SDK may treat an explicit undefined
+    // differently from a missing key on some versions).
+    const requestApproval = vi.fn().mockResolvedValue({
+      behavior: 'deny' as const,
+      // no message field
+    });
+
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    const hook = buildPreToolUseHook('default', RUN_ID);
+    expect(hook).toBeDefined();
+
+    const result = await hook!(makePreToolInput('Bash'), 'tool-use-id', {} as Parameters<HookCallback>[2]);
+
+    // permissionDecision must be 'deny'
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+      },
+    });
+
+    // permissionDecisionReason must be absent — not just falsy
+    const output = result as { hookSpecificOutput: Record<string, unknown> };
+    expect(Object.prototype.hasOwnProperty.call(output.hookSpecificOutput, 'permissionDecisionReason')).toBe(false);
+  });
+
+  // ─── Test 7: allow with updatedInput → updatedInput threaded through ──────
+
+  it('allow decision with updatedInput threads updatedInput into hookSpecificOutput', async () => {
+    // When ApprovalRouter returns an allow decision with a mutated input,
+    // deferToApprovalRouter must include updatedInput in the SDK output so the
+    // SDK can substitute the tool's input before execution.
+    const mutatedInput = { path: '/safe/rewrite.ts', content: '// approved' };
+    const requestApproval = vi.fn().mockResolvedValue({
+      behavior: 'allow' as const,
+      updatedInput: mutatedInput,
+    });
+
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    const hook = buildPreToolUseHook('default', RUN_ID);
+    expect(hook).toBeDefined();
+
+    const result = await hook!(makePreToolInput('Edit'), 'tool-use-id', {} as Parameters<HookCallback>[2]);
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        updatedInput: mutatedInput,
+      },
+    });
+  });
 });
