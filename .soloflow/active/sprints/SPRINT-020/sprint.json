@@ -10,9 +10,6 @@
       "status": "human_needed",
       "started": "2026-05-19T14:36:40.791Z",
       "verdict_at": "2026-05-19T14:54:29.290Z"
-    },
-    "TASK-597": {
-      "status": "pending"
     }
   },
   "run": {
