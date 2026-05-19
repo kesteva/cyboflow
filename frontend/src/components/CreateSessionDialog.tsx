@@ -88,7 +88,7 @@ export function CreateSessionDialog({
   const [claudeConfig, setClaudeConfig] = useState<ClaudeCodeConfig>({
     prompt: initialPrompt || '',
     model: initialClaudeConfig?.model || 'auto',
-    permissionMode: initialClaudeConfig?.permissionMode || 'ignore',
+    permissionMode: initialClaudeConfig?.permissionMode || 'approve',
     ultrathink: initialClaudeConfig?.ultrathink || false,
     attachedImages: [],
     attachedTexts: []
@@ -97,7 +97,7 @@ export function CreateSessionDialog({
     prompt: initialPrompt || '',
     worktreeTemplate: '',
     count: 1,
-    permissionMode: 'ignore',
+    permissionMode: 'approve',
     baseBranch: initialBaseBranch
     // Model is now managed at panel level, not session level
   });
@@ -621,7 +621,7 @@ export function CreateSessionDialog({
       for (const toolType of toolsToCreate) {
         // Prepare tool-specific prompt
         let toolPrompt = finalPrompt;
-        let toolPermissionMode: 'ignore' | 'approve' = 'ignore';
+        let toolPermissionMode: 'ignore' | 'approve' = 'approve';
 
         if (toolType === 'claude') {
           if (claudeConfig.ultrathink && toolPrompt) {
@@ -630,7 +630,7 @@ export function CreateSessionDialog({
           toolPermissionMode = claudeConfig.permissionMode;
         } else if (toolType === 'none') {
           // For sessions with no agent, use default permission mode
-          toolPermissionMode = formData.permissionMode || 'ignore';
+          toolPermissionMode = formData.permissionMode || 'approve';
         }
 
         // Determine session name
