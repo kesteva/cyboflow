@@ -7,7 +7,7 @@
  *   b. RunExecutor.execute throws when workflow row is missing
  *   c. RunExecutor.execute throws when worktree_path is null
  *   d. Default RunExecutor.getPrompt throws NOT_IMPLEMENTED (sentinel contract)
- *   e. RunExecutor.execute synthesises panelId/sessionId and calls spawnCliProcess
+ *   e. RunExecutor.execute assigns panelId/sessionId from runId (invariant: panelId === runId === sessionId) and calls spawnCliProcess
  *   f. RunLauncher.launch enqueues execute() via RunQueueRegistry AFTER publish
  *   g. RunLauncher.launch does NOT call execute() synchronously; queue.add does
  *   h. RunLauncher.launch with executor/registry omitted still returns correct shape
@@ -170,7 +170,7 @@ describe('RunExecutor.execute — default getPrompt sentinel', () => {
 });
 
 describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () => {
-  it('(e) synthesises panelId/sessionId from runId and calls spawnCliProcess', async () => {
+  it('(e) assigns panelId/sessionId from runId (invariant: panelId === runId === sessionId) and calls spawnCliProcess', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -277,7 +277,7 @@ describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fir
 });
 
 describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
-  it('(ii) cancel() calls spawner.abort with synthetic panelId AND fires bridge.dispose()', async () => {
+  it('(ii) cancel() calls spawner.abort with the runId (invariant: panelId === runId) AND fires bridge.dispose()', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -762,8 +762,8 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 
     // spawnCliProcess emits one output event on the source to simulate the SDK
     // delivering its first message, then resolves normally.
-    // The bridge filters on panelId === runId (the bare UUID, not the synthetic
-    // "run-<uuid>" prefix used by ClaudeCodeManager's own panelId).
+    // The bridge filters on panelId === runId (invariant: panelId === runId === sessionId
+    // throughout the orchestrator surface — see runExecutor.ts JSDoc).
     (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       emitOutputEvent(source, run.id, {
         type: 'system',
@@ -789,6 +789,12 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     // execute() completed normally → completed() fires too.
     expect(completed).toHaveBeenCalledOnce();
     expect(completed).toHaveBeenCalledWith(run.id, 'running');
+
+    // The bridge must have INSERTed at least one raw_events row (panelId === runId fix).
+    const rawRow = db
+      .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
+      .get(run.id) as { cnt: number };
+    expect(rawRow.cnt).toBeGreaterThanOrEqual(1);
   });
 
   /**
@@ -1204,97 +1210,6 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
 // ---------------------------------------------------------------------------
 
 describe('panelId/runId alignment — integration with RunEventBridge', () => {
-  /**
-   * End-to-end wiring test that would have caught FIND-SPRINT-021-4.
-   *
-   * Constructs a real RunEventBridge (via the default bridgeEvents() hook)
-   * driven by an EventEmitter source. The spawner mock emits an 'output' event
-   * synchronously before resolving, simulating the first SDK message arriving
-   * during spawnCliProcess. Asserts:
-   *   (a) raw_events row was inserted (bridge processed the event)
-   *   (b) lifecycleTransitions.running() was called exactly once with runId
-   *   (c) publisher.publish was called exactly once with runId as first arg
-   *
-   * This test would have failed before the panelId === runId fix because
-   * the bridge filter (p.panelId !== runId) would have dropped all events.
-   */
-  it('bridge processes output event when panelId === runId (no prefix)', async () => {
-    const { mock: lt, running, completed } = makeLifecycleTransitions();
-
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-
-    // Real in-memory DB so RawEventsSink can INSERT raw_events rows.
-    const db = new Database(':memory:');
-    db.pragma('foreign_keys = OFF');
-    db.exec(RAW_EVENTS_DDL_EXEC);
-
-    // Publisher spy — records (runId, envelope) calls.
-    const publishSpy = vi.fn<(runId: string, envelope: unknown) => void>();
-    const publisher: StreamEventPublisher = { publish: publishSpy };
-
-    // Source EventEmitter — carries 'output' events.
-    const source = new EventEmitter();
-
-    const executor = new TestableRunExecutor(
-      makeSpawner(),
-      registry,
-      makeLogger(),
-      undefined,  // promptReader — TestableRunExecutor overrides getPrompt
-      lt,
-      publisher,
-      db,
-      source,
-    );
-
-    // Spawner mock: emit one 'output' event synchronously before resolving,
-    // simulating the SDK iterator delivering its first message.
-    // panelId must equal run.id (bare UUID, no prefix) for the bridge to accept it.
-    const spawner = executor['spawner'] as ClaudeSpawnerLike;
-    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      source.emit('output', {
-        panelId: run.id,
-        sessionId: run.id,
-        type: 'json',
-        data: {
-          type: 'system',
-          subtype: 'init',
-          session_id: 'sess-align-test',
-          cwd: '/tmp',
-          model: 'claude-opus',
-          tools: [],
-          mcp_servers: [],
-          permissionMode: 'default',
-        },
-        timestamp: new Date(),
-      });
-    });
-
-    await executor.execute(run.id);
-
-    // (a) raw_events row must have been inserted.
-    const row = db
-      .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
-      .get(run.id) as { cnt: number };
-    expect(row.cnt).toBeGreaterThanOrEqual(1);
-
-    // (b) lifecycleTransitions.running() must have been called exactly once.
-    expect(running).toHaveBeenCalledOnce();
-    expect(running).toHaveBeenCalledWith(run.id);
-
-    // (c) publisher.publish must have been called at least once with runId.
-    expect(publishSpy).toHaveBeenCalledOnce();
-    expect(publishSpy.mock.calls[0][0]).toBe(run.id);
-
-    // execute() completed normally → completed() fires too.
-    expect(completed).toHaveBeenCalledOnce();
-    expect(completed).toHaveBeenCalledWith(run.id, 'running');
-  });
-
   /**
    * Negative: if panelId had the old "run-<runId>" prefix (pre-TASK-663), the bridge would
    * silently drop the event and running() would never be called.
