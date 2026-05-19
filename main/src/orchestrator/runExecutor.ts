@@ -234,8 +234,8 @@ export class RunExecutor {
    * For each active run:
    *   1. Look up the panelId. If not present, no-op (idempotent).
    *   2. Abort the SDK run via spawner.abort(panelId).
-   *   3. Fire teardownRun to dispose the bridge and clean up state.
-   *   4. Fire onLifecycleTransition(runId, 'canceled').
+   *   3. Fire onLifecycleTransition(runId, 'canceled') while pending* maps still populated.
+   *   4. Fire teardownRun to dispose the bridge and clean up state.
    *
    * In the common single-run-per-executor pattern (used with RunExecutorRegistry),
    * this cancels exactly the one in-flight run. Double-cancel is idempotent.
@@ -249,8 +249,8 @@ export class RunExecutor {
       if (!panelId) continue;
 
       await this.spawner.abort(panelId);
-      this.teardownRun(runId);
       await this.onLifecycleTransition(runId, 'canceled');
+      this.teardownRun(runId);
     }
   }
 
