@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-019
-pending_count: 2
-last_updated: "2026-05-19T03:28:55.824Z"
+pending_count: 3
+last_updated: "2026-05-19T03:37:33.932Z"
 ---
 # Findings Queue
 
@@ -41,3 +41,13 @@ last_updated: "2026-05-19T03:28:55.824Z"
 - **location:** package.json:104-107
 - **description:** TASK-584 plan referenced cyboflowPermissionBridge.js and cyboflowPermissionBridgeStandalone.js as files that need asarUnpack, but these files do not exist in the codebase — the SDK-based rewrite (claudeCodeManager.ts) replaced the subprocess bridge approach. The actual subprocess that needs asarUnpack is cyboflowMcpServer.js at main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js. The plan AC checks for bridge files cannot pass. Executor corrected asarUnpack to the real path and documented it.
 - **suggested_action:** Update TASK-584 acceptance criteria to check for cyboflowMcpServer.js path instead of the non-existent bridge files. Consider removing the scriptPath.ts ASAR-extraction fallback in a follow-up task once the asarUnpack fix is verified in a real packaged build.
+
+## FIND-SPRINT-019-5
+- **source:** TASK-585 (executor)
+- **type:** cleanup
+- **severity:** medium
+- **status:** open
+- **location:** main/package.json:25
+- **description:** electron-store@^11.0.0 is declared in main/package.json but has zero importers in main/src/**. Grep confirmed: no import or require of electron-store anywhere in main/src TypeScript files. It appears to be a Crystal-era leftover. Should be removed from main/package.json in a follow-up task; root package.json intentionally omits it. Documented in docs/packaging/root-deps-policy.md.
+- **suggested_action:** Remove electron-store from main/package.json dependencies in a dedicated cleanup task. Verify no other file references it (already confirmed empty for main/src/*.ts).
+- **resolved_by:** 
