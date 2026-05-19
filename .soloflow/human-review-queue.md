@@ -1,8 +1,8 @@
 ---
-pending_count: 24
+pending_count: 23
 buckets:
   decisions: 1
-  actions: 5
+  actions: 4
   testing: 15
   deferred_visual: 3
 items: []
@@ -78,19 +78,6 @@ items: []
     - TASK-570
     - TASK-596
     - TASK-597
-
-- task: TASK-652
-  type: action_required
-  bucket: actions
-  dedup_key: main_workspace_better_sqlite3_abi_mismatch
-  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-652-plan.md
-  action: "Run `pnpm electron:rebuild` to resolve better-sqlite3 NODE_MODULE_VERSION 136 vs 127 mismatch. After rebuild, re-run `cd main && pnpm exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts` to confirm the 25 DB-bootstrap failures (all on `new Database(:memory:)`) clear. Pre-existing env drift, identical failure mode on parent commit; TASK-652 is a pure-extraction refactor and only modified frontmatter parsing — 7/7 markdownFrontmatter and 9/9 workflowPromptReader tests pass."
-  blocked_checks:
-    - "AC4: workflowRegistry.test.ts (25 DB-instantiation tests) — pre-existing env block, not a TASK-652 regression"
-  level: ground_truth
-  severity: medium
-  created_at: "2026-05-19T20:14:47.585Z"
-  updated_at: "2026-05-19T20:14:47.585Z"
 
 ## Testing
 
@@ -324,6 +311,21 @@ items: []
     - TASK-553
 
 ## Overridden
+
+- task: TASK-652
+  type: overridden
+  bucket: actions
+  dedup_key: main_workspace_better_sqlite3_abi_mismatch
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-652-plan.md
+  action: "Run `pnpm electron:rebuild` to resolve better-sqlite3 NODE_MODULE_VERSION 136 vs 127 mismatch. After rebuild, re-run `cd main && pnpm exec vitest run src/orchestrator/__tests__/workflowRegistry.test.ts` to confirm the 25 DB-bootstrap failures (all on `new Database(:memory:)`) clear. Pre-existing env drift, identical failure mode on parent commit; TASK-652 is a pure-extraction refactor and only modified frontmatter parsing — 7/7 markdownFrontmatter and 9/9 workflowPromptReader tests pass."
+  blocked_checks:
+    - "AC4: workflowRegistry.test.ts (25 DB-instantiation tests) — pre-existing env block, not a TASK-652 regression"
+  level: ground_truth
+  severity: medium
+  created_at: "2026-05-19T20:14:47.585Z"
+  updated_at: "2026-05-19T20:14:47.585Z"
+  override: "Known better-sqlite3 NODE_MODULE_VERSION mismatch (ABI 136 vs 127) — user-owned infra fix via pnpm electron:rebuild. Out of scope for TASK-663/664 (orchestrator/tRPC). Affected tests remain SKIPPED as in prior sprints."
+  override_at: "2026-05-19T21:50:54.661Z"
 
 - task: TASK-577
   type: overridden

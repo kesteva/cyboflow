@@ -1,8 +1,8 @@
 ---
 id: TASK-664
 idea: IDEA-018
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runEventBridge.ts
   - main/src/orchestrator/runExecutor.ts
@@ -23,32 +23,32 @@ acceptance_criteria:
   - criterion: "A new integration test in runEventBridge.test.ts ('dual-pipeline single-INSERT guarantee') asserts: emit one output event on the source; the bridge with `skipPersistence: true` produces 0 raw_events rows from its own sink path; the publisher receives 1 envelope; onFirstMessage fires once"
     verification: "grep -n 'dual-pipeline single-INSERT' main/src/orchestrator/__tests__/runEventBridge.test.ts returns at least 1 match; pnpm --filter main test -- runEventBridge exits 0"
   - criterion: "When `skipPersistence` is absent or false, the bridge's pre-existing behaviour is unchanged — all 14 existing test cases in runEventBridge.test.ts continue to pass without modification"
-    verification: "git diff main/src/orchestrator/__tests__/runEventBridge.test.ts shows no edits to the 14 pre-existing `it(...)` blocks (additions only); pnpm --filter main test -- runEventBridge exits 0"
+    verification: git diff main/src/orchestrator/__tests__/runEventBridge.test.ts shows no edits to the 14 pre-existing `it(...)` blocks (additions only); pnpm --filter main test -- runEventBridge exits 0
   - criterion: "RunExecutor's integration test from TASK-663 (panelId/runId alignment) produces exactly 1 raw_events row, not 2 — verifying that even with both pipelines wired in production, no duplicate INSERT occurs"
     verification: "pnpm --filter main test -- runExecutor exits 0 with the panelId/runId-alignment test asserting `countRows(db, runId) === 1`"
-  - criterion: "pnpm --filter main typecheck and pnpm --filter main test both exit 0"
-    verification: "pnpm --filter main typecheck exits 0; pnpm --filter main test exits 0"
-depends_on: [TASK-663]
+  - criterion: pnpm --filter main typecheck and pnpm --filter main test both exit 0
+    verification: pnpm --filter main typecheck exits 0; pnpm --filter main test exits 0
+depends_on:
+  - TASK-663
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "The 14 sibling tests in runEventBridge.test.ts all rely on the bridge constructing its own router/sink. Adding `skipPersistence` is a behaviour fork that must (a) preserve every existing path and (b) add new coverage for the skip path. The dual-pipeline duplicate-INSERT class is exactly the failure mode that FIND-SPRINT-021-5 surfaced — explicit single-INSERT assertion is required."
+  justification: The 14 sibling tests in runEventBridge.test.ts all rely on the bridge constructing its own router/sink. Adding `skipPersistence` is a behaviour fork that must (a) preserve every existing path and (b) add new coverage for the skip path. The dual-pipeline duplicate-INSERT class is exactly the failure mode that FIND-SPRINT-021-5 surfaced — explicit single-INSERT assertion is required.
   targets:
     - behavior: "BridgeEventsOptions.skipPersistence=true: bridge attaches listener and publishes envelopes but constructs no EventRouter, no RawEventsSink, and never calls db.prepare(...) — verified with a stub db whose `prepare` method throws"
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
     - behavior: "BridgeEventsOptions.skipPersistence=true: onFirstMessage still fires correctly on the first JSON output event"
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
     - behavior: "Dual-pipeline single-INSERT guarantee: when the source emits one event and the source's own RawEventsSink would insert one row, the bridge with skipPersistence=true produces 0 additional rows — net 1, not 2"
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: integration
-    - behavior: "RunExecutor wires bridgeEvents with skipPersistence=true so the production pipeline (ClaudeCodeManager.runSdkQuery → EventRouter → RawEventsSink) is the single persistence path"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+    - behavior: RunExecutor wires bridgeEvents with skipPersistence=true so the production pipeline (ClaudeCodeManager.runSdkQuery → EventRouter → RawEventsSink) is the single persistence path
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
 ---
-
 # Resolve dual raw_events persistence pipelines (must ship alongside TASK-663)
 
 ## Objective
