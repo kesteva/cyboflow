@@ -55,8 +55,9 @@ export interface NodeResolver {
  * Decouples RunLauncher from the Electron layer by accepting a plain publisher
  * interface instead of importing BrowserWindow directly.
  *
- * The concrete implementation lives in main/src/ipc/cyboflow.ts, which is the
- * only place that calls win.webContents.send for cyboflow stream events.
+ * The concrete implementation lives in main/src/index.ts (initializeServices),
+ * which is the only place that calls win.webContents.send for cyboflow stream
+ * events.
  * Keeping this interface here preserves the standalone-typecheck invariant:
  * no electron imports inside main/src/orchestrator/.
  */
@@ -78,10 +79,15 @@ export class RunLauncher {
     private readonly runExecutor?: RunExecutor,
     private readonly runQueueRegistry?: RunQueueRegistry,
   ) {
-    if (!mcpConfigWriter) throw new Error('RunLauncher: missing required collaborator mcpConfigWriter');
-    if (!orchSocketProvider) throw new Error('RunLauncher: missing required collaborator orchSocketProvider');
-    if (!bridgeScriptResolver) throw new Error('RunLauncher: missing required collaborator bridgeScriptResolver');
-    if (!nodeResolver) throw new Error('RunLauncher: missing required collaborator nodeResolver');
+    // Legacy-bridge collaborators are required only when no runExecutor is
+    // supplied.  Under the SDK substrate, the PreToolUse hook gates permissions
+    // in-process; the MCP permission-bridge file (writeForRun) is skipped.
+    if (!runExecutor) {
+      if (!mcpConfigWriter) throw new Error('RunLauncher: missing required collaborator mcpConfigWriter');
+      if (!orchSocketProvider) throw new Error('RunLauncher: missing required collaborator orchSocketProvider');
+      if (!bridgeScriptResolver) throw new Error('RunLauncher: missing required collaborator bridgeScriptResolver');
+      if (!nodeResolver) throw new Error('RunLauncher: missing required collaborator nodeResolver');
+    }
   }
 
   /**
@@ -113,14 +119,19 @@ export class RunLauncher {
 
       // Write the per-run .mcp.json into the worktree so Claude can discover
       // the cyboflow-permissions bridge.
-      const nodeExecutablePath = await this.nodeResolver.getNodePath();
-      await this.mcpConfigWriter.writeForRun({
-        runId,
-        worktreePath,
-        orchSocketPath: this.orchSocketProvider.getSocketPath(),
-        bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
-        nodeExecutablePath,
-      });
+      // Skipped when runExecutor is wired: the SDK substrate gates permissions
+      // via PreToolUse in-process; the legacy Unix-socket bridge file is dead
+      // code on every SDK-driven launch.
+      if (!this.runExecutor) {
+        const nodeExecutablePath = await this.nodeResolver.getNodePath();
+        await this.mcpConfigWriter.writeForRun({
+          runId,
+          worktreePath,
+          orchSocketPath: this.orchSocketProvider.getSocketPath(),
+          bridgeScriptPath: this.bridgeScriptResolver.getScriptPath(),
+          nodeExecutablePath,
+        });
+      }
 
       this.db
         .prepare(

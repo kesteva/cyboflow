@@ -37,6 +37,15 @@ import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
+import { RunExecutor } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike, LifecycleTransitionsLike } from './orchestrator/runExecutor';
+import {
+  transitionToRunning,
+  transitionToCompleted,
+  transitionToFailed,
+  transitionToCanceled,
+} from './services/cyboflow/transitions';
+import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
@@ -589,6 +598,45 @@ async function initializeServices() {
     getNodePath: async () => process.execPath,
   };
 
+  // Concrete WorkflowPromptReaderLike adapter — delegates to readWorkflowPrompt()
+  // while keeping RunExecutor free of direct fs/concrete-module imports.
+  const promptReader = { read: (workflowPath: string) => readWorkflowPrompt(workflowPath) };
+
+  // ClaudeSpawnerLike adapter — wraps defaultCliManager so RunExecutor can call
+  // spawnCliProcess() and abort() via the narrow interface without importing the
+  // concrete class directly.  ClaudeCodeManager.spawnCliProcess() accepts a
+  // ClaudeSpawnOptions superset of ClaudeSpawnerOptions; abort delegates to
+  // killProcess() which performs the SDK abort + cleanup.
+  const spawnerAdapter: ClaudeSpawnerLike = {
+    spawnCliProcess: defaultCliManager.spawnCliProcess.bind(defaultCliManager),
+    abort: defaultCliManager.killProcess.bind(defaultCliManager),
+  };
+
+  // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
+  // delegating to the transitionTo* helpers at the index.ts boundary.
+  const rawDb = databaseService.getDb();
+  const lifecycleTransitions: LifecycleTransitionsLike = {
+    running: (runId) => transitionToRunning(rawDb, { runId }),
+    completed: (runId, fromStatus) => transitionToCompleted(rawDb, { runId, fromStatus }),
+    failed: (runId, fromStatus, errorMessage) =>
+      transitionToFailed(rawDb, { runId, fromStatus, errorMessage }),
+    canceled: (runId) => transitionToCanceled(rawDb, { runId }),
+  };
+
+  // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
+  // LifecycleTransitions adapter, streaming publisher + db for event bridging, and
+  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output').
+  const runExecutor = new RunExecutor(
+    spawnerAdapter,
+    workflowRegistry,
+    cyboflowLogger,
+    promptReader,
+    lifecycleTransitions,
+    cyboflowPublisher,
+    rawDb,
+    defaultCliManager,
+  );
+
   const runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
@@ -599,6 +647,7 @@ async function initializeServices() {
     bridgeScriptResolver,
     nodeResolver,
     cyboflowPublisher,
+    runExecutor,
   );
 
   const services: AppServices = {

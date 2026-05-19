@@ -13,18 +13,31 @@
  *   bridgeEvents(runId, panelId)      — TASK-642 (SDK event bridge)
  *   buildOptionsOverrides(...)        — TASK-643 (permission mode mapper)
  *   onLifecycleTransition(runId, phase) — TASK-644 (run lifecycle transitions)
- *
- * permissionMode type-axis note: WorkflowRow stores 'default' | 'acceptEdits' |
- * 'dontAsk', while ClaudeSpawnOptions.permissionMode is 'approve' | 'ignore'.
- * buildOptionsOverrides() leaves permissionMode undefined until TASK-643 lands.
  */
 
+import { EventEmitter } from 'node:events';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
+import type { PermissionMode } from '../../../shared/types/workflows';
+import { buildPreToolUseHook } from './permissionModeMapper';
+import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
+import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
+import type { StreamEventPublisher } from './runLauncher';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
 // ---------------------------------------------------------------------------
+
+/**
+ * Narrow interface for reading a workflow prompt file.
+ * The real implementation delegates to readWorkflowPrompt(); tests inject a stub.
+ * Synchronous — matches the existing readWorkflowPrompt API.
+ * Throws WorkflowPromptReadError when the file is missing or the body is empty.
+ */
+export interface WorkflowPromptReaderLike {
+  read(workflowPath: string): { prompt: string; systemPromptAppend: string };
+}
 
 /**
  * Options accepted by ClaudeCodeManager.spawnCliProcess (narrow shape).
@@ -35,15 +48,17 @@ export interface ClaudeSpawnerOptions {
   sessionId: string;
   worktreePath: string;
   prompt: string;
-  permissionMode?: 'approve' | 'ignore';
+  preToolUseHook?: HookCallback;
+  systemPromptAppend?: string;
 }
 
 /**
- * Narrow interface for spawning a Claude CLI process.
+ * Narrow interface for spawning and aborting a Claude CLI process.
  * Matches the ClaudeManagerLike pattern in stuckDetector.ts:36.
  */
 export interface ClaudeSpawnerLike {
   spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void>;
+  abort(panelId: string): Promise<void>;
 }
 
 /**
@@ -55,21 +70,77 @@ export interface WorkflowRegistryLike {
   getById(workflowId: string): WorkflowRow | null;
 }
 
+/**
+ * Narrow interface for firing workflow_runs status transitions.
+ * The concrete adapter in main/src/index.ts delegates to the transitionTo*
+ * helpers from services/cyboflow/transitions.ts.  Keeping this interface
+ * here preserves the standalone-typecheck invariant: runExecutor.ts never
+ * imports from main/src/services/*.
+ */
+export interface LifecycleTransitionsLike {
+  running(runId: string): void;
+  completed(runId: string, fromStatus: 'running'): void;
+  failed(runId: string, fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck', errorMessage: string): void;
+  canceled(runId: string): void;
+}
+
 // ---------------------------------------------------------------------------
 // RunExecutor
 // ---------------------------------------------------------------------------
 
 /**
  * Execution phase labels used by onLifecycleTransition.
- * Extended by TASK-644 as more lifecycle phases are introduced.
+ * Covers the full workflow_runs lifecycle.
  */
-export type ExecutionPhase = 'spawning' | 'spawned' | 'error';
+export type ExecutionPhase = 'pre_spawn' | 'post_spawn' | 'sdk_initialized' | 'completed' | 'failed' | 'canceled';
 
 export class RunExecutor {
+  /**
+   * Per-run bridge handles, keyed by runId.
+   * Populated when bridgeEvents() returns a RunEventBridge; disposed by teardownRun().
+   */
+  private readonly bridges: Map<string, { dispose(): void }> = new Map();
+
+  /**
+   * Per-run panelId mapping, keyed by runId.
+   * Stored during execute() so cancel() can look up the panelId to abort.
+   */
+  private readonly activePanelIds: Map<string, string> = new Map();
+
+  /**
+   * Per-run systemPromptAppend values stashed by getPrompt() and consumed by
+   * buildOptionsOverrides(). Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingSystemPromptAppend = new Map<string, string>();
+
+  /**
+   * Per-run error messages stashed in execute()'s catch arm before firing the
+   * 'failed' phase. Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingFailedMessage = new Map<string, string>();
+
+  /**
+   * Per-run fromStatus values for the 'failed' transition, defaulting to 'running'.
+   * Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingFailedFromStatus = new Map<string, 'starting' | 'running' | 'awaiting_review' | 'stuck'>();
+
   constructor(
-    private readonly spawner: ClaudeSpawnerLike,
+    protected readonly spawner: ClaudeSpawnerLike,
     private readonly registry: WorkflowRegistryLike,
-    private readonly logger: LoggerLike,
+    protected readonly logger: LoggerLike,
+    private readonly promptReader?: WorkflowPromptReaderLike,
+    private readonly lifecycleTransitions?: LifecycleTransitionsLike,
+    private readonly publisher?: StreamEventPublisher,
+    private readonly db?: BridgeEventsOptions['db'],
+    /**
+     * Optional EventEmitter source for the event bridge.  In production this is
+     * the concrete AbstractCliManager (which extends EventEmitter and emits
+     * 'output' events).  Injected here so bridgeEvents() does not need to cast
+     * `this.spawner` — the spawner is a plain-object adapter that has no .on().
+     * When absent, bridgeEvents() short-circuits (no bridging, backward-compat).
+     */
+    private readonly source?: EventEmitter,
   ) {}
 
   /**
@@ -80,9 +151,11 @@ export class RunExecutor {
    * 3. Derive synthetic panelId and sessionId from runId.
    * 4. Call getPrompt() to retrieve the prompt (default: throws NOT_IMPLEMENTED).
    * 5. Call buildOptionsOverrides() to get optional spawn-option overrides.
-   * 6. Call bridgeEvents() to wire event forwarding (default: no-op).
-   * 7. Call spawnCliProcess() on the ClaudeSpawnerLike collaborator.
-   * 8. Call onLifecycleTransition() for lifecycle signalling (default: no-op).
+   * 6. Call bridgeEvents() to wire event forwarding; store returned handle.
+   * 7. Call onLifecycleTransition(runId, 'pre_spawn').
+   * 8. Call spawnCliProcess() on the ClaudeSpawnerLike collaborator.
+   * 9. Call onLifecycleTransition(runId, 'post_spawn').
+   * 10. Call teardownRun(runId) in a finally block to dispose the bridge.
    */
   async execute(runId: string): Promise<void> {
     const run = this.registry.getRunById(runId);
@@ -108,31 +181,94 @@ export class RunExecutor {
     const panelId = `run-${runId}`;
     const sessionId = `run-${runId}`;
 
-    const prompt = await this.getPrompt(workflow);
-    const overrides = await this.buildOptionsOverrides(runId, run, workflow);
+    // Store the panelId so cancel() can look it up.
+    this.activePanelIds.set(runId, panelId);
 
-    // Wire event forwarding BEFORE spawning so no SDK-initialization events
-    // are lost — bridgeEvents registers listeners, spawnCliProcess starts the
-    // iterator that emits them.
-    await this.bridgeEvents(runId, panelId);
+    try {
+      const prompt = await this.getPrompt(runId, workflow);
+      const overrides = await this.buildOptionsOverrides(runId, run, workflow);
 
-    await this.onLifecycleTransition(runId, 'spawning');
+      // Wire event forwarding BEFORE spawning so no SDK-initialization events
+      // are lost — bridgeEvents registers listeners, spawnCliProcess starts the
+      // iterator that emits them.
+      const bridgeHandle = await this.bridgeEvents(runId, panelId);
+      if (bridgeHandle) {
+        this.bridges.set(runId, bridgeHandle);
+      }
 
-    this.logger.info('[RunExecutor] spawning Claude CLI process', {
-      runId,
-      panelId,
-      worktreePath: run.worktree_path,
-    });
+      await this.onLifecycleTransition(runId, 'pre_spawn');
 
-    await this.spawner.spawnCliProcess({
-      panelId,
-      sessionId,
-      worktreePath: run.worktree_path,
-      prompt,
-      ...overrides,
-    });
+      this.logger.info('[RunExecutor] spawning Claude CLI process', {
+        runId,
+        panelId,
+        worktreePath: run.worktree_path,
+      });
 
-    await this.onLifecycleTransition(runId, 'spawned');
+      try {
+        await this.spawner.spawnCliProcess({
+          panelId,
+          sessionId,
+          worktreePath: run.worktree_path,
+          prompt,
+          ...overrides,
+        });
+
+        // Iterator drained without error — fire the completed phase.
+        await this.onLifecycleTransition(runId, 'completed');
+      } catch (err) {
+        // Stash the error message so onLifecycleTransition('failed') can pick it up.
+        const message = err instanceof Error ? err.message : String(err);
+        this.pendingFailedMessage.set(runId, message);
+        await this.onLifecycleTransition(runId, 'failed');
+        // Re-throw so the caller's catch (in runLauncher.ts) can log it.
+        throw err;
+      }
+    } finally {
+      this.teardownRun(runId);
+    }
+  }
+
+  /**
+   * Cancel all in-flight runs managed by this executor.
+   *
+   * For each active run:
+   *   1. Look up the panelId. If not present, no-op (idempotent).
+   *   2. Abort the SDK run via spawner.abort(panelId).
+   *   3. Fire onLifecycleTransition(runId, 'canceled') while pending* maps still populated.
+   *   4. Fire teardownRun to dispose the bridge and clean up state.
+   *
+   * In the common single-run-per-executor pattern (used with RunExecutorRegistry),
+   * this cancels exactly the one in-flight run. Double-cancel is idempotent.
+   */
+  async cancel(): Promise<void> {
+    // Snapshot the active runIds so teardownRun deletions don't mutate the iterator.
+    const activeRunIds = Array.from(this.activePanelIds.keys());
+
+    for (const runId of activeRunIds) {
+      const panelId = this.activePanelIds.get(runId);
+      if (!panelId) continue;
+
+      await this.spawner.abort(panelId);
+      await this.onLifecycleTransition(runId, 'canceled');
+      this.teardownRun(runId);
+    }
+  }
+
+  /**
+   * Dispose the bridge handle and remove the panelId for the given runId.
+   * Also clears the stashed systemPromptAppend to prevent leaks across runs.
+   * Safe to call multiple times (idempotent).
+   */
+  private teardownRun(runId: string): void {
+    const bridge = this.bridges.get(runId);
+    if (bridge) {
+      bridge.dispose();
+      this.bridges.delete(runId);
+    }
+    this.activePanelIds.delete(runId);
+    this.pendingSystemPromptAppend.delete(runId);
+    this.pendingFailedMessage.delete(runId);
+    this.pendingFailedFromStatus.delete(runId);
   }
 
   // ---------------------------------------------------------------------------
@@ -142,48 +278,131 @@ export class RunExecutor {
   /**
    * Returns the prompt string to pass to ClaudeCodeManager.spawnCliProcess.
    *
-   * Default implementation throws NOT_IMPLEMENTED so TASK-641 has an obvious
-   * wiring target. Override in a subclass to provide the real prompt.
+   * Default implementation reads the workflow file via the injected
+   * WorkflowPromptReaderLike collaborator and stashes systemPromptAppend for
+   * buildOptionsOverrides().  When no promptReader is injected (e.g. legacy
+   * subclass that overrides getPrompt directly), the subclass override is called
+   * instead via the two-arg form.
+   *
+   * Throws NOT_IMPLEMENTED if neither a reader nor a subclass override is available.
+   *
+   * @param runId    The workflow run ID — used to stash systemPromptAppend.
+   * @param workflow The workflow row containing workflow_path.
    */
-  protected async getPrompt(_workflow: WorkflowRow): Promise<string> {
-    throw new Error('NOT_IMPLEMENTED: getPrompt — TASK-641 must override');
+  protected async getPrompt(runId: string, workflow: WorkflowRow): Promise<string> {
+    if (!this.promptReader) {
+      throw new Error('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected — pass a promptReader to the constructor or override getPrompt in a subclass');
+    }
+    if (!workflow.workflow_path) {
+      throw new Error(`RunExecutor.getPrompt: workflow_path is null for workflowId=${workflow.id}`);
+    }
+    const { prompt, systemPromptAppend } = this.promptReader.read(workflow.workflow_path);
+    this.pendingSystemPromptAppend.set(runId, systemPromptAppend);
+    return Promise.resolve(prompt);
   }
 
   /**
    * Wire event forwarding between the SDK pipeline and the renderer.
-   * Default is a no-op until TASK-642 lands.
+   * Default implementation calls bridgeEventsImpl with onFirstMessage wired to
+   * fire 'sdk_initialized' so the run transitions from 'starting' to 'running'
+   * on the first SDK message.
    *
-   * @param _runId   The workflow run ID.
-   * @param _panelId The synthetic panel ID used by ClaudeCodeManager.
+   * Returns a RunEventBridge handle (or void) that is stored per-run and
+   * disposed when the run terminates or is canceled.
+   *
+   * @param runId   The workflow run ID.
+   * @param _panelId The synthetic panel ID used by ClaudeCodeManager (unused
+   *                 by the bridge which uses runId directly).
    */
-  protected async bridgeEvents(_runId: string, _panelId: string): Promise<void> {
-    // no-op until TASK-642
+  protected async bridgeEvents(runId: string, _panelId: string): Promise<RunEventBridge | void> {
+    if (!this.publisher || !this.db || !this.source) {
+      // No publisher/db/source injected — skip bridging (backward-compat with tests
+      // that construct RunExecutor without them).
+      return;
+    }
+    return bridgeEventsImpl({
+      runId,
+      source: this.source,
+      publisher: this.publisher,
+      db: this.db,
+      logger: this.logger,
+      onFirstMessage: () => this.onLifecycleTransition(runId, 'sdk_initialized'),
+    });
   }
 
   /**
-   * Returns optional overrides for ClaudeSpawnerOptions (e.g. permissionMode).
-   * Default returns an empty object — permissionMode mapping is owned by TASK-643.
+   * Returns optional overrides for ClaudeSpawnerOptions (e.g. preToolUseHook).
+   * Default returns preToolUseHook from buildPreToolUseHook when permission_mode
+   * is set on the workflow; otherwise returns an empty object.
    *
-   * @param _runId    The workflow run ID.
+   * @param runId     The workflow run ID.
    * @param _run      The workflow_runs row.
-   * @param _workflow The workflow row.
+   * @param workflow  The workflow row.
    */
-  protected buildOptionsOverrides(
-    _runId: string,
+  protected async buildOptionsOverrides(
+    runId: string,
     _run: WorkflowRunRow,
-    _workflow: WorkflowRow,
-  ): Partial<ClaudeSpawnerOptions> {
-    return {};
+    workflow: WorkflowRow,
+  ): Promise<Partial<ClaudeSpawnerOptions>> {
+    const systemPromptAppend = this.pendingSystemPromptAppend.get(runId) || undefined;
+    const overrides: Partial<ClaudeSpawnerOptions> = { systemPromptAppend };
+
+    if (workflow.permission_mode) {
+      const hook = buildPreToolUseHook(workflow.permission_mode as PermissionMode, runId, this.logger);
+      if (hook !== undefined) {
+        overrides.preToolUseHook = hook;
+      }
+    }
+
+    return overrides;
   }
 
   /**
-   * Called at key lifecycle transition points (spawning, spawned, error).
-   * Default is a no-op until TASK-644 lands.
+   * Called at key lifecycle transition points.
+   * Routes ExecutionPhase labels to the injected LifecycleTransitionsLike collaborator.
+   * A throwing transition (e.g. TransitionRejectedError from a race with cancel) is
+   * logged at warn level and NOT escalated — the race is expected.
    *
-   * @param _runId  The workflow run ID.
-   * @param _phase  The lifecycle phase label.
+   * Phase routing:
+   *   'sdk_initialized' → lifecycleTransitions.running(runId)
+   *   'completed'       → lifecycleTransitions.completed(runId, 'running')
+   *   'failed'          → lifecycleTransitions.failed(runId, fromStatus, errorMessage)
+   *   'canceled'        → lifecycleTransitions.canceled(runId)
+   *   'pre_spawn' / 'post_spawn' → no-op
+   *
+   * @param runId  The workflow run ID.
+   * @param phase  The lifecycle phase label.
    */
-  protected async onLifecycleTransition(_runId: string, _phase: ExecutionPhase): Promise<void> {
-    // no-op until TASK-644
+  protected async onLifecycleTransition(runId: string, phase: ExecutionPhase): Promise<void> {
+    if (!this.lifecycleTransitions) return;
+    try {
+      switch (phase) {
+        case 'sdk_initialized':
+          await this.lifecycleTransitions.running(runId);
+          break;
+        case 'completed':
+          await this.lifecycleTransitions.completed(runId, 'running');
+          break;
+        case 'failed': {
+          const fromStatus = this.pendingFailedFromStatus.get(runId) ?? 'running';
+          const errorMessage = this.pendingFailedMessage.get(runId) ?? 'unknown error';
+          await this.lifecycleTransitions.failed(runId, fromStatus, errorMessage);
+          break;
+        }
+        case 'canceled':
+          await this.lifecycleTransitions.canceled(runId);
+          break;
+        case 'pre_spawn':
+        case 'post_spawn':
+          // no-op
+          return;
+      }
+    } catch (err) {
+      this.logger.warn('[RunExecutor] lifecycle transition rejected (expected race)', {
+        runId,
+        phase,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }

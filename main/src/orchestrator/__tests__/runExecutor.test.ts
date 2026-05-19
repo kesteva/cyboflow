@@ -18,7 +18,7 @@ import { randomUUID } from 'crypto';
 import { join } from 'path';
 import Database from 'better-sqlite3';
 import { RunExecutor } from '../runExecutor';
-import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions } from '../runExecutor';
+import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike } from '../runExecutor';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
 import type {
@@ -52,6 +52,7 @@ function makeLogger(): LoggerLike {
 function makeSpawner(): ClaudeSpawnerLike {
   return {
     spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockResolvedValue(undefined),
+    abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
   };
 }
 
@@ -88,7 +89,7 @@ function makeWorkflowRunRow(overrides?: Partial<WorkflowRunRow>): WorkflowRunRow
  * prompt, so execute() can complete without hitting NOT_IMPLEMENTED.
  */
 class TestableRunExecutor extends RunExecutor {
-  protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+  protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
     return 'test prompt';
   }
 }
@@ -154,17 +155,17 @@ describe('RunExecutor.execute — missing rows', () => {
 });
 
 describe('RunExecutor.execute — default getPrompt sentinel', () => {
-  it('(d) default getPrompt throws NOT_IMPLEMENTED', async () => {
+  it('(d) default getPrompt throws NOT_IMPLEMENTED when no promptReader injected', async () => {
     const run = makeWorkflowRunRow();
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    // Use base RunExecutor (no getPrompt override) to confirm sentinel
+    // Use base RunExecutor with no promptReader — confirms sentinel still fires
     const executor = new RunExecutor(makeSpawner(), registry, makeLogger());
 
-    await expect(executor.execute(run.id)).rejects.toThrow('NOT_IMPLEMENTED: getPrompt');
+    await expect(executor.execute(run.id)).rejects.toThrow('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected');
   });
 });
 
@@ -208,7 +209,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () 
     const callOrder: string[] = [];
 
     class OrderTrackingExecutor extends RunExecutor {
-      protected override async getPrompt(_workflow: WorkflowRow): Promise<string> {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
         return 'order-tracking prompt';
       }
 
@@ -233,6 +234,597 @@ describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () 
     expect(callOrder).toContain('spawnCliProcess');
     // bridgeEvents must appear before spawnCliProcess
     expect(callOrder.indexOf('bridgeEvents')).toBeLessThan(callOrder.indexOf('spawnCliProcess'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-650: New tests for cancel surface, bridge handle, ExecutionPhase,
+// and preToolUseHook threading.
+// ---------------------------------------------------------------------------
+
+import type { RunEventBridge } from '../runEventBridge';
+
+describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fires dispose', () => {
+  it('(i) execute() stores a real RunEventBridge handle and disposes it on completion (teardownRun via finally)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+
+    await executor.execute(run.id);
+
+    // After execute() completes, teardownRun should have called dispose() once.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
+  it('(ii) cancel() calls spawner.abort with synthetic panelId AND fires bridge.dispose()', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    // Latch to control when spawnCliProcess resolves — so cancel() runs while execute() is in-flight.
+    let resolveSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await spawnBlocked;
+    });
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+
+    // Start execute() in background — it blocks on spawnCliProcess.
+    const executePromise = executor.execute(run.id);
+
+    // Give microtasks a chance to register the panelId in activePanelIds
+    // (bridgeEvents and panelId storage run before spawnCliProcess).
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cancel while execute() is still blocked.
+    await executor.cancel();
+
+    // Verify abort was called with the synthetic panelId.
+    expect(spawner.abort).toHaveBeenCalledOnce();
+    expect(spawner.abort).toHaveBeenCalledWith(`run-${run.id}`);
+
+    // Verify bridge.dispose() was called by cancel() via teardownRun.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+
+    // Unblock execute() so it can finish (it may throw because abort was called).
+    resolveSpawn();
+    // We don't care about execute()'s final state — cancel already cleaned up.
+    await executePromise.catch(() => {});
+  });
+
+  it('(ii-b) double-cancel is idempotent — abort called once, dispose called once', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    let resolveSpawn!: () => void;
+    const spawnBlocked = new Promise<void>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      await spawnBlocked;
+    });
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executePromise = executor.execute(run.id);
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cancel twice.
+    await executor.cancel();
+    await executor.cancel(); // second cancel — no-op
+
+    expect(spawner.abort).toHaveBeenCalledOnce();
+    expect(disposeSpy).toHaveBeenCalledOnce();
+
+    resolveSpawn();
+    await executePromise.catch(() => {});
+  });
+});
+
+describe('RunExecutor.execute — terminal phase triggers teardownRun via finally', () => {
+  it('(iii) bridge.dispose() fires when execute() completes normally (finally arm)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('(iii-b) bridge.dispose() fires even when spawnCliProcess throws (finally arm on error path)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('spawn failed'));
+
+    const disposeSpy = vi.fn();
+    const fakeBridge: RunEventBridge = { dispose: disposeSpy };
+
+    class BridgeReturningExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
+        return fakeBridge;
+      }
+    }
+
+    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    await expect(executor.execute(run.id)).rejects.toThrow('spawn failed');
+
+    // Despite the error, dispose() must have been called.
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () => {
+  it('(iv) returns { preToolUseHook } when workflow.permission_mode is "default"', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'default' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    // The spawner should have been called with a preToolUseHook function.
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(typeof capturedOverrides!.preToolUseHook).toBe('function');
+  });
+
+  it('(iv-b) returns {} (no preToolUseHook) when permission_mode is "dontAsk"', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'dontAsk' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    await executor.execute(run.id);
+
+    // For 'dontAsk', buildPreToolUseHook returns undefined so no hook is set.
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.preToolUseHook).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-661: New tests for WorkflowPromptReaderLike wiring and systemPromptAppend
+// ---------------------------------------------------------------------------
+
+/** Stub reader backed by an in-memory map for unit tests. */
+function makeStubReader(entries: Record<string, { prompt: string; systemPromptAppend: string }>): WorkflowPromptReaderLike {
+  return {
+    read: (workflowPath: string) => {
+      const entry = entries[workflowPath];
+      if (!entry) {
+        const err = new Error(`WorkflowPromptReadError: no entry for ${workflowPath}`);
+        err.name = 'WorkflowPromptReadError';
+        throw err;
+      }
+      return entry;
+    },
+  };
+}
+
+describe('RunExecutor — getPrompt reads workflow file via injected reader', () => {
+  it('getPrompt reads workflow file via injected reader', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: '' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.prompt).toBe('do the sprint');
+  });
+
+  it('getPrompt throws WorkflowPromptReadError when file is missing — error bubbles up from execute()', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/missing/file.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const reader = makeStubReader({}); // empty — will throw on any read
+    const executor = new RunExecutor(makeSpawner(), registry, makeLogger(), reader);
+
+    await expect(executor.execute(run.id)).rejects.toThrow('WorkflowPromptReadError');
+  });
+
+  it('buildOptionsOverrides includes systemPromptAppend from frontmatter', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md', permission_mode: 'dontAsk' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: 'always use TypeScript' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.systemPromptAppend).toBe('always use TypeScript');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-662: Lifecycle transition tests
+// ---------------------------------------------------------------------------
+
+import { EventEmitter } from 'node:events';
+import type { LifecycleTransitionsLike } from '../runExecutor';
+
+function makeLifecycleTransitions(): { mock: LifecycleTransitionsLike } & {
+  running: ReturnType<typeof vi.fn>;
+  completed: ReturnType<typeof vi.fn>;
+  failed: ReturnType<typeof vi.fn>;
+  canceled: ReturnType<typeof vi.fn>;
+} {
+  const running = vi.fn<(runId: string) => void>();
+  const completed = vi.fn<(runId: string, fromStatus: 'running') => void>();
+  const failed = vi.fn<(runId: string, fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck', errorMessage: string) => void>();
+  const canceled = vi.fn<(runId: string) => void>();
+  const mock: LifecycleTransitionsLike = { running, completed, failed, canceled };
+  return { mock, running, completed, failed, canceled };
+}
+
+describe('lifecycle transitions', () => {
+  // -------------------------------------------------------------------------
+  // (i) onLifecycleTransition routes each phase to the right transition helper
+  // -------------------------------------------------------------------------
+  it('onLifecycleTransition routes each phase to the right transition helper', async () => {
+    const { mock: lt, running, completed, failed, canceled } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    // Use base RunExecutor with lifecycleTransitions injected.
+    // We access onLifecycleTransition via a subclass for testing.
+    class LifecycleTestExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      // Expose the protected method for testing.
+      public async testLifecycleTransition(runId: string, phase: import('../runExecutor').ExecutionPhase): Promise<void> {
+        return this.onLifecycleTransition(runId, phase);
+      }
+    }
+
+    const executor = new LifecycleTestExecutor(makeSpawner(), registry, makeLogger(), undefined, lt);
+
+    await executor.testLifecycleTransition(run.id, 'sdk_initialized');
+    expect(running).toHaveBeenCalledOnce();
+    expect(running).toHaveBeenCalledWith(run.id);
+
+    await executor.testLifecycleTransition(run.id, 'completed');
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+
+    await executor.testLifecycleTransition(run.id, 'canceled');
+    expect(canceled).toHaveBeenCalledOnce();
+    expect(canceled).toHaveBeenCalledWith(run.id);
+
+    // pre_spawn / post_spawn are no-ops — nothing extra called.
+    await executor.testLifecycleTransition(run.id, 'pre_spawn');
+    await executor.testLifecycleTransition(run.id, 'post_spawn');
+    expect(running).toHaveBeenCalledOnce(); // still only once
+    expect(completed).toHaveBeenCalledOnce();
+  });
+
+  // -------------------------------------------------------------------------
+  // (ii) execute() fires completed phase on normal terminate
+  // -------------------------------------------------------------------------
+  it('execute() fires completed phase on normal terminate', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner(); // resolves successfully
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    await executor.execute(run.id);
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+  });
+
+  // -------------------------------------------------------------------------
+  // (iii) execute() fires failed phase with error message on spawner reject
+  // -------------------------------------------------------------------------
+  it('execute() fires failed phase with error message on spawner reject', async () => {
+    const { mock: lt, failed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('SDK spawn failed with exit code 1'),
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    await expect(executor.execute(run.id)).rejects.toThrow('SDK spawn failed with exit code 1');
+
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed).toHaveBeenCalledWith(run.id, 'running', 'SDK spawn failed with exit code 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-662 follow-up: source EventEmitter arg wires onFirstMessage → running()
+// ---------------------------------------------------------------------------
+
+const RAW_EVENTS_DDL_EXEC = `
+  CREATE TABLE IF NOT EXISTS raw_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`;
+
+/**
+ * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
+ * (panelId must equal runId; type must be 'json').
+ */
+function emitOutputEvent(source: EventEmitter, runId: string, data: unknown): void {
+  source.emit('output', {
+    panelId: runId,
+    sessionId: `run-${runId}`,
+    type: 'json',
+    data,
+    timestamp: new Date(),
+  });
+}
+
+describe('RunExecutor.bridgeEvents — source arg integration', () => {
+  /**
+   * End-to-end wire test: when a real `source` EventEmitter is injected along
+   * with publisher/db/lifecycleTransitions, an 'output' event on the source
+   * flows through bridgeEventsImpl → onFirstMessage →
+   * onLifecycleTransition('sdk_initialized') → lifecycleTransitions.running().
+   *
+   * This pins the fix introduced in the follow-up commit (9539688) which replaced
+   * `this.spawner as unknown as EventEmitter` with `this.source` — ensuring the
+   * real EventEmitter is used rather than the spawner adapter.
+   */
+  it('source arg: lifecycleTransitions.running() fires when source emits output event', async () => {
+    const { mock: lt, running, completed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+
+    // Use a real in-memory DB so bridgeEventsImpl can INSERT raw_events rows.
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = OFF');
+    db.exec(RAW_EVENTS_DDL_EXEC);
+
+    // The publisher collects envelopes — presence confirms the bridge fired.
+    const publishedTypes: string[] = [];
+    const publisher: StreamEventPublisher = {
+      publish(_runId, envelope) {
+        publishedTypes.push((envelope as { type: string }).type);
+      },
+    };
+
+    // source is the EventEmitter that will carry 'output' events.
+    const source = new EventEmitter();
+
+    // Inject source as the 8th constructor arg.
+    const executor = new TestableRunExecutor(
+      spawner,
+      registry,
+      makeLogger(),
+      undefined,
+      lt,
+      publisher,
+      db,
+      source,
+    );
+
+    // spawnCliProcess emits one output event on the source to simulate the SDK
+    // delivering its first message, then resolves normally.
+    // The bridge filters on panelId === runId (the bare UUID, not the synthetic
+    // "run-<uuid>" prefix used by ClaudeCodeManager's own panelId).
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      emitOutputEvent(source, run.id, {
+        type: 'system',
+        subtype: 'init',
+        session_id: 'sess-test',
+        cwd: '/tmp',
+        model: 'claude-opus',
+        tools: [],
+        mcp_servers: [],
+        permissionMode: 'default',
+      });
+    });
+
+    await executor.execute(run.id);
+
+    // The bridge must have forwarded the event to the publisher.
+    expect(publishedTypes).toContain('system');
+
+    // onFirstMessage must have fired exactly once, driving 'sdk_initialized' → running().
+    expect(running).toHaveBeenCalledOnce();
+    expect(running).toHaveBeenCalledWith(run.id);
+
+    // execute() completed normally → completed() fires too.
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+  });
+
+  /**
+   * Backward-compat: when source is absent, bridgeEvents() short-circuits and
+   * running() is NOT called (the bridge is not wired).
+   */
+  it('source absent: bridgeEvents short-circuits; running() is not called', async () => {
+    const { mock: lt, running } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = OFF');
+    db.exec(RAW_EVENTS_DDL_EXEC);
+    const publisher: StreamEventPublisher = { publish: vi.fn() };
+
+    // No source — 8th arg omitted.
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeLogger(),
+      undefined,
+      lt,
+      publisher,
+      db,
+      // source intentionally absent
+    );
+
+    await executor.execute(run.id);
+
+    // running() must NOT have been called because bridgeEvents short-circuited.
+    expect(running).not.toHaveBeenCalled();
   });
 });
 
@@ -317,6 +909,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockImplementation(async () => {
           callOrder.push('spawnCliProcess');
         }),
+        abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
       };
 
       const runQueueRegistry = new RunQueueRegistry();
@@ -420,6 +1013,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockImplementation(async () => {
           executeCalled = true;
         }),
+        abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
       };
 
       const runQueueRegistry = new RunQueueRegistry();
