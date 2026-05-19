@@ -12,6 +12,20 @@ export type WorkflowRunStatus =
   | 'failed'
   | 'canceled';
 
+/**
+ * Terminal workflow_runs statuses — runs in these states cannot transition
+ * further. Used by every cancel/finalize path that needs to reject re-entry.
+ *
+ * The SQL literal is derived from the array so a future status addition is
+ * a single edit. Both `services/cyboflow/*` and `orchestrator/trpc/routers/*`
+ * import from this module, so this constant is the canonical source.
+ */
+export const TERMINAL_RUN_STATUSES = ['canceled', 'failed', 'completed'] as const;
+export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number];
+export const TERMINAL_RUN_STATUSES_SQL_IN = `('${TERMINAL_RUN_STATUSES.join(
+  "','",
+)}')`;
+
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'timed_out';
 
 export interface WorkflowRow {

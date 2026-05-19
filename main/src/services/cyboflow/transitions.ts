@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ApprovalStatus, WorkflowRunStatus } from '../../../../shared/types/cyboflow';
+import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../shared/types/cyboflow';
 import { assertTransitionAllowed } from './stateMachine';
 
 /**
@@ -210,7 +211,7 @@ export function transitionToCanceled(
   const result = db.prepare(
     `UPDATE workflow_runs
         SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE id = @runId AND status NOT IN ('canceled', 'failed', 'completed')`,
+      WHERE id = @runId AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
   ).run({ runId: params.runId });
   if (result.changes === 0) {
     throw new TransitionRejectedError(
