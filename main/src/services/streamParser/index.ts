@@ -12,4 +12,5 @@ export { TypedEventNarrowing } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
 export { RawEventsSink } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
+export { deriveEventType } from './derivers';
 export type { ILogger } from './types';

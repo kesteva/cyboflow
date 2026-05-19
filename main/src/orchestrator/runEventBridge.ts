@@ -20,6 +20,7 @@
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../services/streamParser';
+import { deriveEventType } from '../services/streamParser/derivers';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { StreamEventPublisher } from './runLauncher';
 import type { LoggerLike } from './types';
@@ -82,16 +83,9 @@ interface StreamEnvelope {
   timestamp: string;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: derive the envelope type string from a narrowed event
-// ---------------------------------------------------------------------------
-
-function deriveEnvelopeType(event: ClaudeStreamEvent): string {
-  if ('kind' in event && event.kind === '__unknown__') {
-    return 'unknown';
-  }
-  return (event as { type: string }).type;
-}
+// Re-exported as deriveEnvelopeType for local readability — same mapping as
+// RawEventsSink uses for the event_type storage column.
+const deriveEnvelopeType = deriveEventType;
 
 // ---------------------------------------------------------------------------
 // Main export
