@@ -1,7 +1,7 @@
 ---
 id: TASK-652
 idea: IDEA-018
-status: ready
+status: in-flight
 created: "2026-05-18T17:45:00Z"
 files_owned:
   - main/src/orchestrator/markdownFrontmatter.ts
@@ -16,15 +16,15 @@ files_readonly:
 acceptance_criteria:
   - criterion: "New file main/src/orchestrator/markdownFrontmatter.ts exports `parseMarkdownFrontmatter(md: string): { frontmatter: Record<string, string>; body: string }`."
     verification: "grep -nE '^export function parseMarkdownFrontmatter' main/src/orchestrator/markdownFrontmatter.ts returns one match; signature matches the documented contract."
-  - criterion: "workflowPromptReader.splitFrontmatter is replaced by a call to parseMarkdownFrontmatter (function is deleted from workflowPromptReader.ts)."
+  - criterion: workflowPromptReader.splitFrontmatter is replaced by a call to parseMarkdownFrontmatter (function is deleted from workflowPromptReader.ts).
     verification: "grep -n 'function splitFrontmatter' main/src/orchestrator/workflowPromptReader.ts returns zero matches; grep -n 'parseMarkdownFrontmatter' main/src/orchestrator/workflowPromptReader.ts returns at least one match."
-  - criterion: "WorkflowRegistry.parseFrontmatter is replaced by a call to parseMarkdownFrontmatter; the local quote-stripping logic is removed since the helper owns it."
+  - criterion: WorkflowRegistry.parseFrontmatter is replaced by a call to parseMarkdownFrontmatter; the local quote-stripping logic is removed since the helper owns it.
     verification: "grep -n 'parseFrontmatter' main/src/orchestrator/workflowRegistry.ts shows only call-site references (no local definition); grep -n 'parseMarkdownFrontmatter' main/src/orchestrator/workflowRegistry.ts returns at least one match."
   - criterion: "All existing tests pass: workflowPromptReader.test.ts (9 cases) and workflowRegistry.test.ts (existing N cases) stay green without modification."
-    verification: "pnpm --filter cyboflow-main test -- workflowPromptReader workflowRegistry exit 0."
+    verification: pnpm --filter cyboflow-main test -- workflowPromptReader workflowRegistry exit 0.
   - criterion: "New test file main/src/orchestrator/__tests__/markdownFrontmatter.test.ts covers 6 cases: (a) standard LF frontmatter, (b) CRLF frontmatter, (c) single-quoted value strip, (d) double-quoted value strip, (e) `---` sequence inside body not treated as second delimiter, (f) missing frontmatter returns full body + empty record."
     verification: "test -f main/src/orchestrator/__tests__/markdownFrontmatter.test.ts; pnpm --filter cyboflow-main test -- markdownFrontmatter reports >= 6 passing cases."
-  - criterion: "Typecheck and lint stay clean."
+  - criterion: Typecheck and lint stay clean.
     verification: "pnpm typecheck && pnpm lint exit 0."
 depends_on:
   - TASK-640
@@ -33,21 +33,21 @@ estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "Pure-extraction refactor with two callers and known boundary-condition divergence (the body-slice trailing-newline handling differs today). Each parse boundary needs a unit test on the new helper; the two existing test suites become regression coverage for the wiring."
+  justification: Pure-extraction refactor with two callers and known boundary-condition divergence (the body-slice trailing-newline handling differs today). Each parse boundary needs a unit test on the new helper; the two existing test suites become regression coverage for the wiring.
   targets:
-    - behavior: "Standard LF frontmatter — `---\\nkey: value\\n---\\nbody.` returns frontmatter={key:'value'} and body='body.' (no trim — caller decides)."
+    - behavior: "Standard LF frontmatter — `---\nkey: value\n---\nbody.` returns frontmatter={key:'value'} and body='body.' (no trim — caller decides)."
       test_file: main/src/orchestrator/__tests__/markdownFrontmatter.test.ts
       type: unit
-    - behavior: "CRLF frontmatter — `---\\r\\nkey: value\\r\\n---\\r\\nbody.` returns the same shape as the LF case."
+    - behavior: "CRLF frontmatter — `---\\r\nkey: value\\r\n---\\r\nbody.` returns the same shape as the LF case."
       test_file: main/src/orchestrator/__tests__/markdownFrontmatter.test.ts
       type: unit
-    - behavior: "Quote stripping — both single-quoted and double-quoted values have their wrapping quotes removed."
+    - behavior: Quote stripping — both single-quoted and double-quoted values have their wrapping quotes removed.
       test_file: main/src/orchestrator/__tests__/markdownFrontmatter.test.ts
       type: unit
     - behavior: "`---` inside body — the frontmatter regex is anchored to start-of-file; a `---` horizontal rule inside the body is preserved in the returned body string."
       test_file: main/src/orchestrator/__tests__/markdownFrontmatter.test.ts
       type: unit
-    - behavior: "Missing frontmatter — file without any `---` delimiter returns the full content as body and empty frontmatter record."
+    - behavior: Missing frontmatter — file without any `---` delimiter returns the full content as body and empty frontmatter record.
       test_file: main/src/orchestrator/__tests__/markdownFrontmatter.test.ts
       type: unit
     - behavior: "Multi-key frontmatter — three key:value lines all extract into the record; ordering is preserved (insertion order)."
