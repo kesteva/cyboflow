@@ -20,7 +20,9 @@ import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { buildPreToolUseHook } from './permissionModeMapper';
-import type { RunEventBridge } from './runEventBridge';
+import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
+import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
+import type { StreamEventPublisher } from './runLauncher';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -67,6 +69,20 @@ export interface WorkflowRegistryLike {
   getById(workflowId: string): WorkflowRow | null;
 }
 
+/**
+ * Narrow interface for firing workflow_runs status transitions.
+ * The concrete adapter in main/src/index.ts delegates to the transitionTo*
+ * helpers from services/cyboflow/transitions.ts.  Keeping this interface
+ * here preserves the standalone-typecheck invariant: runExecutor.ts never
+ * imports from main/src/services/*.
+ */
+export interface LifecycleTransitionsLike {
+  running(runId: string): void;
+  completed(runId: string, fromStatus: 'running'): void;
+  failed(runId: string, fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck', errorMessage: string): void;
+  canceled(runId: string): void;
+}
+
 // ---------------------------------------------------------------------------
 // RunExecutor
 // ---------------------------------------------------------------------------
@@ -96,11 +112,26 @@ export class RunExecutor {
    */
   private pendingSystemPromptAppend = new Map<string, string>();
 
+  /**
+   * Per-run error messages stashed in execute()'s catch arm before firing the
+   * 'failed' phase. Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingFailedMessage = new Map<string, string>();
+
+  /**
+   * Per-run fromStatus values for the 'failed' transition, defaulting to 'running'.
+   * Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingFailedFromStatus = new Map<string, 'starting' | 'running' | 'awaiting_review' | 'stuck'>();
+
   constructor(
     protected readonly spawner: ClaudeSpawnerLike,
     private readonly registry: WorkflowRegistryLike,
     protected readonly logger: LoggerLike,
     private readonly promptReader?: WorkflowPromptReaderLike,
+    private readonly lifecycleTransitions?: LifecycleTransitionsLike,
+    private readonly publisher?: StreamEventPublisher,
+    private readonly db?: BridgeEventsOptions['db'],
   ) {}
 
   /**
@@ -164,15 +195,25 @@ export class RunExecutor {
         worktreePath: run.worktree_path,
       });
 
-      await this.spawner.spawnCliProcess({
-        panelId,
-        sessionId,
-        worktreePath: run.worktree_path,
-        prompt,
-        ...overrides,
-      });
+      try {
+        await this.spawner.spawnCliProcess({
+          panelId,
+          sessionId,
+          worktreePath: run.worktree_path,
+          prompt,
+          ...overrides,
+        });
 
-      await this.onLifecycleTransition(runId, 'post_spawn');
+        // Iterator drained without error — fire the completed phase.
+        await this.onLifecycleTransition(runId, 'completed');
+      } catch (err) {
+        // Stash the error message so onLifecycleTransition('failed') can pick it up.
+        const message = err instanceof Error ? err.message : String(err);
+        this.pendingFailedMessage.set(runId, message);
+        await this.onLifecycleTransition(runId, 'failed');
+        // Re-throw so the caller's catch (in runLauncher.ts) can log it.
+        throw err;
+      }
     } finally {
       this.teardownRun(runId);
     }
@@ -217,6 +258,8 @@ export class RunExecutor {
     }
     this.activePanelIds.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
+    this.pendingFailedMessage.delete(runId);
+    this.pendingFailedFromStatus.delete(runId);
   }
 
   // ---------------------------------------------------------------------------
@@ -251,16 +294,31 @@ export class RunExecutor {
 
   /**
    * Wire event forwarding between the SDK pipeline and the renderer.
-   * Default is a no-op until TASK-642 lands.
+   * Default implementation calls bridgeEventsImpl with onFirstMessage wired to
+   * fire 'sdk_initialized' so the run transitions from 'starting' to 'running'
+   * on the first SDK message.
    *
    * Returns a RunEventBridge handle (or void) that is stored per-run and
    * disposed when the run terminates or is canceled.
    *
-   * @param _runId   The workflow run ID.
-   * @param _panelId The synthetic panel ID used by ClaudeCodeManager.
+   * @param runId   The workflow run ID.
+   * @param _panelId The synthetic panel ID used by ClaudeCodeManager (unused
+   *                 by the bridge which uses runId directly).
    */
-  protected async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge | void> {
-    // no-op until TASK-642
+  protected async bridgeEvents(runId: string, _panelId: string): Promise<RunEventBridge | void> {
+    if (!this.publisher || !this.db) {
+      // No publisher/db injected — skip bridging (backward-compat with tests
+      // that construct RunExecutor without them).
+      return;
+    }
+    return bridgeEventsImpl({
+      runId,
+      source: this.spawner as unknown as Parameters<typeof bridgeEventsImpl>[0]['source'],
+      publisher: this.publisher,
+      db: this.db,
+      logger: this.logger,
+      onFirstMessage: () => this.onLifecycleTransition(runId, 'sdk_initialized'),
+    });
   }
 
   /**
@@ -292,12 +350,50 @@ export class RunExecutor {
 
   /**
    * Called at key lifecycle transition points.
-   * Default is a no-op until TASK-644 lands.
+   * Routes ExecutionPhase labels to the injected LifecycleTransitionsLike collaborator.
+   * A throwing transition (e.g. TransitionRejectedError from a race with cancel) is
+   * logged at warn level and NOT escalated — the race is expected.
    *
-   * @param _runId  The workflow run ID.
-   * @param _phase  The lifecycle phase label.
+   * Phase routing:
+   *   'sdk_initialized' → lifecycleTransitions.running(runId)
+   *   'completed'       → lifecycleTransitions.completed(runId, 'running')
+   *   'failed'          → lifecycleTransitions.failed(runId, fromStatus, errorMessage)
+   *   'canceled'        → lifecycleTransitions.canceled(runId)
+   *   'pre_spawn' / 'post_spawn' → no-op
+   *
+   * @param runId  The workflow run ID.
+   * @param phase  The lifecycle phase label.
    */
-  protected async onLifecycleTransition(_runId: string, _phase: ExecutionPhase): Promise<void> {
-    // no-op until TASK-644
+  protected async onLifecycleTransition(runId: string, phase: ExecutionPhase): Promise<void> {
+    if (!this.lifecycleTransitions) return;
+    try {
+      switch (phase) {
+        case 'sdk_initialized':
+          await this.lifecycleTransitions.running(runId);
+          break;
+        case 'completed':
+          await this.lifecycleTransitions.completed(runId, 'running');
+          break;
+        case 'failed': {
+          const fromStatus = this.pendingFailedFromStatus.get(runId) ?? 'running';
+          const errorMessage = this.pendingFailedMessage.get(runId) ?? 'unknown error';
+          await this.lifecycleTransitions.failed(runId, fromStatus, errorMessage);
+          break;
+        }
+        case 'canceled':
+          await this.lifecycleTransitions.canceled(runId);
+          break;
+        case 'pre_spawn':
+        case 'post_spawn':
+          // no-op
+          return;
+      }
+    } catch (err) {
+      this.logger.warn('[RunExecutor] lifecycle transition rejected (expected race)', {
+        runId,
+        phase,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
