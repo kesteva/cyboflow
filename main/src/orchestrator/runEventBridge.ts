@@ -55,6 +55,13 @@ export interface BridgeEventsOptions {
    * If omitted, a new TypedEventNarrowing is created internally.
    */
   narrowing?: TypedEventNarrowing;
+  /**
+   * Optional single-shot callback fired on the first narrowed JSON output event.
+   * Fires AFTER INSERT + publish complete so the running transition cannot race
+   * ahead of event delivery.  Fail-soft: a throwing callback is logged at warn
+   * level and does not affect the rest of the pipeline.
+   */
+  onFirstMessage?: (firstTyped: ClaudeStreamEvent) => void;
 }
 
 export interface RunEventBridge {
@@ -117,6 +124,9 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
 
   // Idempotent-dispose guard.
   let disposed = false;
+
+  // Single-shot guard for onFirstMessage.
+  let firstMessageFired = false;
 
   // Attach the sink to the router so emitForRun triggers INSERT synchronously.
   sink.attachToRouter(router, runId);
@@ -183,6 +193,20 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
         runId,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // Step 4: Fire onFirstMessage exactly once, AFTER INSERT + publish complete.
+    // This ordering ensures the running transition cannot race ahead of event delivery.
+    if (!firstMessageFired && opts.onFirstMessage) {
+      firstMessageFired = true;
+      try {
+        opts.onFirstMessage(typed);
+      } catch (err) {
+        logger?.warn('[runEventBridge] onFirstMessage threw', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   };
 
