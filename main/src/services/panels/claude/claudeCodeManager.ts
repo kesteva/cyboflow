@@ -497,6 +497,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
             }
           };
         }
+        // A deny may originate from clearPendingForRun() when the run is
+        // terminated mid-approval (e.g., user cancels the run while awaiting a
+        // PreToolUse decision). In that case decision.message will be
+        // 'Run was terminated before approval could be processed'.
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,
@@ -527,7 +531,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Override killProcess to abort the SDK run instead of killing a PTY.
    */
   override async killProcess(panelId: string): Promise<void> {
-    this.cleanupPipeline(panelId);
+    // Deliberate ordering: await abortCurrentRun first so the SDK iterator's
+    // finally block (in runSdkQuery) disposes the pipeline and clears pending
+    // approvals BEFORE we return. Calling the pipeline-dispose helper here
+    // directly would tear down the RawEventsSink listener while the iterator is
+    // still pushing tail events, silently dropping raw_events rows. Pipeline
+    // disposal is single-sourced through runSdkQuery's finally to eliminate
+    // that race.
     await this.abortCurrentRun(panelId);
     this.processes.delete(panelId);
   }
