@@ -25,7 +25,7 @@ const SCRIPT_FILENAME = 'cyboflowMcpServer.js';
  * Resolve the absolute path to the cyboflowMcpServer.js script.
  *
  * - Dev mode: returns the sibling .js file compiled by `pnpm run build:main`
- *   into main/dist/orchestrator/mcpServer/.
+ *   into main/dist/main/src/orchestrator/mcpServer/.
  * - Packaged DMG (asar): reads the script out of the .asar virtual FS via
  *   fs.readFileSync (which Electron patches to support .asar paths) and writes
  *   it to ~/.cyboflow/cyboflowMcpServer.js before returning that path.
