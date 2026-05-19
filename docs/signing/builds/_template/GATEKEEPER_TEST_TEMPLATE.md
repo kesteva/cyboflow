@@ -1,8 +1,8 @@
-# Gatekeeper Acceptance Test — Cyboflow 0.3.5
+# Gatekeeper Acceptance Test — Cyboflow <TODO: VERSION>
 
 ## Purpose
 
-This document records the clean-account Gatekeeper acceptance test for the signed-and-notarized DMG produced by TASK-055. It is the final gate of the `apple-signing-notarization-setup` epic and serves as proof that packaging is a known-good operation before Milestone 2's MVP-done bar.
+This document records the clean-account Gatekeeper acceptance test for the signed-and-notarized DMG produced by `<TODO: task/sprint reference>`. It is the final gate of the `apple-signing-notarization-setup` epic and serves as proof that packaging is a known-good operation.
 
 The test must be run on a clean macOS user account (one that has never run any unsigned Cyboflow or Crystal build and has not had `spctl --master-disable` applied) to prevent developer-account interventions from masking Gatekeeper failures.
 
@@ -12,13 +12,13 @@ The test must be run on a clean macOS user account (one that has never run any u
 
 | Field | Value |
 |-------|-------|
-| File | `dist-electron/Cyboflow-0.3.5-macOS-universal.dmg` |
-| App version | 0.3.5 |
-| AppID | com.cyboflow.app |
-| Signing identity | Developer ID Application: Raimundo Esteva (Y7B83UUSAC) |
-| Notarization status | Accepted (Apple submission ID: `c5950a84-b245-4322-a866-f332b6a4bef8`) |
-| DMG SHA256 | `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494` |
-| Build log cross-reference | `docs/signing/FIRST_SIGNED_BUILD_LOG.md` |
+| File | `dist-electron/Cyboflow-<TODO:VERSION>-macOS-universal.dmg` |
+| App version | `<TODO: VERSION>` |
+| AppID | `<TODO: from package.json build.appId>` |
+| Signing identity | `<TODO: Developer ID Application: <NAME> (<TEAM_ID>)>` |
+| Notarization status | `<TODO: Accepted (Apple submission ID: <TODO:SUBMISSION_ID>)>` |
+| DMG SHA256 | `<TODO: post-staple SHA256 — run shasum -a 256 on the distribution DMG>` |
+| Build log cross-reference | `./FIRST_SIGNED_BUILD_LOG.md` |
 
 ---
 
@@ -26,9 +26,9 @@ The test must be run on a clean macOS user account (one that has never run any u
 
 | Field | Value |
 |-------|-------|
-| macOS ProductName | macOS |
-| macOS ProductVersion | 26.2 |
-| macOS BuildVersion | 25C56 |
+| macOS ProductName | `<TODO: run sw_vers -productName>` |
+| macOS ProductVersion | `<TODO: run sw_vers -productVersion>` |
+| macOS BuildVersion | `<TODO: run sw_vers -buildVersion>` |
 
 ---
 
@@ -46,11 +46,11 @@ The test must be run on a clean macOS user account (one that has never run any u
 ## SHA256 Verification
 
 ```
-$ shasum -a 256 ~/Downloads/Cyboflow-0.3.5-macOS-universal.dmg
-6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494  Cyboflow-0.3.5-macOS-universal.dmg
+$ shasum -a 256 ~/Downloads/Cyboflow-<TODO:VERSION>-macOS-universal.dmg
+<TODO: SHA256 hash>  Cyboflow-<TODO:VERSION>-macOS-universal.dmg
 ```
 
-> **Action for tester:** After copying the DMG to `~/Downloads/` on the test account, run `shasum -a 256 ~/Downloads/Cyboflow-0.3.5-macOS-universal.dmg` and confirm the hash above matches exactly before proceeding.
+> **Action for tester:** After copying the DMG to `~/Downloads/` on the test account, run `shasum -a 256 ~/Downloads/Cyboflow-<TODO:VERSION>-macOS-universal.dmg` and confirm the hash above matches exactly before proceeding.
 
 ---
 
@@ -74,19 +74,19 @@ If a clean local account is not available, a fresh VM (Parallels/UTM with a clea
 From the developer account, relay the DMG through `/Users/Shared/`:
 
 ```bash
-cp dist-electron/Cyboflow-0.3.5-macOS-universal.dmg /Users/Shared/
+cp dist-electron/Cyboflow-<TODO:VERSION>-macOS-universal.dmg /Users/Shared/
 ```
 
 Then, logged in as the test user:
 
 ```bash
-cp /Users/Shared/Cyboflow-0.3.5-macOS-universal.dmg ~/Downloads/
+cp /Users/Shared/Cyboflow-<TODO:VERSION>-macOS-universal.dmg ~/Downloads/
 ```
 
 ### Step 3 — Verify quarantine flag
 
 ```bash
-xattr -p com.apple.quarantine ~/Downloads/Cyboflow-0.3.5-macOS-universal.dmg
+xattr -p com.apple.quarantine ~/Downloads/Cyboflow-<TODO:VERSION>-macOS-universal.dmg
 ```
 
 Expected output starts with `0083;` — this confirms macOS is treating the file as user-downloaded and will apply Gatekeeper checks on open.
@@ -94,14 +94,14 @@ Expected output starts with `0083;` — this confirms macOS is treating the file
 ### Step 4 — Verify SHA256 matches
 
 ```bash
-shasum -a 256 ~/Downloads/Cyboflow-0.3.5-macOS-universal.dmg
+shasum -a 256 ~/Downloads/Cyboflow-<TODO:VERSION>-macOS-universal.dmg
 ```
 
-Must match: `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494`
+Must match: `<TODO: post-staple SHA256 from the Artifact Under Test table above>`
 
 ### Step 5 — Mount the DMG and install
 
-Double-click the DMG in Finder (or `open ~/Downloads/Cyboflow-0.3.5-macOS-universal.dmg`). When the Finder window appears, drag **Cyboflow.app** to `/Applications`.
+Double-click the DMG in Finder (or `open ~/Downloads/Cyboflow-<TODO:VERSION>-macOS-universal.dmg`). When the Finder window appears, drag **Cyboflow.app** to `/Applications`.
 
 **Expected:** No "unidentified developer" dialog. No "app downloaded from the internet" sheet. The DMG mounts and the drag-to-Applications works without any interruption from macOS.
 
@@ -185,7 +185,7 @@ test -s ~/.cyboflow/cyboflow.db; echo $?
 
 ## Anomalies Observed During Runtime Smoke
 
-None observed. _(Update this section if any unexpected behavior is noted during testing.)_
+`<TODO: describe any unexpected behavior, or write "None observed.">`
 
 ---
 
@@ -193,11 +193,11 @@ None observed. _(Update this section if any unexpected behavior is noted during 
 
 | Field | Value |
 |-------|-------|
-| AC1 — No Gatekeeper dialog | PENDING — user to complete |
-| AC2 — PTY spawns under hardened runtime | PENDING — user to complete |
-| AC3 — App writes to data dir | PENDING — user to complete |
-| AC4 — This document contains required fields | PASS (macOS, SHA256, spctl present) |
-| Overall | PENDING — user to complete |
+| AC1 — No Gatekeeper dialog | `<TODO: PASS / FAIL / PENDING>` |
+| AC2 — PTY spawns under hardened runtime | `<TODO: PASS / FAIL / PENDING>` |
+| AC3 — App writes to data dir | `<TODO: PASS / FAIL / PENDING>` |
+| AC4 — This document contains required fields | `<TODO: PASS / FAIL / PENDING>` |
+| Overall | `<TODO: PASS / FAIL / PENDING>` |
 
 ---
 
@@ -208,6 +208,6 @@ After completing the test steps above:
 1. Fill in the **Test Environment** table at the top.
 2. Replace each `<TODO: ...>` block in **CLI Verification Outputs** with the actual terminal output.
 3. Update the **Anomalies** section.
-4. Change each `PENDING — user to complete` row in **Result** to `PASS` or `FAIL`.
-5. Commit: `git add docs/signing/GATEKEEPER_ACCEPTANCE_TEST.md && git commit -m "docs(TASK-056): record gatekeeper acceptance test results"`
+4. Change each `<TODO: PASS / FAIL / PENDING>` row in **Result** to `PASS` or `FAIL`.
+5. Commit: `git add docs/signing/builds/<TODO:VERSION>/GATEKEEPER_ACCEPTANCE_TEST.md && git commit -m "docs: record gatekeeper acceptance test results for <TODO:VERSION>"`
 6. Resolve the queued `manual_acceptance_test` action via `/soloflow:review-queue` (it will pull this completed doc into the testing bucket).
