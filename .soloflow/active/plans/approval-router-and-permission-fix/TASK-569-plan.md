@@ -1,7 +1,7 @@
 ---
 id: TASK-569
-title: permissionMode 'ignore' callsite sweep — flip user-facing defaults to 'approve'
-status: ready
+title: "permissionMode 'ignore' callsite sweep — flip user-facing defaults to 'approve'"
+status: in-flight
 epic: approval-router-and-permission-fix
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-005
@@ -32,7 +32,7 @@ acceptance_criteria:
     verification: "grep -rEn \"permissionMode\\s*:\\s*['\\\"]ignore['\\\"]|permissionMode[^=]*\\|\\|\\s*['\\\"]ignore['\\\"]|useState<[^>]*>\\(['\\\"]ignore['\\\"]\\)|defaultPermissionMode\\s*\\|\\|\\s*['\\\"]ignore['\\\"]\" frontend/src main/src | grep -v __tests__ | grep -v test | grep -v node_modules | grep -v 'shared/types' | grep -v 'database.ts' | grep -v 'database/migrations' returns 0 matches."
   - criterion: "The `'ignore'` selectable option is removed from the user-facing `ClaudeCodeConfig.tsx` Permission Mode UI (the Skip card and its onChange path) so users cannot pick a mode that throws at spawn."
     verification: "grep -nE \"permissionMode: 'ignore'\" frontend/src/components/dialog/ClaudeCodeConfig.tsx returns 0 matches; the `'ignore' | 'approve'` literal union on line 11 is narrowed to `'approve'` only OR `ClaudeCodeConfigProps` no longer accepts a permissionMode toggle."
-  - criterion: "Standard session creation through the UI completes without throwing the TASK-204 `Cyboflow runs require approve mode` error."
+  - criterion: Standard session creation through the UI completes without throwing the TASK-204 `Cyboflow runs require approve mode` error.
     verification: "Manual smoke: `pnpm dev`, click `+` to create a new session with a prompt, confirm the session starts and the Claude panel becomes interactive without an error toast or `[ClaudeCodeManager] Cyboflow runs require approve mode` log line in cyboflow-backend-debug.log."
   - criterion: "Type-only `'ignore' | 'approve'` declarations in `shared/types/cliPanels.ts`, `shared/types/panels.ts`, `shared/types/aiPanelConfig.ts`, `main/src/types/*.ts`, and `frontend/src/types/*.ts` are left intact (the `'ignore'` discriminant still exists as a type-level escape hatch for future debug builds), but no runtime code paths set `'ignore'` as the default."
     verification: "grep -nE \"'approve' \\| 'ignore'|'ignore' \\| 'approve'\" shared/types/cliPanels.ts shared/types/panels.ts shared/types/aiPanelConfig.ts returns >=3 matches (type unions untouched)."
@@ -44,14 +44,13 @@ test_strategy:
   justification: "The default-flip is observable in `sessionPreferencesStore` and `configManager` and warrants a regression test so a future re-introduction of `'ignore'` defaults is caught at CI time."
   targets:
     - behavior: "`useSessionPreferencesStore.getState().preferences.claudeConfig.permissionMode` equals `'approve'` on fresh mount."
-      test_file: "frontend/src/stores/__tests__/sessionPreferencesStore.test.ts"
+      test_file: frontend/src/stores/__tests__/sessionPreferencesStore.test.ts
       type: unit
     - behavior: "`ConfigManager.getSessionCreationPreferences()` returns `permissionMode: 'approve'` when no user config is set."
-      test_file: "main/src/services/__tests__/configManager.permissionMode.test.ts"
+      test_file: main/src/services/__tests__/configManager.permissionMode.test.ts
       type: unit
 prerequisites: []
 ---
-
 # permissionMode 'ignore' callsite sweep
 
 ## Problem

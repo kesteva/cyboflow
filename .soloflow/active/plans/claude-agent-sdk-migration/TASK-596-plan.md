@@ -1,8 +1,8 @@
 ---
 id: TASK-596
 idea: IDEA-014
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
   - main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
@@ -16,28 +16,27 @@ acceptance_criteria:
   - criterion: "killProcess no longer calls cleanupPipeline directly — pipeline disposal is owned solely by runSdkQuery's finally block."
     verification: "grep -n 'cleanupPipeline' main/src/services/panels/claude/claudeCodeManager.ts shows exactly TWO matches: the declaration at line ~464 and the call inside runSdkQuery's finally block (~line 311). The match inside killProcess MUST be gone."
   - criterion: "killProcess body, after the change, is: (1) await abortCurrentRun(panelId), (2) processes.delete(panelId). No cleanupPipeline call, no other state mutations."
-    verification: "Open main/src/services/panels/claude/claudeCodeManager.ts and visually confirm the override killProcess method body matches the spec above; reviewer signs off."
+    verification: Open main/src/services/panels/claude/claudeCodeManager.ts and visually confirm the override killProcess method body matches the spec above; reviewer signs off.
   - criterion: "A code comment inside killProcess explicitly explains the deliberate ordering: abort first so the SDK iterator's finally runs cleanupPipeline before any tail events are lost, and so that pipeline disposal is single-sourced."
     verification: "grep -n 'single-sourced\\|tail events\\|deliberate ordering' main/src/services/panels/claude/claudeCodeManager.ts returns at least one match inside the killProcess method."
   - criterion: "New unit test claudeCodeManager.killProcess.test.ts proves that killProcess() leaves pipelines, sdkRuns, and processes maps empty after returning."
     verification: "cd main && pnpm vitest run src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts exits 0 with the new test cases passing."
-  - criterion: "pnpm typecheck and pnpm lint are green for the main workspace."
+  - criterion: pnpm typecheck and pnpm lint are green for the main workspace.
     verification: "cd main && pnpm typecheck && pnpm lint both exit 0."
 depends_on: []
 estimated_complexity: low
 epic: claude-agent-sdk-migration
 test_strategy:
   needed: true
-  justification: "killProcess is on the hot path for continuePanel / restartPanelWithHistory and the failure mode (silent event-loss on kill-mid-stream) is non-observable from the UI. A unit test guards the ordering invariant."
+  justification: killProcess is on the hot path for continuePanel / restartPanelWithHistory and the failure mode (silent event-loss on kill-mid-stream) is non-observable from the UI. A unit test guards the ordering invariant.
   targets:
     - behavior: "killProcess on a running panel leaves pipelines, sdkRuns, and processes maps empty after returning."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
     - behavior: "killProcess on a panel with no active run is a no-op (idempotent — abortCurrentRun early-returns when sdkRuns has no entry, processes.delete is a no-op when key absent)."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
 ---
-
 # Audit killProcess cleanup ordering to prevent raw_events loss on kill-mid-stream
 
 ## Objective

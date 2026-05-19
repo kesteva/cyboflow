@@ -1,7 +1,7 @@
 ---
 id: TASK-571
 title: Add bidirectional TS↔Zod drift bridge to schemas.ts
-status: ready
+status: in-flight
 epic: typed-stream-event-schema
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-004
@@ -14,19 +14,18 @@ files_readonly:
 acceptance_criteria:
   - criterion: "A reverse compile-time guard exists immediately below the existing `_typeCheck` declaration in `schemas.ts`, of the form `const _reverseCheck: z.infer<typeof claudeStreamEventSchema> = {} as ClaudeStreamEvent; void _reverseCheck;`. The guard fires a TypeScript error if a field is added to `ClaudeStreamEvent` (`shared/types/claudeStream.ts`) but missing from `claudeStreamEventSchema`."
     verification: "grep -nE 'const _reverseCheck: z\\.infer<typeof claudeStreamEventSchema> = \\{\\} as ClaudeStreamEvent' main/src/services/streamParser/schemas.ts returns exactly 1 match; grep -nE 'void _reverseCheck' main/src/services/streamParser/schemas.ts returns exactly 1 match."
-  - criterion: "Both compile-time guards (`_typeCheck` and `_reverseCheck`) sit adjacent in `schemas.ts` with a brief JSDoc comment explaining the bidirectional drift contract."
+  - criterion: Both compile-time guards (`_typeCheck` and `_reverseCheck`) sit adjacent in `schemas.ts` with a brief JSDoc comment explaining the bidirectional drift contract.
     verification: "grep -nB2 -A1 '_reverseCheck' main/src/services/streamParser/schemas.ts shows a comment explaining the bridge above the declaration."
   - criterion: "`pnpm typecheck` passes (i.e. the schema currently matches the TS union — the reverse bridge is satisfied by the current code)."
-    verification: "Exit code 0."
+    verification: Exit code 0.
   - criterion: "`pnpm --filter main exec vitest run` passes (no behavioral regression)."
-    verification: "Exit code 0."
+    verification: Exit code 0.
 estimated_complexity: low
 test_strategy:
   needed: false
   justification: "The reverse-check IS the test — it is a compile-time tripwire enforced by `tsc --noEmit` (run via `pnpm typecheck`). A runtime test would only re-prove what the compiler proves. Sibling test `main/src/services/streamParser/__tests__/schemas.test.ts` exists (verified) but its tests exercise `parseClaudeStreamEvent` round-trips, not the drift bridge itself — touching only `schemas.ts` (not exports, signatures, or behavior) cannot affect those tests, so `needed: false` is safe. The CLAUDE.md 'Compile-Time Assertions in ACs' principle applies: `pnpm typecheck` is the verification command."
 prerequisites: []
 ---
-
 # Add bidirectional TS↔Zod drift bridge
 
 ## Problem
