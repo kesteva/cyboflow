@@ -179,6 +179,26 @@ pnpm lint                 # ESLint across all workspaces
 pnpm test                 # Playwright E2E (requires a built app)
 ```
 
+### asarUnpack contract
+
+`main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js` is listed in
+`package.json` `build.asarUnpack` because it is spawned as an external `node`
+subprocess (the per-session Cyboflow MCP server) and Node cannot execute files
+from inside an ASAR archive. The runtime fallback in `scriptPath.ts`
+(read-from-asar, write-to-temp at `~/.cyboflow/cyboflowMcpServer.js`) is a
+defensive safety net for dev/edge cases; in a correctly-packaged build, it
+should never fire.
+
+The tsc emit layout for the main process is `main/dist/main/src/**` (mirroring
+the source tree under `main/src/`). Any future subprocess script added under
+`main/src/` that must be spawned externally in a packaged build needs a
+targeted `asarUnpack` entry using the corresponding `main/dist/main/src/...`
+path — avoid broad wildcards to minimise the unpacked-tree size.
+
+See also `docs/packaging/root-deps-policy.md` for the workspace dependency
+policy (which deps belong in `main/package.json` vs. root `package.json`, and
+the list of confirmed dead dependencies pending removal).
+
 ## Decisions & Trade-offs
 
 See `docs/cyboflow_system_design.md` §2 (stack), §3 (fork rationale, cuts), §4 (principles).
