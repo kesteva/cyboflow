@@ -43,7 +43,8 @@ export function formatJsonForOutput(jsonMessage: ClaudeJsonMessage): string {
             if (item.type === 'text') return item.text;
             if (item.type === 'tool_result') {
               // Limit tool results to 10 lines
-              const toolContent = item.content || '';
+              const rawContent = item.content || '';
+              const toolContent = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
               const lines = toolContent.split('\n');
               const truncated = lines.slice(0, 10);
               const truncatedContent = truncated.join('\n');
