@@ -569,6 +569,119 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
 });
 
 // ---------------------------------------------------------------------------
+// TASK-662: Lifecycle transition tests
+// ---------------------------------------------------------------------------
+
+import type { LifecycleTransitionsLike } from '../runExecutor';
+
+function makeLifecycleTransitions(): { mock: LifecycleTransitionsLike } & {
+  running: ReturnType<typeof vi.fn>;
+  completed: ReturnType<typeof vi.fn>;
+  failed: ReturnType<typeof vi.fn>;
+  canceled: ReturnType<typeof vi.fn>;
+} {
+  const running = vi.fn<(runId: string) => void>();
+  const completed = vi.fn<(runId: string, fromStatus: 'running') => void>();
+  const failed = vi.fn<(runId: string, fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck', errorMessage: string) => void>();
+  const canceled = vi.fn<(runId: string) => void>();
+  const mock: LifecycleTransitionsLike = { running, completed, failed, canceled };
+  return { mock, running, completed, failed, canceled };
+}
+
+describe('lifecycle transitions', () => {
+  // -------------------------------------------------------------------------
+  // (i) onLifecycleTransition routes each phase to the right transition helper
+  // -------------------------------------------------------------------------
+  it('onLifecycleTransition routes each phase to the right transition helper', async () => {
+    const { mock: lt, running, completed, failed, canceled } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    // Use base RunExecutor with lifecycleTransitions injected.
+    // We access onLifecycleTransition via a subclass for testing.
+    class LifecycleTestExecutor extends RunExecutor {
+      protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+        return 'test prompt';
+      }
+
+      // Expose the protected method for testing.
+      public async testLifecycleTransition(runId: string, phase: import('../runExecutor').ExecutionPhase): Promise<void> {
+        return this.onLifecycleTransition(runId, phase);
+      }
+    }
+
+    const executor = new LifecycleTestExecutor(makeSpawner(), registry, makeLogger(), undefined, lt);
+
+    await executor.testLifecycleTransition(run.id, 'sdk_initialized');
+    expect(running).toHaveBeenCalledOnce();
+    expect(running).toHaveBeenCalledWith(run.id);
+
+    await executor.testLifecycleTransition(run.id, 'completed');
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+
+    await executor.testLifecycleTransition(run.id, 'canceled');
+    expect(canceled).toHaveBeenCalledOnce();
+    expect(canceled).toHaveBeenCalledWith(run.id);
+
+    // pre_spawn / post_spawn are no-ops — nothing extra called.
+    await executor.testLifecycleTransition(run.id, 'pre_spawn');
+    await executor.testLifecycleTransition(run.id, 'post_spawn');
+    expect(running).toHaveBeenCalledOnce(); // still only once
+    expect(completed).toHaveBeenCalledOnce();
+  });
+
+  // -------------------------------------------------------------------------
+  // (ii) execute() fires completed phase on normal terminate
+  // -------------------------------------------------------------------------
+  it('execute() fires completed phase on normal terminate', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner(); // resolves successfully
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    await executor.execute(run.id);
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+  });
+
+  // -------------------------------------------------------------------------
+  // (iii) execute() fires failed phase with error message on spawner reject
+  // -------------------------------------------------------------------------
+  it('execute() fires failed phase with error message on spawner reject', async () => {
+    const { mock: lt, failed } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('SDK spawn failed with exit code 1'),
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    await expect(executor.execute(run.id)).rejects.toThrow('SDK spawn failed with exit code 1');
+
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed).toHaveBeenCalledWith(run.id, 'running', 'SDK spawn failed with exit code 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RunLauncher integration tests
 // ---------------------------------------------------------------------------
 
