@@ -27,6 +27,16 @@ import type { RunEventBridge } from './runEventBridge';
 // ---------------------------------------------------------------------------
 
 /**
+ * Narrow interface for reading a workflow prompt file.
+ * The real implementation delegates to readWorkflowPrompt(); tests inject a stub.
+ * Synchronous — matches the existing readWorkflowPrompt API.
+ * Throws WorkflowPromptReadError when the file is missing or the body is empty.
+ */
+export interface WorkflowPromptReaderLike {
+  read(workflowPath: string): { prompt: string; systemPromptAppend: string };
+}
+
+/**
  * Options accepted by ClaudeCodeManager.spawnCliProcess (narrow shape).
  * The real ClaudeCodeManager satisfies this interface; tests use a vi.fn() stub.
  */
@@ -36,6 +46,7 @@ export interface ClaudeSpawnerOptions {
   worktreePath: string;
   prompt: string;
   preToolUseHook?: HookCallback;
+  systemPromptAppend?: string;
 }
 
 /**
@@ -79,10 +90,17 @@ export class RunExecutor {
    */
   private readonly activePanelIds: Map<string, string> = new Map();
 
+  /**
+   * Per-run systemPromptAppend values stashed by getPrompt() and consumed by
+   * buildOptionsOverrides(). Cleared by teardownRun() to prevent leaks.
+   */
+  private pendingSystemPromptAppend = new Map<string, string>();
+
   constructor(
     protected readonly spawner: ClaudeSpawnerLike,
     private readonly registry: WorkflowRegistryLike,
     protected readonly logger: LoggerLike,
+    private readonly promptReader?: WorkflowPromptReaderLike,
   ) {}
 
   /**
@@ -127,7 +145,7 @@ export class RunExecutor {
     this.activePanelIds.set(runId, panelId);
 
     try {
-      const prompt = await this.getPrompt(workflow);
+      const prompt = await this.getPrompt(runId, workflow);
       const overrides = await this.buildOptionsOverrides(runId, run, workflow);
 
       // Wire event forwarding BEFORE spawning so no SDK-initialization events
@@ -188,6 +206,7 @@ export class RunExecutor {
 
   /**
    * Dispose the bridge handle and remove the panelId for the given runId.
+   * Also clears the stashed systemPromptAppend to prevent leaks across runs.
    * Safe to call multiple times (idempotent).
    */
   private teardownRun(runId: string): void {
@@ -197,6 +216,7 @@ export class RunExecutor {
       this.bridges.delete(runId);
     }
     this.activePanelIds.delete(runId);
+    this.pendingSystemPromptAppend.delete(runId);
   }
 
   // ---------------------------------------------------------------------------
@@ -206,11 +226,27 @@ export class RunExecutor {
   /**
    * Returns the prompt string to pass to ClaudeCodeManager.spawnCliProcess.
    *
-   * Default implementation throws NOT_IMPLEMENTED so TASK-641 has an obvious
-   * wiring target. Override in a subclass to provide the real prompt.
+   * Default implementation reads the workflow file via the injected
+   * WorkflowPromptReaderLike collaborator and stashes systemPromptAppend for
+   * buildOptionsOverrides().  When no promptReader is injected (e.g. legacy
+   * subclass that overrides getPrompt directly), the subclass override is called
+   * instead via the two-arg form.
+   *
+   * Throws NOT_IMPLEMENTED if neither a reader nor a subclass override is available.
+   *
+   * @param runId    The workflow run ID — used to stash systemPromptAppend.
+   * @param workflow The workflow row containing workflow_path.
    */
-  protected async getPrompt(_workflow: WorkflowRow): Promise<string> {
-    throw new Error('NOT_IMPLEMENTED: getPrompt — TASK-641 must override');
+  protected async getPrompt(runId: string, workflow: WorkflowRow): Promise<string> {
+    if (!this.promptReader) {
+      throw new Error('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected — pass a promptReader to the constructor or override getPrompt in a subclass');
+    }
+    if (!workflow.workflow_path) {
+      throw new Error(`RunExecutor.getPrompt: workflow_path is null for workflowId=${workflow.id}`);
+    }
+    const { prompt, systemPromptAppend } = this.promptReader.read(workflow.workflow_path);
+    this.pendingSystemPromptAppend.set(runId, systemPromptAppend);
+    return Promise.resolve(prompt);
   }
 
   /**
@@ -241,13 +277,17 @@ export class RunExecutor {
     _run: WorkflowRunRow,
     workflow: WorkflowRow,
   ): Promise<Partial<ClaudeSpawnerOptions>> {
+    const systemPromptAppend = this.pendingSystemPromptAppend.get(runId) || undefined;
+    const overrides: Partial<ClaudeSpawnerOptions> = { systemPromptAppend };
+
     if (workflow.permission_mode) {
       const hook = buildPreToolUseHook(workflow.permission_mode as PermissionMode, runId, this.logger);
       if (hook !== undefined) {
-        return { preToolUseHook: hook };
+        overrides.preToolUseHook = hook;
       }
     }
-    return {};
+
+    return overrides;
   }
 
   /**
