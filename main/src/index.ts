@@ -37,6 +37,8 @@ import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
+import { RunExecutor } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike } from './orchestrator/runExecutor';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
@@ -589,6 +591,22 @@ async function initializeServices() {
     getNodePath: async () => process.execPath,
   };
 
+  // Placeholder RunExecutor — wires the SDK substrate so the legacy
+  // permission-bridge sentinels (orchSocketProvider, bridgeScriptResolver) are
+  // never reached during launch().  TASK-661 replaces this with a fully-wired
+  // RunExecutor that uses the real ClaudeCodeManager spawner + WorkflowPromptReader.
+  // @cyboflow-hidden [TASK-661] replace nopSpawner + placeholder RunExecutor with
+  //   real ClaudeSpawnerLike (defaultCliManager) + WorkflowPromptReader wiring.
+  const nopSpawner: ClaudeSpawnerLike = {
+    spawnCliProcess: async () => {
+      cyboflowLogger.warn('[index] nopSpawner.spawnCliProcess called — placeholder; TASK-661 must wire the real spawner');
+    },
+    abort: async () => {
+      cyboflowLogger.warn('[index] nopSpawner.abort called — placeholder; TASK-661 must wire the real spawner');
+    },
+  };
+  const placeholderRunExecutor = new RunExecutor(nopSpawner, workflowRegistry, cyboflowLogger);
+
   const runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
@@ -599,6 +617,7 @@ async function initializeServices() {
     bridgeScriptResolver,
     nodeResolver,
     cyboflowPublisher,
+    placeholderRunExecutor,
   );
 
   const services: AppServices = {
