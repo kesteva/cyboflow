@@ -421,3 +421,107 @@ in `package.json`. Check that `node_modules/**/*.node` is listed in
 notarization ticket (~5 minutes after `notarytool` reports `Accepted`). Wait
 5–10 minutes and retry. If it continues to fail after 30 minutes, re-check the
 Apple status page at https://developer.apple.com/system-status/.
+
+---
+
+## Recording a Signed Build
+
+After `pnpm run build:mac:universal` produces a signed-and-notarized DMG,
+capture the evidence immediately — do not reconstruct from memory or logs later.
+
+1. Create a new directory for this release version:
+   ```bash
+   mkdir -p docs/signing/builds/<version>
+   ```
+
+2. Copy the build log template and fill in every `<TODO: ...>` placeholder as
+   you work through the build:
+   ```bash
+   cp docs/signing/builds/_template/BUILD_LOG_TEMPLATE.md \
+      docs/signing/builds/<version>/FIRST_SIGNED_BUILD_LOG.md
+   ```
+   Record submission IDs, SHA256 hashes, and timestamps directly from the
+   terminal output at the time each step completes.
+
+3. After the clean-account Gatekeeper test completes (separate task), copy and
+   fill in the Gatekeeper test template:
+   ```bash
+   cp docs/signing/builds/_template/GATEKEEPER_TEST_TEMPLATE.md \
+      docs/signing/builds/<version>/GATEKEEPER_ACCEPTANCE_TEST.md
+   ```
+
+4. Commit both files:
+   ```bash
+   git add docs/signing/builds/<version>/
+   git commit -m "docs: record signed build and Gatekeeper test for <version>"
+   ```
+
+See `docs/signing/builds/README.md` for the full lifecycle policy, including
+the never-overwrite rule: completed `builds/<version>/` directories are
+append-only audit records.
+
+> **This directory is the audit trail for distribution — never overwrite a
+> completed build's evidence.** If a rebuild is required, create a new
+> directory (e.g. `builds/<version>-rebuild/`) rather than editing the
+> original.
+
+---
+
+## Known Build Pitfalls
+
+These are operational lessons from the 0.3.5 first signed build. Review before
+starting a new signed build.
+
+### Pitfall 1: electron-builder background kill during notarytool wait
+
+`electron-builder` runs `notarytool submit --wait`, which polls Apple for up
+to several hours on a slow first submission. If your terminal session times out
+or the build runner kills the process, `electron-builder` exits non-zero but
+the notarytool submission continues on Apple's side.
+
+**Recovery:**
+1. Poll `xcrun notarytool info <submission-id> --apple-id <APPLE_ID> --team-id <TEAM_ID>` until the status leaves "In Progress".
+2. Manually staple the `.app`: `xcrun stapler staple dist-electron/mac-universal/Cyboflow.app`
+3. Create the DMG manually: `hdiutil create -volname Cyboflow -srcfolder dist-electron/mac-universal/Cyboflow.app -ov -format UDZO dist-electron/Cyboflow-<VERSION>-macOS-universal.dmg`
+4. Submit and staple the DMG separately (see Pitfall 2).
+
+**Prevention:** Ensure the terminal session is persistent (e.g. use `tmux` or
+`screen`) or increase the timeout before invoking `pnpm run build:mac:universal`.
+Apple notarization for a first submission can take ~1 hour.
+
+### Pitfall 2: DMG notarization is a separate round-trip from app notarization
+
+The `.app` and the `.dmg` are notarized in separate `notarytool submit` calls.
+`electron-builder` normally handles both inline. If the build is interrupted
+after `.app` signing but before DMG creation, the DMG must be submitted
+separately — adding approximately 2 minutes for a second notarytool round-trip.
+Record both submission IDs in the build log.
+
+### Pitfall 3: Apple notarization latency variance
+
+First submission for a new app identity can take ~95 minutes; subsequent
+submissions for the same app are typically 2–15 minutes. A slow notarization
+does not mean the submission has failed — poll `notarytool info` rather than
+re-submitting. Re-submitting produces a second (unnecessary) submission ID and
+complicates the audit trail.
+
+### Pitfall 4: configure-build.js rewrites package.json at build time
+
+`scripts/configure-build.js` rewrites `package.json` `build.mac.notarize` (and
+related fields) in place before invoking `electron-builder`. The committed value
+in `package.json` is a post-run artifact, not a default; the `APPLE_*` env vars
+present at build time are what actually drive the credentials and notarization
+posture. A contributor invoking `electron-builder` directly (bypassing the npm
+`build:mac:*` scripts) will not get configure-build.js's rewrite and may get
+unexpected behavior. Always use `pnpm run build:mac:universal` (or another
+`build:mac:*` / `release:mac` script). See the "configure-build.js contract"
+subsection under Build-Time Environment Variables for the full field list.
+
+### Pitfall 5: Stapling rewrites the DMG — always record the post-staple SHA256
+
+`xcrun stapler staple` rewrites the DMG file to embed the notarization ticket.
+The SHA256 of the file changes after stapling. Always record the **post-staple**
+SHA256 in the Gatekeeper test record — that is the file users will download and
+verify. The pre-staple SHA256 (from the `notarytool` submission record) is
+preserved in the build log for cross-reference only; it will not match the
+distribution artifact on disk.
