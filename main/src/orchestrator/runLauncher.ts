@@ -6,10 +6,13 @@
  *   2. Create a new `workflow_runs` row via WorkflowRegistry.createRun
  *   3. Create a deterministic worktree via WorktreeManager.createDeterministicWorktree
  *   4. UPDATE the `workflow_runs` row with worktree_path, branch_name, status='starting'
+ *   5. (Optional) Enqueue RunExecutor.execute(runId) via RunQueueRegistry after publish
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron'
  * or any concrete service in main/src/services/*.  All collaborators are
- * injected via the constructor.
+ * injected via the constructor. The new optional 10th (runExecutor) and 11th
+ * (runQueueRegistry) constructor parameters preserve backward compatibility
+ * with all existing call sites that omit them.
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -18,6 +21,8 @@ import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { McpConfigWriter } from './mcpConfigWriter';
+import type { RunExecutor } from './runExecutor';
+import type { RunQueueRegistry } from './RunQueueRegistry';
 
 /**
  * Provides the Unix socket path that the orchestrator IPC server listens on.
@@ -70,6 +75,8 @@ export class RunLauncher {
     private readonly bridgeScriptResolver: BridgeScriptResolver,
     private readonly nodeResolver: NodeResolver,
     private readonly publisher?: StreamEventPublisher,
+    private readonly runExecutor?: RunExecutor,
+    private readonly runQueueRegistry?: RunQueueRegistry,
   ) {
     if (!mcpConfigWriter) throw new Error('RunLauncher: missing required collaborator mcpConfigWriter');
     if (!orchSocketProvider) throw new Error('RunLauncher: missing required collaborator orchSocketProvider');
@@ -129,6 +136,24 @@ export class RunLauncher {
         payload: { runId, worktreePath, branchName },
         timestamp: new Date().toISOString(),
       });
+
+      // Enqueue the RunExecutor onto the per-run PQueue (fire-and-forget).
+      // The void prefix and inner try/catch are load-bearing: launch() must
+      // not block on the SDK run, and errors must not propagate to the caller.
+      if (this.runExecutor && this.runQueueRegistry) {
+        const executor = this.runExecutor;
+        const queue = this.runQueueRegistry.getOrCreate(runId);
+        void queue.add(async () => {
+          try {
+            await executor.execute(runId);
+          } catch (err) {
+            this.logger.error('[RunLauncher] RunExecutor.execute failed', {
+              runId,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            });
+          }
+        });
+      }
 
       this.logger.info('RunLauncher: run started', {
         runId,

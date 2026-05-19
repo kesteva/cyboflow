@@ -59,6 +59,14 @@ without transitive imports from `electron`, `better-sqlite3`, or any service in
 `main/src/services/*`. This keeps the orchestrator extractable to a standalone Node process
 for the team-tier v2 target (ROADMAP-001 §6.3).
 
+**Documented exception:** `main/src/orchestrator/runEventBridge.ts` imports `EventRouter`,
+`RawEventsSink`, and `TypedEventNarrowing` from `main/src/services/streamParser` at value
+position. This is the ONLY accepted exception, permitted because `streamParser` itself has
+clean runtime imports today (zod + `node:events`; `better-sqlite3` is type-only). If
+`streamParser` ever pulls in `electron` or `better-sqlite3` at value position,
+`runEventBridge.ts` must switch to constructor injection. Do NOT add value imports from
+`services/*` to any other file under `orchestrator/**` without extending this list.
+
 ### Services (`main/src/services/`)
 
 Core business logic services. Key components:
