@@ -26,7 +26,7 @@ const defaultPreferences: SessionCreationPreferences = {
   },
   claudeConfig: {
     model: 'auto',
-    permissionMode: 'ignore',
+    permissionMode: 'approve',
     ultrathink: false
   },
   showAdvanced: false,
