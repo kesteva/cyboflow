@@ -55,8 +55,9 @@ export interface NodeResolver {
  * Decouples RunLauncher from the Electron layer by accepting a plain publisher
  * interface instead of importing BrowserWindow directly.
  *
- * The concrete implementation lives in main/src/ipc/cyboflow.ts, which is the
- * only place that calls win.webContents.send for cyboflow stream events.
+ * The concrete implementation lives in main/src/index.ts (initializeServices),
+ * which is the only place that calls win.webContents.send for cyboflow stream
+ * events.
  * Keeping this interface here preserves the standalone-typecheck invariant:
  * no electron imports inside main/src/orchestrator/.
  */
