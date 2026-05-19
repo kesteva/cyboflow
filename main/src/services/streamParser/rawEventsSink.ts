@@ -27,21 +27,7 @@ import type { EventRouter } from './eventRouter';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { ILogger } from './types';
 
-/**
- * Derives the event_type string for storage.
- *
- * The UnknownStreamEvent uses `kind: '__unknown__'` instead of a `type` field
- * (by design — it cannot collide with any real wire type). We normalize both
- * `__unknown__` and any future `unknown` variant to the string 'unknown' in the
- * table so queries can filter on a stable value.
- */
-function deriveEventType(event: ClaudeStreamEvent): string {
-  if ('kind' in event && event.kind === '__unknown__') {
-    return 'unknown';
-  }
-  // All real wire variants have a `type` field.
-  return (event as { type: string }).type;
-}
+import { deriveEventType } from './derivers';
 
 export class RawEventsSink {
   private readonly db: Database.Database;
