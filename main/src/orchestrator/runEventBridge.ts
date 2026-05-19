@@ -9,7 +9,7 @@
  *   status-transition handler) or cancel.
  *
  *   INVARIANT: panelId === runId === sessionId across the orchestrator surface.
- *   RunExecutor.execute() passes panelId = runId (no prefix), and the bridge filter at :158
+ *   RunExecutor.execute() passes panelId = runId (no prefix), and the `p.panelId !== runId` guard
  *   keys on raw runId — so every 'output' event whose panelId matches runId is forwarded.
  *   ApprovalRouter's workflow_runs UPDATE and RawEventsSink.run_id all rely on the same invariant.
  *
