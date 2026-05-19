@@ -1,7 +1,8 @@
 {
   "verification": {
     "visual_mobile": false,
-    "visual_web": true
+    "visual_web": true,
+    "visual_macos": true
   },
   "git": {
     "branch_per_run": "always"
