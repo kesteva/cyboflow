@@ -11,6 +11,7 @@
  * used by SoloFlow workflow .md files and nothing more complex.
  */
 import { readFileSync, readdirSync } from 'fs';
+import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
@@ -167,38 +168,13 @@ export class WorkflowRegistry {
   // --------------------------------------------------------------------------
 
   /**
-   * Parse the leading `--- ... ---` frontmatter block of a markdown file.
-   * Handles CRLF and LF line endings.  Strips surrounding single/double quotes
-   * from values.  Returns an empty object if no frontmatter block is found.
-   */
-  private parseFrontmatter(md: string): Record<string, string> {
-    const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    if (!match) return {};
-    const out: Record<string, string> = {};
-    for (const line of match[1].split(/\r?\n/)) {
-      const m = line.match(/^([a-zA-Z0-9_-]+)\s*:\s*(.*?)\s*$/);
-      if (!m) continue;
-      let val = m[2];
-      // Strip surrounding quotes
-      if (
-        (val.startsWith('"') && val.endsWith('"')) ||
-        (val.startsWith("'") && val.endsWith("'"))
-      ) {
-        val = val.slice(1, -1);
-      }
-      out[m[1]] = val;
-    }
-    return out;
-  }
-
-  /**
    * Extract the `permission_mode` field from frontmatter, normalising to a
    * valid PermissionMode.  Absent or unrecognised values fall back to
    * `'default'`.
    */
   private extractPermissionMode(md: string): PermissionMode {
-    const fm = this.parseFrontmatter(md);
-    const raw = fm['permission_mode'];
+    const { frontmatter } = parseMarkdownFrontmatter(md);
+    const raw = frontmatter['permission_mode'];
     if (raw === 'acceptEdits' || raw === 'dontAsk' || raw === 'default') {
       return raw;
     }
