@@ -61,6 +61,19 @@ export interface BridgeEventsOptions {
    */
   narrowing?: TypedEventNarrowing;
   /**
+   * When true, the bridge does NOT construct an EventRouter or RawEventsSink;
+   * only the renderer-IPC publish path and onFirstMessage are active.
+   *
+   * Use this when a parallel pipeline (e.g. ClaudeCodeManager.runSdkQuery)
+   * already owns raw_events persistence for this run. Without this flag, both
+   * the bridge's own EventRouter+RawEventsSink AND the CCM pipeline would
+   * INSERT the same event, causing double-INSERTs (FIND-SPRINT-021-5).
+   *
+   * `db` remains required in the options type for back-compat; its value is
+   * simply unused when skipPersistence === true.
+   */
+  skipPersistence?: boolean;
+  /**
    * Optional single-shot callback fired on the first narrowed JSON output event.
    * Fires AFTER INSERT + publish complete so the running transition cannot race
    * ahead of event delivery.  Fail-soft: a throwing callback is logged at warn
@@ -122,19 +135,33 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
     logger,
   } = opts;
 
-  // Use injected collaborators (test seams) or create fresh instances.
+  // narrowing is always needed (used unconditionally in the publish envelope path).
   const narrowing: TypedEventNarrowing = opts.narrowing ?? new TypedEventNarrowing();
-  const router: EventRouter = opts.router ?? new EventRouter();
-  const sink: RawEventsSink = opts.sink ?? new RawEventsSink(db, logger);
+
+  // When skipPersistence is true, skip EventRouter + RawEventsSink construction
+  // entirely. The opts.router / opts.sink injection seams (used by tests) are
+  // still honoured if present, but in normal skipPersistence usage both are null.
+  let router: EventRouter | null;
+  let sink: RawEventsSink | null;
+
+  if (opts.skipPersistence === true) {
+    // Persistence disabled — renderer-IPC publish and onFirstMessage still fire.
+    // If test seams are supplied, respect them; otherwise leave null.
+    router = opts.router ?? null;
+    sink = opts.sink ?? null;
+  } else {
+    // Default legacy behaviour: construct router + sink and wire INSERT pipeline.
+    router = opts.router ?? new EventRouter();
+    sink = opts.sink ?? new RawEventsSink(db, logger);
+    // Attach the sink to the router so emitForRun triggers INSERT synchronously.
+    sink.attachToRouter(router, runId);
+  }
 
   // Idempotent-dispose guard.
   let disposed = false;
 
   // Single-shot guard for onFirstMessage.
   let firstMessageFired = false;
-
-  // Attach the sink to the router so emitForRun triggers INSERT synchronously.
-  sink.attachToRouter(router, runId);
 
   // ---------------------------------------------------------------------------
   // 'output' listener
@@ -173,14 +200,17 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
 
     // Step 2: Emit through the EventRouter — this synchronously fires the
     // RawEventsSink listener which INSERTs the raw_events row.
+    // Skipped when skipPersistence === true (router is null in that mode).
     // The sink itself is fail-soft, but we wrap in try/catch as a final safety net.
-    try {
-      router.emitForRun(runId, typed);
-    } catch (err) {
-      logger?.warn('[runEventBridge] router.emitForRun threw unexpectedly', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (router) {
+      try {
+        router.emitForRun(runId, typed);
+      } catch (err) {
+        logger?.warn('[runEventBridge] router.emitForRun threw unexpectedly', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // Step 3: Build the renderer envelope and publish — always fires regardless
@@ -231,7 +261,10 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
       source.off('output', onOutput);
 
       // Detach the RawEventsSink from the EventRouter for this runId.
-      sink.dispose(runId);
+      // Guarded: sink is null when skipPersistence === true.
+      if (sink) {
+        sink.dispose(runId);
+      }
     },
   };
 }
