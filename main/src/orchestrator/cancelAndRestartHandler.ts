@@ -16,6 +16,10 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { ApprovalRouter } from './approvalRouter';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import {
+  TERMINAL_RUN_STATUSES,
+  TERMINAL_RUN_STATUSES_SQL_IN,
+} from '../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
 // Dependency bag
@@ -65,7 +69,7 @@ interface WorkflowRunRow {
 }
 
 // Terminal statuses — cancel-and-restart is a no-op on these.
-const TERMINAL_STATUSES = new Set(['canceled', 'failed', 'completed']);
+const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -146,7 +150,7 @@ export async function cancelAndRestartHandler(
       const updateResult = db.prepare(
         `UPDATE workflow_runs
            SET status = 'canceled', ended_at = ?, updated_at = ?
-         WHERE id = ? AND status NOT IN ('canceled', 'failed', 'completed')`,
+         WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
       ).run(now, now, runId) as { changes: number };
 
       if (updateResult.changes === 0) {

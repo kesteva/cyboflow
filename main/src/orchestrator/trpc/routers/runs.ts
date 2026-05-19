@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
+import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -124,7 +125,7 @@ export async function cancelHandler(
   const result = deps.db.prepare(
     `UPDATE workflow_runs
         SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status NOT IN ('canceled', 'failed', 'completed')`,
+      WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
   ).run(runId) as { changes: number };
 
   if (result.changes === 0) {
