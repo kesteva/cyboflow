@@ -15,6 +15,7 @@
  *   onLifecycleTransition(runId, phase) — TASK-644 (run lifecycle transitions)
  */
 
+import { EventEmitter } from 'node:events';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
@@ -132,6 +133,14 @@ export class RunExecutor {
     private readonly lifecycleTransitions?: LifecycleTransitionsLike,
     private readonly publisher?: StreamEventPublisher,
     private readonly db?: BridgeEventsOptions['db'],
+    /**
+     * Optional EventEmitter source for the event bridge.  In production this is
+     * the concrete AbstractCliManager (which extends EventEmitter and emits
+     * 'output' events).  Injected here so bridgeEvents() does not need to cast
+     * `this.spawner` — the spawner is a plain-object adapter that has no .on().
+     * When absent, bridgeEvents() short-circuits (no bridging, backward-compat).
+     */
+    private readonly source?: EventEmitter,
   ) {}
 
   /**
@@ -306,14 +315,14 @@ export class RunExecutor {
    *                 by the bridge which uses runId directly).
    */
   protected async bridgeEvents(runId: string, _panelId: string): Promise<RunEventBridge | void> {
-    if (!this.publisher || !this.db) {
-      // No publisher/db injected — skip bridging (backward-compat with tests
+    if (!this.publisher || !this.db || !this.source) {
+      // No publisher/db/source injected — skip bridging (backward-compat with tests
       // that construct RunExecutor without them).
       return;
     }
     return bridgeEventsImpl({
       runId,
-      source: this.spawner as unknown as Parameters<typeof bridgeEventsImpl>[0]['source'],
+      source: this.source,
       publisher: this.publisher,
       db: this.db,
       logger: this.logger,
