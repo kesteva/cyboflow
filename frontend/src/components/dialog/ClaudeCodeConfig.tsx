@@ -8,7 +8,7 @@ import type { AttachedImage, AttachedText } from '../../types/session';
 export interface ClaudeCodeConfig {
   prompt?: string;
   model: 'auto' | 'sonnet' | 'opus' | 'haiku';
-  permissionMode: 'ignore' | 'approve';
+  permissionMode: 'approve' | 'ignore';
   ultrathink?: boolean;
   attachedImages?: AttachedImage[];
   attachedTexts?: AttachedText[];
