@@ -1,9 +1,9 @@
 ---
-pending_count: 23
+pending_count: 24
 buckets:
   decisions: 1
   actions: 5
-  testing: 14
+  testing: 15
   deferred_visual: 3
 items: []
 ---
@@ -260,6 +260,16 @@ items: []
   action: "Manual smoke: run `pnpm dev`, click Start Run on the seeded prune workflow, then `grep \"orchSocketProvider not yet wired\" cyboflow-backend-debug.log` should return zero matches against entries timestamped AFTER the TASK-660 commits (a3d2c50 / 02fc7df / 596948b). The current log file has stale entries from before the fix landed (lines 151-152, 393-394 dated 18:53Z and 19:15Z — commits land on branch created 19:37Z) so the file must be retruncated by a fresh `pnpm dev` launch before the assertion is meaningful."
   blocked_checks:
     - AC5 — no orchSocketProvider sentinel error in cyboflow-backend-debug.log post-fix
+  level: requirements
+  severity: medium
+
+- task: TASK-662
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-662-plan.md
+  action: "Run pnpm dev and click Start Run on the seeded \"prune\" workflow. Watch cyboflow-backend-debug.log for the workflow_runs UPDATE lines: status='starting' → 'running' (on first SDK message via onFirstMessage) → 'completed' on normal terminate (or 'failed' if the SDK errors). Confirm the RunView in the renderer reflects the same status flips in real time. This is the end-to-end gate for IDEA-018 closing."
+  blocked_checks:
+    - "AC9 — end-to-end manual smoke: workflow_runs status transitions starting → running → completed|failed under pnpm dev"
   level: requirements
   severity: medium
 
