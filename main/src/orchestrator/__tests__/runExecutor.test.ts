@@ -169,7 +169,7 @@ describe('RunExecutor.execute — default getPrompt sentinel', () => {
   });
 });
 
-describe('RunExecutor.execute — happy path (panelId/sessionId synthesis)', () => {
+describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () => {
   it('(e) assigns panelId/sessionId from runId (invariant: panelId === runId === sessionId) and calls spawnCliProcess', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });

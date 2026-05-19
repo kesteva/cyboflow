@@ -312,8 +312,8 @@ export class RunExecutor {
    * disposed when the run terminates or is canceled.
    *
    * @param runId   The workflow run ID.
-   * @param _panelId The synthetic panel ID used by ClaudeCodeManager (unused
-   *                 by the bridge which uses runId directly).
+   * @param _panelId The panel ID (per invariant, equals runId; unused by the bridge
+   *                 which keys directly on runId).
    */
   protected async bridgeEvents(runId: string, _panelId: string): Promise<RunEventBridge | void> {
     if (!this.publisher || !this.db || !this.source) {
