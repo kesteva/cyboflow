@@ -497,6 +497,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
             }
           };
         }
+        // A deny may originate from clearPendingForRun() when the run is
+        // terminated mid-approval (e.g., user cancels the run while awaiting a
+        // PreToolUse decision). In that case decision.message will be
+        // 'Run was terminated before approval could be processed'.
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,

@@ -321,18 +321,56 @@ export class ApprovalRouter extends EventEmitter {
   /**
    * Clear all pending approvals for `runId`.
    *
-   * Stub — the full body (deny in-flight approvals, write DB rows, close
-   * socket connections) lands in TASK-304.  For now this is a documented
-   * no-op that satisfies the import surface required by claudeCodeManager.ts.
+   * Called during run termination (e.g., from claudeCodeManager's runSdkQuery
+   * finally block) to settle any in-flight approval Promises so that callers
+   * are not left hanging.
+   *
+   * Invariants:
+   * - Synchronous; returns void.  Does NOT submit work through the per-run PQueue.
+   * - Resolves each pending Promise with a deny-shaped ApprovalDecision so the
+   *   awaiting PreToolUse hook callback can return a deny to the SDK cleanly.
+   * - Does NOT invoke socketReply — the run is being torn down; the socket is
+   *   no longer meaningful.
+   * - Performs a guarded DB UPDATE (`WHERE id = ? AND status = 'pending'`) for
+   *   idempotency with a concurrent respond() that may have already settled the row.
+   * - DB errors during shutdown are swallowed with console.warn so they never
+   *   surface as unhandled rejections during process teardown.
    */
-  clearPendingForRun(_runId: string): void {
-    // TODO(TASK-304): Implement full clearPendingForRun body:
-    //   1. Find all pending entries for runId.
-    //   2. Write a synthetic deny response to each socket.
-    //   3. Update approvals.status = 'rejected' for each row.
-    //   4. Remove entries from this.pending.
-    // Silent no-op until then — TASK-590 calls this on every Claude run
-    // termination via runSdkQuery's finally block.
+  clearPendingForRun(runId: string): void {
+    const denyDecision: ApprovalDecision = {
+      behavior: 'deny',
+      message: 'Run was terminated before approval could be processed',
+    };
+
+    // Collect entries first, then mutate the map to avoid iterating-while-deleting.
+    const toClose: Array<{ approvalId: string; entry: PendingEntry }> = [];
+    for (const [approvalId, entry] of this.pending.entries()) {
+      if (entry.request.runId === runId) {
+        toClose.push({ approvalId, entry });
+      }
+    }
+
+    for (const { approvalId, entry } of toClose) {
+      this.pending.delete(approvalId);
+
+      try {
+        const now = new Date().toISOString();
+        // Guarded UPDATE for idempotency: if respond() already settled the row,
+        // status will no longer be 'pending' and changes will be 0 — that is fine.
+        this.db.prepare(
+          `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
+           WHERE id = ? AND status = 'pending'`,
+        ).run(now, approvalId);
+      } catch (err) {
+        // Swallow DB errors during shutdown — do not throw.
+        console.warn(
+          `[ApprovalRouter] clearPendingForRun: DB update failed for approval ${approvalId} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      // Resolve the awaiting Promise — do NOT invoke socketReply.
+      entry.resolve(denyDecision);
+    }
   }
 
   /**
