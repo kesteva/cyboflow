@@ -608,8 +608,8 @@ async function initializeServices() {
   // ClaudeSpawnOptions superset of ClaudeSpawnerOptions; abort delegates to
   // killProcess() which performs the SDK abort + cleanup.
   const spawnerAdapter: ClaudeSpawnerLike = {
-    spawnCliProcess: (options) => (defaultCliManager as unknown as { spawnCliProcess(opts: typeof options): Promise<void> }).spawnCliProcess(options),
-    abort: (panelId) => (defaultCliManager as unknown as { killProcess(id: string): Promise<void> }).killProcess(panelId),
+    spawnCliProcess: defaultCliManager.spawnCliProcess.bind(defaultCliManager),
+    abort: defaultCliManager.killProcess.bind(defaultCliManager),
   };
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
