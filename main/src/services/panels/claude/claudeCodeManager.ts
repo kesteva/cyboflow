@@ -10,6 +10,7 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
+import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
@@ -477,49 +478,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
   /**
    * Build the PreToolUse hook callback that routes tool-use permission
    * decisions through ApprovalRouter and translates to SDK hookSpecificOutput.
+   *
+   * Delegates to routePreToolUseThroughApprovalRouter so the allow/deny/error
+   * semantics are maintained in a single place alongside permissionModeMapper.
+   *
+   * A deny may originate from clearPendingForRun() when the run is terminated
+   * mid-approval (e.g., user cancels the run while awaiting a PreToolUse
+   * decision). In that case decision.message will be
+   * 'Run was terminated before approval could be processed'.
    */
   private makePreToolUseHook(panelId: string): HookCallback {
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
-      try {
-        const decision = await ApprovalRouter.getInstance().requestApproval(
-          panelId,
-          pretool.tool_name,
-          pretool.tool_input as Record<string, unknown>,
-          () => {}
-        );
-        if (decision.behavior === 'allow') {
-          return {
-            hookSpecificOutput: {
-              hookEventName: 'PreToolUse' as const,
-              permissionDecision: 'allow' as const,
-              ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {})
-            }
-          };
-        }
-        // A deny may originate from clearPendingForRun() when the run is
-        // terminated mid-approval (e.g., user cancels the run while awaiting a
-        // PreToolUse decision). In that case decision.message will be
-        // 'Run was terminated before approval could be processed'.
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'deny' as const,
-            ...(decision.message ? { permissionDecisionReason: decision.message } : {})
-          }
-        };
-      } catch (err) {
-        this.logger?.error(
-          `[ClaudeCodeManager] PreToolUse hook failed for ${pretool.tool_name}: ${err instanceof Error ? err.message : String(err)}`
-        );
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'deny' as const,
-            permissionDecisionReason: 'Internal approval-router error'
-          }
-        };
-      }
+      return routePreToolUseThroughApprovalRouter(pretool, panelId, 'ClaudeCodeManager', this.logger);
     };
   }
 
