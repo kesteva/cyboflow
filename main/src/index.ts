@@ -38,7 +38,13 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike, LifecycleTransitionsLike } from './orchestrator/runExecutor';
+import {
+  transitionToRunning,
+  transitionToCompleted,
+  transitionToFailed,
+  transitionToCanceled,
+} from './services/cyboflow/transitions';
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
@@ -606,8 +612,28 @@ async function initializeServices() {
     abort: (panelId) => (defaultCliManager as unknown as { killProcess(id: string): Promise<void> }).killProcess(panelId),
   };
 
-  // RunExecutor wired with the real ClaudeCodeManager spawner and WorkflowPromptReader.
-  const placeholderRunExecutor = new RunExecutor(spawnerAdapter, workflowRegistry, cyboflowLogger, promptReader);
+  // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
+  // delegating to the transitionTo* helpers at the index.ts boundary.
+  const rawDb = databaseService.getDb();
+  const lifecycleTransitions: LifecycleTransitionsLike = {
+    running: (runId) => transitionToRunning(rawDb, { runId }),
+    completed: (runId, fromStatus) => transitionToCompleted(rawDb, { runId, fromStatus }),
+    failed: (runId, fromStatus, errorMessage) =>
+      transitionToFailed(rawDb, { runId, fromStatus, errorMessage }),
+    canceled: (runId) => transitionToCanceled(rawDb, { runId }),
+  };
+
+  // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
+  // LifecycleTransitions adapter, and streaming publisher + db for event bridging.
+  const placeholderRunExecutor = new RunExecutor(
+    spawnerAdapter,
+    workflowRegistry,
+    cyboflowLogger,
+    promptReader,
+    lifecycleTransitions,
+    cyboflowPublisher,
+    rawDb,
+  );
 
   const runLauncher = new RunLauncher(
     cyboflowDb,
