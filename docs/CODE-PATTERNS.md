@@ -45,6 +45,21 @@ to a canonical example — read those for the actual implementation.
   Captures original `console.*` methods before any override to avoid recursion.
 - **Canonical example:** `main/src/services/sessionManager.ts`
 
+### `main/src/orchestrator/loggerAdapter`
+
+- **Path:** `main/src/orchestrator/loggerAdapter.ts`
+- **Use it for:** Bridging a `Logger` instance to any boundary typed as `LoggerLike`
+  (the structural interface in `main/src/orchestrator/types.ts`). Call
+  `makeLoggerLike(logger)` — also handles the `logger === undefined` case by returning
+  a console-based shim, so callers never need a null check. Companion `makeDatabaseLike`
+  builds the matching `DatabaseLike` adapter.
+- **Why single-source:** Hand-rolled inline adapters (`{ info: m => logger.info(m), ... }`)
+  silently drift when `Logger` or `LoggerLike` gain methods — FIND-017-5 extracted this
+  utility specifically to kill that drift surface, and TASK-651 re-introduced it before
+  the code-reviewer caught the duplication. Do NOT inline.
+- **Canonical example:** `main/src/services/panels/claude/claudeCodeManager.ts:503`;
+  `main/src/index.ts:559` and `:717`.
+
 ### `frontend/src/utils/api`
 
 - **Path:** `frontend/src/utils/api.ts`
