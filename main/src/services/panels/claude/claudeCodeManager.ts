@@ -5,6 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import type { LoggerLike } from '../../../orchestrator/types';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
@@ -488,9 +489,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * 'Run was terminated before approval could be processed'.
    */
   private makePreToolUseHook(panelId: string): HookCallback {
+    // Adapt Logger (verbose/debug-less) to the narrow LoggerLike interface that
+    // routePreToolUseThroughApprovalRouter accepts. Only the error() call path
+    // is exercised by the helper; debug/warn/info are included for completeness.
+    const loggerLike: LoggerLike | undefined = this.logger
+      ? {
+          info:  (m: string) => this.logger!.info(m),
+          warn:  (m: string) => this.logger!.warn(m),
+          error: (m: string) => this.logger!.error(m),
+          debug: (_m: string) => {},
+        }
+      : undefined;
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
-      return routePreToolUseThroughApprovalRouter(pretool, panelId, 'ClaudeCodeManager', this.logger);
+      return routePreToolUseThroughApprovalRouter(pretool, panelId, 'ClaudeCodeManager', loggerLike);
     };
   }
 
