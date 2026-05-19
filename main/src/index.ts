@@ -624,8 +624,9 @@ async function initializeServices() {
   };
 
   // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
-  // LifecycleTransitions adapter, and streaming publisher + db for event bridging.
-  const placeholderRunExecutor = new RunExecutor(
+  // LifecycleTransitions adapter, streaming publisher + db for event bridging, and
+  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output').
+  const runExecutor = new RunExecutor(
     spawnerAdapter,
     workflowRegistry,
     cyboflowLogger,
@@ -633,6 +634,7 @@ async function initializeServices() {
     lifecycleTransitions,
     cyboflowPublisher,
     rawDb,
+    defaultCliManager,
   );
 
   const runLauncher = new RunLauncher(
@@ -645,7 +647,7 @@ async function initializeServices() {
     bridgeScriptResolver,
     nodeResolver,
     cyboflowPublisher,
-    placeholderRunExecutor,
+    runExecutor,
   );
 
   const services: AppServices = {
