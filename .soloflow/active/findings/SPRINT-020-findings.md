@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-020
-pending_count: 4
-last_updated: "2026-05-19T08:10:00.000Z"
+pending_count: 5
+last_updated: "2026-05-19T15:30:00.000Z"
 ---
 # Findings Queue
 
@@ -52,4 +52,14 @@ SPRINT-020 started with missing infra: docker; tests deferred.
 - **location:** .soloflow/active/plans/approval-router-and-permission-fix/TASK-569-plan.md; main/src/services/panels/claude/claudeCodeManager.ts:387-395
 - **description:** TASK-569's plan opens with "TASK-204 (SPRINT-005) replaced the `--dangerously-skip-permissions` bypass in `claudeCodeManager.buildCommandArgs()` with a hard throw whenever `effectiveMode === 'ignore'`. That seals the bypass — but every UI callsite that creates a session still defaults `permissionMode: 'ignore'`, so the standard session-creation flow now hits the throw and fails at spawn." Reviewing the actual `claudeCodeManager.ts` in the worktree, there is no longer a throw on `'ignore'` (no `Cyboflow runs require approve mode` Error anywhere in `main/src`). Instead, lines 387-395 silently omit the PreToolUse hook when `permissionMode === 'ignore'` — the SDK auto-allows every tool call ("matching the pre-SDK 'skip the bridge' behavior"). The plan's referenced `claudeCodeManagerPermissions.test.ts` file (criterion 5) also does not exist in the worktree. The default-flip is still a reasonable safety-by-default change, but the urgency framing ("standard session creation flow fails at spawn") is stale — the actual current behavior is silent bypass, not crash. Worth flagging because future readers (and the compounder) will trust the plan's narrative.
 - **suggested_action:** Update the TASK-569 plan's Problem section (or close the parent epic) to reflect the current `claudeCodeManager.ts` behavior. Decide whether `permissionMode === 'ignore'` should: (a) genuinely be sealed (re-introduce the throw), (b) stay as the silent-bypass debug escape hatch (then document the contract), or (c) be removed entirely from the type unions. The current half-state (manager silently bypasses, UI defaults to `'approve'`, but two other UI surfaces still let users pick `'ignore'`) is the worst of all worlds.
+- **resolved_by:**
+
+## FIND-SPRINT-020-6
+- **source:** TASK-597 (code-reviewer)
+- **type:** claude-md
+- **severity:** low
+- **status:** open
+- **location:** main/src/database/migrations/006_cyboflow_schema.sql (approvals.decided_by column comment)
+- **description:** The approvals table schema comment enumerates `decided_by TEXT, -- 'user' | 'auto-policy' | 'timeout'`, but ApprovalRouter.clearPendingForRun() introduced in TASK-597 now writes a new value `'system'` (decided_by='system') to mark system-initiated termination cleanups. The column has no CHECK constraint, so this is a documentation-drift issue rather than a runtime bug — but the comment now under-enumerates the production-written values, which will mislead future maintainers and reviewers. The same comment list is also missing `'auto-policy'` for the canceled-allow path at approvalRouter.ts:291 (the comment did list 'auto-policy', so that one is fine — only 'system' is the new addition).
+- **suggested_action:** Update the schema comment in `006_cyboflow_schema.sql` to `decided_by TEXT, -- 'user' | 'auto-policy' | 'system' | 'timeout'`. Optionally, add a CHECK constraint enumerating the valid values in a follow-up migration to make this enforceable rather than documented.
 - **resolved_by:**
