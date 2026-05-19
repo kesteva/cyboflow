@@ -216,20 +216,3 @@ Both `x86_64` and `arm64` slices confirmed present.
 
 (The package also ships pre-built binaries for other platforms under `prebuilds/` — these are ignored at runtime; the `build/Release/pty.node` is what Electron loads.)
 
----
-
-## Notes for Future Builds
-
-1. **electron-builder background kill:** The background process timeout killed `pnpm run build:mac:universal` while `notarytool submit --wait` was polling Apple. On future runs, ensure the terminal session is persistent or the timeout is increased (the build takes ~1 hour when Apple notarization is slow). The submitted artifact was still accepted; we recovered by:
-   - Polling `xcrun notarytool info` until status left "In Progress"
-   - Manually stapling the .app
-   - Creating the DMG with `hdiutil create`
-   - Submitting and stapling the DMG separately
-
-2. **DMG notarization is separate from app notarization:** electron-builder normally handles creating the DMG and stapling as part of its build flow. When the build is interrupted after signing but before DMG creation, the DMG must be notarized separately. This adds ~2 min for a second notarytool round-trip.
-
-3. **Apple notarization latency:** First submission took ~95 min. Subsequent submissions were ~2 min. Normal latency is 2–15 min; the first submission may be slow due to Apple's initial scan of a new app identity.
-
-4. **configure-build.js behavior:** Sets `notarize: true` in package.json before invoking electron-builder. electron-builder 26's `getNotarizeOptions()` reads credentials directly from `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` env vars — the `notarize: { teamId: '${APPLE_TEAM_ID}' }` placeholder in package.json is overridden to `true` by configure-build.js and the env vars are what actually matter.
-
-5. **appId:** `com.cyboflow.app` — confirmed correct, rebrand is complete.
