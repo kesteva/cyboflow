@@ -31,4 +31,13 @@ describe('ConfigManager permissionMode default', () => {
     const prefs = mgr.getSessionCreationPreferences();
     expect(prefs.claudeConfig?.permissionMode).toBe('approve');
   });
+
+  it('top-level defaultPermissionMode in DEFAULT_CONFIG is "approve" (Settings.tsx reads this field)', () => {
+    // Settings.tsx fetches config via API.config.get() and falls back with
+    // data.defaultPermissionMode || 'approve'.  Regression guard: the
+    // constructor DEFAULT_CONFIG must not ship 'ignore' as the stored default.
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    const config = mgr.getConfig();
+    expect(config.defaultPermissionMode).toBe('approve');
+  });
 });
