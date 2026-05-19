@@ -70,6 +70,11 @@ node scripts/configure-build.test.js
 
 ## Notarization — Submission 1: App Bundle (Cyboflow.zip)
 
+> **Redaction:** Use the literal `<APPLE_ID>` placeholder in committed
+> transcripts rather than a real Apple ID email. The submission ID and Team
+> ID are sufficient cross-reference anchors for audit; the email adds no
+> retrieval value and is unnecessary PII to leave in version control.
+
 **Submission ID:** `<TODO>`
 **Submitted:** `<TODO: ISO-8601 UTC timestamp>`
 **Status:** `<TODO: Accepted / Rejected / Invalid>`
