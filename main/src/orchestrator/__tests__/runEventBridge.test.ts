@@ -525,12 +525,7 @@ describe('runEventBridge', () => {
     //     Verified by a stub db whose `prepare` throws — if the bridge tried to
     //     construct a RawEventsSink it would call db.prepare and the test would fail.
     // -----------------------------------------------------------------------
-    it('(a) skipPersistence: true skips router/sink construction — non-functional db stub does not throw', () => {
-      // Stub db whose prepare() throws. If the bridge constructs a RawEventsSink, this will throw.
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called when skipPersistence=true'); },
-      } as unknown as Database.Database;
-
+    it('(a) skipPersistence: true skips router/sink construction — db may be omitted entirely', () => {
       const { asPublisher } = makePublisher();
       const source = new EventEmitter();
 
@@ -539,7 +534,6 @@ describe('runEventBridge', () => {
           runId: SP_RUN_ID,
           source,
           publisher: asPublisher,
-          db: stubDb,
           skipPersistence: true,
         });
       }).not.toThrow();
@@ -549,10 +543,6 @@ describe('runEventBridge', () => {
     // (b) skipPersistence: true — onFirstMessage still fires exactly once
     // -----------------------------------------------------------------------
     it('(b) skipPersistence: true still fires onFirstMessage exactly once', () => {
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called'); },
-      } as unknown as Database.Database;
-
       const onFirstMessage = vi.fn();
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
@@ -561,7 +551,6 @@ describe('runEventBridge', () => {
         runId: SP_RUN_ID,
         source: src,
         publisher: asPublisher,
-        db: stubDb,
         skipPersistence: true,
         onFirstMessage,
       });
@@ -626,10 +615,6 @@ describe('runEventBridge', () => {
     // (e) dispose with skipPersistence: true is idempotent
     // -----------------------------------------------------------------------
     it('(e) dispose with skipPersistence: true is idempotent', () => {
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called'); },
-      } as unknown as Database.Database;
-
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
       const baselineListenerCount = src.listenerCount('output');
@@ -638,7 +623,6 @@ describe('runEventBridge', () => {
         runId: SP_RUN_ID,
         source: src,
         publisher: asPublisher,
-        db: stubDb,
         skipPersistence: true,
       });
 
@@ -653,6 +637,47 @@ describe('runEventBridge', () => {
       // Calling dispose() again must not throw.
       expect(() => bridge.dispose()).not.toThrow();
       expect(src.listenerCount('output')).toBe(baselineListenerCount);
+    });
+
+    // -----------------------------------------------------------------------
+    // (f) runtime guard: bridgeEvents throws when db is undefined and skipPersistence is not true
+    // -----------------------------------------------------------------------
+    it('(f) bridgeEvents throws when db is undefined and skipPersistence is not true', () => {
+      const { asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      // (i) skipPersistence: false explicit, no db → throws
+      expect(() =>
+        bridgeEvents({ runId: SP_RUN_ID, source: src, publisher: asPublisher, skipPersistence: false }),
+      ).toThrow(/db.*skipPersistence|skipPersistence.*db/);
+
+      // (ii) skipPersistence omitted, no db → throws
+      expect(() =>
+        bridgeEvents({ runId: SP_RUN_ID, source: src, publisher: asPublisher }),
+      ).toThrow(/db.*skipPersistence|skipPersistence.*db/);
+    });
+
+    // -----------------------------------------------------------------------
+    // (g) db-omitted success path: skipPersistence: true with db omitted works end-to-end
+    // -----------------------------------------------------------------------
+    it('(g) skipPersistence: true with db omitted: bridge functions normally', () => {
+      const onFirstMessage = vi.fn();
+      const { publish, asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      // No db field in options at all.
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        skipPersistence: true,
+        onFirstMessage,
+      });
+
+      emitOutput(src, SP_RUN_ID, systemEvent);
+
+      expect(publish).toHaveBeenCalledOnce();
+      expect(onFirstMessage).toHaveBeenCalledOnce();
     });
 
     // -----------------------------------------------------------------------

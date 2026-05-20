@@ -41,8 +41,21 @@ export interface BridgeEventsOptions {
   source: EventEmitter;
   /** Delivers the wrapped envelope to the renderer via IPC. */
   publisher: StreamEventPublisher;
-  /** better-sqlite3 database handle used by RawEventsSink for inserts. */
-  db: Database.Database;
+  /**
+   * better-sqlite3 database handle used by RawEventsSink for INSERTs.
+   *
+   * Required when `skipPersistence` is falsy (the default — production callers
+   * always supply it because they want raw_events persistence). MAY be omitted
+   * when `skipPersistence === true`; in that mode the bridge constructs no
+   * EventRouter/RawEventsSink and never touches `db`, so callers (e.g.
+   * renderer-only forwarders) need not allocate one.
+   *
+   * The optionality is enforced at the type level and additionally guarded at
+   * runtime in `bridgeEvents()` — see the early throw below — so back-compat
+   * is preserved for callers that forget to set `skipPersistence` while also
+   * omitting `db`.
+   */
+  db?: Database.Database;
   /** Optional structured logger; if omitted, warn messages are silently swallowed. */
   logger?: LoggerLike;
   /**
@@ -69,8 +82,9 @@ export interface BridgeEventsOptions {
    * the bridge's own EventRouter+RawEventsSink AND the CCM pipeline would
    * INSERT the same event, causing double-INSERTs (FIND-SPRINT-021-5).
    *
-   * `db` remains required in the options type for back-compat; its value is
-   * simply unused when skipPersistence === true.
+   * `db` is optional in the options type; its value is unused when
+   * skipPersistence === true. Production callers still supply it (and must,
+   * because the runtime guard throws when it is absent and persistence is on).
    */
   skipPersistence?: boolean;
   /**
@@ -135,6 +149,18 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
     logger,
   } = opts;
 
+  // Guard: db is optional in the type to support skipPersistence callers, but
+  // when persistence IS active (the default for production), db is required.
+  // Throw synchronously with a descriptive message so misconfigured callers
+  // fail loudly at construction rather than silently producing a no-op bridge.
+  if (opts.skipPersistence !== true && db === undefined) {
+    throw new Error(
+      '[runEventBridge] bridgeEvents() requires `db` unless `skipPersistence: true` is set. ' +
+      'Production callers MUST supply a better-sqlite3 database; set `skipPersistence: true` ' +
+      'only when a parallel pipeline already owns raw_events persistence for this run.',
+    );
+  }
+
   // narrowing is always needed (used unconditionally in the publish envelope path).
   const narrowing: TypedEventNarrowing = opts.narrowing ?? new TypedEventNarrowing();
 
@@ -152,7 +178,8 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
   } else {
     // Default legacy behaviour: construct router + sink and wire INSERT pipeline.
     router = opts.router ?? new EventRouter();
-    sink = opts.sink ?? new RawEventsSink(db, logger);
+    // db is guaranteed non-undefined here — the guard above throws when it is absent.
+    sink = opts.sink ?? new RawEventsSink(db!, logger);
     // Attach the sink to the router so emitForRun triggers INSERT synchronously.
     sink.attachToRouter(router, runId);
   }
