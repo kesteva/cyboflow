@@ -301,6 +301,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
       this.emit('spawned', { panelId, sessionId });
 
       this.logger?.info(`[ClaudeCodeManager] SDK query started for panel ${panelId} (session ${sessionId})`);
+
+      // Wait for the SDK iterator to drain before returning. Callers (RunExecutor,
+      // continueConversation) await spawnCliProcess to know when the turn is done —
+      // runExecutor.ts:217 fires `transitionToCompleted` immediately after this
+      // resolves, expecting status='running' from the matching `pre_spawn` transition.
+      // Returning before the iterator drains races those transitions: status flips
+      // running → completed before SDK tool calls fire, then ApprovalRouter rejects
+      // every tool request with RunNotRunningError. runSdkQuery's try/catch swallows
+      // SDK errors, so this await never throws — the lock releases on iterator drain.
+      await iteratorDone;
     });
   }
 
