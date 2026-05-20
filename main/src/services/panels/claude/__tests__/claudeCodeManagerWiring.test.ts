@@ -1,6 +1,7 @@
 /**
  * Unit tests for ClaudeCodeManager.composeSystemPromptAppend per-spawn
- * precedence (TASK-661 acceptance criteria).
+ * precedence (TASK-661 acceptance criteria) and logger-wire coverage
+ * (TASK-649 acceptance criteria).
  *
  * Behavior covered:
  *   - When both dbSession-derived append AND per-spawn systemPromptAppend are
@@ -11,6 +12,8 @@
  *   - When only dbSession append is present, behavior is unchanged from prior
  *     to TASK-661.
  *   - When neither is present, undefined is returned.
+ *   - Logger spy is wired through ClaudeCodeManager → RawEventsSink: warn()
+ *     is called when RawEventsSink.handleEvent fails to INSERT (TASK-649).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -22,6 +25,26 @@ import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
+import type { Logger } from '../../../../utils/logger';
+
+// ---------------------------------------------------------------------------
+// Logger spy factory (TASK-649)
+//
+// Structurally compatible with Pick<Logger, 'warn' | 'info' | 'verbose'>.
+// The production Logger class (utils/logger.ts) exposes more methods; only
+// these three are consumed by the ClaudeCodeManager / RawEventsSink pipeline.
+// Pattern matches main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts.
+// ---------------------------------------------------------------------------
+
+type LoggerSpy = Pick<Logger, 'warn' | 'info' | 'verbose'>;
+
+function makeLoggerSpy(): LoggerSpy {
+  return {
+    warn: vi.fn(),
+    info: vi.fn(),
+    verbose: vi.fn(),
+  } as unknown as LoggerSpy;
+}
 
 
 // ---------------------------------------------------------------------------
@@ -112,10 +135,12 @@ function createMockSessionManager(sessionAppend?: string): SessionManager {
 
 describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence', () => {
   let db: Database.Database;
+  let logger: LoggerSpy;
 
   beforeEach(() => {
     capturedQueryOptions = null;
     db = createTestDb();
+    logger = makeLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
@@ -134,7 +159,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
@@ -163,7 +188,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
@@ -190,7 +215,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
@@ -217,7 +242,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
@@ -248,5 +273,49 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
         undefined as unknown as Database.Database, // simulate a caller bypassing TS
       );
     }).toThrow(/db argument is required/i);
+  });
+
+  it('logger spy receives warn() when RawEventsSink INSERT fails — proves the ClaudeCodeManager → pipeline logger wire', async () => {
+    // Use a fake DB whose prepared statement's run() always throws.
+    // This forces RawEventsSink.handleEvent into its fail-soft catch block,
+    // which calls this.logger?.warn(...).  Because ClaudeCodeManager passes
+    // `this.logger` to new RawEventsSink(this.db, this.logger) during
+    // spawnCliProcess, the spy must observe the call — proving the logger
+    // reference flows from manager construction through to the pipeline.
+    // Reference: rawEventsSink.ts:112-116 (fail-soft catch).
+    const fakeStmt = { run: vi.fn(() => { throw new Error('simulated INSERT failure'); }) };
+    const fakeDb = {
+      prepare: vi.fn(() => fakeStmt),
+    } as unknown as Database.Database;
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      fakeDb,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-logger-wire',
+      sessionId: 'session-logger-wire',
+      worktreePath: '/tmp/test',
+      prompt: 'trigger warn via pipeline',
+      permissionMode: 'ignore',
+    });
+
+    // Let the async SDK iterator and RawEventsSink dispatch settle.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // logger.warn must have been called by RawEventsSink.handleEvent.
+    expect(logger.warn).toHaveBeenCalled();
+    // Inspect warn.mock.calls[0] to verify the fail-soft message content.
+    // (warn.mock.calls is the vitest Mock API surface; cast needed since LoggerSpy
+    // types warn as a plain function, not a vi.fn Mock.)
+    const warn = logger.warn as unknown as import('vitest').MockInstance;
+    expect(warn.mock.calls[0][0]).toContain('[rawEventsSink]');
   });
 });
