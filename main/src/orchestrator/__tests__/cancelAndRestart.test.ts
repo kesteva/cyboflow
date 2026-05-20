@@ -315,21 +315,24 @@ describe('cancelAndRestartHandler', () => {
   });
 
   // -------------------------------------------------------------------------
-  // TASK-627: WARN log emitted after clearPendingForRun (TASK-304 no-op)
+  // TASK-627 / SPRINT-023 A4: DEBUG log emitted after clearPendingForRun
+  // (TASK-304 no-op). Downgraded from warn to debug to avoid log-flood on
+  // every Cancel-and-restart click — the tooltip surfaces the limitation
+  // to users; debug level keeps the trace available for diagnostics.
   // -------------------------------------------------------------------------
 
-  it('emits a WARN with TASK-304 reference after clearPendingForRun', async () => {
+  it('emits a DEBUG with TASK-304 reference after clearPendingForRun', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
 
-    const loggerWarns: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const loggerDebugs: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
     const testLogger = {
       info: vi.fn(),
-      warn: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
-        loggerWarns.push({ msg: _msg, ctx: ctx ?? {} });
-      }),
+      warn: vi.fn(),
       error: vi.fn(),
-      debug: vi.fn(),
+      debug: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerDebugs.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
     };
 
     const deps: HandlerDeps = {
@@ -339,27 +342,25 @@ describe('cancelAndRestartHandler', () => {
 
     await cancelAndRestartHandler(runId, deps);
 
-    expect(loggerWarns.length).toBe(1);
-    expect(loggerWarns[0].msg).toContain('[cancelAndRestart]');
-    // AC-TASK-627: warn message must reference TASK-304 so log scraping can flag the no-op.
-    expect(loggerWarns[0].msg).toContain('TASK-304'); // warn contains TASK-304
-    expect(loggerWarns[0].ctx['runId']).toBe(runId);
-    // Verify via spy: logger.warn was called with a message containing 'TASK-304'
-    expect(testLogger.warn).toHaveBeenCalledWith(expect.stringContaining('TASK-304'), expect.objectContaining({ runId }));
+    expect(loggerDebugs.length).toBe(1);
+    expect(loggerDebugs[0].msg).toContain('[cancelAndRestart]');
+    expect(loggerDebugs[0].msg).toContain('TASK-304');
+    expect(loggerDebugs[0].ctx['runId']).toBe(runId);
+    expect(testLogger.debug).toHaveBeenCalledWith(expect.stringContaining('TASK-304'), expect.objectContaining({ runId }));
   });
 
-  it('does NOT emit the TASK-304 WARN when the run is already terminal (noOp path)', async () => {
+  it('does NOT emit the TASK-304 DEBUG when the run is already terminal (noOp path)', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'completed');
 
-    const loggerWarns: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const loggerDebugs: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
     const testLogger = {
       info: vi.fn(),
-      warn: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
-        loggerWarns.push({ msg: _msg, ctx: ctx ?? {} });
-      }),
+      warn: vi.fn(),
       error: vi.fn(),
-      debug: vi.fn(),
+      debug: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerDebugs.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
     };
 
     const deps: HandlerDeps = {
@@ -370,7 +371,7 @@ describe('cancelAndRestartHandler', () => {
     const result = await cancelAndRestartHandler(runId, deps);
 
     expect('noOp' in result && result.noOp).toBe(true);
-    expect(loggerWarns.length).toBe(0);
+    expect(loggerDebugs.length).toBe(0);
   });
 
   it('still works without a logger when claudeManagerStop rejects', async () => {
