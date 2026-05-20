@@ -1,71 +1,55 @@
 /**
- * RunView subscription lifecycle tests (TASK-602).
+ * RunView rendering tests (updated in TASK-667).
+ *
+ * After TASK-667 confirmed H2 (renderer listener teardown), the stream-event
+ * subscription was moved from RunView's useEffect into the cyboflowStore
+ * module-level singleton. RunView is now subscription-free.
  *
  * Behaviors verified:
  *   1. Renders a "No active run" placeholder when activeRunId is null.
- *   2. Calls subscribeToStreamEvents with the correct runId when activeRunId
- *      is set.
- *   3. Calls the returned unsubscribe when the component unmounts (cleanup).
- *   4. Calls unsubscribe for the old runId and subscribes to the new runId
- *      when activeRunId changes.
+ *   2. Renders the runId when an active run is set.
+ *   3. Renders "Waiting for events…" before any events arrive.
+ *   4. Renders stream events from the store as JSON blobs.
+ *   5. Subscription is NOT managed by RunView (it is managed by the store).
  *
- * Design:
- *   - cyboflowApi is mocked at module level.  Because vi.mock factories are
- *     hoisted before variable initialization, the subscribe spy is installed
- *     via vi.mocked() AFTER import rather than referenced in the factory.
- *   - useCyboflowStore is used directly (real Zustand store, reset between
- *     tests via clearActiveRun / act).
+ * Subscription lifecycle tests live in
+ * frontend/src/stores/__tests__/cyboflowStore.test.ts.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi before importing the component.
-// The factory cannot reference top-level variables (hoisting), so we return
-// a vi.fn() directly and retrieve the spy later via vi.mocked().
+// Mock cyboflowApi so the store-level subscription does not attempt real IPC.
+// We mock the named export used by the store singleton (_startSubscription).
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../utils/cyboflowApi', () => ({
+  subscribeToStreamEvents: vi.fn(() => vi.fn()),
   cyboflowApi: {
-    subscribeToStreamEvents: vi.fn(),
+    subscribeToStreamEvents: vi.fn(() => vi.fn()),
+    listWorkflows: vi.fn(),
+    startRun: vi.fn(),
+    approveRun: vi.fn(),
   },
 }));
 
 // Import after mocks so vi.mock hoisting is in effect
 import { RunView } from '../RunView';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
-import { cyboflowApi } from '../../../utils/cyboflowApi';
-
-// ---------------------------------------------------------------------------
-// Convenience aliases for the mocked functions
-// ---------------------------------------------------------------------------
-
-const mockSubscribe = vi.mocked(cyboflowApi.subscribeToStreamEvents);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function setActiveRun(runId: string) {
-  act(() => {
-    useCyboflowStore.getState().setActiveRun(runId);
-  });
-}
+import { subscribeToStreamEvents } from '../../../utils/cyboflowApi';
+import type { StreamEvent } from '../../../utils/cyboflowApi';
 
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  mockSubscribe.mockReset();
-  // Default: each call returns a fresh unsubscribe spy
-  mockSubscribe.mockReturnValue(vi.fn());
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
   });
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
-  // useEffect does not throw and tests can focus on subscription behaviour.
+  // useEffect does not throw and tests can focus on rendering behaviour.
   HTMLElement.prototype.scrollIntoView = vi.fn();
 });
 
@@ -77,61 +61,69 @@ describe('RunView', () => {
   it('shows "No active run" placeholder when activeRunId is null', () => {
     render(<RunView />);
     expect(screen.getByText('No active run')).toBeInTheDocument();
-    expect(mockSubscribe).not.toHaveBeenCalled();
   });
 
-  it('calls subscribeToStreamEvents with the active runId when a run is set', () => {
-    setActiveRun('run-abc-123');
+  it('renders the active runId header when a run is set', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-abc-123');
+    });
     render(<RunView />);
 
-    expect(mockSubscribe).toHaveBeenCalledOnce();
-    const callArg = mockSubscribe.mock.calls[0][0] as {
-      runId: string;
-      onEvent: (e: unknown) => void;
-    };
-    expect(callArg.runId).toBe('run-abc-123');
-    expect(typeof callArg.onEvent).toBe('function');
+    expect(screen.queryByText('No active run')).not.toBeInTheDocument();
+    expect(screen.getByText('run-abc-123')).toBeInTheDocument();
   });
 
-  it('calls unsubscribe when the component unmounts', () => {
-    const unsubscribeSpy = vi.fn();
-    mockSubscribe.mockReturnValue(unsubscribeSpy);
+  it('shows "Waiting for events…" before any events arrive', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-abc-123');
+    });
+    render(<RunView />);
+    expect(screen.getByText(/Waiting for events/)).toBeInTheDocument();
+  });
 
-    setActiveRun('run-unmount-test');
+  it('renders stream events from the store as JSON blobs', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-abc-123');
+    });
+    const testEvent: StreamEvent = {
+      runId: 'run-abc-123',
+      type: 'system',
+      payload: { type: 'system', subtype: 'init' },
+      timestamp: '2026-05-20T00:00:00Z',
+    };
+    act(() => {
+      useCyboflowStore.getState().appendStreamEvent(testEvent);
+    });
+
+    render(<RunView />);
+
+    // Should not show the "waiting" placeholder anymore
+    expect(screen.queryByText(/Waiting for events/)).not.toBeInTheDocument();
+
+    // The JSON blob should be visible
+    expect(screen.getByText(/system/)).toBeInTheDocument();
+  });
+
+  it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
+    // Get the mocked subscribeToStreamEvents from the module-level mock.
+    const mockSubFn = vi.mocked(subscribeToStreamEvents);
+
+    // Rendering RunView must NOT trigger any additional subscribeToStreamEvents calls
+    // (the store already called it when setActiveRun was invoked above).
+    const callsBefore = mockSubFn.mock.calls.length;
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-render-test');
+    });
+    const callsAfterSetActiveRun = mockSubFn.mock.calls.length;
+    expect(callsAfterSetActiveRun).toBe(callsBefore + 1); // store called it once
+
     const { unmount } = render(<RunView />);
-
-    expect(mockSubscribe).toHaveBeenCalledOnce();
-    expect(unsubscribeSpy).not.toHaveBeenCalled();
+    // Mounting RunView should NOT call subscribeToStreamEvents again
+    expect(mockSubFn.mock.calls.length).toBe(callsAfterSetActiveRun);
 
     unmount();
-
-    expect(unsubscribeSpy).toHaveBeenCalledOnce();
-  });
-
-  it('unsubscribes from old runId and subscribes to new runId when activeRunId changes', () => {
-    const firstUnsubscribe = vi.fn();
-    const secondUnsubscribe = vi.fn();
-    mockSubscribe
-      .mockReturnValueOnce(firstUnsubscribe)
-      .mockReturnValueOnce(secondUnsubscribe);
-
-    setActiveRun('run-first');
-    const { rerender } = render(<RunView />);
-
-    expect(mockSubscribe).toHaveBeenCalledOnce();
-    expect((mockSubscribe.mock.calls[0][0] as { runId: string }).runId).toBe('run-first');
-
-    // Switch to a new run — triggers useEffect cleanup + re-subscribe
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-second');
-    });
-    rerender(<RunView />);
-
-    // The old subscription must have been cleaned up
-    expect(firstUnsubscribe).toHaveBeenCalledOnce();
-
-    // A new subscription must have been opened for the new runId
-    expect(mockSubscribe).toHaveBeenCalledTimes(2);
-    expect((mockSubscribe.mock.calls[1][0] as { runId: string }).runId).toBe('run-second');
+    // Unmounting RunView should NOT trigger additional subscribe calls
+    expect(mockSubFn.mock.calls.length).toBe(callsAfterSetActiveRun);
   });
 });
