@@ -265,6 +265,109 @@ describe('PendingApprovalCard — single variant', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Component tests: PendingApprovalCard — onDecide callback (single variant)
+// ---------------------------------------------------------------------------
+
+describe('PendingApprovalCard — onDecide callback (single variant)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('onDecide is called once after successful Approve mutation', async () => {
+    const onDecide = vi.fn();
+    mockApproveMutate.mockResolvedValueOnce(undefined);
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is called once after successful Reject mutation', async () => {
+    const onDecide = vi.fn();
+    mockRejectMutate.mockResolvedValueOnce(undefined);
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is not called when the prop is omitted (no errors thrown)', async () => {
+    // No onDecide prop — mutation still fires without error
+    render(<PendingApprovalCard item={singleItem} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    });
+    // No assertion on onDecide since it was not provided — just ensure no throw
+  });
+
+  it('onDecide is NOT called when the Approve mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockApproveMutate.mockRejectedValueOnce(new Error('network error'));
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('onDecide is NOT called when the Reject mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockRejectMutate.mockRejectedValueOnce(new Error('network error'));
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(mockRejectMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Component tests: PendingApprovalCard — onDecide callback (group variant)
+// ---------------------------------------------------------------------------
+
+describe('PendingApprovalCard — onDecide callback (group variant)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('onDecide is called once after successful group Approve mutation', async () => {
+    const onDecide = vi.fn();
+    mockApproveRestOfRunMutate.mockResolvedValueOnce({ decided: 1 });
+    render(<PendingApprovalCard item={groupItemRunX} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is called once after successful group Reject mutation', async () => {
+    const onDecide = vi.fn();
+    mockRejectRestOfRunMutate.mockResolvedValueOnce({ decided: 1 });
+    render(<PendingApprovalCard item={groupItemRunX} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Reject'));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is NOT called when the group Approve mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockApproveRestOfRunMutate.mockRejectedValueOnce(new Error('server error'));
+    render(<PendingApprovalCard item={groupItemRunX} onDecide={onDecide} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => {
+      expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Component tests: PendingApprovalCard — group variant
 // ---------------------------------------------------------------------------
 

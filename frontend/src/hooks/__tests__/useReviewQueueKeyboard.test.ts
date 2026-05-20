@@ -343,6 +343,66 @@ describe('useReviewQueueKeyboard — focus guard for non-input focusable element
 });
 
 // ---------------------------------------------------------------------------
+// onDecide callback (TASK-625)
+// ---------------------------------------------------------------------------
+
+describe('useReviewQueueKeyboard — onDecide callback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('y dispatches approve mutation AND calls onDecide once', () => {
+    const onDecide = vi.fn();
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3, onDecide));
+    act(() => { press('y'); });
+    expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+  });
+
+  it('n dispatches reject mutation AND calls onDecide once', () => {
+    const onDecide = vi.fn();
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3, onDecide));
+    act(() => { press('n'); });
+    expect(mockRejectMutate).toHaveBeenCalledTimes(1);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+  });
+
+  it('y on a group item calls approveRestOfRun AND calls onDecide once', () => {
+    const onDecide = vi.fn();
+    const queue = [groupItem(['g1', 'g2'], 'run-grp')];
+    renderHook(() => useReviewQueueKeyboard(queue, onDecide));
+    act(() => { press('y'); });
+    expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    expect(onDecide).toHaveBeenCalledTimes(1);
+  });
+
+  it('y on an empty queue does not call onDecide', () => {
+    const onDecide = vi.fn();
+    renderHook(() => useReviewQueueKeyboard([], onDecide));
+    act(() => { press('y'); });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('modifier-key combos (Cmd-y) do not call onDecide', () => {
+    const onDecide = vi.fn();
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3, onDecide));
+    act(() => {
+      fireEvent.keyDown(window, { key: 'y', metaKey: true });
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('onDecide is not called when no onDecide is provided (no errors thrown)', () => {
+    // Omit onDecide — just ensure y/n work without it
+    renderHook(() => useReviewQueueKeyboard(QUEUE_3));
+    expect(() => {
+      act(() => { press('y'); });
+    }).not.toThrow();
+    expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // React.StrictMode regression — state updaters must not fire side effects
 // ---------------------------------------------------------------------------
 
