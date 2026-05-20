@@ -365,6 +365,30 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 12b. system event with unrecognised subtype → null (covers projectSystemEvent fallthrough)
+  //
+  // The Zod schema now only accepts 'init' and 'compact_boundary' system subtypes,
+  // but the TypeScript union still includes SystemApiRetryEvent and SystemCompactEvent
+  // (preserved in shared/types/claudeStream.ts as migration stubs). Injecting such a
+  // subtype through the project() public API verifies that projectSystemEvent()'s
+  // fallthrough `return null` fires rather than crashing.
+  // -------------------------------------------------------------------------
+
+  it('returns null for a system event with an unrecognised subtype', () => {
+    // Use a legacy-TS-union subtype that the runtime no longer handles.
+    const unknownSubtypeEvent = {
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 1,
+      max_retries: 3,
+      retry_delay_ms: 1000,
+    } as unknown as Parameters<typeof projection.project>[0];
+
+    const result = projection.project(unknownSubtypeEvent);
+    expect(result).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // 13. Tool-result correlation: ToolCall status updated after user event
   // -------------------------------------------------------------------------
 
