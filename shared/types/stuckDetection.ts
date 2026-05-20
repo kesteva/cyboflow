@@ -49,3 +49,22 @@ export interface StuckDetectedEvent {
   /** Unix epoch milliseconds matching the stuck_detected_at column value. */
   detectedAt: number;
 }
+
+// ---------------------------------------------------------------------------
+// tRPC subscription client surface
+//
+// Narrow shape for `trpc.cyboflow.events.onStuckDetected`. Consumers cast the
+// tRPC client through `unknown` until TASK-254 lands the real router type.
+// Promoted out of frontend/ so any consumer imports rather than re-declares.
+// ---------------------------------------------------------------------------
+export interface StuckEventsClient {
+  onStuckDetected: {
+    subscribe(
+      input: undefined,
+      callbacks: {
+        onData: (event: StuckDetectedEvent) => void;
+        onError: (err: unknown) => void;
+      },
+    ): { unsubscribe(): void };
+  };
+}
