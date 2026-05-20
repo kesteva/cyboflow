@@ -1,10 +1,10 @@
 ---
-pending_count: 24
+pending_count: 27
 buckets:
   decisions: 1
   actions: 4
-  testing: 15
-  deferred_visual: 4
+  testing: 17
+  deferred_visual: 5
 items: []
 ---
 # Human Review Queue
@@ -260,6 +260,37 @@ items: []
   level: requirements
   severity: medium
 
+- sprint: SPRINT-023
+  type: deferred
+  bucket: testing
+  dedup_key: visual_web_electron_unreachable
+  level: ground_truth
+  severity: medium
+  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify these sprint-touched flows: (1) Review Queue stuck-aware card swap + tooltip with detectedAt (TASK-622/623/624); (2) Cancel-and-restart button tooltip + WARN log on TASK-304 no-op (TASK-627); (3) OnboardingCard dismissal via onDecide for both keyboard and click paths (TASK-625); (4) StatusBar is the sole MCP health surface — Sidebar no longer shows MCP dot (TASK-626); (5) commit footer presence in a fresh cyboflow run commit (TASK-628). Also confirm the pre-existing `useStuckNotifications subscription error: No \"subscription\"-procedure on path \"cyboflow.events.onStuckDetected\"` warning (observed in pre-sprint debug log) does not regress — TASK-623 aligned the hook with the canonical StuckDetectedEvent schema."
+  blocked_checks:
+    - "visual_web — Electron renderer at http://localhost:4521 unreachable (no `pnpm dev` session running); per CLAUDE.md the renderer cannot bootstrap standalone."
+    - "visual_macos — Peekaboo MCP available with both permissions granted, but no cyboflow UI window discoverable (macOS UI session at loginwindow); cannot attach to / capture an unmounted Electron window."
+  flows_deferred:
+    - Review Queue stuck-aware card swap + StuckBadge tooltip (TASK-622/623/624)
+    - Cancel-and-restart tooltip + WARN log (TASK-627)
+    - OnboardingCard dismissal via onDecide — keyboard + click paths (TASK-625)
+    - Sidebar MCP dot removed; StatusBar is single MCP surface (TASK-626)
+    - Commit footer composition for cyboflow runs (TASK-628)
+    - "Sprint-wide cross-task: App.tsx top-level subscribeToStuckEvents mount with TASK-623 useStuckNotifications — no duplicate subscriptions / missed events"
+    - Stuck inspector modal reason+detectedAt persistence through reviewQueueSlice (TASK-624)
+  created_at: "2026-05-19T19:15:00.000Z"
+
+- task: TASK-667
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-667-plan.md
+  action: "Manual smoke: in `pnpm dev`, against the Tester-mctest project, start the prune workflow and watch the renderer DevTools console. Confirm `[cyboflowApi] stream event #1`, `#2`, `#3` all appear (up to at least `#25`), and `useCyboflowStore.getState().streamEvents.length >= 3` by the time the run reaches `completed`. The architectural fix (subscription moved from RunView useEffect to cyboflowStore module-level singleton) was verified by unit tests but the end-to-end envelope-flow gate (AC8 — Phase 4 step 12) was not run by the executor."
+  blocked_checks:
+    - "AC8 — renderer receives N>=3 envelopes on a fresh run"
+    - Phase 4 step 12 — diagnostic re-run with fix in place
+  level: goal_backward
+  severity: medium
+
 ## Deferred Visual
 
 - sprint: SPRINT-007
@@ -309,6 +340,43 @@ items: []
     - TASK-551
     - TASK-552
     - TASK-553
+
+- sprint: SPRINT-024
+  type: human_needed
+  bucket: deferred_visual
+  dedup_key: electron_renderer_unreachable
+  verdict_notes: "Sprint verifier could not bring up the Electron app to run UI smoke for the TASK-637 parseJsonMessage adapter changes (MessagesView + RichOutputView). Orchestrator directive forbids spawning pnpm dev; an existing zombie Electron process (PID 22778, ~11h uptime) has 0 windows and Vite at :4521 is not listening. visual_web and visual_macos both classified skipped_unable."
+  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify the UI rendering surface that depends on TASK-637's parseJsonMessage adapter: (1) RichOutputView renders Claude SDK stream messages without crashing (confirm bb926cd's UnifiedMessage restoration holds — the adapter is shape-mismatched at the StreamEvent level but RichOutputView consumes UnifiedMessage); (2) MessagesView still shows session_info cards in the legacy mode (was flagged FIND-SPRINT-024-5 as empty); (3) confirm stale IPC type decls flagged in FIND-SPRINT-024-4 didn't surface a regression in panel:get-json-messages consumers after TASK-648 deleted the divergent sessions:get-json-messages handler."
+  blocked_checks:
+    - "visual_web — no live Vite renderer (port 4521 not listening; existing Electron PID 22778 has 0 windows, ~11.5h elapsed, debug logs stale from 17:38)"
+    - visual_macos — peekaboo CLI not installed; Peekaboo MCP reachable but Electron app shows 0 windows so nothing to capture
+    - "playwright E2E (`pnpm test`) — webServer config requires `pnpm electron-dev`, same constraint as visual"
+  flows_deferred:
+    - RichOutputView Claude SDK output rendering (TASK-637 + bb926cd fix)
+    - MessagesView session_info card population (FIND-SPRINT-024-5)
+    - "panels:get-json-messages consumer path still works after sessions:get-json-messages deletion (TASK-648)"
+  severity: medium
+  created_at: "2026-05-19T23:45:00.000Z"
+
+- sprint: SPRINT-025
+  type: human_needed
+  bucket: deferred_visual
+  dedup_key: electron_renderer_unreachable
+  verdict_notes: "End-of-sprint visual verification could not run any of the 7 affected UI flows. Playwright MCP and Peekaboo MCP are both technically present in this session but neither can drive the live cyboflow renderer: Playwright at http://localhost:4521 hits the documented `electronTRPC` preload constraint (CLAUDE.md) and renders a blank body; Peekaboo MCP enumerates the cyboflow Electron window (PID 76201, ID 6335) and reports Screen Recording + Accessibility granted, but the actual ScreenCaptureKit stream fails with `Failed to start stream due to audio/video capture failure` / `No displays available for capture`. Per-task visual was SKIPPED for the whole sprint (parallel-mode); this end-of-sprint pass is therefore the single missed visual verification. Integration tests + typecheck + lint are clean (net delta vs base: -1 pre-existing failure)."
+  action: "Launch `pnpm dev` (full Electron), then manually verify these sprint-touched flows: (1) TASK-657 — open a session/project and confirm `panels:initialize` round-trips `customState.cwd` and prefers it on re-mount; (2) TASK-658 — click the new + / Add Terminal button in PanelTabBar (test in both ProjectView and SessionView contexts), confirm a new terminal panel appears and is focused; (3) TASK-659 — press Cmd+Shift+Backquote (Ctrl+... on Linux/Windows) with a session open, confirm same behavior as the button, then verify TerminalPanel breadcrumb header shows the cwd; (4) TASK-668 — trigger a stuck detection on a run, confirm desktop notification fires exactly once and Review Queue UI reflects stuck state via reviewQueueSlice.runStatusMap; (5) TASK-669 — take a stuck run to a terminal state (completed/failed/canceled), confirm runReasonMap and runDetectedAtMap entries are cleared (no stale tooltip/inspector content); (6) TASK-670 — exercise paths that go through worktreeManager/runCommandManager/ipc/file.ts with single quotes and spaces (e.g. project named `my'project's worktree`), confirm no shell errors. NOTE: TASK-667's end-to-end envelope-flow gate is already separately queued in the existing TASK-667 action_required entry above."
+  blocked_checks:
+    - "visual_web — Playwright MCP works but Vite renderer at http://localhost:4521 is blank without Electron preload (electronTRPC missing). The standalone-terminal-panels.spec.ts added by TASK-658 fails for this same root cause when run via `pnpm test`; not a regression but degraded coverage."
+    - "visual_macos — Peekaboo MCP enumerates the Electron window and reports both permissions granted, but ScreenCaptureKit stream itself rejects: `Failed to start stream due to audio/video capture failure` (window-target) and `No displays available for capture` (screen-target). TCC grant is present at the policy layer but capture-stream not authorized for this Claude Code host process."
+    - "playwright E2E (`pnpm test`) — `tests/cyboflow-day3-gate.spec.ts` imports vitest and breaks `playwright test` collection (pre-existing, unrelated to sprint); even when excluded, all other specs hit the same `electronTRPC` constraint."
+  flows_deferred:
+    - TASK-657 panels:initialize cwd round-trip
+    - TASK-658 Add Terminal button in PanelTabBar (ProjectView + SessionView)
+    - TASK-659 useAddTerminalShortcut + TerminalPanel cwd breadcrumb
+    - TASK-668 stuck-event single-subscription chain (no duplicate notifications)
+    - TASK-669 runReasonMap/runDetectedAtMap eviction on terminal status
+    - TASK-670 escapeShellArg migration adversarial paths
+  severity: medium
+  created_at: "2026-05-20T15:42:00.000Z"
 
 ## Overridden
 
@@ -400,40 +468,3 @@ items: []
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
-
-- sprint: SPRINT-023
-  type: deferred
-  bucket: testing
-  dedup_key: visual_web_electron_unreachable
-  level: ground_truth
-  severity: medium
-  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify these sprint-touched flows: (1) Review Queue stuck-aware card swap + tooltip with detectedAt (TASK-622/623/624); (2) Cancel-and-restart button tooltip + WARN log on TASK-304 no-op (TASK-627); (3) OnboardingCard dismissal via onDecide for both keyboard and click paths (TASK-625); (4) StatusBar is the sole MCP health surface — Sidebar no longer shows MCP dot (TASK-626); (5) commit footer presence in a fresh cyboflow run commit (TASK-628). Also confirm the pre-existing `useStuckNotifications subscription error: No \"subscription\"-procedure on path \"cyboflow.events.onStuckDetected\"` warning (observed in pre-sprint debug log) does not regress — TASK-623 aligned the hook with the canonical StuckDetectedEvent schema."
-  blocked_checks:
-    - "visual_web — Electron renderer at http://localhost:4521 unreachable (no `pnpm dev` session running); per CLAUDE.md the renderer cannot bootstrap standalone."
-    - "visual_macos — Peekaboo MCP available with both permissions granted, but no cyboflow UI window discoverable (macOS UI session at loginwindow); cannot attach to / capture an unmounted Electron window."
-  flows_deferred:
-    - "Review Queue stuck-aware card swap + StuckBadge tooltip (TASK-622/623/624)"
-    - "Cancel-and-restart tooltip + WARN log (TASK-627)"
-    - "OnboardingCard dismissal via onDecide — keyboard + click paths (TASK-625)"
-    - "Sidebar MCP dot removed; StatusBar is single MCP surface (TASK-626)"
-    - "Commit footer composition for cyboflow runs (TASK-628)"
-    - "Sprint-wide cross-task: App.tsx top-level subscribeToStuckEvents mount with TASK-623 useStuckNotifications — no duplicate subscriptions / missed events"
-    - "Stuck inspector modal reason+detectedAt persistence through reviewQueueSlice (TASK-624)"
-  created_at: "2026-05-19T19:15:00.000Z"
-
-- sprint: SPRINT-024
-  type: human_needed
-  bucket: deferred_visual
-  dedup_key: electron_renderer_unreachable
-  verdict_notes: "Sprint verifier could not bring up the Electron app to run UI smoke for the TASK-637 parseJsonMessage adapter changes (MessagesView + RichOutputView). Orchestrator directive forbids spawning pnpm dev; an existing zombie Electron process (PID 22778, ~11h uptime) has 0 windows and Vite at :4521 is not listening. visual_web and visual_macos both classified skipped_unable."
-  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify the UI rendering surface that depends on TASK-637's parseJsonMessage adapter: (1) RichOutputView renders Claude SDK stream messages without crashing (confirm bb926cd's UnifiedMessage restoration holds — the adapter is shape-mismatched at the StreamEvent level but RichOutputView consumes UnifiedMessage); (2) MessagesView still shows session_info cards in the legacy mode (was flagged FIND-SPRINT-024-5 as empty); (3) confirm stale IPC type decls flagged in FIND-SPRINT-024-4 didn't surface a regression in panel:get-json-messages consumers after TASK-648 deleted the divergent sessions:get-json-messages handler."
-  blocked_checks:
-    - "visual_web — no live Vite renderer (port 4521 not listening; existing Electron PID 22778 has 0 windows, ~11.5h elapsed, debug logs stale from 17:38)"
-    - "visual_macos — peekaboo CLI not installed; Peekaboo MCP reachable but Electron app shows 0 windows so nothing to capture"
-    - "playwright E2E (`pnpm test`) — webServer config requires `pnpm electron-dev`, same constraint as visual"
-  flows_deferred:
-    - "RichOutputView Claude SDK output rendering (TASK-637 + bb926cd fix)"
-    - "MessagesView session_info card population (FIND-SPRINT-024-5)"
-    - "panels:get-json-messages consumer path still works after sessions:get-json-messages deletion (TASK-648)"
-  severity: medium
-  created_at: "2026-05-19T23:45:00.000Z"
