@@ -3,7 +3,6 @@ import { API } from '../../../utils/api';
 import { cn } from '../../../utils/cn';
 import { ChevronRight, ChevronDown, Copy, Check, Terminal, FileText } from 'lucide-react';
 import type { JSONMessage, SessionInfo } from './parseJsonMessage';
-import type { UnifiedMessage } from './transformers/MessageTransformer';
 
 interface MessagesViewProps {
   panelId: string;
@@ -33,15 +32,12 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
         const response = await API.panels.getJsonMessages(panelId);
         
         if (response.success && response.data) {
-          // panels:get-json-messages returns UnifiedMessage[] at runtime (not ClaudeJsonMessage[]).
-          // Pass straight through — serialize each UnifiedMessage as JSON for the raw viewer.
-          // The deeper fix (correcting the IPC type declaration) is tracked in FIND-SPRINT-024-4.
+          // Serialize each UnifiedMessage as JSON for the raw viewer.
           const regularMessages: JSONMessage[] = [];
-          response.data.forEach((rawMsg) => {
-            const msg = rawMsg as unknown as UnifiedMessage;
+          response.data.forEach((msg) => {
             regularMessages.push({
               type: 'json',
-              data: JSON.stringify(rawMsg),
+              data: JSON.stringify(msg),
               timestamp: msg.timestamp ?? '',
             });
           });

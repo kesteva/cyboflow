@@ -4,11 +4,10 @@
  * The runtime parseJsonMessage / parseJsonMessages adapters originally
  * declared in this module were dead after TASK-637's fix commit bb926cd —
  * production now feeds UnifiedMessage[] straight through to
- * messageTransformer.transform() (identity cast) in MessagesView /
- * RichOutputView. The type aliases below remain in use; the runtime
- * adapters were removed in SPRINT-024 (compound A6). FIND-SPRINT-024-4
- * tracks the deeper IPC type-declaration fix that would let these aliases
- * also be retired.
+ * messageTransformer.transform() in MessagesView / RichOutputView.
+ * The type aliases below remain in use; the runtime adapters were removed
+ * in SPRINT-024 (compound A6). The IPC type declaration was corrected in
+ * TASK-672 (aligning electron.d.ts getJsonMessages to UnifiedMessage[]).
  */
 
 /**
