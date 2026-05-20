@@ -1,5 +1,5 @@
 import React, { useCallback, memo, useState, useRef, useEffect } from 'react';
-import { X, Terminal, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Edit2 } from 'lucide-react';
+import { X, Terminal, MessageSquare, GitBranch, FileText, FileCode, MoreVertical, BarChart3, Edit2, Plus } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { PanelTabBarProps } from '../../types/panelComponents';
 import { ToolPanel, ToolPanelType, LogsPanelState, BaseAIPanelState, PanelStatus } from '../../../../shared/types/panels';
@@ -13,7 +13,8 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   activePanel,
   onPanelSelect,
   onPanelClose,
-  context = 'worktree'  // Default to worktree for backward compatibility
+  context = 'worktree',  // Default to worktree for backward compatibility
+  onAddTerminal
 }) => {
   const sessionContext = useSession();
   const { gitBranchActions, isMerging } = sessionContext || {};
@@ -83,7 +84,17 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       handleRenameCancel();
     }
   }, [handleRenameSubmit, handleRenameCancel]);
-  
+
+  const handleAddTerminal = useCallback(() => {
+    if (!onAddTerminal) return;
+    const result = onAddTerminal();
+    if (result instanceof Promise) {
+      result.catch((err: unknown) => {
+        console.error('[PanelTabBar] Failed to add terminal:', err);
+      });
+    }
+  }, [onAddTerminal]);
+
   // Focus input when editing starts
   useEffect(() => {
     if (editingPanelId && editInputRef.current) {
@@ -241,25 +252,40 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
           );
         })}
         
-        {/* Branch Actions button - moved from ViewTabs - only in worktree context */}
-        {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
+        {/* Trailing actions: Add Terminal button + Branch Actions (worktree only) */}
+        {(onAddTerminal || (context === 'worktree' && gitBranchActions && gitBranchActions.length > 0)) && (
           <div className="ml-auto flex items-center gap-2 pr-2 h-8">
-            <Dropdown
-              trigger={
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="flex items-center gap-2 px-3 py-1 h-7"
-                  disabled={isMerging}
-                >
-                  <GitBranch className="w-4 h-4" />
-                  <span className="text-sm">Git Branch Actions</span>
-                  <MoreVertical className="w-3 h-3" />
-                </Button>
-              }
-              items={gitBranchActions}
-              position="bottom-right"
-            />
+            {onAddTerminal && (
+              <button
+                type="button"
+                onClick={handleAddTerminal}
+                aria-label="Add terminal panel"
+                title="Add terminal panel"
+                className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+              >
+                <Plus className="w-4 h-4" />
+                <Terminal className="w-4 h-4" />
+                <span className="sr-only">Add terminal panel</span>
+              </button>
+            )}
+            {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
+              <Dropdown
+                trigger={
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="flex items-center gap-2 px-3 py-1 h-7"
+                    disabled={isMerging}
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    <span className="text-sm">Git Branch Actions</span>
+                    <MoreVertical className="w-3 h-3" />
+                  </Button>
+                }
+                items={gitBranchActions}
+                position="bottom-right"
+              />
+            )}
           </div>
         )}
       </div>
