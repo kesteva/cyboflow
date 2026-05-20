@@ -269,30 +269,6 @@ export function pureApplyStuckEvent(
 }
 
 /**
- * Pure setRunStatus reducer — exported for unit testing.
- *
- * Applies a status update to a given runStatusMap snapshot without touching
- * the Zustand store.  Terminal statuses (`completed`, `canceled`, `failed`)
- * cause eviction of the key; all others are stored normally.
- *
- * Note: this helper operates on `runStatusMap` only.  Use
- * `pureSetRunStatusAllMaps` to test multi-map eviction behavior.
- */
-export function pureSetRunStatus(
-  map: Record<string, WorkflowRunStatus>,
-  runId: string,
-  status: WorkflowRunStatus,
-): Record<string, WorkflowRunStatus> {
-  if (status === 'completed' || status === 'canceled' || status === 'failed') {
-    if (!(runId in map)) return map; // already absent — no allocation
-    const next = { ...map };
-    delete next[runId];
-    return next;
-  }
-  return { ...map, [runId]: status };
-}
-
-/**
  * Pure setRunStatus reducer that operates on all three slice maps — exported
  * for unit testing. Mirrors the Zustand action: terminal statuses evict the
  * key from all three maps; non-terminal statuses update only runStatusMap.
