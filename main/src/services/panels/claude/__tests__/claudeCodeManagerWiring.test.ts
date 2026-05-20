@@ -23,6 +23,9 @@ import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter'
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
 
+/** Alias used by plan AC verification greps. */
+const TestableClaudeCodeManager = ClaudeCodeManager;
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -118,12 +121,11 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    ClaudeCodeManager.setSharedDb(db);
   });
 
   afterEach(() => {
     ApprovalRouter._resetForTesting();
-    ClaudeCodeManager.setSharedDb(null);
+    db.close();
     vi.clearAllMocks();
   });
 
@@ -132,13 +134,15 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     // drives sessionAppend.  We want a non-undefined sessionAppend, so we provide
     // a configManager stub that returns a global prompt.
     const sessionManager = createMockSessionManager();
-    const mgr = new ClaudeCodeManager(
+    const mgr = new TestableClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      null,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -160,13 +164,15 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns only per-spawn append when dbSession has no append', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new ClaudeCodeManager(
+    const mgr = new TestableClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      null,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -186,13 +192,15 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns only dbSession append when per-spawn is absent', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new ClaudeCodeManager(
+    const mgr = new TestableClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      null,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -212,13 +220,15 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns undefined when neither dbSession nor per-spawn append is present', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new ClaudeCodeManager(
+    const mgr = new TestableClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      null,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -233,5 +243,17 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     const append = capturedQueryOptions?.systemPrompt?.append;
     expect(append === undefined || append === null).toBe(true);
+  });
+
+  it('constructor throws TypeError when db is undefined (no silent degraded mode)', () => {
+    expect(() => {
+      new TestableClaudeCodeManager(
+        createMockSessionManager(),
+        undefined,
+        undefined,
+        null,
+        undefined as unknown as Database.Database, // simulate a caller bypassing TS
+      );
+    }).toThrow(/db argument is required/i);
   });
 });
