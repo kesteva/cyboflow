@@ -238,6 +238,153 @@ describe('RunView', () => {
     expect(details).not.toBeNull();
   });
 
+  // -------------------------------------------------------------------------
+  // Additional edge-case tests (added post-executor review)
+  // -------------------------------------------------------------------------
+
+  it('routes a system/api_retry event to the typed system branch (non-init subtype)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'api_retry',
+        attempt: 2,
+        max_retries: 5,
+        retry_delay_ms: 1000,
+      },
+      timestamp: '2026-05-20T00:00:10Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    expect(screen.getByText(/system\/api_retry/)).toBeInTheDocument();
+    expect(screen.getByText(/2\/5/)).toBeInTheDocument();
+    expect(screen.queryByText(/"attempt"/)).not.toBeInTheDocument();
+  });
+
+  it('routes a system/compact event to the typed system branch (non-init subtype)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'compact',
+        summary: 'Context compacted after 50k tokens.',
+      },
+      timestamp: '2026-05-20T00:00:11Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    expect(screen.getByText(/system\/compact/)).toBeInTheDocument();
+    expect(screen.getByText(/Context compacted after 50k tokens/)).toBeInTheDocument();
+    expect(screen.queryByText(/"summary"/)).not.toBeInTheDocument();
+  });
+
+  it('routes a system/compact_boundary event to the typed system branch (non-init subtype)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'compact_boundary',
+        compact_metadata: { trigger: 'auto', pre_tokens: 98000 },
+      },
+      timestamp: '2026-05-20T00:00:12Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    expect(screen.getByText(/system\/compact_boundary/)).toBeInTheDocument();
+    expect(screen.getByText(/trigger=auto/)).toBeInTheDocument();
+    expect(screen.queryByText(/"compact_metadata"/)).not.toBeInTheDocument();
+  });
+
+  it('renders assistant event with multiple mixed content blocks (text + tool_use + thinking)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'assistant',
+      payload: {
+        type: 'assistant',
+        message: {
+          id: 'msg-multi',
+          model: 'claude-sonnet-4-5',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Let me think about that.' },
+            { type: 'thinking', thinking: 'The user wants X, so I should do Y.' },
+            {
+              type: 'tool_use',
+              id: 'toolu_abc',
+              name: 'bash',
+              input: { command: 'echo hello' },
+            },
+          ],
+        },
+      },
+      timestamp: '2026-05-20T00:00:13Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Text block
+    expect(screen.getByText('Let me think about that.')).toBeInTheDocument();
+    // Tool-use block: tool name visible
+    expect(screen.getByText('bash')).toBeInTheDocument();
+    // Thinking block: renders as a collapsed <details> with "thinking…" summary
+    expect(screen.getByText(/thinking…/)).toBeInTheDocument();
+    // Must NOT be a whole-event JSON dump
+    expect(screen.queryByText(/"msg-multi"/)).not.toBeInTheDocument();
+  });
+
+  it('renders result event without total_cost_usd as "n/a"', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'result',
+      payload: {
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        duration_ms: 9999,
+        num_turns: 20,
+        // total_cost_usd intentionally omitted
+      },
+      timestamp: '2026-05-20T00:00:14Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    expect(screen.getByText(/error_max_turns/)).toBeInTheDocument();
+    // When total_cost_usd is absent the component renders the literal "n/a"
+    expect(screen.getByText(/n\/a/)).toBeInTheDocument();
+    expect(screen.queryByText(/"is_error"/)).not.toBeInTheDocument();
+  });
+
+  it('renders stream_event content_block_delta text inline in the compact summary', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'stream_event',
+      payload: {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'streaming text token' },
+        },
+      },
+      timestamp: '2026-05-20T00:00:15Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Inner event type appears in the compact summary
+    expect(screen.getByText(/content_block_delta/)).toBeInTheDocument();
+    // The delta text itself must appear inline (not behind a JSON dump)
+    expect(screen.getByText(/streaming text token/)).toBeInTheDocument();
+    expect(screen.queryByText(/"type": "stream_event"/)).not.toBeInTheDocument();
+  });
+
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
     // Get the mocked subscribeToStreamEvents from the module-level mock.
     const mockSubFn = vi.mocked(subscribeToStreamEvents);
