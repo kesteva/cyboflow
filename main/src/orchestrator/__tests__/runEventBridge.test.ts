@@ -23,21 +23,7 @@ import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-
-// ---------------------------------------------------------------------------
-// Schema DDL (matches 006_cyboflow_schema.sql exactly — columns: id, run_id,
-// event_type, payload_json, created_at; NO event_subtype column).
-// ---------------------------------------------------------------------------
-
-const RAW_EVENTS_DDL = `
-  CREATE TABLE IF NOT EXISTS raw_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`;
+import { makeRawEventsDb, countRows } from './__fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant
@@ -97,21 +83,6 @@ const streamEvent: ClaudeStreamEvent = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeDb(): Database.Database {
-  const db = new Database(':memory:');
-  // Disable FK enforcement — keeps tests focused on bridge behaviour, not FK seeding.
-  db.pragma('foreign_keys = OFF');
-  db.exec(RAW_EVENTS_DDL);
-  return db;
-}
-
-function countRows(db: Database.Database, runId: string): number {
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM raw_events WHERE run_id = ?')
-    .get(runId) as { n: number };
-  return row.n;
-}
-
 interface RawEventRow {
   event_type: string;
   payload_json: string;
@@ -155,7 +126,7 @@ describe('runEventBridge', () => {
   let source: EventEmitter;
 
   beforeEach(() => {
-    db = makeDb();
+    db = makeRawEventsDb();
     source = new EventEmitter();
   });
 
@@ -232,7 +203,7 @@ describe('runEventBridge', () => {
     const { publish, asPublisher } = makePublisher();
 
     // Build a sink whose insertStmt.run throws on the 2nd call.
-    const sinkDb = makeDb();
+    const sinkDb = makeRawEventsDb();
     const sink = new RawEventsSink(sinkDb, mockLogger);
     let insertCallCount = 0;
     const sinkAsRecord = sink as unknown as Record<string, unknown>;
@@ -509,7 +480,7 @@ describe('runEventBridge', () => {
 
       // Also verify INSERT happened before publish by checking row count at publish time
       const rowCountsAtPublish: number[] = [];
-      const db2 = makeDb();
+      const db2 = makeRawEventsDb();
       const source2 = new EventEmitter();
       const publisher2: StreamEventPublisher = {
         publish(runId) {
@@ -605,7 +576,7 @@ describe('runEventBridge', () => {
     // (c) skipPersistence: true — produces zero rows in a real DB
     // -----------------------------------------------------------------------
     it('(c) skipPersistence: true produces zero rows in a real DB', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
 
@@ -629,7 +600,7 @@ describe('runEventBridge', () => {
     //     5 events → 5 rows and 5 publish calls
     // -----------------------------------------------------------------------
     it('(d) skipPersistence: false/absent preserves legacy behaviour — 5 INSERTs, 5 publishes', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const { publish, asPublisher } = makePublisher();
       const src = new EventEmitter();
 
@@ -697,7 +668,7 @@ describe('runEventBridge', () => {
     // contract. If this invariant changes, update both.
     // -----------------------------------------------------------------------
     it('dual-pipeline single-INSERT guarantee — bridge with skipPersistence does not double-INSERT alongside CCM-owned sink', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const src = new EventEmitter();
       const { publish, asPublisher } = makePublisher();
       const onFirstMessage = vi.fn();
