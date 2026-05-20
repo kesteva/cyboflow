@@ -2,28 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { API } from '../../../utils/api';
 import { cn } from '../../../utils/cn';
 import { ChevronRight, ChevronDown, Copy, Check, Terminal, FileText } from 'lucide-react';
+import { parseJsonMessage, type JSONMessage, type SessionInfo } from './parseJsonMessage';
 
 interface MessagesViewProps {
   panelId: string;
   agentType: 'claude' | 'generic-cli';
   outputEventName: string;
-}
-
-interface JSONMessage {
-  type: 'json';
-  data: string;
-  timestamp: string;
-}
-
-interface SessionInfo {
-  type: 'session_info';
-  initial_prompt?: string;
-  claude_command?: string;
-  worktree_path?: string;
-  model?: string;
-  permission_mode?: string;
-  approval_policy?: string;
-  timestamp: string;
 }
 
 export const MessagesView: React.FC<MessagesViewProps> = ({
@@ -52,50 +36,15 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
           const regularMessages: JSONMessage[] = [];
           let foundSessionInfo: SessionInfo | null = null;
           
-          // FIXME(SPRINT-015): local JSONMessage diverges from ClaudeJsonMessage — see FIND-SPRINT-015-12; resolve in B5 follow-up
-          (response.data as unknown as JSONMessage[]).forEach((msg: JSONMessage) => {
-            try {
-              // Try to parse the message data to check its type
-              let msgData: unknown;
-              if (typeof msg === 'string') {
-                try {
-                  msgData = JSON.parse(msg);
-                } catch {
-                  // If it's a string but not valid JSON, treat as regular message
-                  // This case shouldn't have timestamps - skip adding to avoid "just now" issue
-                  console.warn('Received raw string message without timestamp:', msg);
-                  return;
-                }
-              } else if (msg.data) {
-                // Handle messages with data field (from IPC)
-                msgData = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
-              } else {
-                msgData = msg;
-              }
-              
-              // Check if this is a session_info message
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- External protocol message with dynamic structure
-              if (msgData && typeof msgData === 'object' && 'type' in msgData && (msgData as any).type === 'session_info') {
-                foundSessionInfo = msgData as SessionInfo;
-              } else {
-                // Regular JSON message
-                regularMessages.push({
-                  type: 'json' as const,
-                  data: msg.data ? (typeof msg.data === 'string' ? msg.data : JSON.stringify(msg.data)) :
-                        (typeof msg === 'string' ? msg : JSON.stringify(msg)),
-                  timestamp: msg.timestamp || ''
-                });
-              }
-            } catch (error) {
-              console.error('Error processing message:', error, msg);
-              // If there's any error, treat it as a regular message
-              regularMessages.push({
-                type: 'json' as const,
-                data: msg.data ? (typeof msg.data === 'string' ? msg.data : JSON.stringify(msg.data)) :
-                      (typeof msg === 'string' ? msg : JSON.stringify(msg)),
-                timestamp: msg.timestamp || ''
-              });
+          response.data.forEach((rawMsg) => {
+            const parsed = parseJsonMessage(rawMsg);
+            if (parsed === null) return;
+            if (parsed.type === 'session_info') {
+              foundSessionInfo = parsed;
+            } else if (parsed.type === 'json') {
+              regularMessages.push(parsed);
             }
+            // parsed.type === 'user' is irrelevant for MessagesView; ignore.
           });
           
           setSessionInfo(foundSessionInfo);
