@@ -23,28 +23,12 @@ import { join } from 'path';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
+import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
 import type { Logger } from '../../../../utils/logger';
 
-// ---------------------------------------------------------------------------
-// Logger spy factory (TASK-649)
-//
-// Structurally compatible with Pick<Logger, 'warn' | 'info' | 'verbose'>.
-// The production Logger class (utils/logger.ts) exposes more methods; only
-// these three are consumed by the ClaudeCodeManager / RawEventsSink pipeline.
-// Pattern matches main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts.
-// ---------------------------------------------------------------------------
-
-type LoggerSpy = Pick<Logger, 'warn' | 'info' | 'verbose'>;
-
-function makeLoggerSpy(): LoggerSpy {
-  return {
-    warn: vi.fn(),
-    info: vi.fn(),
-    verbose: vi.fn(),
-  } as unknown as LoggerSpy;
-}
+type LoggerSpy = ReturnType<typeof makeProdLoggerSpy>;
 
 
 // ---------------------------------------------------------------------------
@@ -140,7 +124,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
   beforeEach(() => {
     capturedQueryOptions = null;
     db = createTestDb();
-    logger = makeLoggerSpy();
+    logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
