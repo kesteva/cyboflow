@@ -25,9 +25,22 @@ export interface StartRunResult {
   branchName: string;
 }
 
+/**
+ * Discriminator values emitted by main/src/services/streamParser/derivers.ts:deriveEventType.
+ * The five SDK-shaped values mirror shared/types/claudeStream.ts ClaudeStreamEvent.type.
+ * 'unknown' is the catch-all produced when the main-process narrower cannot classify an event.
+ */
+export type StreamEventType =
+  | 'system'
+  | 'assistant'
+  | 'user'
+  | 'result'
+  | 'stream_event'
+  | 'unknown';
+
 export interface StreamEvent {
   runId: string;
-  type: string;
+  type: StreamEventType;
   payload: unknown;
   timestamp: string;
 }
