@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { API } from '../../../utils/api';
 import { cn } from '../../../utils/cn';
 import { ChevronRight, ChevronDown, Copy, Check, Terminal, FileText } from 'lucide-react';
-import { parseJsonMessage, type JSONMessage, type SessionInfo } from './parseJsonMessage';
+import type { JSONMessage, SessionInfo } from './parseJsonMessage';
+import type { UnifiedMessage } from './transformers/MessageTransformer';
 
 interface MessagesViewProps {
   panelId: string;
@@ -32,22 +33,20 @@ export const MessagesView: React.FC<MessagesViewProps> = ({
         const response = await API.panels.getJsonMessages(panelId);
         
         if (response.success && response.data) {
-          // Filter out session_info messages and handle them separately
+          // panels:get-json-messages returns UnifiedMessage[] at runtime (not ClaudeJsonMessage[]).
+          // Pass straight through — serialize each UnifiedMessage as JSON for the raw viewer.
+          // The deeper fix (correcting the IPC type declaration) is tracked in FIND-SPRINT-024-4.
           const regularMessages: JSONMessage[] = [];
-          let foundSessionInfo: SessionInfo | null = null;
-          
           response.data.forEach((rawMsg) => {
-            const parsed = parseJsonMessage(rawMsg);
-            if (parsed === null) return;
-            if (parsed.type === 'session_info') {
-              foundSessionInfo = parsed;
-            } else if (parsed.type === 'json') {
-              regularMessages.push(parsed);
-            }
-            // parsed.type === 'user' is irrelevant for MessagesView; ignore.
+            const msg = rawMsg as unknown as UnifiedMessage;
+            regularMessages.push({
+              type: 'json',
+              data: JSON.stringify(rawMsg),
+              timestamp: msg.timestamp ?? '',
+            });
           });
-          
-          setSessionInfo(foundSessionInfo);
+
+          setSessionInfo(null);
           // Sort messages by timestamp if available
           const sortedMessages = regularMessages.sort((a, b) => {
             if (!a.timestamp || !b.timestamp) return 0;
