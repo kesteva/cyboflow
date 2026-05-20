@@ -6,21 +6,22 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-672": {
-      "status": "pending",
-      "depends_on": []
-    },
     "TASK-681": {
       "status": "pending",
       "depends_on": []
     },
     "TASK-682": {
       "status": "pending",
-      "depends_on": ["TASK-681"]
+      "depends_on": [
+        "TASK-681"
+      ]
     },
     "TASK-683": {
       "status": "pending",
-      "depends_on": ["TASK-681", "TASK-682"]
+      "depends_on": [
+        "TASK-681",
+        "TASK-682"
+      ]
     }
   },
   "playwright_target": {
