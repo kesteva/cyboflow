@@ -27,6 +27,10 @@ _(none — see Removed dependencies below)_
   Zero importers across the repo; Node 22+ (engine floor) ships WHATWG Streams
   natively.
 
+- `dotenv@^16.4.7` — removed in SPRINT-025 compound (FIND-SPRINT-025-5).
+  Was declared in BOTH root `package.json` and `main/package.json` with zero
+  importers anywhere in the repo. Both declarations removed.
+
 ## When to revisit
 
 If a future packaged build emits MODULE_NOT_FOUND for a workspace-only dep,

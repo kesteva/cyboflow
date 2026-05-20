@@ -23,9 +23,6 @@ importers:
       better-sqlite3:
         specifier: ^11.7.0
         version: 11.10.0
-      dotenv:
-        specifier: ^16.4.7
-        version: 16.6.1
       electron-updater:
         specifier: ^6.6.8
         version: 6.6.8
@@ -292,9 +289,6 @@ importers:
       better-sqlite3:
         specifier: ^11.7.0
         version: 11.10.0
-      dotenv:
-        specifier: ^16.4.7
-        version: 16.6.1
       electron-updater:
         specifier: ^6.6.8
         version: 6.6.8
