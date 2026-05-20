@@ -1,9 +1,9 @@
 ---
-pending_count: 28
+pending_count: 34
 buckets:
   decisions: 1
   actions: 5
-  testing: 17
+  testing: 23
   deferred_visual: 5
 items: []
 ---
@@ -314,6 +314,60 @@ items: []
     - Phase 4 step 12 — diagnostic re-run with fix in place
   level: goal_backward
   severity: medium
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: requirements
+  severity: medium
+  action: "AC#13 Manual smoke 1 — panel create + prompt + stream. Run pnpm dev, create a new Claude panel, send the prompt 'Say hello and explain in one sentence what file I am currently in.' Confirm streaming response appears. Read cyboflow-backend-debug.log for [ClaudeCodeManager] SDK query started + >=1 stream/assistant event. Checklist: docs/sdk-migration-smoke-results.md §Smoke 1."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: Manual UI verification deferred — autonomous session cannot drive Electron UI.
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: requirements
+  severity: medium
+  action: "AC#14 Manual smoke 2 — tool intercept + approval. Send 'List the files in the current directory using the bash tool.' Review queue should intercept; click approve; tool completes. Confirm cyboflow-backend-debug.log contains routePreToolUseThroughApprovalRouter and ApprovalRouter.requestApproval. Sanity SELECT FROM approvals. Checklist: docs/sdk-migration-smoke-results.md §Smoke 2."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: Manual UI verification deferred.
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: requirements
+  severity: medium
+  action: "AC#15 Manual smoke 3 — session resume across panel restart. Send 'My favorite color is teal. Remember this.' Close panel; reopen for same session; send 'What is my favorite color?' Response must reference teal. Backend log contains 'resuming with sessionId='. Checklist: docs/sdk-migration-smoke-results.md §Smoke 3."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: Manual UI verification deferred.
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: requirements
+  severity: medium
+  action: "AC#16 Manual smoke 4 — PATH isolation. Filter claude from PATH (FILTERED_PATH per smoke-results §Smoke 4), confirm 'which claude' exits 1, then pnpm dev. Repeat smoke 1 in this PATH context. Must succeed — no claude binary needed. Checklist: docs/sdk-migration-smoke-results.md §Smoke 4."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: Manual UI verification deferred.
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: goal_backward
+  severity: high
+  action: "AC#17 Manual smoke 5 — workflow run emits >=2 distinct real SDK event types. Start a workflow run from the cyboflow tab; RunView event log must show >=2 unique 'type' values beyond run_started (system/assistant/user/result/stream_event). If only run_started appears, RunExecutor is not wired — file finding and halt. Programmatic check: SELECT DISTINCT type FROM raw_events WHERE run_id=<id> returns >=2. Checklist: docs/sdk-migration-smoke-results.md §Smoke 5."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: "HIGH severity — gates 'real SDK events flow' validation for the epic. Manual UI verification deferred."
+
+- task: TASK-683
+  type: manual_smoke
+  bucket: testing
+  level: requirements
+  severity: medium
+  action: "AC#18 Manual smoke 6 — no UX regressions in full user flow. Walk: create panel → prompt → tool approval → resume → workflow run start → workflow run complete. Record any UX deltas (none expected). Checklist: docs/sdk-migration-smoke-results.md §Smoke 6."
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
+  verdict_notes: Manual UI verification deferred.
 
 ## Deferred Visual
 
