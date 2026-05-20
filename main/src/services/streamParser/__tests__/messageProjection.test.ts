@@ -7,7 +7,7 @@
  *
  * Coverage:
  *   1. system/init → UnifiedMessage with role='system', systemSubtype='init'
- *   2. system/compact_boundary → UnifiedMessage with role='system', systemSubtype='context_compacted', compact_trigger+pre_tokens in metadata
+ *   2. system/compact_boundary → UnifiedMessage with role='system', systemSubtype='context_compacted', compactTrigger+preTokens in metadata
  *   3. assistant with text → UnifiedMessage with role='assistant', text segment
  *   4. assistant with tool_use → UnifiedMessage with tool_call segment (pending initially)
  *   5. assistant with thinking block → UnifiedMessage with thinking segment
