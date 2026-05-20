@@ -80,7 +80,7 @@ function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
     return (
       <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
         <span className="font-semibold text-text-primary">system/compact_boundary</span>
-        {' '}trigger={cb.compact_metadata.trigger} pre_tokens={cb.compact_metadata.pre_tokens}
+        {' '}trigger={cb.compact_metadata.trigger} pre-compaction tokens={cb.compact_metadata.pre_tokens}
       </div>
     );
   }
