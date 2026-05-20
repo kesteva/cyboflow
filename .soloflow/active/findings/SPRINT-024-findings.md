@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-024
-pending_count: 5
-last_updated: "2026-05-20T05:50:33.039Z"
+pending_count: 6
+last_updated: "2026-05-20T06:30:00.000Z"
 ---
 # Findings Queue
 
@@ -72,6 +72,16 @@ last_updated: "2026-05-20T05:50:33.039Z"
 - **location:** main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts
 - **description:** required to meet AC: sweep-grep gate AC requires all orchestrator test files to use shared fixture; preToolUseHookHelper.test.ts has a local makeLogger() that would violate the completeness gate. Claimed to migrate it alongside the other 6 identified files.
 - **resolved_by:** verifier — plan-prescribed: Implementation Step 1 ("Add any missed sites to files_owned") + AC-prescribed: sweep-grep gate AC4 would fail without this migration
+
+## FIND-SPRINT-024-9
+- **source:** TASK-649 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts:314-319
+- **description:** The warn assertion uses a less idiomatic pattern than the sibling test for the same code path. Current form: `expect(logger.warn).toHaveBeenCalled()` followed by `const warn = logger.warn as unknown as import('vitest').MockInstance; expect(warn.mock.calls[0][0]).toContain('[rawEventsSink]')`. The sibling test at `main/src/services/streamParser/__tests__/rawEventsSink.test.ts:225-231` exercises the identical fail-soft path and expresses the assertion as `expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('[rawEventsSink] insert failed for runId='))` — no inline `import('vitest')` cast, no manual mock-array indexing, and it asserts the full call shape rather than a substring of the first positional arg.
+- **suggested_action:** Replace lines 313-319 with two `expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(...))` assertions mirroring the sibling test. Removes the `as unknown as MockInstance` cast and the inline `import('vitest')` type import.
+- **resolved_by:** 
 
 ## FIND-SPRINT-024-8
 - **type:** scope_deviation
