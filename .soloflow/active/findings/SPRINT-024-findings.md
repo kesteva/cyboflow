@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-024
-pending_count: 6
-last_updated: "2026-05-20T06:30:00.000Z"
+pending_count: 11
+last_updated: "2026-05-20T06:48:18.111Z"
 ---
 # Findings Queue
 
@@ -91,3 +91,96 @@ last_updated: "2026-05-20T06:30:00.000Z"
 - **location:** main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
 - **description:** required to meet AC: this test file uses ClaudeCodeManager.setSharedDb() in beforeEach/afterEach and new ClaudeCodeManager() without db arg. Removing the static injector (AC-1) makes these calls compile errors. File must be updated to pass db as 5th constructor arg and remove setSharedDb calls.
 - **resolved_by:** TASK-647
+
+## FIND-SPRINT-024-10
+- **source:** SPRINT-024 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts:30-43
+- **description:** Cross-task duplicate logger-spy factory — TASK-646 introduced the canonical shared makeSpyLogger() fixture at main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts and migrated 8 orchestrator/IPC test files to use it. One commit later in the same sprint, TASK-649 added a separate local makeLoggerSpy() factory inside claudeCodeManagerWiring.test.ts (lines 30-43) instead of reusing the shared fixture. Both factories serve the same purpose (vi.fn() spies for warn/info). The shapes differ (LoggerLike with info/warn/error/debug vs Pick<Logger, warn|info|verbose>), but the wiring test only actually asserts on .warn, which both shapes provide.
+- **suggested_action:** Either (a) import { makeSpyLogger } from "../../../../orchestrator/__test_fixtures__/loggerLikeSpy" and use it directly — the LoggerLike shape it returns is assignable to Pick<Logger, warn|info> because the production Logger class implements info/warn/error/debug; or (b) move the wiring test fixture into the shared loggerLikeSpy.ts module as a second exported variant (e.g. makeProdLoggerSpy()) and reference it from the wiring test. Option (a) is simpler — the verbose method is unused at the call site so the type cast `logger as unknown as Logger` already used in the file would still apply.
+- **resolved_by:** 
+
+
+
+
+
+Suspected tasks: TASK-646, TASK-649
+
+## FIND-SPRINT-024-11
+- **source:** SPRINT-024 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/cliManagerFactory.ts:177
+- **description:** Inline `import("better-sqlite3").Database` type cast — TASK-647 introduced `const db = options?.db as import("better-sqlite3").Database | undefined;` to thread the database handle through the factory. The file already imports concrete classes from `./panels/claude/claudeCodeManager` (which itself does `import type Database from "better-sqlite3"` at line 9). An inline `import(...)` type cast in body code is harder to read than a top-of-file `import type Database from "better-sqlite3"`. The pattern also bypasses any structural validation — only a truthy check happens at runtime.
+- **suggested_action:** Add `import type Database from "better-sqlite3";` at the top of cliManagerFactory.ts (mirroring claudeCodeManager.ts line 9), then rewrite line 177 as `const db = options?.db as Database | undefined;`. Strictly cosmetic — the runtime behavior is identical.
+- **resolved_by:** 
+
+
+
+
+Suspected tasks: TASK-647
+
+## FIND-SPRINT-024-12
+- **source:** SPRINT-024 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** package.json:55-56
+- **description:** test:unit duplicates the verify-schema-parity invocation rather than reusing the dedicated `verify:schema` script. Current state (TASK-639):
+- **suggested_action:** Change the `test:unit` chain segment `... && node scripts/verify-schema-parity.js && ...` to `... && pnpm run verify:schema && ...`. Single source of truth.
+- **resolved_by:** 
+
+
+
+  "verify:schema": "node scripts/verify-schema-parity.js",
+  "test:unit": "pnpm --filter main test && pnpm --filter frontend test && node scripts/verify-schema-parity.js && node scripts/__tests__/verify-schema-parity.test.js && pnpm run test:build"
+
+The `node scripts/verify-schema-parity.js` token in `test:unit` should be `pnpm run verify:schema` so the script path is declared once. If the script later moves (e.g. relocates under `scripts/verify/` or gets a different name), the duplicate hard-coded path silently breaks.
+
+Suspected tasks: TASK-639
+
+## FIND-SPRINT-024-13
+- **source:** SPRINT-024 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/services/cliManagerFactory.ts:170-187
+- **description:** Lost type safety in factory DI plumbing — TASK-647 replaced the static `ClaudeCodeManager.setSharedDb()` injector with constructor DI threaded through `additionalOptions?: unknown`. The new claude factory:
+- **suggested_action:** Either (a) add a structural duck-type check before the cast — e.g. `if (!db || typeof (db as { prepare?: unknown }).prepare !== "function") throw new TypeError(...)` — to fail fast at construction with a meaningful error; or (b) tighten the ManagerFactoryFunction signature in cliToolRegistry.ts to accept a discriminated union of tool-specific option shapes (claude: { db: Database }; codex: {}; ...) so the factory dispatch site is type-checked end-to-end. Option (a) is the minimal patch; option (b) is a larger refactor worth filing as backlog.
+- **resolved_by:** 
+
+
+  const claudeManagerFactory: ManagerFactoryFunction = (
+    sessionManager: unknown,
+    logger?: Logger,
+    configManager?: ConfigManager,
+    additionalOptions?: unknown,
+  ) => {
+    const options = additionalOptions as Record<string, unknown> | undefined;
+    const db = options?.db as import("better-sqlite3").Database | undefined;
+    if (!db) {
+      throw new TypeError("[CliManagerFactory] claude tool requires `db` in additionalOptions");
+    }
+    return new ClaudeCodeManager(...);
+  };
+
+The `additionalOptions` parameter is typed as `unknown` and the contained `db` is cast via `as`, but there is no validation that the cast target is actually a better-sqlite3 Database — only a truthy check. A caller could pass `additionalOptions: { db: "not actually a db" }` and the TypeError would not fire; the failure would surface at the first `db.prepare()` call inside RawEventsSink. This is the systemic shape required by the registry-pluggable `ManagerFactoryFunction` signature in cliToolRegistry.ts:115, but the cross-cutting drop in type safety is real.
+
+Suspected tasks: TASK-647
+
+## FIND-SPRINT-024-14
+- **source:** SPRINT-024 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/panels/ai/parseJsonMessage.ts:49-106 and frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
+- **description:** Cross-task dead runtime code — TASK-637 added parseJsonMessage() + parseJsonMessages() functions to centralize the IPC adapter conversion. The follow-up fix commit bb926cd (also TASK-637) determined the adapter was shape-mismatched against the real UnifiedMessage IPC payload and reverted both consumer call sites (MessagesView.tsx and RichOutputView.tsx) to bypass the adapter and pass raw payloads through. Result: as of sprint close, `parseJsonMessage` and `parseJsonMessages` are imported by NOTHING in the frontend tree — only the *type* exports (JSONMessage, UserPromptMessage, SessionInfo) are still used. The runtime functions and their full 41-line test file have zero production callers, but the test file still runs in the test:unit chain and gates merges on dead-code behavior.
+
+Verification: `grep -rn parseJsonMessage frontend/src` returns matches only for the type re-export imports, the test file, and the dead-code self-references inside parseJsonMessage.ts itself.
+
+Suspected tasks: TASK-637
+- **suggested_action:** Either (a) delete parseJsonMessage() + parseJsonMessages() function exports and the parseJsonMessage.test.ts file entirely, keeping only the type declarations (interfaces JSONMessage, UserPromptMessage, SessionInfo) — minimal preservation of what consumers actually import; or (b) keep both and redesign parseJsonMessage against the real UnifiedMessage shape per the suggestion in FIND-SPRINT-024-4 (discriminate on role + metadata.systemSubtype, not type/message/data). Option (a) is the simpler clean-up. Either way, the current state — dead production code shipping with green tests — is misleading.
+- **resolved_by:** 
