@@ -7,28 +7,26 @@
  *
  * Coverage:
  *   1. system/init → UnifiedMessage with role='system', systemSubtype='init'
- *   2. system/compact → UnifiedMessage with role='system', systemSubtype='context_compacted'
- *   3. system/api_retry → null (not renderable)
- *   4. assistant with text → UnifiedMessage with role='assistant', text segment
- *   5. assistant with tool_use → UnifiedMessage with tool_call segment (pending initially)
- *   6. assistant with thinking block → UnifiedMessage with thinking segment
- *   7. user with tool_result (string content) → null (absorbed; correlates ToolCall)
- *   8. user with tool_result (array content) → null (absorbed; correlates ToolCall)
- *   9. result/success → null (old transformer returns null for non-error results)
- *  10. result/error_during_execution → UnifiedMessage with role='system', systemSubtype='error'
- *  11. stream_event → null
- *  12. __unknown__ → null
- *  13. Tool-result correlation: tool_call status updated to 'success' after user event
- *  14. Thinking block content preserved trimmed
- *  15. Synthetic error (model='<synthetic>') → role='system', systemSubtype='error'
+ *   2. system/compact_boundary → UnifiedMessage with role='system', systemSubtype='context_compacted', compact_trigger+pre_tokens in metadata
+ *   3. assistant with text → UnifiedMessage with role='assistant', text segment
+ *   4. assistant with tool_use → UnifiedMessage with tool_call segment (pending initially)
+ *   5. assistant with thinking block → UnifiedMessage with thinking segment
+ *   6. user with tool_result (string content) → null (absorbed; correlates ToolCall)
+ *   7. user with tool_result (array content) → null (absorbed; correlates ToolCall)
+ *   8. result/success → null (old transformer returns null for non-error results)
+ *   9. result/error_during_execution → UnifiedMessage with role='system', systemSubtype='error'
+ *  10. stream_event → null
+ *  11. __unknown__ → null
+ *  12. Tool-result correlation: tool_call status updated to 'success' after user event
+ *  13. Thinking block content preserved trimmed
+ *  14. Synthetic error (model='<synthetic>') → role='system', systemSubtype='error'
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MessageProjection } from '../messageProjection';
 import type {
   SystemInitEvent,
-  SystemCompactEvent,
-  SystemApiRetryEvent,
+  SystemCompactBoundaryEvent,
   AssistantEvent,
   UserEvent,
   ResultEvent,
@@ -59,21 +57,14 @@ const systemInitEvent: SystemInitEvent = {
   claude_code_version: '1.0.0',
 };
 
-const systemCompactEvent: SystemCompactEvent = {
+const systemCompactBoundaryEvent: SystemCompactBoundaryEvent = {
   type: 'system',
-  subtype: 'compact',
+  subtype: 'compact_boundary',
   session_id: SESSION_ID,
-  summary: 'Context was compacted to free context window space.',
-};
-
-const systemApiRetryEvent: SystemApiRetryEvent = {
-  type: 'system',
-  subtype: 'api_retry',
-  attempt: 2,
-  max_retries: 5,
-  retry_delay_ms: 2000,
-  error_status: 529,
-  error: { category: 'rate_limit', message: 'Rate limit exceeded.' },
+  compact_metadata: {
+    trigger: 'auto',
+    pre_tokens: 90000,
+  },
 };
 
 const assistantTextEvent: AssistantEvent = {
@@ -217,35 +208,27 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 2. system/compact
+  // 2. system/compact_boundary
   // -------------------------------------------------------------------------
 
-  it('projects system/compact to a system message with systemSubtype=context_compacted', () => {
-    const result = projection.project(systemCompactEvent);
+  it('projects system/compact_boundary to a system message with systemSubtype=context_compacted', () => {
+    const result = projection.project(systemCompactBoundaryEvent);
 
     expect(result).not.toBeNull();
     const msg = result as UnifiedMessage;
     expect(msg.role).toBe('system');
     expect(msg.metadata?.systemSubtype).toBe('context_compacted');
-    // First segment should be a text segment with the summary.
+    expect(msg.metadata?.compact_trigger).toBe('auto');
+    expect(msg.metadata?.pre_tokens).toBe(90000);
+    // Segments should contain exactly one system_info segment (no text segment).
+    expect(msg.segments).toHaveLength(1);
+    expect(msg.segments[0].type).toBe('system_info');
     const textSeg = msg.segments.find(s => s.type === 'text');
-    expect(textSeg).toBeDefined();
-    if (textSeg?.type === 'text') {
-      expect(textSeg.content).toBe('Context was compacted to free context window space.');
-    }
+    expect(textSeg).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
-  // 3. system/api_retry → null
-  // -------------------------------------------------------------------------
-
-  it('returns null for system/api_retry (not renderable)', () => {
-    const result = projection.project(systemApiRetryEvent);
-    expect(result).toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // 4. assistant with text
+  // 3. assistant with text
   // -------------------------------------------------------------------------
 
   it('projects assistant with text content to an assistant message with text segment', () => {

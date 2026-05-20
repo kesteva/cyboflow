@@ -15,8 +15,6 @@
 
 import type {
   SystemInitEvent,
-  SystemApiRetryEvent,
-  SystemCompactEvent,
   SystemCompactBoundaryEvent,
   AssistantEvent,
   UserEvent,
@@ -40,32 +38,6 @@ export function systemInit(overrides: Partial<SystemInitEvent> = {}): SystemInit
     permissionMode: 'bypassPermissions',
     apiKeySource: 'ANTHROPIC_API_KEY',
     claude_code_version: '1.0.0',
-    ...overrides,
-  };
-}
-
-export function systemApiRetry(overrides: Partial<SystemApiRetryEvent> = {}): SystemApiRetryEvent {
-  return {
-    type: 'system',
-    subtype: 'api_retry',
-    attempt: 2,
-    max_retries: 5,
-    retry_delay_ms: 2000,
-    error_status: 529,
-    error: {
-      category: 'rate_limit',
-      message: 'Rate limit exceeded. Please retry after 2 seconds.',
-    },
-    ...overrides,
-  };
-}
-
-export function systemCompact(overrides: Partial<SystemCompactEvent> = {}): SystemCompactEvent {
-  return {
-    type: 'system',
-    subtype: 'compact',
-    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-    summary: 'Context was compacted. Previous conversation summarized to free context window space.',
     ...overrides,
   };
 }

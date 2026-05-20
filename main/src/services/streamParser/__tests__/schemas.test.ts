@@ -17,8 +17,6 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
 import { assertNever } from '../../../../../shared/types/claudeStream';
 import {
   systemInit,
-  systemApiRetry,
-  systemCompact,
   systemCompactBoundary,
   assistant,
   userStringContent,
@@ -68,52 +66,6 @@ describe('SystemInitEvent', () => {
     // permissionMode is the documented camelCase wire exception (SamSaffron spec gist)
     expect(Object.keys(event)).toContain('permissionMode');
     expect(event).not.toHaveProperty('permission_mode');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// SystemApiRetryEvent
-// ---------------------------------------------------------------------------
-
-describe('SystemApiRetryEvent', () => {
-  it('parses system_api_retry.json and narrows to system/api_retry with numeric retry fields', () => {
-    const raw = systemApiRetry();
-    const event = narrower.narrow(raw);
-
-    if ('kind' in event) {
-      throw new Error('Expected typed variant, got UnknownStreamEvent');
-    }
-    expect(event.type).toBe('system');
-    if (event.type !== 'system' || event.subtype !== 'api_retry') {
-      throw new Error('Expected SystemApiRetryEvent');
-    }
-    expect(event.subtype).toBe('api_retry');
-    expect(typeof event.attempt).toBe('number');
-    expect(typeof event.max_retries).toBe('number');
-    expect(typeof event.retry_delay_ms).toBe('number');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// SystemCompactEvent
-// ---------------------------------------------------------------------------
-
-describe('SystemCompactEvent', () => {
-  it('parses system_compact.json and narrows to system/compact — pins the wire literal (not context_compacted)', () => {
-    // NOTE: Crystal's ClaudeMessageTransformer uses 'context_compacted' internally,
-    // but the actual wire discriminant is 'compact' per research §1. This test
-    // pins the wire literal so that any CLI update changing the wire value fails loudly.
-    const raw = systemCompact();
-    const event = narrower.narrow(raw);
-
-    if ('kind' in event) {
-      throw new Error('Expected typed variant, got UnknownStreamEvent');
-    }
-    expect(event.type).toBe('system');
-    if (event.type !== 'system' || event.subtype !== 'compact') {
-      throw new Error('Expected SystemCompactEvent');
-    }
-    expect(event.subtype).toBe('compact');
   });
 });
 
@@ -408,8 +360,6 @@ describe('exhaustive union coverage', () => {
     // call that only typechecks if the union is fully covered.
     const fixtures: Array<[ClaudeStreamEvent, string]> = [
       [systemInit(), 'system/init'],
-      [systemApiRetry(), 'system/api_retry'],
-      [systemCompact(), 'system/compact'],
       [systemCompactBoundary(), 'system/compact_boundary'],
       [assistant(), 'assistant'],
       [userStringContent(), 'user'],
