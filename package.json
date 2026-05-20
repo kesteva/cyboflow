@@ -53,7 +53,7 @@
     "test:headed": "playwright test --headed",
     "test:build": "node build/afterSign.test.js && node scripts/configure-build.test.js",
     "verify:schema": "node scripts/verify-schema-parity.js",
-    "test:unit": "pnpm --filter main test && pnpm --filter frontend test && node scripts/verify-schema-parity.js && pnpm run test:build",
+    "test:unit": "pnpm --filter main test && pnpm --filter frontend test && node scripts/verify-schema-parity.js && node scripts/__tests__/verify-schema-parity.test.js && pnpm run test:build",
     "test:gate": "vitest run --config vitest.config.gate.ts"
   },
   "dependencies": {
