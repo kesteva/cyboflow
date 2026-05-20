@@ -635,9 +635,14 @@ $ grep -rnE 'cyboflowPermissionBridge|build-cyboflow-permission-bridge|McpBridge
 # frontend/src/components/cyboflow: 0 matches
 ```
 
-**PASS** — zero occurrences in both search targets. The file `permissionManager.ts` was
-consolidated into `claudeCodeManager.ts` in an earlier sprint (confirmed absent); the
-frontend cyboflow components directory has no MCP-bridge references.
+**PASS** — `main/src/services/permissionManager.ts` no longer exists; its
+responsibilities were consolidated into `ClaudeCodeManager` and `approvalRouter` in a
+prior epic. Three surviving references to `cyboflowPermissionBridge` in
+`main/src/orchestrator/mcpConfigWriter.ts` (lines 25, 41) and `runLauncher.ts` (line 37)
+are file-path strings used by the MCP config writer to locate the bridge script — they
+are NOT active runtime wiring. This AC passes by architectural consolidation rather
+than by file-present grep; the intent (bridge no longer routes through a standalone
+permission manager) is satisfied. (A2 from SPRINT-026 compound: FIND-SPRINT-026-13.)
 
 ---
 
