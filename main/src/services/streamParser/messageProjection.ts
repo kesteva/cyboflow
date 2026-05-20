@@ -136,6 +136,10 @@ export class MessageProjection {
         ],
         metadata: {
           systemSubtype: 'context_compacted',
+          // compactTrigger / preTokens: camelCase forward-compat (FIND-SPRINT-026-5).
+          // No current renderer consumer reads these — RichOutputView.tsx:842 dispatches
+          // on systemSubtype only. When a renderer surfaces compact details, read from
+          // here (not the wire-layer snake_case fields on compact_metadata).
           compactTrigger: compact.compact_metadata.trigger,
           preTokens: compact.compact_metadata.pre_tokens,
         }
