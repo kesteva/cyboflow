@@ -117,6 +117,13 @@ to a canonical example — read those for the actual implementation.
 - **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
 - **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
 
+### `main/src/orchestrator/__tests__/__fixtures__/rawEvents`
+
+- **Path:** `main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts` (will move to `__test_fixtures__/rawEvents.ts` via TASK-676)
+- **Use it for:** Any test that needs a `raw_events` table — persistence (`bridgeEvents`, `RawEventsSink`), consumption (`runExecutor`), or schema reconciliation. Exports `RAW_EVENTS_DDL`, `makeRawEventsDb()` (in-memory `better-sqlite3` with the table created and FKs off), and `countRawEvents(db, runId)`. Do NOT inline `CREATE TABLE ... raw_events` locally — a migration 006 schema change must propagate via this single source.
+- **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
+- **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.
+
 ### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
 
 The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
