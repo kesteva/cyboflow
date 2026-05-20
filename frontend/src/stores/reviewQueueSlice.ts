@@ -30,9 +30,10 @@
  * TASK-502 — stuck-detection-and-observability epic.
  */
 import { create } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../utils/trpcClient';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
-import type { StuckDetectedEvent } from '../../../shared/types/stuckDetection';
+import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // Forward-looking tRPC subscription interface (TASK-254 dependency)
@@ -69,6 +70,24 @@ export interface ReviewQueueSliceState {
    *   - (Future) The full-state resync fetches run statuses.
    */
   runStatusMap: Record<string, WorkflowRunStatus>;
+
+  /**
+   * Per-run stuck reason map.  Keys are workflow_runs.id values; values are the
+   * StuckReason that caused the run to be classified stuck.
+   *
+   * Populated when `applyStuckEvent` is called with a `reason` payload.
+   * Entries are written alongside runStatusMap but are NOT evicted on terminal
+   * status — the reason stays available for diagnostic display even after cancel.
+   */
+  runReasonMap: Record<string, StuckReason>;
+
+  /**
+   * Per-run stuck detection timestamp map.  Keys are workflow_runs.id values;
+   * values are Unix epoch milliseconds of when the run was classified stuck.
+   *
+   * Populated when `applyStuckEvent` is called with a `detectedAt` payload.
+   */
+  runDetectedAtMap: Record<string, number>;
 
   // -- Reducers (pure / synchronous) ----------------------------------------
 
@@ -125,16 +144,25 @@ export interface ReviewQueueSliceState {
 
 export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => ({
   runStatusMap: {},
+  runReasonMap: {},
+  runDetectedAtMap: {},
 
   // -- Reducers ---------------------------------------------------------------
 
-  applyStuckEvent: ({ runId }) => {
-    const current = get().runStatusMap[runId];
-    // Idempotent: already stuck — skip the allocation.
-    if (current === 'stuck') return;
-    set((state) => ({
-      runStatusMap: { ...state.runStatusMap, [runId]: 'stuck' },
-    }));
+  applyStuckEvent: ({ runId, reason, detectedAt }) => {
+    set((state) => {
+      const next: Partial<ReviewQueueSliceState> = {};
+      if (state.runStatusMap[runId] !== 'stuck') {
+        next.runStatusMap = { ...state.runStatusMap, [runId]: 'stuck' };
+      }
+      if (reason !== undefined && state.runReasonMap[runId] !== reason) {
+        next.runReasonMap = { ...state.runReasonMap, [runId]: reason };
+      }
+      if (detectedAt !== undefined && state.runDetectedAtMap[runId] !== detectedAt) {
+        next.runDetectedAtMap = { ...state.runDetectedAtMap, [runId]: detectedAt };
+      }
+      return next;
+    });
   },
 
   setRunStatus: (runId, status) => {
@@ -200,6 +228,31 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
  */
 export function useRunStatus(runId: string | undefined): WorkflowRunStatus | undefined {
   return useReviewQueueSlice((s) => (runId ? s.runStatusMap[runId] : undefined));
+}
+
+/**
+ * Selector hook that returns the stuck reason and detection timestamp for the
+ * given runId, or `undefined` fields when the runId is absent from the maps.
+ *
+ * Used by PendingApprovalCard to forward reason + detectedAt to StuckBadge
+ * without requiring ReviewQueueView to pass these as props.
+ *
+ * The `shallow` equality function prevents unnecessary re-renders caused by
+ * a fresh object being returned on every selector call.
+ *
+ * @param runId - The workflow_runs.id to look up. When undefined, both fields
+ *                are returned as undefined.
+ */
+export function useRunStuckDetails(runId: string | undefined): {
+  reason: StuckReason | undefined;
+  detectedAt: number | undefined;
+} {
+  return useReviewQueueSlice(
+    useShallow((s) => ({
+      reason: runId ? s.runReasonMap[runId] : undefined,
+      detectedAt: runId ? s.runDetectedAtMap[runId] : undefined,
+    })),
+  );
 }
 
 // ---------------------------------------------------------------------------
