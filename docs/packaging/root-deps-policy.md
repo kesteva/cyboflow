@@ -10,7 +10,7 @@ intentional in cases where:
 
 ## Verified-safe-to-omit packages
 
-_(none yet — see Dead-dep entries below for pending cleanup)_
+_(none yet)_
 
 ## Dead dependencies in main/package.json
 
