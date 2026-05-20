@@ -678,16 +678,7 @@ describe('lifecycle transitions', () => {
 // ---------------------------------------------------------------------------
 
 import { EventRouter, RawEventsSink } from '../../services/streamParser';
-
-const RAW_EVENTS_DDL_EXEC = `
-  CREATE TABLE IF NOT EXISTS raw_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`;
+import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
 
 /**
  * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
@@ -726,9 +717,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     const spawner = makeSpawner();
 
     // Use a real in-memory DB so the CCM-style pipeline can INSERT raw_events rows.
-    const db = new Database(':memory:');
-    db.pragma('foreign_keys = OFF');
-    db.exec(RAW_EVENTS_DDL_EXEC);
+    const db = makeRawEventsDb();
 
     // Simulate CCM's own EventRouter + RawEventsSink pipeline — this is the sole
     // persistence path when the bridge has skipPersistence: true (TASK-664).
@@ -820,10 +809,8 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     // Sibling: runEventBridge.test.ts "dual-pipeline single-INSERT guarantee"
     // tests this same invariant in isolation (bridgeEvents() only). Both must
     // be updated together if the storage contract changes.
-    const rawRow = db
-      .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
-      .get(run.id) as { cnt: number };
-    expect(rawRow.cnt).toBe(1);
+    const cnt = countRawEvents(db, run.id);
+    expect(cnt).toBe(1);
   });
 
   /**
@@ -839,9 +826,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    const db = new Database(':memory:');
-    db.pragma('foreign_keys = OFF');
-    db.exec(RAW_EVENTS_DDL_EXEC);
+    const db = makeRawEventsDb();
     const publisher: StreamEventPublisher = { publish: vi.fn() };
 
     // No source — 8th arg omitted.
@@ -1254,9 +1239,7 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
       getById: vi.fn().mockReturnValue(workflow),
     };
 
-    const db = new Database(':memory:');
-    db.pragma('foreign_keys = OFF');
-    db.exec(RAW_EVENTS_DDL_EXEC);
+    const db = makeRawEventsDb();
 
     const publisher: StreamEventPublisher = { publish: vi.fn() };
     const source = new EventEmitter();
@@ -1301,9 +1284,7 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     expect(running).not.toHaveBeenCalled();
 
     // raw_events row must also not exist.
-    const row = db
-      .prepare('SELECT COUNT(*) AS cnt FROM raw_events WHERE run_id = ?')
-      .get(run.id) as { cnt: number };
-    expect(row.cnt).toBe(0);
+    const cnt = countRawEvents(db, run.id);
+    expect(cnt).toBe(0);
   });
 });
