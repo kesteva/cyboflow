@@ -10,7 +10,7 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-import { parseJsonMessage, type UserPromptMessage } from './parseJsonMessage';
+import type { UserPromptMessage } from './parseJsonMessage';
 
 // Interface for conversation messages from database
 interface ConversationMessage {
@@ -204,21 +204,23 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
           });
         }
         
-        // Combine user prompts with output messages (filter for JSON messages)
-        const allMessages = [...userPrompts];
-        if (outputResponse.success && outputResponse.data && Array.isArray(outputResponse.data)) {
-          for (const rawMsg of outputResponse.data) {
-            const parsed = parseJsonMessage(rawMsg);
-            if (parsed !== null && parsed.type === 'user') {
-              allMessages.push(parsed);
-            }
-          }
+        // Combine user prompts with output messages.
+        // outputResponse.data is UnifiedMessage[] at runtime (panels:get-json-messages returns
+        // MessageProjection output). Pass straight through — parseJsonMessage is shape-mismatched
+        // against UnifiedMessage and would drop assistant/tool/thinking messages.
+        // The deeper fix (correcting the IPC type declaration) is tracked in FIND-SPRINT-024-4.
+        const allMessages: unknown[] = [...userPrompts];
+        if (outputResponse.success && Array.isArray(outputResponse.data)) {
+          allMessages.push(...(outputResponse.data as unknown as UnifiedMessage[]));
         }
         
-        // Sort by timestamp to get correct order
+        // Sort by timestamp to get correct order. Items are either UserPromptMessage or
+        // UnifiedMessage — both have a string timestamp field.
         allMessages.sort((a, b) => {
-          const timeA = new Date(a.timestamp).getTime();
-          const timeB = new Date(b.timestamp).getTime();
+          const msgA = a as { timestamp?: string };
+          const msgB = b as { timestamp?: string };
+          const timeA = new Date(msgA.timestamp ?? '').getTime();
+          const timeB = new Date(msgB.timestamp ?? '').getTime();
           return timeA - timeB;
         });
         
