@@ -174,7 +174,6 @@ export class CliManagerFactory {
       additionalOptions?: unknown,
     ) => {
       const options = additionalOptions as Record<string, unknown> | undefined;
-      const permissionIpcPath = options?.permissionIpcPath || null;
       const db = options?.db as import('better-sqlite3').Database | undefined;
       if (!db) {
         throw new TypeError('[CliManagerFactory] claude tool requires `db` in additionalOptions');
@@ -183,7 +182,6 @@ export class CliManagerFactory {
         sessionManager as SessionManager,
         logger,
         configManager,
-        (typeof permissionIpcPath === 'string' ? permissionIpcPath : null),
         db,
       );
     };

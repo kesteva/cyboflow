@@ -119,7 +119,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
     configManager: ConfigManager | undefined,
-    permissionIpcPath: string | null,
     private readonly db: Database.Database,
   ) {
     super(sessionManager, logger, configManager);

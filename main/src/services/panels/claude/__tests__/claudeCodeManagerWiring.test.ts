@@ -23,8 +23,6 @@ import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter'
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
 
-/** Alias used by plan AC verification greps. */
-const TestableClaudeCodeManager = ClaudeCodeManager;
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -134,14 +132,13 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     // drives sessionAppend.  We want a non-undefined sessionAppend, so we provide
     // a configManager stub that returns a global prompt.
     const sessionManager = createMockSessionManager();
-    const mgr = new TestableClaudeCodeManager(
+    const mgr = new ClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
-      null,
       db,
     );
 
@@ -164,14 +161,13 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns only per-spawn append when dbSession has no append', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new TestableClaudeCodeManager(
+    const mgr = new ClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
-      null,
       db,
     );
 
@@ -192,14 +188,13 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns only dbSession append when per-spawn is absent', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new TestableClaudeCodeManager(
+    const mgr = new ClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
-      null,
       db,
     );
 
@@ -220,14 +215,13 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('returns undefined when neither dbSession nor per-spawn append is present', async () => {
     const sessionManager = createMockSessionManager();
-    const mgr = new TestableClaudeCodeManager(
+    const mgr = new ClaudeCodeManager(
       sessionManager,
       undefined,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
-      null,
       db,
     );
 
@@ -247,11 +241,10 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
   it('constructor throws TypeError when db is undefined (no silent degraded mode)', () => {
     expect(() => {
-      new TestableClaudeCodeManager(
+      new ClaudeCodeManager(
         createMockSessionManager(),
         undefined,
         undefined,
-        null,
         undefined as unknown as Database.Database, // simulate a caller bypassing TS
       );
     }).toThrow(/db argument is required/i);
