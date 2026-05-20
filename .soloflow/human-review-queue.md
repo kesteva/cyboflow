@@ -1,10 +1,10 @@
 ---
-pending_count: 23
+pending_count: 24
 buckets:
   decisions: 1
   actions: 4
   testing: 15
-  deferred_visual: 3
+  deferred_visual: 4
 items: []
 ---
 # Human Review Queue
@@ -420,3 +420,20 @@ items: []
     - "Sprint-wide cross-task: App.tsx top-level subscribeToStuckEvents mount with TASK-623 useStuckNotifications — no duplicate subscriptions / missed events"
     - "Stuck inspector modal reason+detectedAt persistence through reviewQueueSlice (TASK-624)"
   created_at: "2026-05-19T19:15:00.000Z"
+
+- sprint: SPRINT-024
+  type: human_needed
+  bucket: deferred_visual
+  dedup_key: electron_renderer_unreachable
+  verdict_notes: "Sprint verifier could not bring up the Electron app to run UI smoke for the TASK-637 parseJsonMessage adapter changes (MessagesView + RichOutputView). Orchestrator directive forbids spawning pnpm dev; an existing zombie Electron process (PID 22778, ~11h uptime) has 0 windows and Vite at :4521 is not listening. visual_web and visual_macos both classified skipped_unable."
+  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify the UI rendering surface that depends on TASK-637's parseJsonMessage adapter: (1) RichOutputView renders Claude SDK stream messages without crashing (confirm bb926cd's UnifiedMessage restoration holds — the adapter is shape-mismatched at the StreamEvent level but RichOutputView consumes UnifiedMessage); (2) MessagesView still shows session_info cards in the legacy mode (was flagged FIND-SPRINT-024-5 as empty); (3) confirm stale IPC type decls flagged in FIND-SPRINT-024-4 didn't surface a regression in panel:get-json-messages consumers after TASK-648 deleted the divergent sessions:get-json-messages handler."
+  blocked_checks:
+    - "visual_web — no live Vite renderer (port 4521 not listening; existing Electron PID 22778 has 0 windows, ~11.5h elapsed, debug logs stale from 17:38)"
+    - "visual_macos — peekaboo CLI not installed; Peekaboo MCP reachable but Electron app shows 0 windows so nothing to capture"
+    - "playwright E2E (`pnpm test`) — webServer config requires `pnpm electron-dev`, same constraint as visual"
+  flows_deferred:
+    - "RichOutputView Claude SDK output rendering (TASK-637 + bb926cd fix)"
+    - "MessagesView session_info card population (FIND-SPRINT-024-5)"
+    - "panels:get-json-messages consumer path still works after sessions:get-json-messages deletion (TASK-648)"
+  severity: medium
+  created_at: "2026-05-19T23:45:00.000Z"
