@@ -131,6 +131,18 @@ type definitions across packages.
 - `shared/types/panels.ts` — panel configuration and state types
 - `shared/types/cliPanels.ts` — CLI-specific panel types
 
+**Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent`,
+`StuckReason`, and the forward-looking `StuckEventsClient` structural cast shim used
+until TASK-254 ships a typed `trpc.cyboflow.events.onStuckDetected` subscription. Rules:
+
+- Import all stuck-event types from `shared/types/stuckDetection.ts`. Do NOT re-declare
+  `StuckEventsClient` or `StuckDetectedEvent` locally — SPRINT-023 had two sites do this
+  independently, producing a verbatim duplicate interface and a doubled IPC subscription.
+- Exactly one App-level mount should cast `trpc.cyboflow.events as unknown as
+  StuckEventsClient` and open the subscription. Other consumers read from the Zustand
+  `reviewQueueSlice` (`runStatusMap`) instead of opening their own tRPC subscription.
+- Audit: `grep -rn 'StuckEventsClient' frontend/src` must return exactly one cast site.
+
 **Label maps for shared-type discriminants** belong next to the type (same file
 or a companion `*Labels.ts` in `shared/types/`), keyed by `Record<Union['kind'], string>`
 so adding a new variant breaks the map at compile time. Never duplicate the map in a
