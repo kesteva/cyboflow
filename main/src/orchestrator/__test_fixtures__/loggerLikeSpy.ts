@@ -14,6 +14,7 @@
  */
 import { vi } from 'vitest';
 import type { LoggerLike } from '../types';
+import type { Logger } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,4 +63,21 @@ export function makeSpyLogger(): LoggerLike & { calls: LogCall[] } {
   });
 
   return { info, warn, error, debug, calls };
+}
+
+/**
+ * Variant of makeSpyLogger() shaped against the production `Logger` class
+ * (utils/logger.ts) used by service-pipeline call sites (ClaudeCodeManager,
+ * RawEventsSink, ClaudeStreamParser).  Adds `verbose` which `LoggerLike` lacks
+ * but production code calls.
+ *
+ * Use at call sites that pass the spy into code expecting `Logger`, typically
+ * via `logger as unknown as Logger`.  Other levels are still spy-able.
+ */
+export function makeProdLoggerSpy(): Pick<Logger, 'warn' | 'info' | 'verbose'> {
+  return {
+    warn: vi.fn(),
+    info: vi.fn(),
+    verbose: vi.fn(),
+  } as unknown as Pick<Logger, 'warn' | 'info' | 'verbose'>;
 }
