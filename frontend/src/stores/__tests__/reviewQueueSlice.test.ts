@@ -40,7 +40,7 @@ vi.mock('../../utils/trpcClient', () => ({
   },
 }));
 
-import { pureApplyStuckEvent, pureSetRunStatus, pureSetRunStatusAllMaps, useReviewQueueSlice, useRunStatus, useRunStuckDetails } from '../reviewQueueSlice';
+import { pureApplyStuckEvent, pureSetRunStatusAllMaps, useReviewQueueSlice, useRunStatus, useRunStuckDetails } from '../reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // pureApplyStuckEvent — pure function tests
@@ -288,48 +288,6 @@ describe('useReviewQueueSlice — setRunStatus', () => {
     expect(state.runStatusMap['run-2']).toBe('stuck');
     expect(state.runReasonMap['run-2']).toEqual({ kind: 'orphan_pty' });
     expect(state.runDetectedAtMap['run-2']).toBe(200);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// pureSetRunStatus — pure function tests
-// ---------------------------------------------------------------------------
-
-describe('pureSetRunStatus', () => {
-  it('stores a non-terminal status', () => {
-    const result = pureSetRunStatus({}, 'run-1', 'running');
-    expect(result['run-1']).toBe('running');
-  });
-
-  it('evicts the key on completed status', () => {
-    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'stuck' };
-    const result = pureSetRunStatus(map, 'run-1', 'completed');
-    expect('run-1' in result).toBe(false);
-  });
-
-  it('evicts the key on canceled status', () => {
-    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'running' };
-    const result = pureSetRunStatus(map, 'run-1', 'canceled');
-    expect('run-1' in result).toBe(false);
-  });
-
-  it('evicts the key on failed status', () => {
-    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'running' };
-    const result = pureSetRunStatus(map, 'run-1', 'failed');
-    expect('run-1' in result).toBe(false);
-  });
-
-  it('returns same reference when evicting an absent key', () => {
-    const map: Record<string, WorkflowRunStatus> = {};
-    const result = pureSetRunStatus(map, 'run-1', 'completed');
-    expect(result).toBe(map);
-  });
-
-  it('does not mutate other entries', () => {
-    const map: Record<string, WorkflowRunStatus> = { 'run-1': 'stuck', 'run-2': 'running' };
-    const result = pureSetRunStatus(map, 'run-1', 'completed');
-    expect('run-1' in result).toBe(false);
-    expect(result['run-2']).toBe('running');
   });
 });
 
