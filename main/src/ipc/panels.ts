@@ -2,8 +2,39 @@ import { IpcMain, BrowserWindow } from 'electron';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService } from '../services/database';
-import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState } from '../../../shared/types/panels';
+import { CreatePanelRequest, PanelEventType, ToolPanel, ToolPanelState, BaseAIPanelState } from '../../../shared/types/panels';
 import type { AppServices } from './types';
+
+/**
+ * Type guard: narrows customState to `{ cwd: string }` when it is an object
+ * with a non-empty string `cwd` property.  Mirrors the narrowing pattern at
+ * terminalPanelManager.ts:249 (`'cwd' in panel.state.customState`).
+ */
+function hasCwdString(state: ToolPanelState['customState']): state is { cwd: string } {
+  return (
+    typeof state === 'object' &&
+    state !== null &&
+    'cwd' in state &&
+    typeof (state as Record<string, unknown>).cwd === 'string' &&
+    ((state as Record<string, unknown>).cwd as string).length > 0
+  );
+}
+
+/**
+ * Resolve the working directory for a terminal panel in priority order:
+ *   1. panel.state.customState.cwd   (persisted from a previous init or panel create)
+ *   2. optionsCwd                    (caller-supplied at init time)
+ *   3. process.cwd()                 (last-resort fallback)
+ */
+function resolveTerminalCwd(panel: ToolPanel, optionsCwd?: string): string {
+  if (hasCwdString(panel.state.customState)) {
+    return panel.state.customState.cwd;
+  }
+  if (typeof optionsCwd === 'string' && optionsCwd.length > 0) {
+    return optionsCwd;
+  }
+  return process.cwd();
+}
 
 export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
   // Panel CRUD operations
@@ -123,8 +154,25 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
     
     // Initialize based on panel type
     if (panel.type === 'terminal') {
-      const cwd = options?.cwd || process.cwd();
-      await terminalPanelManager.initializeTerminal(panel, cwd);
+      const resolvedCwd = resolveTerminalCwd(panel, options?.cwd);
+
+      // Persist resolvedCwd into customState.cwd BEFORE spawning the PTY so the
+      // panel record has a stable source of truth (used by the breadcrumb header
+      // in TASK-659 and by any re-initialization path).
+      if (!hasCwdString(panel.state.customState)) {
+        const existingCustomState = panel.state.customState ?? {};
+        const nextCustomState = {
+          ...(typeof existingCustomState === 'object' && existingCustomState !== null
+            ? existingCustomState
+            : {}),
+          cwd: resolvedCwd,
+        };
+        await panelManager.updatePanel(panel.id, {
+          state: { ...panel.state, customState: nextCustomState },
+        });
+      }
+
+      await terminalPanelManager.initializeTerminal(panel, resolvedCwd);
     }
     
     return true;
