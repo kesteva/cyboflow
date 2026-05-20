@@ -38,8 +38,11 @@ export function makeRawEventsDb(): Database.Database {
 /**
  * Count raw_events rows for a given run_id. Replaces the inline
  * SELECT COUNT(*) idiom previously duplicated across test files.
+ *
+ * Named countRawEvents (not countRows) to avoid collision once this fixture
+ * pattern spreads to messages/approvals tables with their own row-count helpers.
  */
-export function countRows(db: Database.Database, runId: string): number {
+export function countRawEvents(db: Database.Database, runId: string): number {
   const row = db
     .prepare('SELECT COUNT(*) AS n FROM raw_events WHERE run_id = ?')
     .get(runId) as { n: number };
