@@ -504,6 +504,11 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     const toolLabel = 'Claude Code';
 
     manager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
+      // cyboflow workflow runs use isCyboflowRunId-shaped IDs and are handled
+      // by runEventBridge; skip Crystal session validation (which would log
+      // "Session not found" against the `sessions` table cyboflow never writes to).
+      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
       const validation = panelId
         ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
         : validateEventContext({ sessionId }, sessionId);
@@ -553,6 +558,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     });
 
     manager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number | null; signal: number | null | string }) => {
+      // cyboflow workflow runs are owned by the workflow orchestrator; skip the
+      // Crystal session validation (mirror of the spawned-handler guard at line 510).
+      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
       const validation = panelId
         ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
         : validateEventContext({ sessionId }, sessionId);

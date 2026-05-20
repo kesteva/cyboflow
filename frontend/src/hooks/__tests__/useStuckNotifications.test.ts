@@ -12,44 +12,47 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
+import { useReviewQueueSlice } from '../../stores/reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
-// Fake tRPC subscription factory
+// Slice-driven emitter helper
 // ---------------------------------------------------------------------------
 
-/** Callback the fake subscription will invoke when `emit()` is called. */
-let onDataCallback: ((event: StuckDetectedEvent) => void) | null = null;
-
-function makeFakeSubscription() {
-  return {
-    subscribe: (_input: undefined, callbacks: { onData: (e: StuckDetectedEvent) => void; onError: (e: unknown) => void }) => {
-      onDataCallback = callbacks.onData;
-      return {
-        unsubscribe: () => { onDataCallback = null; },
-      };
-    },
-  };
-}
-
-/** Emit a stuck event through the currently active subscription. */
+/** Drive the hook by setting slice state directly via applyStuckEvent. */
 function emitStuck(event: StuckDetectedEvent) {
-  if (!onDataCallback) throw new Error('No active subscription — hook not mounted or already unmounted');
-  onDataCallback(event);
+  act(() => {
+    useReviewQueueSlice.getState().applyStuckEvent({
+      runId: event.runId,
+      reason: event.reason,
+      detectedAt: event.detectedAt,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Module mocks (declared before any imports of the module under test)
 // ---------------------------------------------------------------------------
 
-vi.mock('../../utils/trpcClient', () => ({
-  trpc: {
-    cyboflow: {
-      events: {
-        onStuckDetected: makeFakeSubscription(),
+// Mock tRPC client to prevent Electron IPC bridge initialization in tests.
+// reviewQueueSlice imports trpc for its subscribeToStuckEvents action; this
+// mock prevents the `electronTRPC` global requirement from being thrown.
+// Note: reviewQueueSlice's subscribeToStuckEvents action is never called by the
+// hook under test — the hook only reads slice state. The mock is a stub to
+// satisfy the module import, not to drive any test behavior.
+vi.mock('../../utils/trpcClient', () => {
+  const noopSubscription = { unsubscribe: vi.fn() };
+  const noopSubscribable = { subscribe: vi.fn().mockReturnValue(noopSubscription) };
+  return {
+    trpc: {
+      cyboflow: {
+        events: new Proxy({}, { get: () => noopSubscribable }),
+        approvals: {
+          listPending: { query: vi.fn().mockResolvedValue([]) },
+        },
       },
     },
-  },
-}));
+  };
+});
 
 // Mutable mock for API.config.get — tests override `notificationsEnabled`.
 let notificationsEnabled = true;
@@ -99,8 +102,8 @@ beforeEach(() => {
   MockNotification.mockClear();
   vi.stubGlobal('Notification', MockNotification);
   notificationsEnabled = true;
-  // Reset the subscription callback before each test
-  onDataCallback = null;
+  // Reset slice state before each test
+  useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
 });
 
 afterEach(() => {
@@ -192,6 +195,11 @@ describe('useStuckNotifications', () => {
     // Assert localStorage was not written (the hook must not persist state)
     expect(localStorage.getItem('stuck-notifications')).toBeNull();
     expect(sessionStorage.getItem('stuck-notifications')).toBeNull();
+
+    // Reset slice state between mounts so prevStuck initialization on mount 2
+    // does NOT see the run-001 entry (otherwise it would be in prevStuck and
+    // the transition would not be detected).
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
 
     // Second mount with a fresh hook instance
     const { unmount: unmount2 } = renderHook(() => useStuckNotifications());

@@ -23,21 +23,7 @@ import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-
-// ---------------------------------------------------------------------------
-// Schema DDL (matches 006_cyboflow_schema.sql exactly — columns: id, run_id,
-// event_type, payload_json, created_at; NO event_subtype column).
-// ---------------------------------------------------------------------------
-
-const RAW_EVENTS_DDL = `
-  CREATE TABLE IF NOT EXISTS raw_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`;
+import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant
@@ -97,21 +83,6 @@ const streamEvent: ClaudeStreamEvent = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeDb(): Database.Database {
-  const db = new Database(':memory:');
-  // Disable FK enforcement — keeps tests focused on bridge behaviour, not FK seeding.
-  db.pragma('foreign_keys = OFF');
-  db.exec(RAW_EVENTS_DDL);
-  return db;
-}
-
-function countRows(db: Database.Database, runId: string): number {
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM raw_events WHERE run_id = ?')
-    .get(runId) as { n: number };
-  return row.n;
-}
-
 interface RawEventRow {
   event_type: string;
   payload_json: string;
@@ -155,7 +126,7 @@ describe('runEventBridge', () => {
   let source: EventEmitter;
 
   beforeEach(() => {
-    db = makeDb();
+    db = makeRawEventsDb();
     source = new EventEmitter();
   });
 
@@ -180,7 +151,7 @@ describe('runEventBridge', () => {
     }
 
     // 5 rows in the DB
-    expect(countRows(db, RUN_ID)).toBe(5);
+    expect(countRawEvents(db, RUN_ID)).toBe(5);
 
     // 5 publish calls
     expect(publish).toHaveBeenCalledTimes(5);
@@ -203,7 +174,7 @@ describe('runEventBridge', () => {
     const rowCountsAtPublish: number[] = [];
     const publisher: StreamEventPublisher = {
       publish(runId) {
-        rowCountsAtPublish.push(countRows(db, runId));
+        rowCountsAtPublish.push(countRawEvents(db, runId));
       },
     };
 
@@ -232,7 +203,7 @@ describe('runEventBridge', () => {
     const { publish, asPublisher } = makePublisher();
 
     // Build a sink whose insertStmt.run throws on the 2nd call.
-    const sinkDb = makeDb();
+    const sinkDb = makeRawEventsDb();
     const sink = new RawEventsSink(sinkDb, mockLogger);
     let insertCallCount = 0;
     const sinkAsRecord = sink as unknown as Record<string, unknown>;
@@ -255,7 +226,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, resultEvent);    // INSERT 3 — succeeds
 
     // Only 2 rows persisted (3rd succeeds, 2nd fails → 1 + 1 = 2).
-    expect(countRows(sinkDb, RUN_ID)).toBe(2);
+    expect(countRawEvents(sinkDb, RUN_ID)).toBe(2);
 
     // All 3 publish calls still fired despite the INSERT failure.
     expect(publish).toHaveBeenCalledTimes(3);
@@ -279,7 +250,7 @@ describe('runEventBridge', () => {
     emitOutput(source, 'run-OTHER-999', systemEvent);
     emitOutput(source, 'run-OTHER-999', assistantEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(0);
+    expect(countRawEvents(db, RUN_ID)).toBe(0);
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -295,7 +266,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, 'some string output', 'stdout');
     emitOutput(source, RUN_ID, 'another string', 'stderr');
 
-    expect(countRows(db, RUN_ID)).toBe(0);
+    expect(countRawEvents(db, RUN_ID)).toBe(0);
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -357,7 +328,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, { notAType: true, gibberish: 42 });
 
     // One row inserted.
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
     const rows = selectRows(db, RUN_ID);
     expect(rows[0].event_type).toBe('unknown');
 
@@ -385,7 +356,7 @@ describe('runEventBridge', () => {
 
     // Emit one event — should produce 1 row + 1 publish.
     emitOutput(source, RUN_ID, systemEvent);
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
     expect(publish).toHaveBeenCalledTimes(1);
 
     // Verify listener is attached.
@@ -401,7 +372,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, assistantEvent);
     emitOutput(source, RUN_ID, resultEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(1);     // still only 1 row
+    expect(countRawEvents(db, RUN_ID)).toBe(1);     // still only 1 row
     expect(publish).toHaveBeenCalledTimes(1);  // still only 1 call
 
     // dispose() is idempotent — calling twice must not throw.
@@ -467,7 +438,7 @@ describe('runEventBridge', () => {
       emitOutput(source, RUN_ID, assistantEvent);
 
       // Both events inserted and published despite the throwing callback
-      expect(countRows(db, RUN_ID)).toBe(2);
+      expect(countRawEvents(db, RUN_ID)).toBe(2);
       expect(publish).toHaveBeenCalledTimes(2);
 
       // onFirstMessage only attempted once
@@ -509,11 +480,11 @@ describe('runEventBridge', () => {
 
       // Also verify INSERT happened before publish by checking row count at publish time
       const rowCountsAtPublish: number[] = [];
-      const db2 = makeDb();
+      const db2 = makeRawEventsDb();
       const source2 = new EventEmitter();
       const publisher2: StreamEventPublisher = {
         publish(runId) {
-          rowCountsAtPublish.push(countRows(db2, runId));
+          rowCountsAtPublish.push(countRawEvents(db2, runId));
         },
       };
       const onFirstMessage2 = vi.fn();
@@ -554,12 +525,7 @@ describe('runEventBridge', () => {
     //     Verified by a stub db whose `prepare` throws — if the bridge tried to
     //     construct a RawEventsSink it would call db.prepare and the test would fail.
     // -----------------------------------------------------------------------
-    it('(a) skipPersistence: true skips router/sink construction — non-functional db stub does not throw', () => {
-      // Stub db whose prepare() throws. If the bridge constructs a RawEventsSink, this will throw.
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called when skipPersistence=true'); },
-      } as unknown as Database.Database;
-
+    it('(a) skipPersistence: true skips router/sink construction — db may be omitted entirely', () => {
       const { asPublisher } = makePublisher();
       const source = new EventEmitter();
 
@@ -568,7 +534,6 @@ describe('runEventBridge', () => {
           runId: SP_RUN_ID,
           source,
           publisher: asPublisher,
-          db: stubDb,
           skipPersistence: true,
         });
       }).not.toThrow();
@@ -578,10 +543,6 @@ describe('runEventBridge', () => {
     // (b) skipPersistence: true — onFirstMessage still fires exactly once
     // -----------------------------------------------------------------------
     it('(b) skipPersistence: true still fires onFirstMessage exactly once', () => {
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called'); },
-      } as unknown as Database.Database;
-
       const onFirstMessage = vi.fn();
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
@@ -590,7 +551,6 @@ describe('runEventBridge', () => {
         runId: SP_RUN_ID,
         source: src,
         publisher: asPublisher,
-        db: stubDb,
         skipPersistence: true,
         onFirstMessage,
       });
@@ -605,7 +565,7 @@ describe('runEventBridge', () => {
     // (c) skipPersistence: true — produces zero rows in a real DB
     // -----------------------------------------------------------------------
     it('(c) skipPersistence: true produces zero rows in a real DB', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
 
@@ -621,7 +581,7 @@ describe('runEventBridge', () => {
       emitOutput(src, SP_RUN_ID, assistantEvent);
       emitOutput(src, SP_RUN_ID, resultEvent);
 
-      expect(countRows(realDb, SP_RUN_ID)).toBe(0);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(0);
     });
 
     // -----------------------------------------------------------------------
@@ -629,7 +589,7 @@ describe('runEventBridge', () => {
     //     5 events → 5 rows and 5 publish calls
     // -----------------------------------------------------------------------
     it('(d) skipPersistence: false/absent preserves legacy behaviour — 5 INSERTs, 5 publishes', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const { publish, asPublisher } = makePublisher();
       const src = new EventEmitter();
 
@@ -647,7 +607,7 @@ describe('runEventBridge', () => {
         emitOutput(src, SP_RUN_ID, ev);
       }
 
-      expect(countRows(realDb, SP_RUN_ID)).toBe(5);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(5);
       expect(publish).toHaveBeenCalledTimes(5);
     });
 
@@ -655,10 +615,6 @@ describe('runEventBridge', () => {
     // (e) dispose with skipPersistence: true is idempotent
     // -----------------------------------------------------------------------
     it('(e) dispose with skipPersistence: true is idempotent', () => {
-      const stubDb = {
-        prepare: () => { throw new Error('db.prepare must not be called'); },
-      } as unknown as Database.Database;
-
       const { asPublisher } = makePublisher();
       const src = new EventEmitter();
       const baselineListenerCount = src.listenerCount('output');
@@ -667,7 +623,6 @@ describe('runEventBridge', () => {
         runId: SP_RUN_ID,
         source: src,
         publisher: asPublisher,
-        db: stubDb,
         skipPersistence: true,
       });
 
@@ -685,19 +640,60 @@ describe('runEventBridge', () => {
     });
 
     // -----------------------------------------------------------------------
+    // (f) runtime guard: bridgeEvents throws when db is undefined and skipPersistence is not true
+    // -----------------------------------------------------------------------
+    it('(f) bridgeEvents throws when db is undefined and skipPersistence is not true', () => {
+      const { asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      // (i) skipPersistence: false explicit, no db → throws
+      expect(() =>
+        bridgeEvents({ runId: SP_RUN_ID, source: src, publisher: asPublisher, skipPersistence: false }),
+      ).toThrow(/db.*skipPersistence|skipPersistence.*db/);
+
+      // (ii) skipPersistence omitted, no db → throws
+      expect(() =>
+        bridgeEvents({ runId: SP_RUN_ID, source: src, publisher: asPublisher }),
+      ).toThrow(/db.*skipPersistence|skipPersistence.*db/);
+    });
+
+    // -----------------------------------------------------------------------
+    // (g) db-omitted success path: skipPersistence: true with db omitted works end-to-end
+    // -----------------------------------------------------------------------
+    it('(g) skipPersistence: true with db omitted: bridge functions normally', () => {
+      const onFirstMessage = vi.fn();
+      const { publish, asPublisher } = makePublisher();
+      const src = new EventEmitter();
+
+      // No db field in options at all.
+      bridgeEvents({
+        runId: SP_RUN_ID,
+        source: src,
+        publisher: asPublisher,
+        skipPersistence: true,
+        onFirstMessage,
+      });
+
+      emitOutput(src, SP_RUN_ID, systemEvent);
+
+      expect(publish).toHaveBeenCalledOnce();
+      expect(onFirstMessage).toHaveBeenCalledOnce();
+    });
+
+    // -----------------------------------------------------------------------
     // 8. Dual-pipeline single-INSERT guarantee
     //    Integration test: real db + real EventEmitter + real EventRouter + RawEventsSink
     //    simulating CCM's pipeline. Bridge with skipPersistence=true.
     //    Emit one 'output' event AND call ccmRouter.emitForRun once.
-    //    Assert countRows === 1 (not 2) and publish called once.
+    //    Assert countRawEvents === 1 (not 2) and publish called once.
     //
     // Sibling: runExecutor.test.ts "source arg: lifecycleTransitions.running()..."
-    // exercises the same countRows === 1 guarantee through the full RunExecutor
+    // exercises the same countRawEvents === 1 guarantee through the full RunExecutor
     // pipeline. This test isolates the bridgeEvents() skipPersistence option
     // contract. If this invariant changes, update both.
     // -----------------------------------------------------------------------
     it('dual-pipeline single-INSERT guarantee — bridge with skipPersistence does not double-INSERT alongside CCM-owned sink', () => {
-      const realDb = makeDb();
+      const realDb = makeRawEventsDb();
       const src = new EventEmitter();
       const { publish, asPublisher } = makePublisher();
       const onFirstMessage = vi.fn();
@@ -729,7 +725,7 @@ describe('runEventBridge', () => {
       ccmRouter.emitForRun(SP_RUN_ID, systemEvent);
 
       // Total rows must be exactly 1 (CCM's insert only — bridge contributes 0).
-      expect(countRows(realDb, SP_RUN_ID)).toBe(1);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(1);
 
       // Bridge must have published the envelope once.
       expect(publish).toHaveBeenCalledOnce();
@@ -769,7 +765,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, resultEvent);    // publish 3 — succeeds
 
     // All 3 rows should be in the DB (INSERT is not affected by publish failure).
-    expect(countRows(db, RUN_ID)).toBe(3);
+    expect(countRawEvents(db, RUN_ID)).toBe(3);
 
     // publish was called 3 times.
     expect(publishCallCount).toBe(3);

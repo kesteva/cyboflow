@@ -1,30 +1,23 @@
 /**
- * RunView — subscribes to the active run's stream-event feed and renders a
- * scrollable event log.  Shows a placeholder when no run is active.
+ * RunView — renders the active run's scrollable event log.  Shows a
+ * placeholder when no run is active.
+ *
+ * Stream-event subscription is managed by the cyboflowStore (module-level
+ * singleton started in setActiveRun / torn down in clearActiveRun).  This
+ * component is subscription-free and re-renders only when the store state
+ * changes.  The previous useEffect-based subscription was vulnerable to
+ * React Strict Mode's double-invoke tearing down the listener mid-run
+ * (TASK-667: confirmed H2).
+ *
+ * TODO(epic-7-trpc-cutover): migrate to trpc.cyboflow.events.onStreamEvent({ runId })
  */
 import { useEffect, useRef } from 'react';
-import { cyboflowApi } from '../../utils/cyboflowApi';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 
 export function RunView() {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  // Subscribe to stream events whenever activeRunId changes.
-  // TODO(epic-7-trpc-cutover): migrate to trpc.cyboflow.events.onStreamEvent({ runId })
-  useEffect(() => {
-    if (!activeRunId) return;
-
-    const unsubscribe = cyboflowApi.subscribeToStreamEvents({
-      runId: activeRunId,
-      onEvent: (event) => {
-        useCyboflowStore.getState().appendStreamEvent(event);
-      },
-    });
-
-    return unsubscribe;
-  }, [activeRunId]);
 
   // Auto-scroll to the bottom when new events arrive
   useEffect(() => {
