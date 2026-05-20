@@ -50,11 +50,17 @@ vi.mock('../../../utils/trpcClient', () => ({
           mutate: mockCancelAndRestartMutate,
         },
       },
+      events: {
+        onStuckDetected: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
     },
   },
 }));
 
 import { PendingApprovalCard } from '../PendingApprovalCard';
+import { useReviewQueueSlice } from '../../../stores/reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -188,6 +194,8 @@ describe('PendingApprovalCard — modal open/close behavior', () => {
 describe('PendingApprovalCard — StuckBadge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset all slice maps so tests start with clean state.
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
   });
 
   it('renders STUCK badge when runStatus is "stuck"', () => {
@@ -205,10 +213,42 @@ describe('PendingApprovalCard — StuckBadge', () => {
     expect(screen.queryByText('STUCK')).not.toBeInTheDocument();
   });
 
-  it('StuckBadge shows stuckReason as tooltip title attribute', () => {
+  it('StuckBadge shows stuckReason as tooltip title attribute (legacy prop fallback)', () => {
     render(<PendingApprovalCard item={singleItem} runStatus="stuck" stuckReason="cross_run_deadlock" />);
     const badge = screen.getByText('STUCK');
     expect(badge).toHaveAttribute('title', 'cross_run_deadlock');
+  });
+
+  it('StuckBadge title includes both reason kind and relative-time suffix when detectedAt is in the slice', () => {
+    // Seed the slice with reason + detectedAt (2 minutes ago)
+    useReviewQueueSlice.setState({
+      runStatusMap: { [baseApproval.runId]: 'stuck' },
+      runReasonMap: { [baseApproval.runId]: { kind: 'cross_run_deadlock', conflictingRunId: 'run-other' } },
+      runDetectedAtMap: { [baseApproval.runId]: Date.now() - 120_000 },
+    });
+
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const badge = screen.getByText('STUCK');
+    const title = badge.getAttribute('title') ?? '';
+    expect(title).toContain('cross_run_deadlock');
+    // 120 seconds = 2 minutes → formatAge returns '2m'
+    expect(title).toContain('2m');
+  });
+
+  it('StuckBadge title contains only reason kind when runDetectedAtMap has no entry for runId', () => {
+    // Seed reason only — no detectedAt
+    useReviewQueueSlice.setState({
+      runStatusMap: { [baseApproval.runId]: 'stuck' },
+      runReasonMap: { [baseApproval.runId]: { kind: 'orphan_pty' } },
+      runDetectedAtMap: {},
+    });
+
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const badge = screen.getByText('STUCK');
+    const title = badge.getAttribute('title') ?? '';
+    expect(title).toBe('orphan_pty');
+    // Should NOT contain a relative time suffix separator
+    expect(title).not.toContain('·');
   });
 });
 
