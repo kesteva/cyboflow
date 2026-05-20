@@ -28,7 +28,6 @@
     "posthog-node": "^5.11.2",
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
-    "web-streams-polyfill": "^3.3.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -23,6 +23,10 @@ _(none — see Removed dependencies below)_
   `frontend/src/**`, `shared/**`, or `scripts/**` — a Crystal-era leftover.
   Removal verified by repo-wide grep returning zero hits.
 
+- `web-streams-polyfill@^3.3.3` — removed in SPRINT-025 compound (FIND-SPRINT-025-4).
+  Zero importers across the repo; Node 22+ (engine floor) ships WHATWG Streams
+  natively.
+
 ## When to revisit
 
 If a future packaged build emits MODULE_NOT_FOUND for a workspace-only dep,
