@@ -1,8 +1,8 @@
 ---
 id: TASK-647
 idea: SPRINT-007-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
   - main/src/services/cliManagerFactory.ts
@@ -20,45 +20,45 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-007-proposal.md
   - .soloflow/archive/done/wire-sprint-005-services/TASK-572-done.md
 acceptance_criteria:
-  - criterion: "ClaudeCodeManager has no static sharedDb field and no setSharedDb method"
+  - criterion: ClaudeCodeManager has no static sharedDb field and no setSharedDb method
     verification: "grep -nE 'static (sharedDb|setSharedDb)' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches"
-  - criterion: "ClaudeCodeManager constructor accepts a non-optional db parameter of type Database.Database (no null) — missing/undefined db is a TypeScript-level error"
+  - criterion: ClaudeCodeManager constructor accepts a non-optional db parameter of type Database.Database (no null) — missing/undefined db is a TypeScript-level error
     verification: "grep -nE 'constructor\\([\\s\\S]*?db:\\s*Database\\.Database[\\s,)]' main/src/services/panels/claude/claudeCodeManager.ts returns at least 1 match AND grep -nE 'db:\\s*Database\\.Database\\s*\\|\\s*null' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches"
-  - criterion: "RawEventsSink is always created in setupProcessHandlers — no null branch — because db is guaranteed by the constructor"
+  - criterion: RawEventsSink is always created in setupProcessHandlers — no null branch — because db is guaranteed by the constructor
     verification: "grep -nE 'sink\\s*=\\s*null|sink:\\s*RawEventsSink\\s*\\|\\s*null' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches AND grep -nE 'new RawEventsSink\\(' main/src/services/panels/claude/claudeCodeManager.ts returns at least 1 match"
-  - criterion: "claudePanel.ts no longer calls setSharedDb"
+  - criterion: claudePanel.ts no longer calls setSharedDb
     verification: "grep -n 'setSharedDb' main/src/ipc/claudePanel.ts returns 0 matches"
-  - criterion: "cliManagerFactory.ts threads a db handle through the claude manager factory function"
+  - criterion: cliManagerFactory.ts threads a db handle through the claude manager factory function
     verification: "grep -nE 'new ClaudeCodeManager\\([\\s\\S]*?db[\\s,)]' main/src/services/cliManagerFactory.ts returns at least 1 match"
-  - criterion: "main/src/index.ts passes databaseService.getDb() through additionalOptions when creating the default Claude manager"
+  - criterion: main/src/index.ts passes databaseService.getDb() through additionalOptions when creating the default Claude manager
     verification: "grep -nE 'additionalOptions:\\s*\\{[^}]*db' main/src/index.ts returns at least 1 match"
-  - criterion: "The wiring test constructs ClaudeCodeManager with a real in-memory db argument and no longer calls setSharedDb"
+  - criterion: The wiring test constructs ClaudeCodeManager with a real in-memory db argument and no longer calls setSharedDb
     verification: "grep -n 'setSharedDb' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns 0 matches AND grep -nE 'new TestableClaudeCodeManager\\([\\s\\S]*?db' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 match"
-  - criterion: "A new test asserts that constructing ClaudeCodeManager with an undefined db throws an explicit TypeError (not a silent no-op)"
+  - criterion: A new test asserts that constructing ClaudeCodeManager with an undefined db throws an explicit TypeError (not a silent no-op)
     verification: "grep -nE 'requires a db|db argument is required|db is required' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 match"
-  - criterion: "claudeCodeManagerPermissions.test.ts builds with the new constructor shape (passes db as 5th arg)"
+  - criterion: claudeCodeManagerPermissions.test.ts builds with the new constructor shape (passes db as 5th arg)
     verification: "grep -cE 'new TestableClaudeCodeManager\\(' main/src/services/__tests__/claudeCodeManagerPermissions.test.ts returns 4 AND grep -nE 'new Database\\(.:memory:.\\)' main/src/services/__tests__/claudeCodeManagerPermissions.test.ts returns at least 1 match"
-  - criterion: "pnpm --filter main typecheck exits 0"
-    verification: "pnpm --filter main typecheck"
-  - criterion: "pnpm --filter main lint exits 0"
-    verification: "pnpm --filter main lint"
-  - criterion: "All ClaudeCodeManager tests pass (wiring + permissions)"
-    verification: "pnpm --filter main test -- claudeCodeManagerWiring claudeCodeManagerPermissions exits 0 with all tests green"
+  - criterion: pnpm --filter main typecheck exits 0
+    verification: pnpm --filter main typecheck
+  - criterion: pnpm --filter main lint exits 0
+    verification: pnpm --filter main lint
+  - criterion: All ClaudeCodeManager tests pass (wiring + permissions)
+    verification: pnpm --filter main test -- claudeCodeManagerWiring claudeCodeManagerPermissions exits 0 with all tests green
 depends_on: []
 estimated_complexity: medium
 epic: wire-sprint-005-services
 test_strategy:
   needed: true
-  justification: "This task removes the silent-no-op degraded mode and replaces it with a constructor invariant. The existing wiring test exercises the static-injector path (degraded mode test at line 276 and afterEach reset at line 184) which becomes invalid; the test must be rewritten to assert the new invariant (missing db = explicit error) and to pass the db as a constructor argument. The permissions test does not touch RawEventsSink behaviour but its constructor calls must be updated to match the new signature."
+  justification: This task removes the silent-no-op degraded mode and replaces it with a constructor invariant. The existing wiring test exercises the static-injector path (degraded mode test at line 276 and afterEach reset at line 184) which becomes invalid; the test must be rewritten to assert the new invariant (missing db = explicit error) and to pass the db as a constructor argument. The permissions test does not touch RawEventsSink behaviour but its constructor calls must be updated to match the new signature.
   targets:
     - behavior: "Constructor with valid db: RawEventsSink is created and raw_events rows are written (the previous AC-1 / AC-2 scenarios, restated against the new constructor shape)"
-      test_file: "main/src/services/__tests__/claudeCodeManagerWiring.test.ts"
+      test_file: main/src/services/__tests__/claudeCodeManagerWiring.test.ts
       type: integration
     - behavior: "Constructor with undefined or null db: throws a TypeError naming 'db'; the existing AC-5 'degraded mode' test is replaced by this assertion"
-      test_file: "main/src/services/__tests__/claudeCodeManagerWiring.test.ts"
+      test_file: main/src/services/__tests__/claudeCodeManagerWiring.test.ts
       type: unit
-    - behavior: "Permissions test continues to pass with new constructor signature (no behavioural change — just signature update)"
-      test_file: "main/src/services/__tests__/claudeCodeManagerPermissions.test.ts"
+    - behavior: Permissions test continues to pass with new constructor signature (no behavioural change — just signature update)
+      test_file: main/src/services/__tests__/claudeCodeManagerPermissions.test.ts
       type: unit
 prerequisites:
   - check: "grep -q 'export class AbstractAIPanelManager' main/src/services/panels/ai/AbstractAIPanelManager.ts 2>/dev/null && echo 'collapse-pending'; true"
@@ -66,7 +66,6 @@ prerequisites:
     description: "Informational: the original FIND framed this work as contingent on the AbstractAIPanelManager collapse. Ripple inspection (main/src/index.ts:595, cliManagerFactory.ts:170, claudePanelManager.ts:14) confirms the inheritance chain is not touched."
     blocking: false
 ---
-
 # Replace static sharedDb injector in ClaudeCodeManager with constructor DI
 
 ## Objective

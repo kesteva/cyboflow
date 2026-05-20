@@ -1,7 +1,7 @@
 ---
 id: TASK-635
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/services/cyboflow/__tests__/transitions.test.ts
@@ -12,12 +12,12 @@ files_readonly:
   - main/src/database/schema.sql
   - main/src/orchestrator/__tests__/workflowRegistry.test.ts
 acceptance_criteria:
-  - criterion: "No inline CREATE TABLE workflow_runs DDL remains in transitions.test.ts or mcpQueryHandler.test.ts"
+  - criterion: No inline CREATE TABLE workflow_runs DDL remains in transitions.test.ts or mcpQueryHandler.test.ts
     verification: "grep -n 'CREATE TABLE.*workflow_runs\\|CREATE TABLE.*approvals\\|CREATE TABLE.*raw_events' main/src/services/cyboflow/__tests__/transitions.test.ts main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts returns 0 matches"
-  - criterion: "Both files import GATE_SCHEMA or REGISTRY_SCHEMA from the canonical fixture"
+  - criterion: Both files import GATE_SCHEMA or REGISTRY_SCHEMA from the canonical fixture
     verification: "grep -l \"from '.*__test_fixtures__/registrySchema'\" main/src/services/cyboflow/__tests__/transitions.test.ts main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts | wc -l returns 2"
-  - criterion: "main workspace tests exit 0"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: main workspace tests exit 0
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -25,7 +25,6 @@ test_strategy:
   needed: false
   justification: "Schema-DDL refactor — replaces inline CREATE TABLE blocks with an import of GATE_SCHEMA (or REGISTRY_SCHEMA) from the canonical fixture. The two test suites' existing assertions remain the regression guard; if a column or constraint diverges, those tests fail at runtime. Sibling-test scan: no other test files exist alongside transitions.test.ts or mcpQueryHandler.test.ts that this refactor could affect. The GATE_SCHEMA / REGISTRY_SCHEMA fixtures themselves are exercised by every test that imports them — no separate fixture test needed."
 ---
-
 # Migrate 2 remaining inline DDL sites to GATE_SCHEMA
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-637
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/ai/MessagesView.tsx
@@ -16,13 +16,13 @@ acceptance_criteria:
     verification: "grep -n 'as unknown as JSONMessage\\[\\]' frontend/src/components/panels/ai/MessagesView.tsx returns 0 matches"
   - criterion: "RichOutputView.tsx no longer uses the `as unknown as UserPromptMessage[]` double-cast"
     verification: "grep -n 'as unknown as UserPromptMessage\\[\\]' frontend/src/components/panels/ai/RichOutputView.tsx returns 0 matches"
-  - criterion: "Both files import and use the parseJsonMessage adapter (or its array variant)"
+  - criterion: Both files import and use the parseJsonMessage adapter (or its array variant)
     verification: "grep -l 'parseJsonMessage\\|parseJsonMessages' frontend/src/components/panels/ai/MessagesView.tsx frontend/src/components/panels/ai/RichOutputView.tsx | wc -l returns 2"
-  - criterion: "The two FIXME(SPRINT-015) breadcrumbs added by A5 are removed"
+  - criterion: The two FIXME(SPRINT-015) breadcrumbs added by A5 are removed
     verification: "grep -n 'FIXME(SPRINT-015).*FIND-SPRINT-015-12' frontend/src/components/panels/ai/MessagesView.tsx frontend/src/components/panels/ai/RichOutputView.tsx returns 0 matches"
-  - criterion: "parseJsonMessage adapter exists and exports both single + array variants"
+  - criterion: parseJsonMessage adapter exists and exports both single + array variants
     verification: "grep -nE 'export function parseJsonMessage|export function parseJsonMessages' frontend/src/components/panels/ai/parseJsonMessage.ts returns at least 2 matches"
-  - criterion: "Typecheck and frontend tests pass"
+  - criterion: Typecheck and frontend tests pass
     verification: "pnpm --filter frontend typecheck && pnpm --filter frontend test exit 0"
 depends_on: []
 estimated_complexity: medium
@@ -31,23 +31,22 @@ test_strategy:
   needed: true
   justification: "New adapter module with non-trivial branching logic (a `ClaudeJsonMessage` may legitimately be missing `timestamp`, may have stringified `data`, may carry a `session_info` discriminator). Unit-testing the adapter in isolation is far cheaper than reproducing the consumer flows. The two view files themselves are exercised by Playwright E2E and dev-mode visual review — no unit-test coverage today, leaving as-is."
   targets:
-    - behavior: "parseJsonMessage returns a normalized JSONMessage shape for a ClaudeJsonMessage with a top-level type=user and stringified data"
-      test_file: "frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts"
+    - behavior: parseJsonMessage returns a normalized JSONMessage shape for a ClaudeJsonMessage with a top-level type=user and stringified data
+      test_file: frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
       type: unit
     - behavior: "parseJsonMessage returns a normalized UserPromptMessage shape for a ClaudeJsonMessage with a nested message.content of type='text'"
-      test_file: "frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts"
+      test_file: frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
       type: unit
-    - behavior: "parseJsonMessage discriminates session_info messages from regular JSON messages"
-      test_file: "frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts"
+    - behavior: parseJsonMessage discriminates session_info messages from regular JSON messages
+      test_file: frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
       type: unit
     - behavior: "parseJsonMessage gracefully handles a malformed message (missing timestamp, non-JSON string data) without throwing"
-      test_file: "frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts"
+      test_file: frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
       type: unit
-    - behavior: "parseJsonMessages array variant returns an empty array for empty input and never throws"
-      test_file: "frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts"
+    - behavior: parseJsonMessages array variant returns an empty array for empty input and never throws
+      test_file: frontend/src/components/panels/ai/__tests__/parseJsonMessage.test.ts
       type: unit
 ---
-
 # Replace double-casts with a parseJsonMessage adapter (MessagesView + RichOutputView)
 
 ## Objective

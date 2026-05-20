@@ -1,8 +1,8 @@
 ---
 id: TASK-648
 idea: SPRINT-007-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/ipc/session.ts
   - main/src/preload.ts
@@ -17,24 +17,24 @@ files_readonly:
 acceptance_criteria:
   - criterion: "The `sessions:get-json-messages` IPC handler is removed from session.ts"
     verification: "grep -nE \"ipcMain\\.handle\\(['\\\"]sessions:get-json-messages\" main/src/ipc/session.ts returns 0 matches"
-  - criterion: "All recursive references to the legacy channel name are gone from the codebase (excluding .soloflow history)"
+  - criterion: All recursive references to the legacy channel name are gone from the codebase (excluding .soloflow history)
     verification: "grep -rn 'sessions:get-json-messages' main/src frontend/src returns 0 matches"
-  - criterion: "The preload binding for sessions.getJsonMessages is removed"
+  - criterion: The preload binding for sessions.getJsonMessages is removed
     verification: "grep -nE \"sessions:get-json-messages|sessions\\.getJsonMessages\" main/src/preload.ts returns 0 matches"
   - criterion: "The frontend api binding (api.ts:87-90) is removed"
     verification: "grep -nE 'sessions\\.getJsonMessages|async getJsonMessages\\(sessionId' frontend/src/utils/api.ts returns 0 matches"
-  - criterion: "The TypeScript declaration for sessions.getJsonMessages is removed from electron.d.ts"
+  - criterion: The TypeScript declaration for sessions.getJsonMessages is removed from electron.d.ts
     verification: "grep -nE 'sessions[^}]*getJsonMessages' frontend/src/types/electron.d.ts returns 0 matches"
   - criterion: "The panel-keyed handler at panels:get-json-messages and its preload/api bindings/types remain intact (no collateral damage)"
     verification: "grep -nE \"panels:get-json-messages\" main/src/ipc/session.ts main/src/preload.ts returns at least 2 matches AND grep -nE 'panels\\.getJsonMessages' frontend/src/utils/api.ts frontend/src/types/electron.d.ts returns at least 2 matches"
-  - criterion: "pnpm --filter main typecheck exits 0"
-    verification: "pnpm --filter main typecheck"
-  - criterion: "pnpm --filter frontend typecheck exits 0"
-    verification: "pnpm --filter frontend typecheck"
-  - criterion: "pnpm lint exits 0"
-    verification: "pnpm lint"
+  - criterion: pnpm --filter main typecheck exits 0
+    verification: pnpm --filter main typecheck
+  - criterion: pnpm --filter frontend typecheck exits 0
+    verification: pnpm --filter frontend typecheck
+  - criterion: pnpm lint exits 0
+    verification: pnpm lint
   - criterion: "Existing sessionJsonMessages.test.ts (covers panels:get-json-messages) still passes"
-    verification: "pnpm --filter main test -- sessionJsonMessages exits 0"
+    verification: pnpm --filter main test -- sessionJsonMessages exits 0
 depends_on: []
 estimated_complexity: low
 epic: wire-sprint-005-services
@@ -42,7 +42,6 @@ test_strategy:
   needed: false
   justification: "Pure deletion of an unreachable code path. The legacy handler has zero renderer callers — confirmed by `grep -rn 'API.sessions.getJsonMessages\\|API.session.getJsonMessages\\|electronAPI.sessions.getJsonMessages' frontend/src main/src` returning only the api.ts wrapper itself (which is being deleted in this task) and no component consumer. The only active code path that calls getJsonMessages is `panels.getJsonMessages` (RichOutputView.tsx:189, MessagesView.tsx:48), which is unaffected by this task. Sibling-test scan: `main/src/ipc/__tests__/sessionJsonMessages.test.ts` exists but per its docstring 'tests the panels:get-json-messages handler' — confirmed by re-reading lines 1-5 of that file. Adding tests for a handler we're deleting would be wasted effort; the existing test for the parallel panel-keyed handler stays green as a regression guard for the surviving path."
 ---
-
 # Delete the divergent sessions:get-json-messages handler
 
 ## Objective

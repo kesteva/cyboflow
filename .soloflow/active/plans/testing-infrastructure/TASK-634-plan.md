@@ -1,7 +1,7 @@
 ---
 id: TASK-634
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/utils/gitignoreWriter.test.ts
@@ -10,14 +10,14 @@ files_readonly:
   - main/src/__test_fixtures__/tmp.ts
   - main/src/__test_fixtures__/__tests__/tmp.test.ts
 acceptance_criteria:
-  - criterion: "No mkdtempSync calls remain in the two target files"
+  - criterion: No mkdtempSync calls remain in the two target files
     verification: "grep -n 'mkdtempSync' main/src/utils/gitignoreWriter.test.ts main/src/orchestrator/__tests__/workflowRegistry.test.ts returns 0 matches"
-  - criterion: "Both files import withTempDir from the canonical fixture"
+  - criterion: Both files import withTempDir from the canonical fixture
     verification: "grep -l \"from '.*__test_fixtures__/tmp'\" main/src/utils/gitignoreWriter.test.ts main/src/orchestrator/__tests__/workflowRegistry.test.ts | wc -l returns 2"
   - criterion: "After test run, no orphan dirs remain in $TMPDIR with the two known prefixes"
     verification: "pnpm --filter main test && ls \"$TMPDIR\" 2>/dev/null | grep -E 'gitignore-test-|workflow-registry-test-' | wc -l returns 0"
-  - criterion: "main workspace tests exit 0"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: main workspace tests exit 0
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -25,7 +25,6 @@ test_strategy:
   needed: false
   justification: "Refactor of test infrastructure to use the already-tested withTempDir helper (covered by main/src/__test_fixtures__/__tests__/tmp.test.ts). The behavior under test in both files (gitignore writing; workflow registry seeding) is unchanged. The two files' own existing assertions remain the regression guard for what the tests cover, and the AC-mandated `ls $TMPDIR | grep` is the regression guard for the leak fix. Sibling-test scan: no other test files exist alongside gitignoreWriter.test.ts or workflowRegistry.test.ts that this refactor could affect."
 ---
-
 # Migrate 2 remaining mkdtempSync leak sites to withTempDir
 
 ## Objective
