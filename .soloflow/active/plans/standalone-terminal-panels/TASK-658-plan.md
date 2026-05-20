@@ -1,8 +1,8 @@
 ---
 id: TASK-658
 idea: IDEA-019
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - frontend/src/types/panelComponents.ts
   - frontend/src/components/panels/PanelTabBar.tsx
@@ -23,21 +23,23 @@ acceptance_criteria:
     verification: "grep -n 'onAddTerminal' frontend/src/types/panelComponents.ts shows the prop declared as optional with a no-arg function type returning void or Promise<void>"
   - criterion: "PanelTabBar renders a visible 'Add Terminal' trigger button at the trailing edge of the tab row when onAddTerminal is provided"
     verification: "grep -n 'onAddTerminal' frontend/src/components/panels/PanelTabBar.tsx shows the prop destructured and rendered as a <button> with aria-label='Add terminal panel'; in a running pnpm dev session the button is visible to the right of the tabs in both ProjectView (project context) and SessionView (worktree context)"
-  - criterion: "The Add Terminal button uses the lucide-react Plus icon (or Terminal+Plus combo) and has visible focus styles consistent with other PanelTabBar buttons"
+  - criterion: The Add Terminal button uses the lucide-react Plus icon (or Terminal+Plus combo) and has visible focus styles consistent with other PanelTabBar buttons
     verification: "grep -n \"from 'lucide-react'\" frontend/src/components/panels/PanelTabBar.tsx shows Plus imported; the button element includes focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle classes (matching existing rename/close buttons)"
   - criterion: "Clicking the button in ProjectView creates a terminal panel on the main-repo project session with initialState.cwd set to the project's path and activates the new panel"
     verification: "grep -n 'panelApi.createPanel' frontend/src/components/ProjectView.tsx shows an onAddTerminal handler that calls createPanel with type: 'terminal', sessionId: mainRepoSessionId, and initialState: { cwd: <project path> }; in a pnpm dev session, opening a project, clicking Add Terminal opens a new Terminal tab and the resulting PTY is rooted at the project path (verified via 'pwd' typed into the PTY)"
   - criterion: "Clicking the button in SessionView creates a terminal panel on the active session with initialState.cwd set to the session's worktreePath and activates the new panel"
     verification: "grep -n 'panelApi.createPanel' frontend/src/components/SessionView.tsx shows an onAddTerminal handler that calls createPanel with type: 'terminal', sessionId: activeSession.id, and initialState: { cwd: activeSession.worktreePath }; in a pnpm dev session, opening a workflow-run session and clicking Add Terminal opens a new Terminal tab rooted at the worktree path (verified via 'pwd' in the PTY)"
-  - criterion: "Both call sites pass onAddTerminal to PanelTabBar"
+  - criterion: Both call sites pass onAddTerminal to PanelTabBar
     verification: "grep -n 'onAddTerminal' frontend/src/components/ProjectView.tsx frontend/src/components/SessionView.tsx shows the prop wired through to <PanelTabBar onAddTerminal={...} /> in both files"
-  - criterion: "The new terminal panel becomes the active panel after creation (via setActivePanelInStore + panelApi.setActivePanel) and renders via existing PanelContainer routing"
+  - criterion: The new terminal panel becomes the active panel after creation (via setActivePanelInStore + panelApi.setActivePanel) and renders via existing PanelContainer routing
     verification: "In a pnpm dev session, after clicking Add Terminal the new tab is highlighted as active and the xterm.js viewport renders; cyboflow-frontend-debug.log shows no errors from panelApi.createPanel or panels:initialize"
-  - criterion: "Both ProjectView and SessionView call useAddTerminalShortcut(handleAddTerminal) so the global keyboard shortcut (defined in TASK-659) fires the same callback as the button"
+  - criterion: Both ProjectView and SessionView call useAddTerminalShortcut(handleAddTerminal) so the global keyboard shortcut (defined in TASK-659) fires the same callback as the button
     verification: "grep -n 'useAddTerminalShortcut' frontend/src/components/ProjectView.tsx frontend/src/components/SessionView.tsx returns at least one match in each file, and the hook is invoked with the same handleAddTerminal that the PanelTabBar button uses"
   - criterion: "TypeScript strict checks pass and no use of the 'any' type is introduced"
     verification: "pnpm typecheck exits 0 and pnpm lint exits 0; grep -n ': any\\b\\| as any\\b' on the four owned source files returns 0 matches"
-depends_on: [TASK-657, TASK-659]
+depends_on:
+  - TASK-657
+  - TASK-659
 estimated_complexity: medium
 epic: standalone-terminal-panels
 test_strategy:
@@ -45,16 +47,15 @@ test_strategy:
   justification: "No sibling unit/component tests exist for PanelTabBar.tsx, ProjectView.tsx, or SessionView.tsx (verified via Glob on the panels directory and component test directories). A focused Playwright E2E spec is the right level of coverage because the behavior spans UI interaction + IPC + PTY initialization, and visual verification is required per the task brief."
   targets:
     - behavior: "Clicking the 'Add Terminal' button in PanelTabBar from the project (main-repo) context creates a new terminal panel rooted at the project path and the new tab becomes active"
-      test_file: "tests/standalone-terminal-panels.spec.ts"
+      test_file: tests/standalone-terminal-panels.spec.ts
       type: integration
     - behavior: "Clicking the 'Add Terminal' button in PanelTabBar from a workflow-run session context creates a new terminal panel rooted at the session's worktreePath and the new tab becomes active"
-      test_file: "tests/standalone-terminal-panels.spec.ts"
+      test_file: tests/standalone-terminal-panels.spec.ts
       type: integration
     - behavior: "The Add Terminal button is keyboard-focusable (Tab to it, Enter activates) and exposes aria-label='Add terminal panel'"
-      test_file: "tests/standalone-terminal-panels.spec.ts"
+      test_file: tests/standalone-terminal-panels.spec.ts
       type: integration
 ---
-
 # Add 'Add Terminal' button to PanelTabBar and wire createPanel in ProjectView and SessionView
 
 ## Objective

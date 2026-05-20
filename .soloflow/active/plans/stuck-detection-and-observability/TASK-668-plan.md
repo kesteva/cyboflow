@@ -1,8 +1,8 @@
 ---
 id: TASK-668
 idea: SPRINT-023
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - shared/types/stuckDetection.ts
   - frontend/src/stores/reviewQueueSlice.ts
@@ -20,13 +20,13 @@ acceptance_criteria:
     verification: "grep -n 'trpc.cyboflow.events' frontend/src/hooks/useStuckNotifications.ts returns 0 matches; grep -n 'onStuckDetected' frontend/src/hooks/useStuckNotifications.ts returns 0 matches."
   - criterion: "`useStuckNotifications.ts` triggers its notification side effect by observing `useReviewQueueSlice.runStatusMap` transitions to `'stuck'` (and reads reason via `useReviewQueueSlice.runReasonMap`)."
     verification: "grep -nE 'useReviewQueueSlice|runStatusMap|runReasonMap' frontend/src/hooks/useStuckNotifications.ts returns >=1 match referencing the slice."
-  - criterion: "Only one subscription to `cyboflow.events.onStuckDetected` is opened per App mount (in `reviewQueueSlice.subscribeToStuckEvents`)."
+  - criterion: Only one subscription to `cyboflow.events.onStuckDetected` is opened per App mount (in `reviewQueueSlice.subscribeToStuckEvents`).
     verification: "grep -rn 'onStuckDetected.subscribe' frontend/src returns exactly 1 hit, located in frontend/src/stores/reviewQueueSlice.ts."
   - criterion: "`useStuckNotifications.test.ts` no longer mocks `trpc.cyboflow.events.onStuckDetected` (the hook is now slice-driven). Tests drive the hook by setting slice state directly."
     verification: "grep -n 'onStuckDetected' frontend/src/hooks/__tests__/useStuckNotifications.test.ts returns 0 matches; grep -nE 'useReviewQueueSlice.setState|applyStuckEvent' frontend/src/hooks/__tests__/useStuckNotifications.test.ts returns >=1 match."
-  - criterion: "pnpm typecheck and pnpm lint pass."
+  - criterion: pnpm typecheck and pnpm lint pass.
     verification: "pnpm typecheck && pnpm lint exit 0"
-  - criterion: "frontend unit tests pass."
+  - criterion: frontend unit tests pass.
     verification: "cd frontend && pnpm test:unit -- reviewQueueSlice useStuckNotifications exit 0"
 depends_on: []
 estimated_complexity: medium
@@ -36,19 +36,18 @@ test_strategy:
   justification: "Both the slice and the hook own behavior changes (single subscription, slice-driven notification). Existing test files must be updated to reflect the new shape and to verify the de-duplicated subscription contract."
   targets:
     - behavior: "Notification fires exactly once per runId transition into 'stuck' when driven by the slice (not by direct tRPC emission)."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Subsequent stuck transitions for same runId in slice do not re-fire notification (per-launch dedupe still works)."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Subsequent stuck transitions for same runId in slice do not re-fire notification (per-launch dedupe still works).
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Notification respects `notifications.enabled === false` gate even when slice transitions to stuck."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Notification respects `notifications.enabled === false` gate even when slice transitions to stuck.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
     - behavior: "`useReviewQueueSlice.subscribeToStuckEvents` continues to consume `StuckEventsClient` shape from the shared type (compile-time check + runtime smoke)."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
 ---
-
 # Extract shared StuckEventsClient type and de-duplicate stuck-event tRPC subscription
 
 ## Objective

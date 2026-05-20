@@ -1,8 +1,8 @@
 ---
 id: TASK-653
 idea: SPRINT-019
-status: ready
-created: 2026-05-18T00:00:00Z
+status: in-flight
+created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/package.json
   - pnpm-lock.yaml
@@ -16,19 +16,19 @@ files_readonly:
   - .soloflow/archive/done/apple-signing-notarization-setup/TASK-585-done.md
   - .soloflow/active/findings/SPRINT-019-findings.md
 acceptance_criteria:
-  - criterion: "electron-store removed from main/package.json dependencies block"
+  - criterion: electron-store removed from main/package.json dependencies block
     verification: "grep -n '\"electron-store\"' main/package.json returns 0 matches (exit code 1)"
-  - criterion: "No source code or scripts import electron-store"
+  - criterion: No source code or scripts import electron-store
     verification: "grep -rnE \"from ['\\\"]electron-store['\\\"]|require\\(['\\\"]electron-store['\\\"]\\)\" main/src frontend/src shared scripts returns 0 matches (exit code 1)"
-  - criterion: "pnpm-lock.yaml no longer pins the electron-store package"
+  - criterion: pnpm-lock.yaml no longer pins the electron-store package
     verification: "grep -n '^  electron-store@' pnpm-lock.yaml returns 0 matches (exit code 1) AND grep -n '^      electron-store:' pnpm-lock.yaml returns 0 matches (exit code 1)"
-  - criterion: "pnpm install completes cleanly after removal"
+  - criterion: pnpm install completes cleanly after removal
     verification: "pnpm install exits 0 with no ERR_PNPM_* errors in stderr"
-  - criterion: "Repo-wide typecheck still passes"
-    verification: "pnpm typecheck exits 0"
-  - criterion: "Repo-wide lint still passes"
-    verification: "pnpm lint exits 0"
-  - criterion: "main workspace unit tests still pass"
+  - criterion: Repo-wide typecheck still passes
+    verification: pnpm typecheck exits 0
+  - criterion: Repo-wide lint still passes
+    verification: pnpm lint exits 0
+  - criterion: main workspace unit tests still pass
     verification: "pnpm --filter main test exits 0 (run after pnpm electron:rebuild if better-sqlite3 ABI mismatch is reported)"
   - criterion: "root-deps-policy.md no longer lists electron-store under 'Dead dependencies' and instead records the removal"
     verification: "grep -nE '^- `electron-store' docs/packaging/root-deps-policy.md returns 0 matches AND grep -ni 'removed in TASK-653' docs/packaging/root-deps-policy.md returns at least 1 match"
@@ -39,7 +39,6 @@ test_strategy:
   needed: false
   justification: "Pure dependency removal with no importers anywhere in the codebase (verified by repo-wide grep across main/src, frontend/src, shared, scripts — zero hits). No runtime behavior changes, so no new test coverage is warranted. Existing test suites (pnpm typecheck, pnpm lint, pnpm --filter main test) are run as gates in the acceptance criteria to confirm nothing regressed. No sibling test exists for main/package.json, pnpm-lock.yaml, or docs/packaging/root-deps-policy.md (config/lockfile/docs files do not have unit tests in this repo)."
 ---
-
 # Remove dead electron-store dependency from main/package.json
 
 ## Objective

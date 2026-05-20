@@ -1,8 +1,8 @@
 ---
 id: TASK-657
 idea: IDEA-019
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/ipc/panels.ts
   - main/src/ipc/__tests__/panelsInitialize.test.ts
@@ -26,30 +26,29 @@ acceptance_criteria:
   - criterion: "The TypeScript narrowing for reading `customState.cwd` uses a type guard, not `as any`. `pnpm typecheck` exits 0."
     verification: "Run `cd main && pnpm typecheck` from repo root; expect exit code 0. Grep guard: `grep -n 'as any' main/src/ipc/panels.ts` returns no new occurrences relative to baseline."
   - criterion: "`pnpm lint` reports no new errors for `main/src/ipc/panels.ts`."
-    verification: "Run `pnpm lint` from repo root; expect exit code 0."
-  - criterion: "All existing tests under `main/src/ipc/__tests__/` continue to pass."
+    verification: Run `pnpm lint` from repo root; expect exit code 0.
+  - criterion: All existing tests under `main/src/ipc/__tests__/` continue to pass.
     verification: "Run `cd main && pnpm run test` (or `pnpm vitest run`) from repo root; expect exit code 0 and the new `panelsInitialize.test.ts` is included in the run."
 depends_on: []
 estimated_complexity: low
 epic: standalone-terminal-panels
 test_strategy:
   needed: true
-  justification: "This task changes priority logic for a runtime fallback that has no visible UI surface. The behavior is only verifiable via direct unit tests of the IPC handler. The existing sibling tests in main/src/ipc/__tests__/ establish the handler-capture + vi.mock pattern — adding panelsInitialize.test.ts follows that pattern exactly."
+  justification: This task changes priority logic for a runtime fallback that has no visible UI surface. The behavior is only verifiable via direct unit tests of the IPC handler. The existing sibling tests in main/src/ipc/__tests__/ establish the handler-capture + vi.mock pattern — adding panelsInitialize.test.ts follows that pattern exactly.
   targets:
     - behavior: "panels:initialize resolves cwd as customState.cwd → options.cwd → process.cwd() with the priority documented in AC1"
-      test_file: "main/src/ipc/__tests__/panelsInitialize.test.ts"
+      test_file: main/src/ipc/__tests__/panelsInitialize.test.ts
       type: unit
     - behavior: "panels:initialize persists resolved cwd into customState.cwd via panelManager.updatePanel before invoking terminalPanelManager.initializeTerminal when customState.cwd is initially unset"
-      test_file: "main/src/ipc/__tests__/panelsInitialize.test.ts"
+      test_file: main/src/ipc/__tests__/panelsInitialize.test.ts
       type: unit
     - behavior: "panels:initialize does NOT overwrite an existing customState.cwd"
-      test_file: "main/src/ipc/__tests__/panelsInitialize.test.ts"
+      test_file: main/src/ipc/__tests__/panelsInitialize.test.ts
       type: unit
     - behavior: "panels:initialize for non-terminal panels (e.g. claude) does NOT call terminalPanelManager.initializeTerminal regardless of options.cwd"
-      test_file: "main/src/ipc/__tests__/panelsInitialize.test.ts"
+      test_file: main/src/ipc/__tests__/panelsInitialize.test.ts
       type: unit
 ---
-
 # Fix `panels:initialize` cwd routing and persist cwd in panel customState
 
 ## Objective

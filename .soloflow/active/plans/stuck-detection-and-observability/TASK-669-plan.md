@@ -1,8 +1,8 @@
 ---
 id: TASK-669
 idea: SPRINT-023
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - frontend/src/stores/reviewQueueSlice.ts
   - frontend/src/stores/__tests__/reviewQueueSlice.test.ts
@@ -15,38 +15,37 @@ acceptance_criteria:
     verification: "grep -n 'runReasonMap' frontend/src/stores/reviewQueueSlice.ts shows a `delete next[runId]` (or equivalent immutable removal) inside the terminal-status branch of `setRunStatus`; same for `runDetectedAtMap`."
   - criterion: "`pureSetRunStatus` signature accepts `runReasonMap` and `runDetectedAtMap` snapshots and returns the evicted shape, OR a new pure helper `pureSetRunStatusAllMaps` exists with that signature. (Author's choice — see Implementation Steps.)"
     verification: "grep -nE 'pureSetRunStatus|pureSetRunStatusAllMaps' frontend/src/stores/reviewQueueSlice.ts shows the multi-map signature; the corresponding test file exercises eviction across all three maps."
-  - criterion: "Slice JSDoc is updated to reflect the new eviction semantics for all three maps."
+  - criterion: Slice JSDoc is updated to reflect the new eviction semantics for all three maps.
     verification: "grep -nE 'runReasonMap|runDetectedAtMap' frontend/src/stores/reviewQueueSlice.ts shows JSDoc text describing 'evicted on terminal status' (replacing the previous 'NOT evicted on terminal status' note on lines ~79-80)."
   - criterion: "New test case asserts `setRunStatus(runId, 'completed')` clears all three maps for that runId without affecting other runIds."
     verification: "grep -nE 'clears all three maps|evicts.*reason|evicts.*detectedAt' frontend/src/stores/__tests__/reviewQueueSlice.test.ts returns >=1 match."
-  - criterion: "pnpm typecheck and pnpm lint pass."
+  - criterion: pnpm typecheck and pnpm lint pass.
     verification: "pnpm typecheck && pnpm lint exit 0"
-  - criterion: "Frontend unit tests pass."
+  - criterion: Frontend unit tests pass.
     verification: "cd frontend && pnpm test:unit -- reviewQueueSlice exit 0"
 depends_on: []
 estimated_complexity: low
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
-  justification: "Behavior change in a pure reducer with existing tests — must extend the test suite to assert multi-map eviction. The sibling test file `reviewQueueSlice.test.ts` already covers `setRunStatus` terminal-status eviction for `runStatusMap`; we mirror those cases for the two new maps."
+  justification: Behavior change in a pure reducer with existing tests — must extend the test suite to assert multi-map eviction. The sibling test file `reviewQueueSlice.test.ts` already covers `setRunStatus` terminal-status eviction for `runStatusMap`; we mirror those cases for the two new maps.
   targets:
     - behavior: "`setRunStatus(runId, 'completed')` removes the runId from all three maps."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "`setRunStatus(runId, 'canceled')` removes the runId from all three maps."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "`setRunStatus(runId, 'failed')` removes the runId from all three maps."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "`setRunStatus(runId, 'running')` (non-terminal) does NOT touch `runReasonMap` or `runDetectedAtMap` for that runId."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
-    - behavior: "Eviction of runId-A does not affect runId-B entries in any of the three maps."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+    - behavior: Eviction of runId-A does not affect runId-B entries in any of the three maps.
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
 ---
-
 # Evict runReasonMap and runDetectedAtMap entries on terminal status in setRunStatus
 
 ## Objective

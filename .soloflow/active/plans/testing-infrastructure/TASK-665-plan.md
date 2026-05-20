@@ -1,8 +1,8 @@
 ---
 id: TASK-665
 idea: IDEA-SPRINT-022-compound
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts
   - main/src/orchestrator/__tests__/runEventBridge.test.ts
@@ -16,14 +16,14 @@ acceptance_criteria:
     verification: "grep -E 'export (const RAW_EVENTS_DDL|function makeRawEventsDb|function countRows)' main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts returns three matches."
   - criterion: "RAW_EVENTS_DDL is the byte-for-byte canonical CREATE TABLE statement (columns: id, run_id, event_type, payload_json, created_at — no event_subtype) matching the raw_events DDL in 006_cyboflow_schema.sql lines 37-44 (sans foreign key, since the fixture intentionally disables FK enforcement)."
     verification: "Inspect the exported RAW_EVENTS_DDL constant; column list matches 006_cyboflow_schema.sql:38-42. The fixture omits the FOREIGN KEY clause because the helper sets pragma('foreign_keys = OFF') so tests do not need a workflow_runs row."
-  - criterion: "Neither test file declares a local RAW_EVENTS_DDL or RAW_EVENTS_DDL_EXEC constant after the migration."
+  - criterion: Neither test file declares a local RAW_EVENTS_DDL or RAW_EVENTS_DDL_EXEC constant after the migration.
     verification: "grep -n 'const RAW_EVENTS_DDL' main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts returns 0 matches."
   - criterion: "Neither test file declares a local makeDb() helper or inlines a SELECT COUNT(*) AS (n|cnt) FROM raw_events query."
     verification: "grep -nE 'function makeDb|SELECT COUNT\\(\\*\\) AS (n|cnt) FROM raw_events' main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts returns 0 matches."
-  - criterion: "Both test files import the shared fixture symbols they use."
+  - criterion: Both test files import the shared fixture symbols they use.
     verification: "grep -n \"from '\\./__fixtures__/rawEvents'\" main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts returns at least 1 import line per file (only files that actually use the helpers need to import)."
-  - criterion: "All orchestrator unit tests still pass after the refactor."
-    verification: "Run `pnpm --filter main test -- --run main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts` and confirm exit 0 with no skipped tests in those two files."
+  - criterion: All orchestrator unit tests still pass after the refactor.
+    verification: Run `pnpm --filter main test -- --run main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts` and confirm exit 0 with no skipped tests in those two files.
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -31,7 +31,6 @@ test_strategy:
   needed: false
   justification: "This is a pure test-helper refactor (deduplicate fixture across two test files); no production code changes. Correctness is verified by re-running the two existing test files (runEventBridge.test.ts has 22 cases; runExecutor.test.ts has the source-arg integration test + panelId-alignment test). Both already cover the DDL- and countRows-touching paths exhaustively. Adding tests for a fixture would test the test infrastructure itself, which has no contractual surface."
 ---
-
 # Extract shared raw_events test fixture from orchestrator test files
 
 ## Objective
