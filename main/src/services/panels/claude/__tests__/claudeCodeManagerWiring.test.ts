@@ -19,7 +19,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
-import type { DatabaseLike } from '../../../../orchestrator/types';
+import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
 
@@ -71,14 +71,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
