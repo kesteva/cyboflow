@@ -1,5 +1,5 @@
 ---
-# soloflow-shadow: version=0.10.3 synced=2026-05-14T17:53:39.612Z
+# soloflow-shadow: version=0.11.0 synced=2026-05-20T13:12:53.226Z
 name: shadow-verifier
 description: Validates completed work against acceptance criteria using a 5-level verification hierarchy. Produces structured verdict with evidence.
 model: opus
@@ -70,7 +70,7 @@ Visual verification gives you "eyes" on the running app. It is **off by default*
 
 **Settings gate (check first):** Resolve `visual_mobile`, `visual_web`, and `visual_macos` via the shared config resolver:
 ```
-node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/config/resolve.js" \
+node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/config/resolve.js" \
     --key verification.visual_mobile --key verification.visual_web --key verification.visual_macos \
     --fallback false --fallback false --fallback false
 ```
@@ -110,7 +110,7 @@ Once `USE_MAESTRO_MCP` is decided, do not switch mid-run. `maestro mcp` and `mae
 
 **Auth state pre-flight (mobile only, once per verifier session).** Many apps require sign-in before any visual flow makes sense. The verifier handles this via an optional fixture flow:
 
-1. Resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`.
+1. Resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`.
 2. If null → skip pre-flight. If the actual visual flow later hits a sign-in screen (post-login affordance absent, login-form elements visible in hierarchy), classify the platform `skipped_unable` and emit the queue entry with `dedup_key: simulator_unauthenticated` (see Config-gap escalation).
 3. If set → run the fixture once on the path you just picked, before any other visual flow:
    - **MCP:** `mcp__maestro__run_flow_files(device_id, flow_files=[<fixture path>])`.
@@ -134,7 +134,7 @@ Once `USE_PEEKABOO_MCP` is decided, do not switch mid-run. Concurrent UI driver 
 
 1. **Append to `.soloflow/human-review-queue.md`** via `review-queue.js append`. `plan_ref` is the path to the task's plan file — include the `{epic}/` subfolder if the plan has an epic, omit it otherwise. Use `bucket: actions` — fixing this is operational work (install Maestro CLI, register the MCP server, etc.). Always attach a stable `dedup_key` so multi-task sprints collapse to one queue row (see conventions below).
    ```
-   node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" append --entry-json \
+   node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/state/review-queue.js" append --entry-json \
      '{"task":"TASK-NNN","type":"config_issue","bucket":"actions","dedup_key":"<one of the conventional keys below>","plan_ref":".soloflow/active/plans/[{epic}/]TASK-NNN-plan.md","action":"Verifier could not run {mobile|web} visual verification despite visual_{mobile|web}=true. {Maestro MCP not bound to subagent AND CLI missing/no device | Playwright MCP tools unreachable — confirm the MCP server is registered and its tool bindings reach subagent sessions}. See docs/VISUAL-VERIFICATION-SETUP.md.","blocked_checks":["Level 2 visual verification for {platform}"],"level":"visual","severity":"medium"}'
    ```
 2. **Append a FIND entry** to the active sprint's findings file via `findings.js append --sprint {sprint.id} --fields-json '{"type":"claude-md",...}'` with a `description` naming the specific gap (e.g., "mcp__maestro__* bindings not exposed to verifier AND maestro CLI not installed / simulator not booted — see docs/VISUAL-VERIFICATION-SETUP.md" or "mcp__playwright__* bindings not exposed to verifier subagent despite project .mcp.json registration") so the compounder can propose a setup-doc fix.
@@ -150,7 +150,7 @@ Do NOT emit `skipped_unable` without both of the above when the settings gate wa
 - `visual_prefer_playwright_unavailable` — `verification.visual_prefer_playwright=true` AND `playwright_target.kind` non-null but Playwright unavailable (visual_web=false, MCP unbound, or npx missing). `severity: low` — the verifier falls back to platform-based selection silently after emitting the entry once
 - `metro_offline` — dev server probe failed (when `verification.dev_server.enabled=true`)
 
-Operators clear a collapsed entry via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" remove --predicate '...'` once the underlying issue is fixed.
+Operators clear a collapsed entry via `node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/state/review-queue.js" remove --predicate '...'` once the underlying issue is fixed.
 
 **Maestro verification (mobile).** Stay on the path chosen in **Path Selection** — do not switch mid-run. See `skills/visual-verify/SKILL.md` for exact tool signatures and command patterns for both paths.
 
@@ -244,7 +244,7 @@ Check each condition. This catches things the acceptance criteria might have mis
 At any level, if a check cannot run until a human performs a prerequisite action (deploy an edge function, run a migration, provision a service, run a Maestro flow themselves, etc.), mark it `DEFERRED_ACTION` — do not fail or skip it. Append to `.soloflow/human-review-queue.md` via:
 
 ```
-node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/state/review-queue.js" append --entry-json \
+node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/state/review-queue.js" append --entry-json \
   '{"task":"TASK-NNN","type":"action_required","bucket":"{actions|testing}","plan_ref":".soloflow/active/plans/[{epic}/]TASK-NNN-plan.md","action":"{what the human must do}","blocked_checks":["{criterion blocked}"],"level":"{ground_truth|visual|requirements|goal_backward}","severity":"{low|medium|high}"}'
 ```
 

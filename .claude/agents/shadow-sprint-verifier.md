@@ -1,5 +1,5 @@
 ---
-# soloflow-shadow: version=0.10.3 synced=2026-05-14T17:53:39.612Z
+# soloflow-shadow: version=0.11.0 synced=2026-05-20T13:12:53.226Z
 name: shadow-sprint-verifier
 description: End-of-sprint verification — manual visual checks for sprint-specific flows, then full integration test suite
 model: opus
@@ -45,7 +45,7 @@ Apply the gates in this order for each platform:
 
 3. **De-duplicate.** Multiple tasks often touch the same flow. Collapse into a unique flow list.
 
-4. **Auth state pre-flight (mobile only, once per pass).** If the mobile settings gate passed and any deduplicated flow targets mobile, resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`. If set, run the fixture once on the chosen Maestro path (MCP `mcp__maestro__run_flow_files` or CLI `maestro test`) before iterating flows. On failure → set `visual_mobile: skipped_unable`, append a queue entry with `dedup_key: simulator_unauthenticated` (see `agents/shadow-verifier.md` → **Config-gap escalation** for the payload shape and conventional keys), skip mobile flows, continue to web/Pass 2. If null and a flow later hits a sign-in screen, classify `skipped_unable` with the same `dedup_key`.
+4. **Auth state pre-flight (mobile only, once per pass).** If the mobile settings gate passed and any deduplicated flow targets mobile, resolve `verification.visual_auth_fixture` via `node "/Users/raimundoesteva/.claude/plugins/marketplaces/soloflow/scripts/config/resolve.js" --key verification.visual_auth_fixture --fallback null`. If set, run the fixture once on the chosen Maestro path (MCP `mcp__maestro__run_flow_files` or CLI `maestro test`) before iterating flows. On failure → set `visual_mobile: skipped_unable`, append a queue entry with `dedup_key: simulator_unauthenticated` (see `agents/shadow-verifier.md` → **Config-gap escalation** for the payload shape and conventional keys), skip mobile flows, continue to web/Pass 2. If null and a flow later hits a sign-in screen, classify `skipped_unable` with the same `dedup_key`.
 
 5. **Run each flow manually.** For each unique flow:
    - Pick a mobile path **once** at the start of the sprint verification, per the **Path Selection** recipe in `skills/visual-verify/SKILL.md`: probe `mcp__maestro__list_devices`; if reachable use Maestro MCP for all flows, else fall back to `maestro test`/`maestro hierarchy` via Bash. Do not mix paths across flows — both use port 7001.
