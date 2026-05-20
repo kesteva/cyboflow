@@ -32,6 +32,7 @@ import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike } from '../types';
 import { cancelAndRestartHandler, type CancelAndRestartDeps as HandlerDeps } from '../cancelAndRestartHandler';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // DB helpers
@@ -46,14 +47,6 @@ function createTestDb(): Database.Database {
   db.exec(readFileSync(SCHEMA_006, 'utf8'));
   db.exec(readFileSync(SCHEMA_007, 'utf8'));
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 // ---------------------------------------------------------------------------

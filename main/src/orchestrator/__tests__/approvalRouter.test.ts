@@ -29,6 +29,7 @@ import { join } from 'path';
 import PQueue from 'p-queue';
 import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -50,22 +51,6 @@ function createTestDb(): Database.Database {
   // The schema creates several tables; run it as-is.
   db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
   return db;
-}
-
-/**
- * Build a DatabaseLike adapter over a better-sqlite3 instance.
- * This mirrors the inline adapter in main/src/index.ts.
- */
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    // The DatabaseLike.transaction<T> generic cannot be inferred from the
-    // concrete better-sqlite3 Transaction return.  We satisfy the type with a
-    // cast at the adapter boundary; the runtime behaviour is identical — both
-    // return a callable that wraps fn in a BEGIN…COMMIT block.
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 /** Seed a workflow_runs row so requestApproval has something to UPDATE. */
