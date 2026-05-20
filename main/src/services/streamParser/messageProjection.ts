@@ -136,8 +136,8 @@ export class MessageProjection {
         ],
         metadata: {
           systemSubtype: 'context_compacted',
-          compact_trigger: compact.compact_metadata.trigger,
-          pre_tokens: compact.compact_metadata.pre_tokens,
+          compactTrigger: compact.compact_metadata.trigger,
+          preTokens: compact.compact_metadata.pre_tokens,
         }
       };
     }

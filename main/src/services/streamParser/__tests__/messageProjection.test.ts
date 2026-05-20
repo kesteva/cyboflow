@@ -218,8 +218,8 @@ describe('MessageProjection', () => {
     const msg = result as UnifiedMessage;
     expect(msg.role).toBe('system');
     expect(msg.metadata?.systemSubtype).toBe('context_compacted');
-    expect(msg.metadata?.compact_trigger).toBe('auto');
-    expect(msg.metadata?.pre_tokens).toBe(90000);
+    expect(msg.metadata?.compactTrigger).toBe('auto');
+    expect(msg.metadata?.preTokens).toBe(90000);
     // Segments should contain exactly one system_info segment (no text segment).
     expect(msg.segments).toHaveLength(1);
     expect(msg.segments[0].type).toBe('system_info');
