@@ -79,3 +79,23 @@ See `assumptions[]` in frontmatter.
 ## Sequencing
 
 Mutually exclusive with IDEA-013 for the Claude panel. The prototype validates which path users care about (subscription billing vs. richer UI). IDEA-014 only makes sense if IDEA-013 is rejected on product grounds, OR as a parallel "premium tier" that pays the Agent SDK credit for the structured-UI experience.
+
+## Refinement notes (added 2026-05-20)
+
+The decomposer should treat the 9-step skeleton in `EPIC-claude-agent-sdk-migration.md` as the canonical starting point — it covers the Claude *panel* substrate replacement well (SDK install, ApprovalRouter, typed events retarget, claudeCodeManager rewrite, MCP bridge deletion, stream-json parser deletion, completion detection swap, test migration, integration verify).
+
+Two scope additions discovered during manual smoke testing on 2026-05-20 that the panel-focused 9-step skeleton does NOT cover and MUST become explicit tasks under this epic:
+
+**Addition 1 — Wire orchestrator-side SDK execution (workflow runs)**
+
+The workflow-run path (`main/src/orchestrator/runLauncher.ts:102-195`) has a `runExecutor`-gated branch at lines 154-167 that would enqueue SDK execution onto a per-run `PQueue`. That branch is dormant today because `RunExecutor` and `RunQueueRegistry` are not constructed in `main/src/index.ts` bootstrap (`AppServices` wiring). Effect: starting a workflow run creates the worktree + writes per-run `.mcp.json`, emits a single synthetic `run_started` event (line 142-149, labeled "Wiring proof"), and returns — Claude is never invoked. Required:
+- Construct `RunExecutor` and `RunQueueRegistry` in `main/src/index.ts` bootstrap and pass them to `RunLauncher`.
+- `RunExecutor.execute(runId)` should invoke the SDK against the run's worktree, using the same `ApprovalRouter` / SDK options layer that the panel uses (single SDK substrate, two callers).
+- Delete (or reframe) the synthetic `run_started` "wiring proof" event once real SDK stream events flow.
+- The legacy MCP-bridge-write branch in `RunLauncher` (lines 125-134) is conditional on `!runExecutor` — it deletes itself when `RunExecutor` is wired. Confirm and remove cleanly.
+
+**Addition 2 — Replace `"unknown"` stream-event tag with proper discriminator handling**
+
+`frontend/src/services/cyboflowApi.ts:34` (the renderer's stream-event subscriber) logs every event whose `type` it doesn't recognize as `"unknown"`, and `RunView.tsx` then JSON.stringifies the payload — producing a raw-blob dump in the UI. Once real SDK-shaped events flow (post-Addition-1 + post-claudeCodeManager-rewrite), wire `cyboflowApi.ts` to recognize the SDK's typed `system | assistant | user | result | stream_event` discriminators (shared with `shared/types/claudeStream.ts`) and route them to the typed renderer paths. Remove the `"unknown"` catch-all (or keep it gated to truly novel future event types, but logged at warn-level, not info).
+
+Both additions are downstream of the panel substrate work (steps 1-7 of the existing skeleton). Addition 1 must land before workflow runs are end-to-end testable. Addition 2 is cosmetic-but-load-bearing for the integration-verify success signal.
