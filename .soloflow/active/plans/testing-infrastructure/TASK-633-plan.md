@@ -1,7 +1,7 @@
 ---
 id: TASK-633
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/cancelAndRestart.test.ts
@@ -17,14 +17,14 @@ files_readonly:
   - main/src/orchestrator/__tests__/runLauncher.test.ts
   - main/src/ipc/__tests__/cyboflow.test.ts
 acceptance_criteria:
-  - criterion: "All four target files import dbAdapter from the canonical fixture and contain zero local function dbAdapter definitions"
+  - criterion: All four target files import dbAdapter from the canonical fixture and contain zero local function dbAdapter definitions
     verification: "grep -rn 'function dbAdapter' main/src/orchestrator/__tests__/cancelAndRestart.test.ts main/src/orchestrator/__tests__/approvalRouter.test.ts main/src/orchestrator/__tests__/stuckDetector.test.ts main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts returns 0 matches"
-  - criterion: "Each of the four target files imports the canonical dbAdapter"
+  - criterion: Each of the four target files imports the canonical dbAdapter
     verification: "grep -l \"from '\\.\\./__test_fixtures__/dbAdapter'\\|from '\\.\\./\\.\\./__test_fixtures__/dbAdapter'\" main/src/orchestrator/__tests__/cancelAndRestart.test.ts main/src/orchestrator/__tests__/approvalRouter.test.ts main/src/orchestrator/__tests__/stuckDetector.test.ts main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts | wc -l returns 4"
   - criterion: "Repo-wide, only the canonical fixture defines function dbAdapter — narrow exceptions for inspectorQueries.test.ts (uses InspectorDb shape) and trpc/__tests__/approvals.test.ts (uses narrower shape) remain"
     verification: "grep -rln 'function dbAdapter' main/src | sort returns exactly these 3 paths: main/src/orchestrator/__test_fixtures__/dbAdapter.ts, main/src/orchestrator/__tests__/inspectorQueries.test.ts, main/src/trpc/__tests__/approvals.test.ts"
-  - criterion: "main workspace tests exit 0"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: main workspace tests exit 0
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -32,7 +32,6 @@ test_strategy:
   needed: false
   justification: "Refactor only — replaces 4 identical inline copies with an import of an already-tested canonical fixture. The existing test suites in each touched file ARE the regression check; if any imported dbAdapter shape mismatches, those test files fail to typecheck or fail at runtime. No new behavior; no new tests warranted. Sibling-test scan: no separate sibling test files exist for these test files (tests testing tests is an anti-pattern). The canonical fixture's compile-time `: DatabaseLike` return ensures any future widening of DatabaseLike fails the build at the fixture, not in drift copies."
 ---
-
 # Complete dbAdapter extraction to remaining 4 test files
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-629
 idea: SPRINT-014-COMPOUND
-status: ready
+status: in-flight
 created: "2026-05-17T00:00:00Z"
 files_owned:
   - main/src/utils/devDebugLog.ts
@@ -12,36 +12,36 @@ files_readonly:
 acceptance_criteria:
   - criterion: "devDebugLog.ts exports `formatConsoleArgs(args: unknown[]): string`"
     verification: "grep -nE 'export function formatConsoleArgs' main/src/utils/devDebugLog.ts returns exactly 1 match"
-  - criterion: "All 5 console overrides in main/src/index.ts call formatConsoleArgs(args)"
+  - criterion: All 5 console overrides in main/src/index.ts call formatConsoleArgs(args)
     verification: "grep -nE 'formatConsoleArgs\\(args\\)' main/src/index.ts returns at least 5 matches"
-  - criterion: "Inline duplicated args-to-string formatter is eliminated from console overrides"
+  - criterion: Inline duplicated args-to-string formatter is eliminated from console overrides
     verification: "grep -cE 'args\\.map\\(arg' main/src/index.ts returns at most 1 (the renderer-error handler at index.ts:236 may retain its own formatter)"
   - criterion: "Error-instance extraction (`args.find(arg => arg instanceof Error)`) preserved in console.error and console.warn callers"
     verification: "grep -nE 'args\\.find\\(arg => arg instanceof Error\\)' main/src/index.ts returns at least 2 matches"
   - criterion: "devDebugLog.test.ts has new tests for formatConsoleArgs (string, object, Error, circular, null/undefined)"
     verification: "cd main && pnpm vitest run src/utils/devDebugLog.test.ts exits 0 with >= 8 tests"
-  - criterion: "pnpm typecheck and pnpm lint pass"
+  - criterion: pnpm typecheck and pnpm lint pass
     verification: "pnpm typecheck && pnpm lint exit 0"
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: true
-  justification: "Adds a public formatter on the dev-debug logging path with branches (object/Error/circular) that are easy to regress."
+  justification: Adds a public formatter on the dev-debug logging path with branches (object/Error/circular) that are easy to regress.
   targets:
-    - behavior: "joins string args with single spaces"
+    - behavior: joins string args with single spaces
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
-    - behavior: "JSON-stringifies plain objects with 2-space indent"
+    - behavior: JSON-stringifies plain objects with 2-space indent
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
-    - behavior: "renders Error instances as `Error: {message}\\nStack: {stack}`"
+    - behavior: "renders Error instances as `Error: {message}\nStack: {stack}`"
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
-    - behavior: "handles circular-structure objects without throwing"
+    - behavior: handles circular-structure objects without throwing
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
-    - behavior: "handles null/undefined via String()"
+    - behavior: handles null/undefined via String()
       test_file: main/src/utils/devDebugLog.test.ts
       type: unit
 ---

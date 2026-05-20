@@ -1,8 +1,8 @@
 ---
 id: TASK-623
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useStuckNotifications.ts
   - frontend/src/hooks/__tests__/useStuckNotifications.test.ts
@@ -21,37 +21,36 @@ acceptance_criteria:
     verification: "grep -n 'workflowName' frontend/src/hooks/useStuckNotifications.ts returns 0 matches AND grep -nE 'new Notification\\(' frontend/src/hooks/useStuckNotifications.ts returns 1 match whose body argument references runId or a static 'Run' label (not workflowName)."
   - criterion: "Tests are updated to construct StuckDetectedEvent with { runId, approvalId, reason: {kind: ...}, detectedAt } shape and to assert against the new notification body."
     verification: "grep -nE 'sessionId|workflowName' frontend/src/hooks/__tests__/useStuckNotifications.test.ts returns 0 matches (or only matches inside historical/removed-by-this-task assertions) AND grep -n 'approvalId' frontend/src/hooks/__tests__/useStuckNotifications.test.ts returns at least 1 match AND grep -n 'reason: { kind:' frontend/src/hooks/__tests__/useStuckNotifications.test.ts returns at least 1 match."
-  - criterion: "All 6 existing test cases continue to pass after rewriting (renamed to use runId suppression semantics where they tested sessionId)."
+  - criterion: All 6 existing test cases continue to pass after rewriting (renamed to use runId suppression semantics where they tested sessionId).
     verification: "Run 'pnpm --filter cyboflow-frontend test -- --run frontend/src/hooks/__tests__/useStuckNotifications.test.ts'; exit 0 with 6 passing tests."
-  - criterion: "pnpm typecheck succeeds across all workspaces with no new errors."
+  - criterion: pnpm typecheck succeeds across all workspaces with no new errors.
     verification: "Run 'pnpm typecheck' from repo root; exit 0."
 depends_on: []
 estimated_complexity: low
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
-  justification: "The existing test file is the only place that constructed events using the diverged local type; rewriting it is required to keep coverage green and now asserts the canonical schema."
+  justification: The existing test file is the only place that constructed events using the diverged local type; rewriting it is required to keep coverage green and now asserts the canonical schema.
   targets:
-    - behavior: "First stuck event for a runId fires a notification."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: First stuck event for a runId fires a notification.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Second stuck event with the same runId is suppressed."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Second stuck event with the same runId is suppressed.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Different runId fires a second notification."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Different runId fires a second notification.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Remount resets the suppression set (in-memory only)."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Remount resets the suppression set (in-memory only).
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "notifications.enabled === false gates the hook."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: notifications.enabled === false gates the hook.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
-    - behavior: "Notification title contains warning emoji; body matches new format using stuck reason from reason.kind."
-      test_file: "frontend/src/hooks/__tests__/useStuckNotifications.test.ts"
+    - behavior: Notification title contains warning emoji; body matches new format using stuck reason from reason.kind.
+      test_file: frontend/src/hooks/__tests__/useStuckNotifications.test.ts
       type: unit
 ---
-
 # Fix useStuckNotifications StuckDetectedEvent schema divergence
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-627
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - main/src/orchestrator/cancelAndRestartHandler.ts
   - frontend/src/components/ReviewQueue/PendingApprovalCard.tsx
@@ -14,21 +14,22 @@ files_readonly:
   - main/src/index.ts
   - shared/types/stuckInspection.ts
 acceptance_criteria:
-  - criterion: "cancelAndRestartHandler logs a WARN line immediately after the approvalRouter.clearPendingForRun(runId) call referencing TASK-304."
+  - criterion: cancelAndRestartHandler logs a WARN line immediately after the approvalRouter.clearPendingForRun(runId) call referencing TASK-304.
     verification: "grep -nE 'logger\\?\\.warn|logger\\?.warn' main/src/orchestrator/cancelAndRestartHandler.ts returns at least 1 match within 4 lines of the line containing 'clearPendingForRun(runId)' AND the warn message contains both '[cancelAndRestart]' and 'TASK-304'."
-  - criterion: "The WARN includes the runId in the context object so log scraping can correlate."
+  - criterion: The WARN includes the runId in the context object so log scraping can correlate.
     verification: "Read the new logger?.warn(...) call — its second argument must be `{ runId }` (or `{ runId, note: ... }` shape consistent with the existing logger?.error call on line 132)."
   - criterion: "ReviewQueue/PendingApprovalCard's 'Cancel and restart' button now carries a tooltip / title attribute that documents the partial-functionality limitation."
     verification: "grep -nE 'Cancel and restart' frontend/src/components/ReviewQueue/PendingApprovalCard.tsx returns the button element, and the button has either a `title=` attribute OR a sibling text element whose contents include the substring 'deny replies' (or 'TASK-304' / 'partial' / 'permission socket'). Verify by reading the JSX block surrounding the button."
-  - criterion: "An existing or new test asserts the WARN is emitted exactly once per cancelAndRestart invocation."
+  - criterion: An existing or new test asserts the WARN is emitted exactly once per cancelAndRestart invocation.
     verification: "grep -nE 'warn.*TASK-304|warn.*clearPendingForRun' main/src/orchestrator/__tests__/cancelAndRestart.test.ts returns at least 1 match in a new or extended test case asserting logger.warn was called with a message containing 'TASK-304'."
-  - criterion: "The PendingApprovalCard test asserts the button has the documenting tooltip / title."
+  - criterion: The PendingApprovalCard test asserts the button has the documenting tooltip / title.
     verification: "grep -nE 'title.*deny|title.*TASK-304|title.*partial' frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx returns at least 1 match in a new test case asserting the title attribute of the Cancel and restart button."
-  - criterion: "pnpm typecheck succeeds across all workspaces."
+  - criterion: pnpm typecheck succeeds across all workspaces.
     verification: "Run 'pnpm typecheck' from repo root; exit 0."
-  - criterion: "Affected test suites pass."
+  - criterion: Affected test suites pass.
     verification: "Run 'pnpm --filter cyboflow-main test -- --run main/src/orchestrator/__tests__/cancelAndRestart.test.ts' AND 'pnpm --filter cyboflow-frontend test -- --run frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx'; both exit 0."
-depends_on: [TASK-622]
+depends_on:
+  - TASK-622
 estimated_complexity: low
 epic: stuck-detection-and-observability
 test_strategy:
@@ -36,16 +37,15 @@ test_strategy:
   justification: "New WARN log line + new UI tooltip; each needs a direct assertion so the partial-functionality contract doesn't silently drift."
   targets:
     - behavior: "cancelAndRestartHandler emits a WARN containing '[cancelAndRestart]' and 'TASK-304' once per successful invocation."
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: unit
-    - behavior: "cancelAndRestartHandler does NOT emit the TASK-304 WARN when the run is already terminal (noOp path) — guard before clearPendingForRun returns."
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+    - behavior: cancelAndRestartHandler does NOT emit the TASK-304 WARN when the run is already terminal (noOp path) — guard before clearPendingForRun returns.
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: unit
-    - behavior: "Cancel and restart button has a title attribute documenting the partial-functionality limitation."
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: Cancel and restart button has a title attribute documenting the partial-functionality limitation.
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
 ---
-
 # Add WARN log for clearPendingForRun stub; document partial functionality in UI tooltip
 
 ## Objective

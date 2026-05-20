@@ -1,7 +1,7 @@
 ---
 id: TASK-631
 idea: SPRINT-014-COMPOUND
-status: ready
+status: in-flight
 created: "2026-05-17T00:00:00Z"
 files_owned:
   - main/src/services/terminalSessionManager.ts
@@ -9,17 +9,17 @@ files_readonly:
   - main/src/services/terminalPanelManager.ts
   - .soloflow/archive/done/crystal-cuts-and-rebrand/TASK-577-done.md
 acceptance_criteria:
-  - criterion: "PTY spawn env block sets CYBOFLOW_SESSION_ID to the sessionId argument"
+  - criterion: PTY spawn env block sets CYBOFLOW_SESSION_ID to the sessionId argument
     verification: "grep -nE 'CYBOFLOW_SESSION_ID:\\s*sessionId' main/src/services/terminalSessionManager.ts returns exactly 1 match"
-  - criterion: "Legacy CRYSTAL_SESSION_ID also dual-set with deprecation comment"
+  - criterion: Legacy CRYSTAL_SESSION_ID also dual-set with deprecation comment
     verification: "grep -nE 'CRYSTAL_SESSION_ID:\\s*sessionId' main/src/services/terminalSessionManager.ts returns exactly 1 match"
-  - criterion: "Deprecation comment within 3 lines above CRYSTAL_SESSION_ID"
+  - criterion: Deprecation comment within 3 lines above CRYSTAL_SESSION_ID
     verification: "grep -nE '@deprecated|TODO\\(post-v1\\)' main/src/services/terminalSessionManager.ts returns at least 1 match"
-  - criterion: "No PANEL_ID variants (this manager has no panel concept)"
+  - criterion: No PANEL_ID variants (this manager has no panel concept)
     verification: "grep -nE 'CYBOFLOW_PANEL_ID|CRYSTAL_PANEL_ID' main/src/services/terminalSessionManager.ts returns 0 matches"
   - criterion: "Other env vars (WORKTREE_PATH, TERM, COLORTERM, LANG, PATH) preserved unchanged"
     verification: "grep -nE 'WORKTREE_PATH:\\s*worktreePath' main/src/services/terminalSessionManager.ts returns 1 match"
-  - criterion: "pnpm typecheck and pnpm lint pass"
+  - criterion: pnpm typecheck and pnpm lint pass
     verification: "pnpm typecheck && pnpm lint exit 0"
 depends_on: []
 estimated_complexity: low
