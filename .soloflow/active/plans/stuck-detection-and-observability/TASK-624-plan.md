@@ -1,8 +1,8 @@
 ---
 id: TASK-624
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/stores/reviewQueueSlice.ts
   - frontend/src/stores/__tests__/reviewQueueSlice.test.ts
@@ -15,15 +15,15 @@ files_readonly:
   - shared/types/stuckDetection.ts
   - shared/types/cyboflow.ts
 acceptance_criteria:
-  - criterion: "reviewQueueSlice exposes runReasonMap and runDetectedAtMap as new top-level state fields."
+  - criterion: reviewQueueSlice exposes runReasonMap and runDetectedAtMap as new top-level state fields.
     verification: "grep -nE 'runReasonMap:|runDetectedAtMap:' frontend/src/stores/reviewQueueSlice.ts returns at least 2 matches in the state-interface block and at least 2 matches in the store implementation (initial values + applyStuckEvent writes)."
-  - criterion: "applyStuckEvent writes runId → reason into runReasonMap and runId → detectedAt into runDetectedAtMap when those values are present on the event."
+  - criterion: applyStuckEvent writes runId → reason into runReasonMap and runId → detectedAt into runDetectedAtMap when those values are present on the event.
     verification: "Read the applyStuckEvent body in reviewQueueSlice.ts; it must include set updates for both maps when params.reason and params.detectedAt are defined. Confirm via 'grep -nE \"runReasonMap:\\s*\\{|runDetectedAtMap:\\s*\\{\" frontend/src/stores/reviewQueueSlice.ts' returning at least 2 matches inside the applyStuckEvent reducer."
   - criterion: "A new useRunStuckDetails(runId) selector hook is exported and returns { reason: StuckReason | undefined, detectedAt: number | undefined }."
     verification: "grep -n 'export function useRunStuckDetails' frontend/src/stores/reviewQueueSlice.ts returns exactly 1 match. Test file imports and exercises it."
   - criterion: "StuckBadge accepts an optional detectedAt?: number prop and appends a relative-time suffix to the native title attribute when provided."
     verification: "grep -nE 'detectedAt\\??:\\s*number' frontend/src/components/ReviewQueue/StuckBadge.tsx returns at least 1 match (the prop definition). Read the component — when detectedAt is provided, title = `${reason ?? '...'} · ${formatAge(...)}` (or equivalent)."
-  - criterion: "ReviewQueue/PendingApprovalCard reads useRunStuckDetails(runId) and forwards detectedAt + a serialized reason to StuckBadge."
+  - criterion: ReviewQueue/PendingApprovalCard reads useRunStuckDetails(runId) and forwards detectedAt + a serialized reason to StuckBadge.
     verification: "grep -n 'useRunStuckDetails' frontend/src/components/ReviewQueue/PendingApprovalCard.tsx returns at least 1 match AND grep -nE 'detectedAt=' frontend/src/components/ReviewQueue/PendingApprovalCard.tsx returns at least 1 match passing the prop into StuckBadge."
   - criterion: "ReviewQueueView's existing stuckReason wiring (added in TASK-622) is removed in favor of the card's internal selector, OR ReviewQueueView still passes stuckReason explicitly — pick one path and document. The card MUST end up with both reason and detectedAt for the badge."
     verification: "Read ReviewQueueView.tsx after the edit. Either (a) it no longer passes stuckReason and the card resolves it internally (preferred), or (b) it computes both reason + detectedAt from useRunStuckDetails(runId) and passes both. There is exactly one source of truth for the badge data."
@@ -31,9 +31,10 @@ acceptance_criteria:
     verification: "grep -nE 'runReasonMap|runDetectedAtMap|useRunStuckDetails' frontend/src/stores/__tests__/reviewQueueSlice.test.ts returns at least 4 matches across at least 3 new test cases."
   - criterion: "PendingApprovalCard test covers the StuckBadge title including the detectedAt suffix (verify via toHaveAttribute('title', ...))."
     verification: "grep -n 'detectedAt' frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx returns at least 1 match AND there is at least one test asserting title attribute contains both reason text and a relative-time fragment."
-  - criterion: "pnpm typecheck succeeds and all updated test suites pass."
+  - criterion: pnpm typecheck succeeds and all updated test suites pass.
     verification: "Run 'pnpm typecheck' (exit 0) and 'pnpm --filter cyboflow-frontend test -- --run' (exit 0)."
-depends_on: [TASK-622]
+depends_on:
+  - TASK-622
 estimated_complexity: medium
 epic: stuck-detection-and-observability
 test_strategy:
@@ -41,22 +42,21 @@ test_strategy:
   justification: "New state, new selector, and new badge tooltip behavior each need direct coverage; existing tests need updates because applyStuckEvent now writes additional fields."
   targets:
     - behavior: "applyStuckEvent({ runId, reason, detectedAt }) writes all three maps."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "applyStuckEvent({ runId }) without reason/detectedAt leaves the reason/detectedAt maps unchanged for that runId."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
     - behavior: "useRunStuckDetails(runId) returns { reason, detectedAt } from the maps, or undefined fields when absent."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
-    - behavior: "StuckBadge title attribute includes both reason text and a relative time suffix when detectedAt is provided."
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: StuckBadge title attribute includes both reason text and a relative time suffix when detectedAt is provided.
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
-    - behavior: "StuckBadge title contains only the reason (no suffix) when detectedAt is omitted."
-      test_file: "frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: StuckBadge title contains only the reason (no suffix) when detectedAt is omitted.
+      test_file: frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
 ---
-
 # Persist reason + detectedAt in reviewQueueSlice; surface detectedAt in StuckBadge tooltip
 
 ## Objective

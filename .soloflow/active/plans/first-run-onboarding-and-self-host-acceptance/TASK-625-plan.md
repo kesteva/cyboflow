@@ -1,8 +1,8 @@
 ---
 id: TASK-625
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueueView.tsx
   - frontend/src/components/PendingApprovalCard.tsx
@@ -21,15 +21,15 @@ acceptance_criteria:
     verification: "Read useReviewQueueKeyboard.ts — the signature now is `useReviewQueueKeyboard(queue, onDecide?)` (or accepts an options object containing onDecide). The y and n switch arms call onDecide?.() after the mutation is fired."
   - criterion: "ReviewQueueView wires onDecide to a single shared callback that runs dismissOnboarding() + setOnboardingDismissed(true) the first time it fires, and is idempotent thereafter."
     verification: "grep -n 'onDecide' frontend/src/components/ReviewQueueView.tsx returns at least 2 matches (one for the keyboard hook, one passed to PendingApprovalCard via QueueRow or directly). Read the callback: it must guard via onboardingDismissedRef.current and be a no-op on subsequent invocations."
-  - criterion: "The duplicate window.keydown listener block in ReviewQueueView.tsx (lines 57–84 of the pre-task file — the y/n dismissal listener) is removed."
+  - criterion: The duplicate window.keydown listener block in ReviewQueueView.tsx (lines 57–84 of the pre-task file — the y/n dismissal listener) is removed.
     verification: "grep -nE 'window\\.addEventListener\\(.keydown.|onboardingDismissedRef' frontend/src/components/ReviewQueueView.tsx — the existing y/n keydown listener block must be gone; only the useEffect that initializes onboardingDismissedRef on mount may remain."
   - criterion: "Existing 'y/n dismisses onboarding card' behavior continues to work end-to-end through the consolidated path (useReviewQueueKeyboard.onDecide → ReviewQueueView callback)."
     verification: "Add a ReviewQueueView component test: render with an onboarding card visible and a queue item, press 'y' on window, assert the OnboardingCard role='status' element is no longer in the DOM."
   - criterion: "New behavior: clicking the Approve or Reject button in a PendingApprovalCard also dismisses the onboarding card."
     verification: "Add ReviewQueueView component tests for both: render with onboarding visible and a queue item, fire click on Approve (then separately Reject) — assert OnboardingCard is removed from DOM after the mutation resolves."
-  - criterion: "All existing PendingApprovalCard / ReviewQueue/PendingApprovalCard / ReviewQueueView tests still pass."
+  - criterion: All existing PendingApprovalCard / ReviewQueue/PendingApprovalCard / ReviewQueueView tests still pass.
     verification: "Run 'pnpm --filter cyboflow-frontend test -- --run frontend/src/components/__tests__ frontend/src/components/ReviewQueue/__tests__ frontend/src/hooks/__tests__/useReviewQueueKeyboard'; exit 0."
-  - criterion: "pnpm typecheck succeeds across all workspaces with no new errors."
+  - criterion: pnpm typecheck succeeds across all workspaces with no new errors.
     verification: "Run 'pnpm typecheck' from repo root; exit 0."
 depends_on: []
 estimated_complexity: medium
@@ -38,23 +38,22 @@ test_strategy:
   needed: true
   justification: "Three new dismissal paths (mouse-Approve, mouse-Reject, consolidated keyboard) plus a refactor of the keyboard hook signature need direct coverage."
   targets:
-    - behavior: "Mouse click on Approve dismisses the onboarding card."
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+    - behavior: Mouse click on Approve dismisses the onboarding card.
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "Mouse click on Reject dismisses the onboarding card."
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+    - behavior: Mouse click on Reject dismisses the onboarding card.
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "Keyboard y / n still dismiss the onboarding card through the consolidated path."
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+    - behavior: Keyboard y / n still dismiss the onboarding card through the consolidated path.
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "useReviewQueueKeyboard invokes onDecide?() after both y and n switch arms (group + single variants)."
-      test_file: "frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts (create if absent)"
+    - behavior: useReviewQueueKeyboard invokes onDecide?() after both y and n switch arms (group + single variants).
+      test_file: frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts (create if absent)
       type: unit
-    - behavior: "PendingApprovalCard.onDecide is called exactly once per successful approve / reject (and not called if the prop is omitted)."
-      test_file: "frontend/src/components/__tests__/PendingApprovalCard.test.tsx and frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx"
+    - behavior: PendingApprovalCard.onDecide is called exactly once per successful approve / reject (and not called if the prop is omitted).
+      test_file: frontend/src/components/__tests__/PendingApprovalCard.test.tsx and frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx
       type: component
 ---
-
 # Mouse-click approve/reject dismisses onboarding card; consolidate keyboard dismissal path
 
 ## Objective

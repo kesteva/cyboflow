@@ -1,7 +1,7 @@
 ---
 id: TASK-628
 idea: SPRINT-014-COMPOUND
-status: ready
+status: in-flight
 created: "2026-05-17T00:00:00Z"
 files_owned:
   - main/src/utils/commitFooter.ts
@@ -15,43 +15,43 @@ files_readonly:
   - main/src/services/configManager.ts
   - main/src/types/config.ts
 acceptance_criteria:
-  - criterion: "commitFooter.ts exports `isCommitFooterEnabled(configManager)` returning boolean (defaults to true when config or flag is undefined)"
+  - criterion: commitFooter.ts exports `isCommitFooterEnabled(configManager)` returning boolean (defaults to true when config or flag is undefined)
     verification: "grep -nE 'export function isCommitFooterEnabled' main/src/utils/commitFooter.ts returns exactly 1 match"
-  - criterion: "commitFooter.ts exports `appendCommitFooter(message, configManager)` that returns `message` when disabled and `${message}\\n\\n${footer}` when enabled"
+  - criterion: "commitFooter.ts exports `appendCommitFooter(message, configManager)` that returns `message` when disabled and `${message}\n\n${footer}` when enabled"
     verification: "grep -nE 'export function appendCommitFooter' main/src/utils/commitFooter.ts returns exactly 1 match"
-  - criterion: "Inline lookup pattern eliminated from sources outside commitFooter.ts"
+  - criterion: Inline lookup pattern eliminated from sources outside commitFooter.ts
     verification: "grep -rn 'config?.enableCyboflowFooter !== false' main/src --include='*.ts' returns 0 matches"
-  - criterion: "Inline composition pattern eliminated from sources outside commitFooter.ts"
+  - criterion: Inline composition pattern eliminated from sources outside commitFooter.ts
     verification: "grep -rnE 'footer\\s*\\?\\s*`\\$\\{' main/src --include='*.ts' --exclude-dir=dist returns 0 matches"
   - criterion: "All 5 call sites (git.ts, file.ts ×2, worktreeManager.ts, commitManager.ts ×2) use the new helpers"
     verification: "grep -nE 'const enableCyboflowFooter\\s*=' main/src -r --include='*.ts' returns 0 matches outside commitFooter.ts and types/config.ts"
-  - criterion: "Existing buildCommitFooter byte-level test plus new helper tests pass"
+  - criterion: Existing buildCommitFooter byte-level test plus new helper tests pass
     verification: "cd main && pnpm vitest run src/utils/commitFooter.test.ts exits 0 with >= 6 tests"
-  - criterion: "pnpm typecheck and pnpm lint pass"
+  - criterion: pnpm typecheck and pnpm lint pass
     verification: "pnpm typecheck && pnpm lint exit 0"
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: true
-  justification: "Adds two new helpers on the commit-message hot path. Unit tests for both helpers cover disabled/enabled/undefined-config branches; existing buildCommitFooter byte-level test continues to guard the literal."
+  justification: Adds two new helpers on the commit-message hot path. Unit tests for both helpers cover disabled/enabled/undefined-config branches; existing buildCommitFooter byte-level test continues to guard the literal.
   targets:
-    - behavior: "isCommitFooterEnabled returns true when configManager is undefined"
+    - behavior: isCommitFooterEnabled returns true when configManager is undefined
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "isCommitFooterEnabled returns true when enableCyboflowFooter is undefined (default-on)"
+    - behavior: isCommitFooterEnabled returns true when enableCyboflowFooter is undefined (default-on)
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "isCommitFooterEnabled returns false only when enableCyboflowFooter === false (explicit opt-out)"
+    - behavior: isCommitFooterEnabled returns false only when enableCyboflowFooter === false (explicit opt-out)
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "appendCommitFooter returns message unchanged when disabled"
+    - behavior: appendCommitFooter returns message unchanged when disabled
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "appendCommitFooter returns message + '\\n\\n' + footer when enabled (byte-equal)"
+    - behavior: "appendCommitFooter returns message + '\n\n' + footer when enabled (byte-equal)"
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
-    - behavior: "appendCommitFooter handles undefined configManager same as missing key (default-on)"
+    - behavior: appendCommitFooter handles undefined configManager same as missing key (default-on)
       test_file: main/src/utils/commitFooter.test.ts
       type: unit
 ---

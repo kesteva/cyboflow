@@ -1,8 +1,8 @@
 ---
 id: TASK-622
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/components/ReviewQueueView.tsx
   - main/src/index.ts
@@ -25,11 +25,11 @@ files_readonly:
 acceptance_criteria:
   - criterion: "ReviewQueueView imports PendingApprovalCard from './ReviewQueue/PendingApprovalCard' (the stuck-aware variant), not './PendingApprovalCard'."
     verification: "grep -n \"from './PendingApprovalCard'\" frontend/src/components/ReviewQueueView.tsx returns 0 matches AND grep -n \"from './ReviewQueue/PendingApprovalCard'\" frontend/src/components/ReviewQueueView.tsx returns exactly 1 match."
-  - criterion: "ReviewQueueView passes runStatus and stuckReason props derived from useReviewQueueSlice.runStatusMap to each PendingApprovalCard."
+  - criterion: ReviewQueueView passes runStatus and stuckReason props derived from useReviewQueueSlice.runStatusMap to each PendingApprovalCard.
     verification: "grep -n 'runStatus=' frontend/src/components/ReviewQueueView.tsx returns at least 2 matches (one per blocking / normal map), and the value is read from useReviewQueueSlice (grep -n 'useReviewQueueSlice' frontend/src/components/ReviewQueueView.tsx returns at least 1 match)."
-  - criterion: "A new useRunStatus(runId) selector hook is exported from reviewQueueSlice.ts and used by ReviewQueueView (or the slice store is read inline with an equivalent selector)."
+  - criterion: A new useRunStatus(runId) selector hook is exported from reviewQueueSlice.ts and used by ReviewQueueView (or the slice store is read inline with an equivalent selector).
     verification: "grep -n 'export function useRunStatus' frontend/src/stores/reviewQueueSlice.ts returns 1 match, and grep -n 'useRunStatus' frontend/src/components/ReviewQueueView.tsx returns at least 1 match."
-  - criterion: "subscribeToStuckEvents() from useReviewQueueSlice is mounted exactly once at app top-level with a useEffect that returns the unsubscribe."
+  - criterion: subscribeToStuckEvents() from useReviewQueueSlice is mounted exactly once at app top-level with a useEffect that returns the unsubscribe.
     verification: "grep -n 'subscribeToStuckEvents' frontend/src/App.tsx returns at least 2 matches (import + invocation), and grep -n 'useReviewQueueSlice' frontend/src/App.tsx returns at least 1 match."
   - criterion: "main/src/index.ts calls setCancelAndRestartDeps({ db, approvalRouter, runQueues, claudeManagerStop }) exactly once during bootstrap after ApprovalRouter.initialize."
     verification: "grep -n 'setCancelAndRestartDeps' main/src/index.ts returns exactly 2 matches (import + call), and the call appears after the line containing 'ApprovalRouter.initialize'."
@@ -37,28 +37,27 @@ acceptance_criteria:
     verification: "grep -nE 'claudeManagerStop\\s*:\\s*' main/src/index.ts returns 1 match whose RHS references defaultCliManager.stopPanel (verify by reading the surrounding 3 lines)."
   - criterion: "The known-limitation comment 'clearPendingForRun is a no-op until TASK-304' is present near the setCancelAndRestartDeps call in main/src/index.ts."
     verification: "grep -n 'TASK-304' main/src/index.ts returns at least 1 match within 10 lines of the line containing 'setCancelAndRestartDeps'."
-  - criterion: "pnpm typecheck succeeds across all workspaces with no new errors."
+  - criterion: pnpm typecheck succeeds across all workspaces with no new errors.
     verification: "Run 'pnpm typecheck' from repo root; exit 0."
-  - criterion: "Existing test suites still pass and the updated ReviewQueueView.test.tsx covers the new import + prop wiring."
+  - criterion: Existing test suites still pass and the updated ReviewQueueView.test.tsx covers the new import + prop wiring.
     verification: "Run 'pnpm --filter cyboflow-frontend test -- --run' (or equivalent); exit 0. ReviewQueueView.test.tsx imports from '../ReviewQueue/PendingApprovalCard' (or mocks that path) and asserts the new card receives runStatus when the slice's runStatusMap has the runId."
 depends_on: []
 estimated_complexity: medium
 epic: stuck-detection-and-observability
 test_strategy:
   needed: true
-  justification: "Wiring touches the existing ReviewQueueView.test.tsx (mock path must move) and warrants a slice-driven prop-propagation test."
+  justification: Wiring touches the existing ReviewQueueView.test.tsx (mock path must move) and warrants a slice-driven prop-propagation test.
   targets:
     - behavior: "ReviewQueueView passes runStatus='stuck' to PendingApprovalCard for runs whose runId is in useReviewQueueSlice.runStatusMap as 'stuck'."
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "ReviewQueueView passes runStatus=undefined for runs not in runStatusMap."
-      test_file: "frontend/src/components/__tests__/ReviewQueueView.test.tsx"
+    - behavior: ReviewQueueView passes runStatus=undefined for runs not in runStatusMap.
+      test_file: frontend/src/components/__tests__/ReviewQueueView.test.tsx
       type: component
-    - behavior: "useRunStatus(runId) selector returns the value from runStatusMap or undefined (pure unit test against the Zustand store)."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+    - behavior: useRunStatus(runId) selector returns the value from runStatusMap or undefined (pure unit test against the Zustand store).
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
 ---
-
 # Wire stuck-detection UI: ReviewQueueView card swap, subscription mount, cancelAndRestart deps
 
 ## Objective

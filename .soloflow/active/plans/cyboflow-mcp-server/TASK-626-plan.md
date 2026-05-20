@@ -1,8 +1,8 @@
 ---
 id: TASK-626
 idea: SPRINT-013
-status: ready
-created: 2026-05-17T00:00:00Z
+status: in-flight
+created: "2026-05-17T00:00:00Z"
 files_owned:
   - shared/types/mcpHealth.ts
   - frontend/src/stores/mcpHealthStore.ts
@@ -19,7 +19,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "shared/types/mcpHealth.ts exports a canonical McpHealthUiStatus union type ('healthy' | 'starting' | 'error') and the existing McpServerHealth (raw 4-value) interface is preserved unchanged."
     verification: "grep -nE 'export type McpHealthUiStatus' shared/types/mcpHealth.ts returns 1 match AND grep -n 'McpServerHealth' shared/types/mcpHealth.ts confirms the 4-value union ('starting' | 'running' | 'failed' | 'stopped') is unchanged."
-  - criterion: "mcpHealthStore.ts imports McpHealthUiStatus from shared/types/mcpHealth and re-exports it (or aliases the local McpHealthStatus to it); does not duplicate the literal union."
+  - criterion: mcpHealthStore.ts imports McpHealthUiStatus from shared/types/mcpHealth and re-exports it (or aliases the local McpHealthStatus to it); does not duplicate the literal union.
     verification: "grep -nE 'export type McpHealthStatus' frontend/src/stores/mcpHealthStore.ts shows it as an alias of McpHealthUiStatus, not an independent literal union. grep -n \"from '../../../shared/types/mcpHealth'\" frontend/src/stores/mcpHealthStore.ts returns at least 1 match."
   - criterion: "useMcpHealth.ts no longer maintains its own setInterval polling loop — it reads from useMcpHealthStore (selector or full state hook) and converts the store's UI status to the 4-value McpServerHealth shape for backward-compatible consumers (Sidebar)."
     verification: "grep -nE 'setInterval|setTimeout' frontend/src/hooks/useMcpHealth.ts returns 0 matches AND grep -n 'useMcpHealthStore' frontend/src/hooks/useMcpHealth.ts returns at least 1 match."
@@ -31,28 +31,27 @@ acceptance_criteria:
     verification: "grep -rnE \"invoke\\(['\\\"]cyboflow:mcp-health['\\\"]\\)\" frontend/src returns matches only in mcpHealthStore.ts."
   - criterion: "Existing McpHealthIndicator continues to render dot colors and popover content correctly using the store's three-value status."
     verification: "Run 'pnpm --filter cyboflow-frontend test -- --run frontend/src/components/__tests__/McpHealthIndicator' (if a test file exists) — exit 0. If no test file exists, this is verified manually by reading McpHealthIndicator.tsx and confirming it reads {status, lastCheckedAt, lastError, pid} from useMcpHealthStore (which it already does — no change needed)."
-  - criterion: "pnpm typecheck succeeds across all workspaces with no new errors."
+  - criterion: pnpm typecheck succeeds across all workspaces with no new errors.
     verification: "Run 'pnpm typecheck' from repo root; exit 0."
-  - criterion: "All affected test suites pass."
+  - criterion: All affected test suites pass.
     verification: "Run 'pnpm --filter cyboflow-frontend test -- --run'; exit 0."
 depends_on: []
 estimated_complexity: medium
 epic: cyboflow-mcp-server
 test_strategy:
   needed: true
-  justification: "Refactoring two parallel polling implementations into one + relocating UI surfaces needs explicit coverage; otherwise a regression where neither dot updates is invisible."
+  justification: Refactoring two parallel polling implementations into one + relocating UI surfaces needs explicit coverage; otherwise a regression where neither dot updates is invisible.
   targets:
-    - behavior: "mcpHealthStore.subscribeToMcpHealth polls every 5s and updates state on a successful IPC response."
-      test_file: "frontend/src/stores/__tests__/mcpHealthStore.test.ts (create if absent)"
+    - behavior: mcpHealthStore.subscribeToMcpHealth polls every 5s and updates state on a successful IPC response.
+      test_file: frontend/src/stores/__tests__/mcpHealthStore.test.ts (create if absent)
       type: unit
     - behavior: "useMcpHealth returns a 4-value McpServerHealth derived from the store's 3-value UI status, mapping 'healthy'→'running', 'starting'→'starting', 'error'→'failed' (lossy but backward-compatible default — pick 'failed' since the store collapses both failed/stopped to 'error')."
-      test_file: "frontend/src/hooks/__tests__/useMcpHealth.test.ts"
+      test_file: frontend/src/hooks/__tests__/useMcpHealth.test.ts
       type: unit
     - behavior: "Sidebar.tsx no longer renders the 'MCP' label or the bottom indicator block."
-      test_file: "frontend/src/components/__tests__/Sidebar.test.tsx (if exists) — otherwise verified by code grep."
+      test_file: frontend/src/components/__tests__/Sidebar.test.tsx (if exists) — otherwise verified by code grep.
       type: component
 ---
-
 # Consolidate dual MCP health polling loops; reconcile status enum split
 
 ## Objective
