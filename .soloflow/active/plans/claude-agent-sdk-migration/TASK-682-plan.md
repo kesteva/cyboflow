@@ -1,8 +1,8 @@
 ---
 id: TASK-682
 idea: IDEA-014
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/utils/cyboflowApi.ts
   - frontend/src/components/cyboflow/RunView.tsx
@@ -16,17 +16,18 @@ files_readonly:
 acceptance_criteria:
   - criterion: "StreamEvent.type in frontend/src/utils/cyboflowApi.ts is a typed discriminator union covering the five SDK variants plus the catch-all, not a bare `string`."
     verification: "grep -nE \"^\\s*type:\\s*string;\" frontend/src/utils/cyboflowApi.ts returns 0 matches inside the StreamEvent interface body (verify by reading lines 28-33). The new union must include each of: 'system', 'assistant', 'user', 'result', 'stream_event', 'unknown'."
-  - criterion: "RunView no longer renders events via a single whole-event JSON.stringify catch-all."
+  - criterion: RunView no longer renders events via a single whole-event JSON.stringify catch-all.
     verification: "grep -n \"JSON.stringify(event\" frontend/src/components/cyboflow/RunView.tsx returns 0 matches. (Per-branch JSON.stringify of a sub-field like a tool_use input is permitted; the prohibition is on stringifying the whole event envelope.)"
   - criterion: "RunView contains explicit render branches for each of the five SDK discriminators ('system', 'assistant', 'user', 'result', 'stream_event') plus the 'unknown' fallback, each producing a non-stringified DOM subtree."
     verification: "grep -nE \"case ['\\\"](system|assistant|user|result|stream_event|unknown)['\\\"]:\" frontend/src/components/cyboflow/RunView.tsx returns at least 6 matches (one per discriminator)."
-  - criterion: "RunView.test.tsx asserts each discriminator routes to its dedicated branch and no longer asserts a JSON-blob render path."
+  - criterion: RunView.test.tsx asserts each discriminator routes to its dedicated branch and no longer asserts a JSON-blob render path.
     verification: "grep -n \"JSON blob\" frontend/src/components/cyboflow/__tests__/RunView.test.tsx returns 0 matches. The test file must contain assertions for at least all five SDK discriminators by render output (text content distinct from a pretty-printed JSON dump)."
   - criterion: "Typecheck, lint, and the frontend test suite all pass."
     verification: "Run: `pnpm typecheck && pnpm lint && pnpm --filter frontend test`. All three commands exit 0."
-  - criterion: "cyboflowStore subscription contract is unchanged (no edits to cyboflowStore.ts or its tests)."
-    verification: "git diff --name-only HEAD returns no entries under frontend/src/stores/. The store and its test file are not in files_owned."
-depends_on: [TASK-681]
+  - criterion: cyboflowStore subscription contract is unchanged (no edits to cyboflowStore.ts or its tests).
+    verification: git diff --name-only HEAD returns no entries under frontend/src/stores/. The store and its test file are not in files_owned.
+depends_on:
+  - TASK-681
 estimated_complexity: low
 epic: claude-agent-sdk-migration
 test_strategy:
@@ -34,28 +35,27 @@ test_strategy:
   justification: "RunView.test.tsx is in files_owned and a sibling test exists. The behavior changes from a single JSON-blob render path to six typed render branches — each branch needs a distinct render assertion. Existing tests for the No active run placeholder, runId header, Waiting for events, and the no-subscription invariant must remain green; the JSON blob test (line 84) must be rewritten and four new discriminator tests added."
   targets:
     - behavior: "system/init event renders a typed system-init view (showing model, cwd, session_id) — not a JSON blob."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
-    - behavior: "assistant event renders the assistant message text (and tool_use blocks if present) via the typed branch."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+    - behavior: assistant event renders the assistant message text (and tool_use blocks if present) via the typed branch.
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
-    - behavior: "user event renders tool_result content via the typed branch."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+    - behavior: user event renders tool_result content via the typed branch.
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
     - behavior: "result event renders the terminal subtype, num_turns, and total_cost_usd via the typed branch."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
-    - behavior: "stream_event event renders a compact one-line summary via the typed branch (not a JSON blob)."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+    - behavior: stream_event event renders a compact one-line summary via the typed branch (not a JSON blob).
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
     - behavior: "Unrecognized event type falls through to the 'unknown' branch and is rendered with a visible warning indicator (not silently)."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
     - behavior: "Existing invariants survive: 'No active run' placeholder, runId header, 'Waiting for events…', and subscription is NOT managed by RunView."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
 ---
-
 # Replace 'unknown' stream-event tag with SDK discriminator handling in renderer
 
 ## Objective
