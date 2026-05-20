@@ -6,7 +6,7 @@ vi.mock('fs', () => ({
 }));
 
 import * as fs from 'fs';
-import { getDevDebugLogPath, appendDevDebugLog } from './devDebugLog';
+import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './devDebugLog';
 
 // Derive expected filenames from the helper itself so there is no second copy
 // of the filename literal in this file (keeping AC2: single-source for filenames).
@@ -58,5 +58,39 @@ describe('appendDevDebugLog', () => {
     const errSpy = vi.fn();
     expect(() => appendDevDebugLog('frontend', 'log', 'X', 'm', { error: errSpy })).not.toThrow();
     expect(errSpy).toHaveBeenCalled();
+  });
+});
+
+describe('formatConsoleArgs', () => {
+  it('joins multiple string arguments with single spaces', () => {
+    expect(formatConsoleArgs(['hello', 'world', 'foo'])).toBe('hello world foo');
+  });
+
+  it('JSON-stringifies plain objects with 2-space indent', () => {
+    const obj = { a: 1, b: 'two' };
+    const result = formatConsoleArgs([obj]);
+    expect(result).toBe(JSON.stringify(obj, null, 2));
+  });
+
+  it('renders Error instances as `Error: {message}\\nStack: {stack}`', () => {
+    const err = new Error('something went wrong');
+    const result = formatConsoleArgs([err]);
+    expect(result).toBe(`Error: ${err.message}\nStack: ${err.stack}`);
+  });
+
+  it('handles circular-structure objects without throwing', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => formatConsoleArgs([circular])).not.toThrow();
+    expect(formatConsoleArgs([circular])).toContain('[Object with circular structure:');
+  });
+
+  it('handles null and undefined via String()', () => {
+    expect(formatConsoleArgs([null, undefined])).toBe('null undefined');
+  });
+
+  it('mixes strings, numbers, and objects correctly', () => {
+    const result = formatConsoleArgs(['count:', 42, { ok: true }]);
+    expect(result).toBe(`count: 42 ${JSON.stringify({ ok: true }, null, 2)}`);
   });
 });
