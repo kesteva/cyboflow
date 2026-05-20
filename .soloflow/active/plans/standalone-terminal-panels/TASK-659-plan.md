@@ -1,8 +1,8 @@
 ---
 id: TASK-659
 idea: IDEA-019
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/TerminalPanel.tsx
   - frontend/src/hooks/useAddTerminalShortcut.ts
@@ -18,45 +18,45 @@ files_readonly:
   - shared/types/panels.ts
   - frontend/src/types/panelComponents.ts
 acceptance_criteria:
-  - criterion: "TerminalPanel renders a thin header bar above the xterm viewport that displays the current working directory."
+  - criterion: TerminalPanel renders a thin header bar above the xterm viewport that displays the current working directory.
     verification: "grep -n 'data-testid=\"terminal-cwd-breadcrumb\"' frontend/src/components/panels/TerminalPanel.tsx returns at least one match and the element renders panel.state.customState.cwd (with fallback to SessionContext.workingDirectory)."
   - criterion: "The cwd shown in the header is read from panel.state.customState.cwd when present, falling back to SessionContext.workingDirectory; the value 'process.cwd()' is never rendered as a fallback."
     verification: "grep -n 'process.cwd' frontend/src/components/panels/TerminalPanel.tsx is restricted to the existing panels:initialize call site (the header rendering code path must not reference process.cwd)."
-  - criterion: "A new hook useAddTerminalShortcut is exported from frontend/src/hooks/useAddTerminalShortcut.ts and registers a window-level keydown handler that fires its callback for Cmd+Shift+Backquote (Mac) / Ctrl+Shift+Backquote (Win/Linux)."
+  - criterion: A new hook useAddTerminalShortcut is exported from frontend/src/hooks/useAddTerminalShortcut.ts and registers a window-level keydown handler that fires its callback for Cmd+Shift+Backquote (Mac) / Ctrl+Shift+Backquote (Win/Linux).
     verification: "grep -n 'export function useAddTerminalShortcut' frontend/src/hooks/useAddTerminalShortcut.ts returns a match and the file contains the key literal '`' plus shiftKey + (metaKey || ctrlKey) checks."
   - criterion: "The shortcut hook ignores the keystroke when focus is inside an input, textarea, or contentEditable element (mirrors the focus-guard convention from useReviewQueueKeyboard)."
-    verification: "Vitest run of frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts passes; the test suite includes a case asserting the callback is NOT invoked when target is HTMLInputElement / HTMLTextAreaElement / contentEditable."
+    verification: Vitest run of frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts passes; the test suite includes a case asserting the callback is NOT invoked when target is HTMLInputElement / HTMLTextAreaElement / contentEditable.
   - criterion: "No existing keyboard shortcut in App.tsx, SessionView.tsx, or any frontend keydown handler binds to Cmd/Ctrl+Shift+Backquote."
     verification: "grep -rn \"key === '\\`'\" frontend/src and grep -rn 'Backquote' frontend/src return no matches outside frontend/src/hooks/useAddTerminalShortcut.ts and its test."
-  - criterion: "Typecheck and lint pass for all owned files."
-    verification: "pnpm typecheck and pnpm lint exit 0."
-depends_on: [TASK-657]
+  - criterion: Typecheck and lint pass for all owned files.
+    verification: pnpm typecheck and pnpm lint exit 0.
+depends_on:
+  - TASK-657
 estimated_complexity: low
 epic: standalone-terminal-panels
 test_strategy:
   needed: true
   justification: "The new useAddTerminalShortcut hook is a self-contained piece of behavior (window keydown registration + focus guards + modifier combo matching) that is straightforwardly unit-testable, and the project already has a strong precedent for testing keyboard-shortcut hooks (frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts). The TerminalPanel header is a pure render addition with no sibling test file in frontend/src/components/panels/ — no existing tests there to keep green."
   targets:
-    - behavior: "Cmd+Shift+Backquote invokes the callback exactly once (Mac path)."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: Cmd+Shift+Backquote invokes the callback exactly once (Mac path).
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
-    - behavior: "Ctrl+Shift+Backquote invokes the callback exactly once (Win/Linux path)."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: Ctrl+Shift+Backquote invokes the callback exactly once (Win/Linux path).
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
-    - behavior: "Plain Backquote (no modifiers) does NOT invoke the callback."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: Plain Backquote (no modifiers) does NOT invoke the callback.
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
-    - behavior: "Cmd+Shift+T does NOT invoke the callback (regression guard — confirms we are not colliding with the dev-mode TokenTest binding in App.tsx)."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: Cmd+Shift+T does NOT invoke the callback (regression guard — confirms we are not colliding with the dev-mode TokenTest binding in App.tsx).
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
-    - behavior: "Callback is not invoked when document.activeElement is an HTMLInputElement / HTMLTextAreaElement / contentEditable element."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: Callback is not invoked when document.activeElement is an HTMLInputElement / HTMLTextAreaElement / contentEditable element.
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
-    - behavior: "The listener is removed on unmount (no callback fires after the rendered hook is unmounted)."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts"
+    - behavior: The listener is removed on unmount (no callback fires after the rendered hook is unmounted).
+      test_file: frontend/src/hooks/__tests__/useAddTerminalShortcut.test.ts
       type: unit
 ---
-
 # Add cwd breadcrumb header to TerminalPanel and add-terminal keyboard shortcut
 
 ## Objective

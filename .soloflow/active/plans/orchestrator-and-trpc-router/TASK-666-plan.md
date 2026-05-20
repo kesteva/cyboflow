@@ -1,8 +1,8 @@
 ---
 id: TASK-666
 idea: IDEA-SPRINT-022-compound
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runEventBridge.ts
   - main/src/orchestrator/__tests__/runEventBridge.test.ts
@@ -21,7 +21,7 @@ acceptance_criteria:
   - criterion: "The JSDoc above the `db` field in BridgeEventsOptions documents the new conditional contract: required when skipPersistence is falsy; ignored when skipPersistence is true; optional in the type so callers can omit it in the skipPersistence-true case."
     verification: "Read lines around the `db?: Database.Database` declaration; the JSDoc clearly states the runtime guard and the back-compat rationale."
   - criterion: "All runEventBridge.test.ts cases pass, including the new test for the runtime guard and the new test for db-omitted success path."
-    verification: "Run `pnpm --filter main test -- --run main/src/orchestrator/__tests__/runEventBridge.test.ts` and confirm exit 0."
+    verification: Run `pnpm --filter main test -- --run main/src/orchestrator/__tests__/runEventBridge.test.ts` and confirm exit 0.
   - criterion: "runExecutor.ts is unchanged in behaviour — its existing call site at runExecutor.ts:328 (passes `db: this.db`) still compiles and still works. We do not require it to drop the field; the optionality is at the type boundary, not the call site."
     verification: "grep -n 'db: this.db' main/src/orchestrator/runExecutor.ts returns the existing call site; `pnpm --filter main test -- --run main/src/orchestrator/__tests__/runExecutor.test.ts` exits 0; `pnpm typecheck` exits 0."
 depends_on: []
@@ -29,19 +29,18 @@ estimated_complexity: low
 epic: orchestrator-and-trpc-router
 test_strategy:
   needed: true
-  justification: "This task changes the runtime contract of a public function (bridgeEvents). The new optional-with-guard semantics need explicit coverage to lock in (a) the back-compat invariant (still throws when production callers forget db) and (b) the new omit-db ergonomic. Both must be tested directly; sibling-test scan confirms runEventBridge.test.ts is the canonical home and already has the (a)-(e) skipPersistence describe block that this work amends."
+  justification: This task changes the runtime contract of a public function (bridgeEvents). The new optional-with-guard semantics need explicit coverage to lock in (a) the back-compat invariant (still throws when production callers forget db) and (b) the new omit-db ergonomic. Both must be tested directly; sibling-test scan confirms runEventBridge.test.ts is the canonical home and already has the (a)-(e) skipPersistence describe block that this work amends.
   targets:
     - behavior: "bridgeEvents() throws a descriptive error when db is undefined and skipPersistence is not true. Cover all three forms: { skipPersistence: false, db: undefined }, { skipPersistence: undefined, db: undefined }, and omitting both."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
     - behavior: "bridgeEvents() with skipPersistence: true and db omitted constructs successfully and the publish/onFirstMessage path still fires on an output event."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
     - behavior: "The existing 5 skipPersistence cases ((a), (b), (c), (d), (e), and the dual-pipeline guarantee) all continue to pass — three of them are updated to omit `db` from their options object, two retain a real DB for row-count assertions."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
 ---
-
 # Make BridgeEventsOptions.db optional when skipPersistence is true
 
 ## Objective

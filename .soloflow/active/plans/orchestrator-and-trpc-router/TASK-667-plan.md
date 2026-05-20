@@ -1,8 +1,8 @@
 ---
 id: TASK-667
 idea: TASK-667-debug-envelope-drop
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runEventBridge.ts
   - main/src/orchestrator/__tests__/runEventBridge.test.ts
@@ -37,7 +37,7 @@ acceptance_criteria:
     verification: "grep -n 'skipPersistence: true' main/src/orchestrator/runExecutor.ts returns exactly one match on the bridgeEventsImpl call site at ~line 337. A fresh end-to-end run produces a raw_events row count consistent with single-write semantics (within ±5 rows of the prior baseline — this is approximate because event volume varies, but a 2x doubling would be unmistakable)."
   - criterion: "The renderer's first envelope is no longer the ONLY envelope. A fresh end-to-end workflow run produces at least 3 entries in the renderer console matching `[cyboflowApi] stream event #` and the RunView shows distinct event blocks scrolling past, not just one frozen `session_info` blob."
     verification: "Manual smoke against the `Tester-mctest` project running the `prune` workflow (or any cyboflow workflow): start a run, watch the renderer DevTools console, confirm `[cyboflowApi] stream event #1`, `#2`, `#3` all appear, and that `useCyboflowStore.getState().streamEvents.length >= 3` by the time the run reports `completed`. This is the user-acceptance gate."
-  - criterion: "All existing runEventBridge.test.ts cases continue to pass; any new tests added for the confirmed hypothesis (e.g. the 6-variant narrowing test for H1a) pass."
+  - criterion: All existing runEventBridge.test.ts cases continue to pass; any new tests added for the confirmed hypothesis (e.g. the 6-variant narrowing test for H1a) pass.
     verification: "`pnpm --filter main test -- --run main/src/orchestrator/__tests__/runEventBridge.test.ts main/src/orchestrator/__tests__/runExecutor.test.ts` exits 0. `pnpm typecheck` exits 0. `pnpm lint` exits 0."
 depends_on: []
 estimated_complexity: medium
@@ -47,16 +47,15 @@ test_strategy:
   justification: "Diagnosis-first plan: the specific fix is conditional on which hypothesis is confirmed, so the test surface is also conditional. Two things are unconditionally testable and must be covered: (1) the cosmetic noise patch at events.ts:506 (a small change but a sibling-test scan of main/src/__tests__/ should be done to confirm whether an events.ts test file exists), and (2) whichever runEventBridge code path the confirmed hypothesis touches. For H1a, a 6-variant narrowing regression test must be added to runEventBridge.test.ts to prevent recurrence. For H1b, a test that asserts publish fail-soft logs once-and-only-once per failure (already covered by existing case 3, but the new failure mode may need its own case). For H2, the test lives in a renderer-side Vitest file or Playwright E2E — leave that decision to the executor based on what infra exists; do not invent a new test harness for this task."
   targets:
     - behavior: "If H1a confirmed — TypedEventNarrowing.narrow() handles each of the 6 live SDK variants (system/init, assistant, user, stream_event, result, rate_limit_event) without throwing or returning UnknownStreamEvent for valid payloads."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: unit
     - behavior: "Cosmetic noise patch — manager.on('spawned') at events.ts:506 short-circuits on cyboflow run IDs (32-char hex). Sibling-test scan: check main/src/__tests__/ and main/src/__tests__/events*.test.ts for an existing events.ts harness; if absent, document why no test is added (events.ts has historically been integration-tested via Playwright, not unit-tested) and rely on the end-to-end run as the gate."
-      test_file: "main/src/__tests__/events.test.ts"
+      test_file: main/src/__tests__/events.test.ts
       type: unit
     - behavior: "Conditional on confirmed hypothesis (H1b or H2 path): add the corresponding regression test in the file the executor identifies as canonical. Do not pre-commit to a path here — record the decision in Implementation Notes after diagnosis."
-      test_file: "TBD-after-diagnosis"
+      test_file: TBD-after-diagnosis
       type: unit
 ---
-
 # Investigate and fix the renderer envelope-drop past event #1
 
 ## Objective

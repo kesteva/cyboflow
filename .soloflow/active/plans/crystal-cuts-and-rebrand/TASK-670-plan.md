@@ -1,8 +1,8 @@
 ---
 id: TASK-670
 idea: SPRINT-023
-status: ready
-created: 2026-05-19T00:00:00Z
+status: in-flight
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/ipc/file.ts
   - main/src/services/worktreeManager.ts
@@ -25,7 +25,7 @@ acceptance_criteria:
     verification: "grep -nE 'escapeShellArg' main/src/services/runCommandManager.ts returns >=1 match; grep -n \"replace(/'/g\" main/src/services/runCommandManager.ts returns 0 matches."
   - criterion: "Injection-attempt smoke test: a worktree path containing `'; touch /tmp/cyboflow-injected-$$; #` (or equivalent) is safely quoted and does not spawn an attacker shell command. (Verified by unit test, not a real exec.)"
     verification: "cd main && pnpm test:unit -- shellEscape runCommandManager exit 0 with the new injection-string test cases present."
-  - criterion: "pnpm typecheck and pnpm lint pass."
+  - criterion: pnpm typecheck and pnpm lint pass.
     verification: "pnpm typecheck && pnpm lint exit 0"
   - criterion: "pnpm build:main succeeds."
     verification: "pnpm build:main exit 0"
@@ -37,21 +37,20 @@ test_strategy:
   justification: "Three shell-arg interpolation sites are being migrated to centralized helpers. New unit tests should assert that adversarial inputs (containing single quotes, double quotes, semicolons, backticks, command substitution sequences) are safely escaped by the call sites that now use the helpers. The existing `shellEscape.ts` may have direct unit tests already; if so, extend them — otherwise create."
   targets:
     - behavior: "`escapeShellArg` round-trips strings containing single quotes safely (no shell-evaluable construct survives)."
-      test_file: "main/src/utils/__tests__/shellEscape.test.ts"
+      test_file: main/src/utils/__tests__/shellEscape.test.ts
       type: unit
     - behavior: "`escapeShellArg` round-trips strings containing double quotes, backticks, and `$(...)` safely."
-      test_file: "main/src/utils/__tests__/shellEscape.test.ts"
+      test_file: main/src/utils/__tests__/shellEscape.test.ts
       type: unit
     - behavior: "`buildSafeCommand` produces a command string whose tokens, when evaluated by `bash -c`, match the input args exactly (no command splitting)."
-      test_file: "main/src/utils/__tests__/shellEscape.test.ts"
+      test_file: main/src/utils/__tests__/shellEscape.test.ts
       type: unit
 prerequisites:
   - check: "test -f main/src/utils/shellEscape.ts && grep -q 'export function escapeShellArg' main/src/utils/shellEscape.ts"
     fix: "(no fix needed — file should exist; if missing, restore from git history)"
-    description: "The migration target helper must exist before any call site can be updated."
+    description: The migration target helper must exist before any call site can be updated.
     blocking: true
 ---
-
 # Migrate 3 ad-hoc shell-arg interpolation sites to `escapeShellArg` / `buildSafeCommand`
 
 ## Objective
