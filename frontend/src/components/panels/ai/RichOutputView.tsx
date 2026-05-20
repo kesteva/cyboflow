@@ -10,15 +10,7 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-// Local interface for combining user prompts with output messages
-interface UserPromptMessage {
-  type: 'user';
-  message: {
-    role: 'user';
-    content: Array<{ type: 'text'; text: string }>;
-  };
-  timestamp: string;
-}
+import { parseJsonMessage, type UserPromptMessage } from './parseJsonMessage';
 
 // Interface for conversation messages from database
 interface ConversationMessage {
@@ -215,9 +207,12 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         // Combine user prompts with output messages (filter for JSON messages)
         const allMessages = [...userPrompts];
         if (outputResponse.success && outputResponse.data && Array.isArray(outputResponse.data)) {
-          // JSON messages are already in the correct format from getJsonMessages
-          // FIXME(SPRINT-015): local UserPromptMessage diverges from ClaudeJsonMessage — see FIND-SPRINT-015-12; resolve in B5 follow-up
-          allMessages.push(...(outputResponse.data as unknown as UserPromptMessage[]));
+          for (const rawMsg of outputResponse.data) {
+            const parsed = parseJsonMessage(rawMsg);
+            if (parsed !== null && parsed.type === 'user') {
+              allMessages.push(parsed);
+            }
+          }
         }
         
         // Sort by timestamp to get correct order
