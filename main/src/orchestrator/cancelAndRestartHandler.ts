@@ -124,7 +124,7 @@ export async function cancelAndRestartHandler(
     // This satisfies the ordered side-effect requirement (AC5):
     // Claude receives deny responses on the socket before the process is aborted.
     approvalRouter.clearPendingForRun(runId);
-    logger?.warn(
+    logger?.debug(
       '[cancelAndRestart] clearPendingForRun is a no-op until TASK-304 lands — deny-replies are NOT being sent on the permission socket for this run',
       { runId },
     );
