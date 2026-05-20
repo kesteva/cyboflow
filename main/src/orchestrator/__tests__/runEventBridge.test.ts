@@ -23,7 +23,7 @@ import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-import { makeRawEventsDb, countRows } from './__fixtures__/rawEvents';
+import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant
@@ -151,7 +151,7 @@ describe('runEventBridge', () => {
     }
 
     // 5 rows in the DB
-    expect(countRows(db, RUN_ID)).toBe(5);
+    expect(countRawEvents(db, RUN_ID)).toBe(5);
 
     // 5 publish calls
     expect(publish).toHaveBeenCalledTimes(5);
@@ -174,7 +174,7 @@ describe('runEventBridge', () => {
     const rowCountsAtPublish: number[] = [];
     const publisher: StreamEventPublisher = {
       publish(runId) {
-        rowCountsAtPublish.push(countRows(db, runId));
+        rowCountsAtPublish.push(countRawEvents(db, runId));
       },
     };
 
@@ -226,7 +226,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, resultEvent);    // INSERT 3 — succeeds
 
     // Only 2 rows persisted (3rd succeeds, 2nd fails → 1 + 1 = 2).
-    expect(countRows(sinkDb, RUN_ID)).toBe(2);
+    expect(countRawEvents(sinkDb, RUN_ID)).toBe(2);
 
     // All 3 publish calls still fired despite the INSERT failure.
     expect(publish).toHaveBeenCalledTimes(3);
@@ -250,7 +250,7 @@ describe('runEventBridge', () => {
     emitOutput(source, 'run-OTHER-999', systemEvent);
     emitOutput(source, 'run-OTHER-999', assistantEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(0);
+    expect(countRawEvents(db, RUN_ID)).toBe(0);
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -266,7 +266,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, 'some string output', 'stdout');
     emitOutput(source, RUN_ID, 'another string', 'stderr');
 
-    expect(countRows(db, RUN_ID)).toBe(0);
+    expect(countRawEvents(db, RUN_ID)).toBe(0);
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -328,7 +328,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, { notAType: true, gibberish: 42 });
 
     // One row inserted.
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
     const rows = selectRows(db, RUN_ID);
     expect(rows[0].event_type).toBe('unknown');
 
@@ -356,7 +356,7 @@ describe('runEventBridge', () => {
 
     // Emit one event — should produce 1 row + 1 publish.
     emitOutput(source, RUN_ID, systemEvent);
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
     expect(publish).toHaveBeenCalledTimes(1);
 
     // Verify listener is attached.
@@ -372,7 +372,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, assistantEvent);
     emitOutput(source, RUN_ID, resultEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(1);     // still only 1 row
+    expect(countRawEvents(db, RUN_ID)).toBe(1);     // still only 1 row
     expect(publish).toHaveBeenCalledTimes(1);  // still only 1 call
 
     // dispose() is idempotent — calling twice must not throw.
@@ -438,7 +438,7 @@ describe('runEventBridge', () => {
       emitOutput(source, RUN_ID, assistantEvent);
 
       // Both events inserted and published despite the throwing callback
-      expect(countRows(db, RUN_ID)).toBe(2);
+      expect(countRawEvents(db, RUN_ID)).toBe(2);
       expect(publish).toHaveBeenCalledTimes(2);
 
       // onFirstMessage only attempted once
@@ -484,7 +484,7 @@ describe('runEventBridge', () => {
       const source2 = new EventEmitter();
       const publisher2: StreamEventPublisher = {
         publish(runId) {
-          rowCountsAtPublish.push(countRows(db2, runId));
+          rowCountsAtPublish.push(countRawEvents(db2, runId));
         },
       };
       const onFirstMessage2 = vi.fn();
@@ -592,7 +592,7 @@ describe('runEventBridge', () => {
       emitOutput(src, SP_RUN_ID, assistantEvent);
       emitOutput(src, SP_RUN_ID, resultEvent);
 
-      expect(countRows(realDb, SP_RUN_ID)).toBe(0);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(0);
     });
 
     // -----------------------------------------------------------------------
@@ -618,7 +618,7 @@ describe('runEventBridge', () => {
         emitOutput(src, SP_RUN_ID, ev);
       }
 
-      expect(countRows(realDb, SP_RUN_ID)).toBe(5);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(5);
       expect(publish).toHaveBeenCalledTimes(5);
     });
 
@@ -700,7 +700,7 @@ describe('runEventBridge', () => {
       ccmRouter.emitForRun(SP_RUN_ID, systemEvent);
 
       // Total rows must be exactly 1 (CCM's insert only — bridge contributes 0).
-      expect(countRows(realDb, SP_RUN_ID)).toBe(1);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(1);
 
       // Bridge must have published the envelope once.
       expect(publish).toHaveBeenCalledOnce();
@@ -740,7 +740,7 @@ describe('runEventBridge', () => {
     emitOutput(source, RUN_ID, resultEvent);    // publish 3 — succeeds
 
     // All 3 rows should be in the DB (INSERT is not affected by publish failure).
-    expect(countRows(db, RUN_ID)).toBe(3);
+    expect(countRawEvents(db, RUN_ID)).toBe(3);
 
     // publish was called 3 times.
     expect(publishCallCount).toBe(3);

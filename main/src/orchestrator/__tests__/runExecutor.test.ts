@@ -678,7 +678,7 @@ describe('lifecycle transitions', () => {
 // ---------------------------------------------------------------------------
 
 import { EventRouter, RawEventsSink } from '../../services/streamParser';
-import { makeRawEventsDb, countRows } from './__fixtures__/rawEvents';
+import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
 
 /**
  * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
@@ -809,7 +809,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     // Sibling: runEventBridge.test.ts "dual-pipeline single-INSERT guarantee"
     // tests this same invariant in isolation (bridgeEvents() only). Both must
     // be updated together if the storage contract changes.
-    const cnt = countRows(db, run.id);
+    const cnt = countRawEvents(db, run.id);
     expect(cnt).toBe(1);
   });
 
@@ -1284,7 +1284,7 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     expect(running).not.toHaveBeenCalled();
 
     // raw_events row must also not exist.
-    const cnt = countRows(db, run.id);
+    const cnt = countRawEvents(db, run.id);
     expect(cnt).toBe(0);
   });
 });
