@@ -18,10 +18,6 @@ export type { McpServerHealth as McpHealth } from '../../../shared/types/mcpHeal
  * When converting back, 'error' maps to 'failed' (closest approximation).
  * If a consumer needs to distinguish 'failed' from 'stopped', use the
  * underlying IPC channel directly.
- *
- * @cyboflow-hidden Sidebar MCP indicator was removed in TASK-626. This hook
- * is kept as a deprecated adapter; it will be deleted once no production
- * importer remains.
  */
 export function useMcpHealth(): McpServerHealth {
   const status = useMcpHealthStore((s) => s.status);
