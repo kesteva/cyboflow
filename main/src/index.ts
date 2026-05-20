@@ -77,6 +77,7 @@ function setAppTitle() {
 }
 let taskQueue: TaskQueue | null = null;
 let orchestrator: Orchestrator | null = null;
+let runQueues: RunQueueRegistry;
 
 // Service instances
 let configManager: ConfigManager;
@@ -637,6 +638,12 @@ async function initializeServices() {
     defaultCliManager,
   );
 
+  // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
+  // and ApprovalRouter (for permission-decision dispatch). RunLauncher needs it
+  // so `runLauncher.launch()` can enqueue `runExecutor.execute(runId)` — without
+  // it, the run stays at `starting` forever.
+  runQueues = new RunQueueRegistry();
+
   const runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
@@ -648,6 +655,7 @@ async function initializeServices() {
     nodeResolver,
     cyboflowPublisher,
     runExecutor,
+    runQueues,
   );
 
   const services: AppServices = {
@@ -707,7 +715,8 @@ app.whenReady().then(async () => {
 
   // Wire tRPC orchestrator after BrowserWindow is available
   {
-    const runQueues = new RunQueueRegistry();
+    // Reuse the module-level RunQueueRegistry instantiated in initializeServices()
+    // so RunLauncher, Orchestrator, and ApprovalRouter all share the same instance.
     // Inline adapter: expose the narrow DatabaseLike surface by delegating to
     // the underlying better-sqlite3 handle.  Using getDb() avoids the
     // type-erasure cast (as unknown as DatabaseLike) that previously bypassed
