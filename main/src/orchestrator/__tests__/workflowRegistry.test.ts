@@ -17,7 +17,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
 import * as path from 'path';
 import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
@@ -40,7 +39,7 @@ function createTestDb(): Database.Database {
 
 /** Write a minimal markdown file with optional frontmatter to a temp dir. */
 function writeTempMd(dir: string, filename: string, content: string): string {
-  const filePath = join(dir, filename);
+  const filePath = path.join(dir, filename);
   writeFileSync(filePath, content, 'utf-8');
   return filePath;
 }
@@ -162,7 +161,7 @@ describe('WorkflowRegistry', () => {
 
     it('missing .md file falls back to permission_mode "default"', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        const nonExistentPath = join(tmpDir, 'does-not-exist.md');
+        const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
         registry.seed(1, [{ name: 'compound', path: nonExistentPath }]);
 
         interface ModeRow { permission_mode: string }
@@ -173,7 +172,7 @@ describe('WorkflowRegistry', () => {
 
     it('missing .md file logs ERROR with the path (TASK-601: raised from WARN to fail-loud)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        const nonExistentPath = join(tmpDir, 'does-not-exist.md');
+        const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
         registry.seed(1, [{ name: 'prune', path: nonExistentPath }]);
 
         // TASK-601: the log level was raised from WARN to ERROR so missing
@@ -189,7 +188,7 @@ describe('WorkflowRegistry', () => {
 
     it('missing .md file does not throw and still inserts the row', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        const nonExistentPath = join(tmpDir, 'does-not-exist.md');
+        const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
         expect(() => registry.seed(1, [{ name: 'prune', path: nonExistentPath }])).not.toThrow();
 
         interface CountRow { count: number }
@@ -434,8 +433,8 @@ describe('resolveSoloFlowPluginRoot', () => {
 
   it('env-var wins even when the filesystem has installed versions', async () => {
     await withTempDir('resolve-test-', async (fakeHome) => {
-      const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      mkdirSync(join(cacheDir, '0.10.3'), { recursive: true });
+      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+      mkdirSync(path.join(cacheDir, '0.10.3'), { recursive: true });
 
       const overridePath = '/override/path';
       const result = resolveSoloFlowPluginRoot(fakeHome, {
@@ -451,14 +450,14 @@ describe('resolveSoloFlowPluginRoot', () => {
       // Build a fake plugin cache with 0.9.12, 0.10.3, and 0.10.10 subdirectories.
       // The resolver must pick 0.10.10 (highest semver), not 0.10.3 (lexicographic
       // sort would incorrectly rank 0.10.3 > 0.10.10 since '3' > '1' char-by-char).
-      const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
       for (const ver of ['0.9.12', '0.10.3', '0.10.10']) {
-        mkdirSync(join(cacheDir, ver), { recursive: true });
+        mkdirSync(path.join(cacheDir, ver), { recursive: true });
       }
 
       const result = resolveSoloFlowPluginRoot(fakeHome, {});
       expect(result.source).toBe('discovered');
-      expect(result.root).toBe(join(cacheDir, '0.10.10'));
+      expect(result.root).toBe(path.join(cacheDir, '0.10.10'));
     });
   });
 
@@ -481,14 +480,14 @@ describe('resolveSoloFlowPluginRoot', () => {
       // fall through to filesystem discovery (or fallback).
       // Build one real version dir so we land on 'discovered' rather than
       // 'fallback' — that lets us assert the guard without a console.warn spy.
-      const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      mkdirSync(join(cacheDir, '0.10.5'), { recursive: true });
+      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+      mkdirSync(path.join(cacheDir, '0.10.5'), { recursive: true });
 
       const result = resolveSoloFlowPluginRoot(fakeHome, {
         SOLOFLOW_PLUGIN_ROOT: '   ',
       });
       expect(result.source).toBe('discovered');
-      expect(result.root).toBe(join(cacheDir, '0.10.5'));
+      expect(result.root).toBe(path.join(cacheDir, '0.10.5'));
     });
   });
 
@@ -508,9 +507,9 @@ describe('resolveSoloFlowPluginRoot', () => {
       // If the cache directory exists but holds only directories whose names do
       // not match the semver pattern (e.g. 'latest', '.DS_Store', 'node_modules'),
       // the resolver must skip them all and fall through to the fallback path.
-      const cacheDir = join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
+      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
       for (const nonSemverName of ['latest', '.DS_Store', 'node_modules', '0.10']) {
-        mkdirSync(join(cacheDir, nonSemverName), { recursive: true });
+        mkdirSync(path.join(cacheDir, nonSemverName), { recursive: true });
       }
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -530,18 +529,18 @@ describe('resolveSoloFlowPluginRoot', () => {
 describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
   it('pathFromHome is relative so path.join(homeDir, pathFromHome) resolves to an existing file', async () => {
     await withTempDir('soloflow-shim-test-', async (tmpHome) => {
-      const pluginRoot = join(
+      const pluginRoot = path.join(
         tmpHome,
         '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev', '0.10.3',
       );
-      const commandsDir = join(pluginRoot, 'commands');
+      const commandsDir = path.join(pluginRoot, 'commands');
       mkdirSync(commandsDir, { recursive: true });
 
       // Write real .md files with frontmatter for all 5 default workflows.
       const workflowNames = ['idea-extractor', 'planner', 'sprint', 'compound', 'prune'];
       for (const name of workflowNames) {
         writeFileSync(
-          join(commandsDir, `${name}.md`),
+          path.join(commandsDir, `${name}.md`),
           `---\npermission_mode: acceptEdits\n---\n# ${name}\n`,
           'utf-8',
         );
