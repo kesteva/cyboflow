@@ -268,4 +268,33 @@ describe('registerPanelHandlers — panels:initialize cwd routing', () => {
 
     expect(mockTerminalPanelManager.initializeTerminal).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // Case E: customState.cwd === "" (empty string) is treated as unset —
+  //         the hasCwdString guard requires length > 0, so empty string must
+  //         fall through to options.cwd, not suppress it.
+  // -------------------------------------------------------------------------
+  it('Case E: empty-string customState.cwd is treated as unset and options.cwd is used instead', async () => {
+    const panel = makeTerminalPanel({ cwd: '' }); // empty string — should NOT win
+    mockPanelManager.getPanel.mockReturnValue(panel);
+
+    await invoke(handlers, 'panels:initialize', 'panel-terminal-1', { cwd: '/from-options' });
+
+    // initializeTerminal must receive options.cwd, not the empty string
+    expect(mockTerminalPanelManager.initializeTerminal).toHaveBeenCalledOnce();
+    expect(mockTerminalPanelManager.initializeTerminal).toHaveBeenCalledWith(
+      panel,
+      '/from-options',
+    );
+
+    // updatePanel must have been called to persist options.cwd (empty string is
+    // not a valid cwd, so the guard must have treated it as absent)
+    const updateCallWithCwd = mockPanelManager.updatePanel.mock.calls.find(
+      (call) => {
+        const updates = call[1] as { state?: { customState?: { cwd?: string } } } | undefined;
+        return updates?.state?.customState?.cwd === '/from-options';
+      },
+    );
+    expect(updateCallWithCwd).toBeDefined();
+  });
 });
