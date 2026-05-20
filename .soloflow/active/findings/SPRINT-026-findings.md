@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-026
-pending_count: 11
-last_updated: "2026-05-20T20:30:00.000Z"
+pending_count: 17
+last_updated: "2026-05-20T19:57:04.590Z"
 ---
 # Findings Queue
 
@@ -127,3 +127,96 @@ SPRINT-026 started with missing infra: docker, playwright, peekaboo; tests defer
 - **location:** docs/sdk-migration-smoke-results.md:821-928
 - **description:** The "Manual Smokes — DEFERRED FOR HUMAN VERIFICATION" section in TASK-683's appended verification report contains six templated checkbox checklists (Smoke 1-6, AC#13-#18) with no back-link to the human-review-queue entries that track their completion. The "Outstanding Follow-ups" subsection (line 987) asserts the smokes are tracked "via the human-review-queue entries appended by TASK-683", but the templated checklists themselves are an island — a future human walking the doc directly will fill in checkboxes that are invisible to the `/soloflow:review-queue` flow, and a future human walking the review queue won't know that the doc has detail-rich templated checklists waiting. Either (a) add a single line under each Smoke-N heading pointing at the corresponding queue entry path (e.g. `> Tracked in .soloflow/human-review-queue.md under TASK-683 / bucket=testing`), or (b) mark the templated checklists as the canonical capture surface and have the queue entries link back to the doc anchor. Without either, the two records will drift the moment a human completes a smoke against only one of them. Also reconcile with FIND-SPRINT-026-12: at executor-commit time the queue entries did NOT exist, but the doc's "Outstanding Follow-ups" presents the post-orchestrator-append state as if it was already true when committed.
 - **suggested_action:** When the next pass touches `docs/sdk-migration-smoke-results.md`, add a one-line anchor under each `### Smoke N — …` heading pointing at the matching `.soloflow/human-review-queue.md` entry (or vice versa), and rephrase line 987 to neither presume nor deny the queue entries existed at commit time.
+
+## FIND-SPRINT-026-15
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/cyboflow/RunView.tsx:58-76
+- **description:** Cross-task drift between TASK-681 (schema retirement) and TASK-682 (typed renderer): RunView.SystemEventRow renders dedicated branches for subtype==="api_retry" (lines 58-66) and subtype==="compact" (lines 68-76), but TASK-681 retired both subtypes from the Zod schema (main/src/services/streamParser/schemas.ts:97-100 — only "init" and "compact_boundary" remain in systemUnionSchema). At runtime, TypedEventNarrowing.narrow() rejects any system event with subtype api_retry/compact and falls through to {kind:"__unknown__"}; deriveEventType then returns the literal string "unknown", routing through the UnknownEventRow branch — never SystemEventRow. The api_retry/compact rendering branches are therefore dead code reachable only by a future schema reintroduction.
+- **suggested_action:** Decide: (a) re-add api_retry / compact subtypes to systemUnionSchema in main/src/services/streamParser/schemas.ts so the renderer branches can fire (matching the legacy CLI surface preserved in shared/types/claudeStream.ts), OR (b) remove the dead api_retry/compact branches from RunView.SystemEventRow and drop the SystemApiRetryEvent / SystemCompactEvent imports from RunView.tsx. The shared TS types remain (they have a documented retention rationale tied to T8 fixture migration); only the renderer branches are dead.
+- **resolved_by:** 
+
+
+
+
+
+
+Suspected tasks: TASK-681, TASK-682
+
+## FIND-SPRINT-026-16
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/runLauncher.ts:142-150
+- **description:** Cross-task contract bug between TASK-682 (typed StreamEventType union) and TASK-683 (synthetic run_started KEEP decision): runLauncher.ts publishes a synthetic event with type:"run_started" to close the 50-500ms UI-bootstrap gap, but TASK-682 narrowed cyboflowApi.ts:33-39 StreamEventType to a closed union of exactly six values — system | assistant | user | result | stream_event | unknown. "run_started" is NOT in that union. The synthetic event reaches RunView.renderEvent() (RunView.tsx:224-233), whose switch covers only the six union cases; "run_started" matches no case, the switch returns undefined, and React renders nothing.
+- **suggested_action:** Pick one: (a) add "run_started" to StreamEventType in frontend/src/utils/cyboflowApi.ts:33-39 and add case "run_started" to RunView.renderEvent() with a minimal placeholder row; (b) remove the synthetic run_started publish from runLauncher.ts:145-149 (path A from TASK-683 plan), accept the 50-500ms blank period, and delete the KEEP comment; (c) tighten StreamEventPublisher.publish in runLauncher.ts:64-66 from `type: string` to `type: StreamEventType | "run_started"` and re-export from a shared module so the publisher and consumer agree at compile time. Path (a) is cheapest and preserves the AC#8 path-B intent; path (c) is the most architecturally correct.
+- **resolved_by:** 
+
+
+
+
+
+The StreamEventPublisher.publish signature in runLauncher.ts:64-66 still types event.type as a bare string, so TypeScript does NOT catch this — the wire contract is type-erased at the publisher boundary. Net effect: the synthetic event TASK-683 retained as a UI-bootstrap aid is invisible to users; the "Waiting for events…" placeholder remains until a real SDK event arrives, defeating the AC#8 path-B rationale.
+
+Suspected tasks: TASK-682, TASK-683
+
+## FIND-SPRINT-026-17
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/streamParser/messageProjection.ts:139-140
+- **description:** The camelCase rename FIND-SPRINT-026-5 → TASK-682 applied (compact_trigger→compactTrigger, pre_tokens→preTokens) is currently dead: grep -rn "compactTrigger\|preTokens" frontend/src returns zero matches. The only consumer of compact-related metadata in the renderer is RichOutputView.tsx:842 which dispatches solely on `message.metadata?.systemSubtype === "context_compacted"` then renders a static help string — never reads the trigger or pre_tokens fields. RunView SystemEventRow (RunView.tsx:78-86) does render trigger and pre_tokens, but reads them from the WIRE shape (cb.compact_metadata.trigger / cb.compact_metadata.pre_tokens — snake_case), not from UnifiedMessage.metadata.
+- **suggested_action:** Either (a) update RichOutputView.tsx:842-892 context_compacted branch to actually surface compactTrigger and preTokens (e.g. "Auto-compacted at 98k tokens" in the header), making the rename load-bearing, or (b) annotate messageProjection.ts:139-140 with a comment noting the rename is forward-compat (no current consumer) so future readers don\u0027t hunt for the read site.
+- **resolved_by:** 
+
+
+
+
+The defensive rename made the post-projection metadata consistent with the camelCase convention (good), but no current consumer benefits. This finding is informational — the rename should remain — but recording so the compounder can decide whether to (a) wire one of the renderers to actually display the camelCase fields, or (b) keep the rename as forward-compat scaffolding.
+
+Suspected tasks: TASK-682
+
+## FIND-SPRINT-026-18
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/streamParser/__tests__/messageProjection.test.ts:10
+- **description:** Stale docstring after the TASK-682 camelCase rename: the Coverage list header still describes test #2 as "compact_trigger+pre_tokens in metadata" (snake_case), but the test body at line 221-222 now asserts msg.metadata?.compactTrigger and msg.metadata?.preTokens (camelCase). A future reader scanning the file header to locate the field names will find the obsolete snake_case form and then fail their own grep against messageProjection.ts. Cheap to fix; only catches the eye on a careful read but the per-task reviewer already commented on the file in scope.
+- **suggested_action:** Edit messageProjection.test.ts:10 to replace "compact_trigger+pre_tokens in metadata" with "compactTrigger+preTokens in metadata" so the docstring matches the assertions at lines 221-222.
+- **resolved_by:** 
+
+
+
+Suspected tasks: TASK-682
+
+## FIND-SPRINT-026-19
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/cyboflow/RunView.tsx:83
+- **description:** Naming convention drift surfacing to users: RunView.SystemEventRow renders the compact_boundary row with the user-visible text `pre_tokens={cb.compact_metadata.pre_tokens}` — the snake_case wire-shape field name leaks into the rendered DOM. This is consistent with the policy that wire shapes stay snake_case (claudeStream.ts:127-136) but inconsistent with the rest of the renderer\u0027s human-facing labels (e.g. "model:", "cwd:", "session:" in the init row use natural English, not wire-key names). Cosmetic only; user-visible.
+- **suggested_action:** Rename the user-visible label from `pre_tokens=` to a human form such as `pre-tokens=` or `tokens-pre=` or label it `pre-compaction tokens:`. The wire field path `cb.compact_metadata.pre_tokens` stays untouched (snake_case is correct on the wire); only the rendered string changes. Same kind of polish lives elsewhere in the row (e.g. assistant-row labels human strings, not wire keys).
+- **resolved_by:** 
+
+
+Suspected tasks: TASK-682
+
+## FIND-SPRINT-026-20
+- **source:** SPRINT-026 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/utils/cyboflowApi.ts:41-46
+- **description:** Cross-task contract widening that hides drift: cyboflowApi.ts StreamEvent declares `payload: unknown`, but the producing side (main/src/orchestrator/runEventBridge.ts:119-123 StreamEnvelope) types payload as `ClaudeStreamEvent` — the discriminated union from shared/types/claudeStream.ts. The wire is therefore fully typed end-to-end, but TASK-682\u0027s narrowing of `type: StreamEventType` was NOT paired with a narrowing of `payload` to ClaudeStreamEvent. Effect: every consumer in RunView.tsx (5 SDK rows + unknown) re-asserts the payload type via `as` casts (lines 38, 98, 138, 167, 186) — 5 sites that all should have been auto-narrowed by the discriminated union.
+
+The `payload: unknown` decision was likely intentional to keep the run_started synthetic event (FIND-SPRINT-026-16) compilable without forcing it into the discriminated union, but it leaks 5 `as` casts into the renderer and removes the type safety that the discriminator design was meant to provide. Same cross-task drift as FIND-SPRINT-026-16 — both stem from run_started not being in the union.
+
+Suspected tasks: TASK-682, TASK-683
+- **suggested_action:** After FIND-SPRINT-026-16 is resolved (run_started decision picked), tighten StreamEvent.payload from `unknown` to ClaudeStreamEvent (or the union ClaudeStreamEvent | RunStartedPayload if run_started stays). Then delete the 5 `as SystemInitEvent | ...`, `as AssistantEvent`, `as UserEvent`, `as ResultEvent`, `as ClaudeStreamEventVariant` casts in RunView.tsx — the discriminated union auto-narrows on `event.type`.
+- **resolved_by:** 
