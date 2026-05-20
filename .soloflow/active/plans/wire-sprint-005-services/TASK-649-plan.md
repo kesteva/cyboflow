@@ -1,8 +1,8 @@
 ---
 id: TASK-649
 idea: SPRINT-007-compound
-status: ready
-created: 2026-05-14T00:00:00Z
+status: in-flight
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/__tests__/claudeCodeManagerWiring.test.ts
 files_readonly:
@@ -15,7 +15,7 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-007-proposal.md
   - .soloflow/active/findings/SPRINT-007-findings.md
 acceptance_criteria:
-  - criterion: "claudeCodeManagerWiring.test.ts no longer passes undefined as the logger constructor arg — every TestableClaudeCodeManager construction passes a spy logger"
+  - criterion: claudeCodeManagerWiring.test.ts no longer passes undefined as the logger constructor arg — every TestableClaudeCodeManager construction passes a spy logger
     verification: "grep -nE 'new TestableClaudeCodeManager\\(' main/src/services/__tests__/claudeCodeManagerWiring.test.ts shows every match followed within 6 lines by a spy-logger argument (not literal 'undefined'); equivalent terminal check: grep -nE 'new TestableClaudeCodeManager' -A 5 main/src/services/__tests__/claudeCodeManagerWiring.test.ts | grep -cE '^\\s+undefined,\\s*//\\s*logger' returns 0"
   - criterion: "A makeLoggerSpy() factory exists in the wiring test file and returns an object structurally compatible with the streamParser ILogger (warn + optional info + optional verbose, all vi.fn())"
     verification: "grep -nE 'function makeLoggerSpy' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 match AND grep -nE 'warn:\\s*vi\\.fn|info:\\s*vi\\.fn|verbose:\\s*vi\\.fn' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 2 matches"
@@ -23,12 +23,12 @@ acceptance_criteria:
     verification: "grep -nE 'expect\\(.*logger.*warn.*\\)\\.toHaveBeenCalled|expect\\(.*\\.warn\\)\\.toHaveBeenCalled' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 match"
   - criterion: "The new test exercises the ClaudeCodeManager → underlying pipeline class wire (parser/router/detector receive the same logger instance) by either (a) directly asserting the logger reference on the constructed pipeline, or (b) triggering a warn-path through the pipeline and observing the spy"
     verification: "grep -nE 'warn\\.mock\\.calls|hasPipeline.*logger|getLogger\\(' main/src/services/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 match"
-  - criterion: "All existing tests in claudeCodeManagerWiring.test.ts (the 7 cases authored by TASK-572 + TASK-574) still pass after the logger spy is introduced"
-    verification: "pnpm --filter main test -- claudeCodeManagerWiring exits 0 with all tests green (originally 7 + new logger tests)"
-  - criterion: "pnpm --filter main typecheck exits 0"
-    verification: "pnpm --filter main typecheck"
-  - criterion: "pnpm --filter main lint exits 0"
-    verification: "pnpm --filter main lint"
+  - criterion: All existing tests in claudeCodeManagerWiring.test.ts (the 7 cases authored by TASK-572 + TASK-574) still pass after the logger spy is introduced
+    verification: pnpm --filter main test -- claudeCodeManagerWiring exits 0 with all tests green (originally 7 + new logger tests)
+  - criterion: pnpm --filter main typecheck exits 0
+    verification: pnpm --filter main typecheck
+  - criterion: pnpm --filter main lint exits 0
+    verification: pnpm --filter main lint
 depends_on: []
 estimated_complexity: low
 epic: wire-sprint-005-services
@@ -36,11 +36,10 @@ test_strategy:
   needed: true
   justification: "The whole task IS the test addition. The wiring test currently passes `undefined` as the logger argument (line 176), so the ClaudeCodeManager → ClaudeStreamParser/RawEventsSink/CompletionDetector logger wire is exercised by zero production code paths AND zero tests. This is the gap FIND-SPRINT-007-15 surfaced. The fix is to introduce a logger spy and assert at least one warn-path is hit, proving the logger reference flows correctly from manager construction down through the per-panel pipeline."
   targets:
-    - behavior: "Logger spy is propagated from manager constructor to per-panel pipeline (ClaudeStreamParser + CompletionDetector). At least one warn-path is observed during a test that exercises the assertTransitionAllowed catch branch in setupProcessHandlers."
-      test_file: "main/src/services/__tests__/claudeCodeManagerWiring.test.ts"
+    - behavior: Logger spy is propagated from manager constructor to per-panel pipeline (ClaudeStreamParser + CompletionDetector). At least one warn-path is observed during a test that exercises the assertTransitionAllowed catch branch in setupProcessHandlers.
+      test_file: main/src/services/__tests__/claudeCodeManagerWiring.test.ts
       type: integration
 ---
-
 # Add spy logger to claudeCodeManagerWiring.test.ts to cover the ILogger wire
 
 ## Objective

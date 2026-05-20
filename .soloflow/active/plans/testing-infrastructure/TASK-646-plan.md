@@ -1,8 +1,8 @@
 ---
 id: TASK-646
 idea: SPRINT-017
-status: ready
-created: 2026-05-18T00:00:00Z
+status: in-flight
+created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts
   - main/src/orchestrator/__test_fixtures__/__tests__/loggerLikeSpy.test.ts
@@ -23,14 +23,14 @@ acceptance_criteria:
     verification: "test -f main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts AND grep -n 'export function makeSpyLogger' main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts returns exactly one match."
   - criterion: "Each of the four test methods (info/warn/error/debug) is a `vi.fn()` whose implementation pushes `{level, message, ctx}` onto the shared `calls` array on every invocation. The methods remain individually spy-able via `expect(logger.info).toHaveBeenCalledWith(...)`."
     verification: "The fixture smoke-test in __test_fixtures__/__tests__/loggerLikeSpy.test.ts asserts both `calls[0]` shape and per-method `.mock.calls[0]` reflect the invocation."
-  - criterion: "All previously-local logger helpers in the six identified test files are removed and replaced with imports from the new fixture; every existing test must still pass."
+  - criterion: All previously-local logger helpers in the six identified test files are removed and replaced with imports from the new fixture; every existing test must still pass.
     verification: "grep -rnE 'function (makeLogger|makeSilentLogger|makeFakeLogger)\\(\\)' main/src/orchestrator/__tests__ main/src/orchestrator/mcpServer/__tests__ main/src/ipc/__tests__ returns 0 matches. grep -n 'makeSpyLogger' on each of the six migrated files returns at least one match per file."
   - criterion: "Sweep-grep gate: no orchestrator/test file under main/src declares a local LoggerLike spy or no-op outside the fixture."
     verification: "grep -rnE 'makeLogger|makeSilentLogger|makeFakeLogger|nullLogger' main/src tests/helpers --include='*.ts' --exclude-dir=node_modules matches only: (a) loggerAdapter.ts production makeLoggerLike, (b) the new fixture, (c) cyboflowTestHarness.ts post-migration imports, (d) import lines in migrated tests."
   - criterion: "tests/helpers/cyboflowTestHarness.ts's `nullLogger` is replaced by an import from the new fixture."
     verification: "grep -n 'const nullLogger' tests/helpers/cyboflowTestHarness.ts returns 0 matches. grep -n 'makeSpyLogger' tests/helpers/cyboflowTestHarness.ts returns at least one match."
-  - criterion: "All workspace unit-tests still pass after the migration."
-    verification: "pnpm --filter main test exits 0; pnpm typecheck exits 0 across all workspaces."
+  - criterion: All workspace unit-tests still pass after the migration.
+    verification: pnpm --filter main test exits 0; pnpm typecheck exits 0 across all workspaces.
   - criterion: "The fixture file complies with the standalone-typecheck invariant (no imports from electron / better-sqlite3 / services/*)."
     verification: "grep -nE \"from 'electron'|from 'better-sqlite3'|from '\\.\\./\\.\\./services\" main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts returns 0 matches."
 depends_on: []
@@ -41,19 +41,18 @@ test_strategy:
   justification: "The new fixture needs a smoke-test to lock in its contract (calls array shape, individual vi.fn spy-ability). Every migrated test file is in files_owned and must continue to pass after the import-and-replace edit."
   targets:
     - behavior: "makeSpyLogger() returns a LoggerLike where each method is both individually vi.fn-spy-able AND pushes {level, message, ctx} onto the shared calls array."
-      test_file: "main/src/orchestrator/__test_fixtures__/__tests__/loggerLikeSpy.test.ts"
+      test_file: main/src/orchestrator/__test_fixtures__/__tests__/loggerLikeSpy.test.ts
       type: unit
-    - behavior: "All existing tests in workflowRegistry.test.ts continue to pass — warnCalls/errorCalls readers rewritten to logger.calls.filter(level === ...)."
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: All existing tests in workflowRegistry.test.ts continue to pass — warnCalls/errorCalls readers rewritten to logger.calls.filter(level === ...).
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
     - behavior: "All existing tests in runLauncher.test.ts, stuckDetector.test.ts, Orchestrator.test.ts, mcpServerLifecycle.test.ts, and cyboflow.test.ts continue to pass after their local logger helpers are replaced."
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: unit
-    - behavior: "cyboflowTestHarness launchPair flow still constructs WorkflowRegistry and RunLauncher with a satisfying LoggerLike."
-      test_file: "tests/helpers/cyboflowTestHarness.ts"
+    - behavior: cyboflowTestHarness launchPair flow still constructs WorkflowRegistry and RunLauncher with a satisfying LoggerLike.
+      test_file: tests/helpers/cyboflowTestHarness.ts
       type: integration
 ---
-
 # Consolidate scattered LoggerLike test helpers into a shared loggerLikeSpy fixture
 
 ## Objective

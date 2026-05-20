@@ -1,7 +1,7 @@
 ---
 id: TASK-639
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - scripts/verify-schema-parity.js
@@ -17,15 +17,15 @@ files_readonly:
   - main/src/database/__test_fixtures__/registrySchema.ts
   - main/src/database/database.ts
 acceptance_criteria:
-  - criterion: "scripts/verify-schema-parity.js exists and is executable as a node script"
+  - criterion: scripts/verify-schema-parity.js exists and is executable as a node script
     verification: "test -f scripts/verify-schema-parity.js && node scripts/verify-schema-parity.js --help exit 0 (or exits with usage info; non-error)"
-  - criterion: "Running the script against the current tree exits 0 (no drift)"
-    verification: "node scripts/verify-schema-parity.js exits 0"
+  - criterion: Running the script against the current tree exits 0 (no drift)
+    verification: node scripts/verify-schema-parity.js exits 0
   - criterion: "Mutation test: a deliberately-divergent extra column in schema.sql (manually injected then reverted) causes the script to exit non-0"
-    verification: "(manual — verified during development; do not commit the divergence)"
+    verification: (manual — verified during development; do not commit the divergence)
   - criterion: "pnpm run verify:schema is wired into the root test:unit chain"
     verification: "grep -nE '\"verify:schema\"|verify-schema' package.json returns at least 2 matches (the script alias + invocation in test:unit)"
-  - criterion: "CODE-PATTERNS.md documents migration 006/007 as the canonical workflow_runs DDL source"
+  - criterion: CODE-PATTERNS.md documents migration 006/007 as the canonical workflow_runs DDL source
     verification: "grep -nE 'canonical.*migration 006|migration 006.*canonical|canonical DDL source' docs/CODE-PATTERNS.md returns at least 1 match"
   - criterion: "Full pnpm run test:unit chain passes including the new verify:schema step"
     verification: "pnpm run test:unit exits 0"
@@ -37,21 +37,20 @@ test_strategy:
   justification: "New script with non-trivial logic (DB initialization, drift comparison). The script's own success path is exercised by the AC's `node scripts/verify-schema-parity.js` invocation against the canonical tree. The negative path (drift detection actually fires) is the more important regression guard — encode it as a fixture-based unit test that injects a deliberate divergence and asserts the script exits non-0."
   targets:
     - behavior: "When schema.sql + migrations produce identical schema, the script exits 0"
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
     - behavior: "When a fixture schema.sql declares an extra column that migrations never add, the script exits non-0 with a useful diff"
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
     - behavior: "When a fixture migration adds a table not in schema.sql, the script exits non-0"
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
 prerequisites:
   - check: "node -e \"require('better-sqlite3')\" 2>/dev/null"
-    fix: "pnpm install (root) — better-sqlite3 is already a main workspace dep"
-    description: "The script runs better-sqlite3 in-memory to compare schemas; must be resolvable from the repo root or via a relative require"
+    fix: pnpm install (root) — better-sqlite3 is already a main workspace dep
+    description: The script runs better-sqlite3 in-memory to compare schemas; must be resolvable from the repo root or via a relative require
     blocking: true
 ---
-
 # Add schema parity CI check and designate migration 006 as canonical DDL source
 
 ## Objective

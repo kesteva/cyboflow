@@ -1,7 +1,7 @@
 ---
 id: TASK-638
 idea: SPRINT-015-compound
-status: ready
+status: in-flight
 created: "2026-05-18T00:00:00Z"
 files_owned:
   - frontend/src/App.tsx
@@ -12,11 +12,11 @@ files_readonly:
   - frontend/src/utils/api.ts
   - frontend/src/types/electron.d.ts
 acceptance_criteria:
-  - criterion: "Zero local interface IPCResponse declarations remain in frontend/src outside the canonical sites"
+  - criterion: Zero local interface IPCResponse declarations remain in frontend/src outside the canonical sites
     verification: "grep -rln 'interface IPCResponse' frontend/src | sort returns exactly these 2 paths: frontend/src/types/electron.d.ts, frontend/src/utils/api.ts"
-  - criterion: "All four touched files import IPCResponse from utils/api (or its global declaration in electron.d.ts) instead of declaring it locally"
+  - criterion: All four touched files import IPCResponse from utils/api (or its global declaration in electron.d.ts) instead of declaring it locally
     verification: "grep -nE \"import type \\{[^}]*IPCResponse\" frontend/src/App.tsx frontend/src/components/DiscordPopup.tsx frontend/src/components/OnboardingCard.tsx frontend/src/components/ReviewQueueView.tsx returns at least 4 matches"
-  - criterion: "Frontend typecheck and tests pass"
+  - criterion: Frontend typecheck and tests pass
     verification: "pnpm --filter frontend typecheck && pnpm --filter frontend test exit 0"
 depends_on: []
 estimated_complexity: low
@@ -25,7 +25,6 @@ test_strategy:
   needed: false
   justification: "Type-import cleanup. The canonical IPCResponse type in utils/api.ts has additional optional fields (`details?`, `command?`) versus the 4 local duplicates which only have `success/data?/error?`. The canonical is a strict superset for all consumer uses — every cast site already passes `<T>` explicitly, so consumer code is unaffected by the swap. No behavior change. Sibling-test scan: no test files exist alongside App.tsx, DiscordPopup.tsx, OnboardingCard.tsx, or ReviewQueueView.tsx that test these IPCResponse usages directly (verified via grep for `*.test.*` / `__tests__/` in the parent dirs of all four files — none found). `pnpm --filter frontend typecheck` is the regression guard."
 ---
-
 # Eliminate 4 local duplicate IPCResponse interface declarations
 
 ## Objective

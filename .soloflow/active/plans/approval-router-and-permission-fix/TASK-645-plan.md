@@ -1,8 +1,8 @@
 ---
 id: TASK-645
 idea: SPRINT-017
-status: ready
-created: 2026-05-18T00:00:00Z
+status: in-flight
+created: "2026-05-18T00:00:00Z"
 files_owned:
   - main/src/trpc/routers/approvals.ts
   - main/src/trpc/__tests__/approvals.test.ts
@@ -16,12 +16,12 @@ acceptance_criteria:
     verification: "grep -nE 'decideRestOfRunHandler' main/src/trpc/routers/approvals.ts returns at least 3 matches (one declaration, two call sites from the wrappers). Reading the file confirms neither wrapper body contains a `for (const row of rows)` loop — that loop appears exactly once, inside decideRestOfRunHandler."
   - criterion: "The wrappers preserve their existing exported names and signatures so the orchestrator TODO comments (main/src/orchestrator/trpc/routers/approvals.ts lines 109-110, 139-140) still grep-replace cleanly."
     verification: "grep -n 'export async function approveRestOfRunHandler' main/src/trpc/routers/approvals.ts AND grep -n 'export async function rejectRestOfRunHandler' main/src/trpc/routers/approvals.ts each return exactly one match; both signatures still accept `(db, runId)` and return `Promise<ApproveRestOfRunResult>` / `Promise<RejectRestOfRunResult>`."
-  - criterion: "The shared implementation uses a parameterized status (the SQL UPDATE binds `?` for status instead of an inline literal) so adding a new decision state in future requires changing only one SQL string."
+  - criterion: The shared implementation uses a parameterized status (the SQL UPDATE binds `?` for status instead of an inline literal) so adding a new decision state in future requires changing only one SQL string.
     verification: "grep -cE \"SET status = 'approved'|SET status = 'rejected'\" main/src/trpc/routers/approvals.ts returns 0. grep -nE 'SET status = \\?' main/src/trpc/routers/approvals.ts returns at least 1 match inside decideRestOfRunHandler."
   - criterion: "The error-log prefix is derived from the decision parameter so the existing log messages `[approveRestOfRun] Failed to approve ...` and `[rejectRestOfRun] Failed to reject ...` continue to appear verbatim at runtime."
-    verification: "Run `pnpm --filter main exec vitest run src/trpc/__tests__/approvals.test.ts`. All 6 existing tests still pass. New error-prefix test asserts both prefixes appear when the UPDATE throws."
-  - criterion: "All 6 existing handler tests still pass; the test file exercises the shared decideRestOfRunHandler implementation via both the approve and reject entry-point wrappers."
-    verification: "Run `pnpm --filter main exec vitest run src/trpc/__tests__/approvals.test.ts`; exit code 0; output reports 6 passing tests in the two existing `describe` blocks plus the new error-prefix tests."
+    verification: Run `pnpm --filter main exec vitest run src/trpc/__tests__/approvals.test.ts`. All 6 existing tests still pass. New error-prefix test asserts both prefixes appear when the UPDATE throws.
+  - criterion: All 6 existing handler tests still pass; the test file exercises the shared decideRestOfRunHandler implementation via both the approve and reject entry-point wrappers.
+    verification: Run `pnpm --filter main exec vitest run src/trpc/__tests__/approvals.test.ts`; exit code 0; output reports 6 passing tests in the two existing `describe` blocks plus the new error-prefix tests.
   - criterion: "No external import surface change: callers continue to `import { approveRestOfRunHandler, rejectRestOfRunHandler } from '...trpc/routers/approvals'`. The shared `decideRestOfRunHandler` is not exported."
     verification: "grep -n 'export' main/src/trpc/routers/approvals.ts shows exports only for `approvalsRouter`, `approveRestOfRunHandler`, `rejectRestOfRunHandler` (no fourth export). grep -rn 'decideRestOfRunHandler' main/ frontend/ shared/ returns matches only inside main/src/trpc/routers/approvals.ts and the test file."
 depends_on: []
@@ -32,13 +32,12 @@ test_strategy:
   justification: "The refactor touches a file that already has a sibling test file with 6 tests across two describe blocks. All 6 must continue to pass to prove behavior preservation, and one new test must assert the decision-derived error-log prefix on UPDATE failure (the symbol-folding intent of the refactor)."
   targets:
     - behavior: "All 6 existing tests pass unchanged (approves all pending for run-A, returns {decided:0} for nonexistent run, sweep-grep for global approve-all symbol; mirror trio for reject)."
-      test_file: "main/src/trpc/__tests__/approvals.test.ts"
+      test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
     - behavior: "When a single UPDATE throws, decideRestOfRunHandler logs with the decision-derived prefix `[approveRestOfRun]` or `[rejectRestOfRun]` (asserted via a vi.spyOn(console, 'error') spy) and continues iterating the remaining rows. Both branches must be exercised."
-      test_file: "main/src/trpc/__tests__/approvals.test.ts"
+      test_file: main/src/trpc/__tests__/approvals.test.ts
       type: unit
 ---
-
 # Extract decideRestOfRunHandler to eliminate the approve/reject clone
 
 ## Objective
