@@ -558,6 +558,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     });
 
     manager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number | null; signal: number | null | string }) => {
+      // cyboflow workflow runs are owned by the workflow orchestrator; skip the
+      // Crystal session validation (mirror of the spawned-handler guard at line 510).
+      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
       const validation = panelId
         ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
         : validateEventContext({ sessionId }, sessionId);
