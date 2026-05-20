@@ -5,6 +5,7 @@ import ReviewQueueView from '../ReviewQueueView';
 import { ErrorBoundary } from '../ErrorBoundary';
 import type { Approval } from '../../../../shared/types/approvals';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
+import { useReviewQueueSlice } from '../../stores/reviewQueueSlice';
 
 // Mutable state shared between mock factory and test helpers
 let mockQueue: Approval[] = [];
@@ -17,6 +18,19 @@ function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
     normal: mockQueue.map(a => ({ kind: 'single' as const, approval: a, isBlocking: false })),
   };
 }
+
+// Mock tRPC client — reviewQueueSlice uses it for subscribeToStuckEvents.
+vi.mock('../../utils/trpcClient', () => ({
+  trpc: {
+    cyboflow: {
+      events: {
+        onStuckDetected: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
+    },
+  },
+}));
 
 // Mock the reviewQueueStore module — expose both useReviewQueueStore and useReviewQueueView
 vi.mock('../../stores/reviewQueueStore', () => {
@@ -36,11 +50,19 @@ vi.mock('../../hooks/useReviewQueueKeyboard', () => ({
   useReviewQueueKeyboard: () => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
 }));
 
-// Mock PendingApprovalCard — accepts the new `item: QueueItem` prop shape.
-vi.mock('../PendingApprovalCard', () => ({
-  PendingApprovalCard: ({ item }: { item: QueueItem }) => {
+// Mock the reviewQueueSlice — ReviewQueueView uses useRunStatus from this slice.
+// The mock uses the real Zustand store so setState works in tests.
+vi.mock('../../stores/reviewQueueSlice', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../stores/reviewQueueSlice')>();
+  return actual;
+});
+
+// Mock PendingApprovalCard — uses the stuck-aware variant path.
+// Exposes runStatus via data-run-status so tests can assert prop propagation.
+vi.mock('../ReviewQueue/PendingApprovalCard', () => ({
+  PendingApprovalCard: ({ item, runStatus }: { item: QueueItem; runStatus?: string }) => {
     const toolName = item.kind === 'single' ? item.approval.toolName : item.toolName;
-    return <div data-testid="pending-approval-card">{toolName}</div>;
+    return <div data-testid="pending-approval-card" data-run-status={runStatus ?? ''}>{toolName}</div>;
   },
 }));
 
@@ -48,6 +70,8 @@ describe('ReviewQueueView', () => {
   beforeEach(() => {
     mockQueue = [];
     mockInit.mockClear();
+    // Reset the slice's runStatusMap so tests start from a clean state.
+    useReviewQueueSlice.setState({ runStatusMap: {} });
   });
 
   it('renders "No pending approvals" when queue is empty', () => {
@@ -125,6 +149,29 @@ describe('ReviewQueueView', () => {
     ];
     render(<ReviewQueueView />);
     expect(screen.getByText('Pending')).toBeInTheDocument();
+  });
+
+  it('passes runStatus="stuck" to PendingApprovalCard when run is in runStatusMap as stuck', () => {
+    mockQueue = [
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+    ];
+    // Set the slice state before rendering so the QueueRow component picks it up.
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    render(<ReviewQueueView />);
+    const cards = screen.getAllByTestId('pending-approval-card');
+    expect(cards[0]).toHaveAttribute('data-run-status', 'stuck');
+  });
+
+  it('passes runStatus="" (undefined) to PendingApprovalCard when runStatusMap is empty', () => {
+    mockQueue = [
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+      { id: '2', runId: 'run-2', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
+    ];
+    useReviewQueueSlice.setState({ runStatusMap: {} });
+    render(<ReviewQueueView />);
+    const cards = screen.getAllByTestId('pending-approval-card');
+    expect(cards[0]).toHaveAttribute('data-run-status', '');
+    expect(cards[1]).toHaveAttribute('data-run-status', '');
   });
 });
 

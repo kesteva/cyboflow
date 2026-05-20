@@ -68,10 +68,24 @@ vi.mock('../hooks/useReviewQueueKeyboard', () => ({
   useReviewQueueKeyboard: () => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
 }));
 
-vi.mock('./PendingApprovalCard', () => ({
+// ReviewQueueView now imports from './ReviewQueue/PendingApprovalCard' (the stuck-aware variant).
+vi.mock('./ReviewQueue/PendingApprovalCard', () => ({
   PendingApprovalCard: ({ item }: { item: QueueItem }) => {
     const toolName = item.kind === 'single' ? item.approval.toolName : item.toolName;
     return <div data-testid="pending-approval-card">{toolName}</div>;
+  },
+}));
+
+// Mock tRPC client — reviewQueueSlice (imported transitively via ReviewQueueView) requires it.
+vi.mock('../utils/trpcClient', () => ({
+  trpc: {
+    cyboflow: {
+      events: {
+        onStuckDetected: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
+    },
   },
 }));
 
