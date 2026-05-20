@@ -1,9 +1,19 @@
 ---
 sprint: SPRINT-025
-pending_count: 14
-last_updated: "2026-05-20T15:05:00.000Z"
+pending_count: 15
+last_updated: "2026-05-20T15:30:00.000Z"
 ---
 # Findings Queue
+
+## FIND-SPRINT-025-17
+- **source:** TASK-667 (verifier)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** .soloflow/active/plans/orchestrator-and-trpc-router/TASK-667-plan.md (Implementation Notes section)
+- **description:** The executor's Implementation Notes record "CONFIRMED H2" but the diagnosis methodology bypassed Phase 1 step 3b's mandate to add the `[runEventBridge] published` log line, rebuild, run a fresh diagnostic workflow, and grep for the actual bridge-publish count. The notes say "Backend bridge-publish count: not available for this run (diagnostic log line was added after this run); inferred from DB as ~168 events published". This inference is logically unsound: when `skipPersistence: true`, the raw_events INSERT is owned by the CCM/EventRouter/RawEventsSink pipeline, NOT runEventBridge — so the 168-row DB count tells us only that CCM saw 168 events, not that the bridge's `onOutput` fired 168 times or that publish was called 168 times. The bridge's `onOutput` listener could plausibly have fired exactly once (e.g. H1a-style or a listener-detach upstream), which would produce the same DB count via the parallel CCM pipeline. The architectural fix (subscription in store singleton) is robust to any of H1a/H1b/H2 — so the wrong-diagnosis risk is bounded — but the "CONFIRMED H2" claim is not supported by the data the executor collected. Additionally, Phase 4 step 12's end-to-end smoke ("renderer console shows `#1`, `#2`, `#3`, ... up to at least `#25`") was not executed; AC8 ("the user-acceptance gate") is therefore not verified by either unit test or manual smoke.
+- **suggested_action:** Future tasks of this "diagnose-then-fix" shape need a verifier-side check that Phase 1 step results match the schema the plan prescribed (counts named, runId named, log lines that produced the counts named). Consider an `acceptance_criteria.verification` extension that lets the verifier mechanically check the Implementation Notes block for the expected counts. Separately, this specific task's AC8 should be cleared by a human smoke after the next merge — added to human-review-queue as a deferred verification.
+- **resolved_by:** 
 
 ## FIND-SPRINT-025-13
 - **source:** TASK-670 (code-reviewer)
@@ -143,3 +153,30 @@ last_updated: "2026-05-20T15:05:00.000Z"
 - **description:** 4 pre-existing test failures in runExecutor.test.ts unrelated to TASK-665 refactoring. Tests: (1) lifecycle transitions > onLifecycleTransition routes each phase — running() called 2x not 1x; (2) source arg integration > running() fired 2x not 1x; (3) source absent: running() fired 1x when expected 0; (4) panelId/runId alignment: running() fired 1x when expected 0. These failures exist identically in the main branch and appear to be a regression in RunExecutor lifecycle wiring (running() is being called from two code paths). Present before and after this refactor task.
 - **suggested_action:** Investigate RunExecutor.onLifecycleTransition — it appears running() is being triggered from both the sdk_initialized phase AND post_spawn or similar, causing double-firing. Check if a recent commit added a redundant lifecycle transition call.
 - **resolved_by:** 
+
+## FIND-SPRINT-025-14
+- **type:** scope_deviation
+- **source:** TASK-667 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/stores/cyboflowStore.ts
+- **description:** H2 confirmed as root cause; moving subscription from RunView useEffect to store-level singleton requires modifying cyboflowStore.ts which was not in files_owned. The plan explicitly describes this as the recommended H2 fix.
+- **resolved_by:** verifier — plan-prescribed: Phase 2 step 9 explicitly names `cyboflowStore.ts` as the H2 fix target ("Move the subscription to a Zustand-level singleton. In `cyboflowStore.ts`, on `setActiveRun(runId)`, call `cyboflowApi.subscribeToStreamEvents` ONCE per runId..."). Executor also amended `files_owned` to include the file.
+
+## FIND-SPRINT-025-15
+- **type:** scope_deviation
+- **source:** TASK-667 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/cyboflow/RunView.tsx
+- **description:** H2 confirmed as root cause; RunView.tsx subscription useEffect must be removed and replaced with a no-op since subscription is now in the store. Required to complete the H2 fix.
+- **resolved_by:** verifier — plan-prescribed: Phase 2 step 9 names `RunView.tsx` as "subscription-free" once the store singleton is in place ("RunView's useEffect becomes a no-op for subscriptions"). Executor also amended `files_owned` to include the file.
+
+## FIND-SPRINT-025-16
+- **type:** scope_deviation
+- **source:** TASK-667 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/cyboflow/__tests__/RunView.test.tsx
+- **description:** RunView tests must be updated since the subscription was moved from RunView useEffect to the store. Tests that assert subscribe/unsubscribe is called by RunView are no longer valid and need to reflect the new architecture.
+- **resolved_by:** verifier — AC-prescribed: AC "All existing runEventBridge.test.ts cases continue to pass; any new tests added for the confirmed hypothesis pass" combined with the Phase 2 step 9 fix requires updating the RunView test surface to match the new no-subscription contract. Executor also amended `files_owned` to include the file.
