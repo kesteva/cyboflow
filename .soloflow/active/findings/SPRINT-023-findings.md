@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-023
-pending_count: 1
-last_updated: "2026-05-20T18:20:00.000Z"
+pending_count: 2
+last_updated: "2026-05-20T01:47:42.341Z"
 ---
 # Findings Queue
 
@@ -51,3 +51,21 @@ SPRINT-023 started with missing infra: docker; tests deferred.
 - **location:** frontend/src/hooks/useStuckNotifications.ts:101
 - **description:** Unused eslint-disable directive (react-hooks/exhaustive-deps) — the rule no longer flags this useEffect block. Safe to delete the `// eslint-disable-next-line react-hooks/exhaustive-deps` comment on line 101.
 - **suggested_action:** Remove the eslint-disable-next-line comment.
+
+## FIND-SPRINT-023-6
+- **source:** TASK-633 (executor)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts:81, main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts:76
+- **description:** Two claudeCodeManager test files still carry inline function dbAdapter definitions identical to the canonical fixture at __test_fixtures__/dbAdapter.ts. They were not in TASK-633 files_owned and were not counted in the plan pre-flight check. Migrating them to the canonical import would complete the full repo-wide consolidation.
+- **suggested_action:** Add these two files to a follow-up task and apply the same canonical import pattern used in TASK-604 / TASK-633.
+
+## FIND-SPRINT-023-7
+- **type:** scope_deviation
+- **source:** TASK-625 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/OnboardingCard.test.tsx
+- **description:** required to meet AC: OnboardingCard.test.tsx mocks useReviewQueueKeyboard without forwarding the onDecide arg. After removing the duplicate window.keydown listener from ReviewQueueView, the y/n dismissal path goes through useReviewQueueKeyboard.onDecide only. The test mock must be updated to capture and invoke onDecide so the y-key-dismisses test still passes.
+- **resolved_by:** TASK-625
