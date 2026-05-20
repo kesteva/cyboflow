@@ -8,10 +8,6 @@
   "tasks": {
     "TASK-627": {
       "status": "pending"
-    },
-    "TASK-633": {
-      "status": "in_progress",
-      "started": "2026-05-20T01:38:34.001Z"
     }
   },
   "playwright_target": {
