@@ -6,11 +6,9 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-659": {
-      "status": "pending"
-    },
     "TASK-665": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-20T13:48:42.471Z"
     },
     "TASK-666": {
       "status": "pending"
@@ -19,7 +17,8 @@
       "status": "pending"
     },
     "TASK-668": {
-      "status": "pending"
+      "status": "in_progress",
+      "started": "2026-05-20T13:48:45.410Z"
     },
     "TASK-669": {
       "status": "pending"
