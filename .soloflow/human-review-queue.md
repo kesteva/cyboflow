@@ -1,8 +1,8 @@
 ---
-pending_count: 27
+pending_count: 28
 buckets:
   decisions: 1
-  actions: 4
+  actions: 5
   testing: 17
   deferred_visual: 5
 items: []
@@ -39,9 +39,14 @@ items: []
   action: "verification.visual_web is true and playwright_target.kind is 'electron', but the Playwright MCP tools cannot launch an Electron app — they drive a Chromium browser only. Navigating to http://localhost:4521 fails per CLAUDE.md (renderer depends on preload-injected electronTRPC and cannot bootstrap standalone). To unblock visual verification: either (a) set verification.visual_web=false for this repo, (b) add a launch script that exposes the Electron renderer over CDP for Playwright to attach to, or (c) run the existing tests/*.spec.ts suite manually via `pnpm test` after `pnpm dev`."
   blocked_checks:
     - Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling
+    - Level 2 visual_web — RunView SDK discriminator branch rendering not exercised in live Electron renderer
   level: sprint
   severity: low
   created_at: "2026-05-18T00:00:00.000Z"
+  affected_tasks:
+    - SPRINT-015
+    - TASK-682
+  updated_at: "2026-05-20T19:21:45.409Z"
 
 - task: SPRINT-017
   type: config_gap
@@ -78,6 +83,23 @@ items: []
     - TASK-570
     - TASK-596
     - TASK-597
+
+- task: TASK-672
+  type: config_issue
+  bucket: actions
+  dedup_key: visual_macos_unavailable
+  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-672-plan.md
+  action: "Verifier could not run macOS visual verification despite visual_macos=true. Peekaboo MCP reachable (Screen Recording granted) but Accessibility permission NOT granted — cannot drive UI events (click/type/menu). Grant Accessibility to the Peekaboo MCP host (Claude Code) in System Settings > Privacy & Security > Accessibility. See docs/VISUAL-VERIFICATION-SETUP.md."
+  blocked_checks:
+    - Level 2 visual verification for macOS
+    - Level 2 visual_macos — RunView discriminator branch rendering not exercised via Electron app driver
+  level: visual
+  severity: medium
+  created_at: "2026-05-20T18:53:08.744Z"
+  updated_at: "2026-05-20T19:21:49.509Z"
+  affected_tasks:
+    - TASK-672
+    - TASK-682
 
 ## Testing
 
@@ -164,14 +186,16 @@ items: []
     - Level 2 visual_web verification of Start Run + CyboflowRoot mount
     - Level 2 visual verification for web (review queue keyboard focus ring + scroll-into-view)
     - "Level 2 visual verification of Sidebar MCP dot rendering, color states, and tooltip"
+    - Level 2 visual verification for web (Electron renderer)
   level: visual
   severity: medium
   created_at: "2026-05-15T06:37:20.926Z"
-  updated_at: "2026-05-17T00:56:05.145Z"
+  updated_at: "2026-05-20T18:53:05.276Z"
   affected_tasks:
     - TASK-354
     - TASK-404
     - TASK-455
+    - TASK-672
 
 - task: TASK-455
   type: action_required
@@ -369,14 +393,7 @@ items: []
     - "visual_macos — Peekaboo MCP enumerates the Electron window and reports both permissions granted, but ScreenCaptureKit stream itself rejects: `Failed to start stream due to audio/video capture failure` (window-target) and `No displays available for capture` (screen-target). TCC grant is present at the policy layer but capture-stream not authorized for this Claude Code host process."
     - "playwright E2E (`pnpm test`) — `tests/cyboflow-day3-gate.spec.ts` imports vitest and breaks `playwright test` collection (pre-existing, unrelated to sprint); even when excluded, all other specs hit the same `electronTRPC` constraint."
   flows_deferred:
-    - TASK-657 panels:initialize cwd round-trip
-    - TASK-658 Add Terminal button in PanelTabBar (ProjectView + SessionView)
-    - TASK-659 useAddTerminalShortcut + TerminalPanel cwd breadcrumb
-    - TASK-668 stuck-event single-subscription chain (no duplicate notifications)
-    - TASK-669 runReasonMap/runDetectedAtMap eviction on terminal status
-    - TASK-670 escapeShellArg migration adversarial paths
-  severity: medium
-  created_at: "2026-05-20T15:42:00.000Z"
+    - null
 
 ## Overridden
 
