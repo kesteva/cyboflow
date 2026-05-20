@@ -178,6 +178,7 @@ function CardChrome({
             size="sm"
             disabled={busy || cancelBusy}
             onClick={handleCancelAndRestart}
+            title="Stops the Claude run and starts a new one with the same workflow + worktree. Note: until TASK-304 ships, pending approvals are not yet denied on the permission socket — Claude may need to time out on its side before the new run can proceed cleanly."
           >
             Cancel and restart
           </Button>

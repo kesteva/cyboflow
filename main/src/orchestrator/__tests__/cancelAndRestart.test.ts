@@ -314,6 +314,65 @@ describe('cancelAndRestartHandler', () => {
     expect(loggerErrors[0].ctx['runId']).toBe(runId);
   });
 
+  // -------------------------------------------------------------------------
+  // TASK-627: WARN log emitted after clearPendingForRun (TASK-304 no-op)
+  // -------------------------------------------------------------------------
+
+  it('emits a WARN with TASK-304 reference after clearPendingForRun', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    const loggerWarns: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const testLogger = {
+      info: vi.fn(),
+      warn: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerWarns.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const deps: HandlerDeps = {
+      ...makeDeps(db, spy, runQueues),
+      logger: testLogger,
+    };
+
+    await cancelAndRestartHandler(runId, deps);
+
+    expect(loggerWarns.length).toBe(1);
+    expect(loggerWarns[0].msg).toContain('[cancelAndRestart]');
+    // AC-TASK-627: warn message must reference TASK-304 so log scraping can flag the no-op.
+    expect(loggerWarns[0].msg).toContain('TASK-304'); // warn contains TASK-304
+    expect(loggerWarns[0].ctx['runId']).toBe(runId);
+    // Verify via spy: logger.warn was called with a message containing 'TASK-304'
+    expect(testLogger.warn).toHaveBeenCalledWith(expect.stringContaining('TASK-304'), expect.objectContaining({ runId }));
+  });
+
+  it('does NOT emit the TASK-304 WARN when the run is already terminal (noOp path)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'completed');
+
+    const loggerWarns: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const testLogger = {
+      info: vi.fn(),
+      warn: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerWarns.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const deps: HandlerDeps = {
+      ...makeDeps(db, spy, runQueues),
+      logger: testLogger,
+    };
+
+    const result = await cancelAndRestartHandler(runId, deps);
+
+    expect('noOp' in result && result.noOp).toBe(true);
+    expect(loggerWarns.length).toBe(0);
+  });
+
   it('still works without a logger when claudeManagerStop rejects', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
