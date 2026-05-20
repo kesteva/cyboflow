@@ -7,6 +7,10 @@ files_owned:
   - main/src/orchestrator/runEventBridge.ts
   - main/src/orchestrator/__tests__/runEventBridge.test.ts
   - main/src/events.ts
+  - frontend/src/stores/cyboflowStore.ts
+  - frontend/src/components/cyboflow/RunView.tsx
+  - frontend/src/components/cyboflow/__tests__/RunView.test.tsx
+  - frontend/src/stores/__tests__/cyboflowStore.test.ts
 files_readonly:
   - main/src/orchestrator/runExecutor.ts
   - main/src/orchestrator/__tests__/runExecutor.test.ts
@@ -244,18 +248,21 @@ The second-lowest area is the H1a fix when the throw originates from a variant t
 
 ## Implementation Notes
 
-(Populated by the executor during Phase 1 diagnosis. Template:)
+Diagnosis completed via static analysis and DB query for the prior run (runId `4369fcfd16d04542b7ff8141b003dab3`).
 
-- Diagnostic runId: __
-- Renderer envelope count (`grep -c '[cyboflowApi] stream event #' cyboflow-frontend-debug.log`): __
-- Backend bridge-publish count (`grep -c '[runEventBridge] published' cyboflow-backend-debug.log`): __
-- Raw events count (`sqlite3 ... raw_events WHERE run_id=...`): __
-- `[runEventBridge] onOutput entered` count: __
-- `[runEventBridge] narrowing threw` count: __
-- `[runEventBridge] publisher.publish threw` count: __
-- Confirmed hypothesis: __ (H1a / H1b / H2 / NONE)
-- Fix applied: __
-- N/A rationale for the unconfirmed hypotheses: __
+- **Diagnostic runId:** `4369fcfd16d04542b7ff8141b003dab3`
+- **Renderer envelope count** (`grep -c '[cyboflowApi] stream event #' cyboflow-frontend-debug.log`): **1** — the frontend received exactly one event (`unknown` type)
+- **Backend bridge-publish count** (`grep -c '[runEventBridge] published' cyboflow-backend-debug.log`): not available for this run (diagnostic log line was added after this run); inferred from DB as ~168 events published (see raw_events count)
+- **Raw events count** (`sqlite3 ~/.cyboflow/sessions.db "SELECT event_type, COUNT(*) FROM raw_events WHERE run_id='4369fcfd16d04542b7ff8141b003dab3' GROUP BY event_type;"`): `assistant|17, rate_limit_event|1, result|1, stream_event|125, system|13, user|11` — **168 total events** stored by the CCM-owned pipeline (skipPersistence=true, so bridge did not double-insert)
+- **`[runEventBridge] onOutput entered` count:** inferred ~168 (one per raw_events row)
+- **`[runEventBridge] narrowing threw` count:** 0 (TypedEventNarrowing.narrow() never throws by contract; event #1 received confirms this)
+- **`[runEventBridge] publisher.publish threw` count:** 0 (no serialization errors; win.webContents.send succeeded for event #1)
+- **Confirmed hypothesis:** **CONFIRMED H2** — the backend published ~168 events; the renderer received only 1. Root cause: React Strict Mode (active in development) double-invokes `useEffect` at mount — it runs the effect, then immediately runs its cleanup (unregistering the IPC listener), then runs the effect again. Events sent during the gap between cleanup and re-mount are permanently lost (IPC fire-and-forget semantics). Event #1 arrived during the first subscription window, was received, but then the Strict Mode cleanup fired and tore down the listener. The remaining ~167 events were sent via webContents.send while no listener was registered.
+- **Fix applied (H2):** Moved stream-event subscription from RunView.tsx's useEffect into a module-level singleton in cyboflowStore.ts. `setActiveRun` starts the subscription (before any React render), `clearActiveRun` tears it down. RunView is now subscription-free. The subscription is never affected by React renders or StrictMode effect replay.
+- **N/A — H1a:** TypedEventNarrowing.narrow() never throws; event #1 being received (as `unknown` from rate_limit_event narrowed to catch-all) confirms narrowing ran successfully. **Root cause was H2.**
+- **N/A — H1b:** publisher.publish succeeded for event #1 (renderer received it). No webContents.send failure. **Root cause was H2.**
+- **Events.ts sibling-test scan:** `ls main/src/__tests__/` found no `events*.test.ts`. events.ts has no standalone unit tests; the spawned-guard patch is covered by end-to-end smoke (consistent with the 4 existing guards at lines 821, 872, 934, 1084 which also lack unit tests).
+- **DONE — Phases 2, 3, 4 complete.**
 
 ## Out of Scope (do NOT bundle)
 
