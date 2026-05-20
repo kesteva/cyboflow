@@ -23,13 +23,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import type { AppServices } from '../types';
-import type { LoggerLike } from '../../orchestrator/types';
 import { RunLauncher } from '../../orchestrator/runLauncher';
 import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../../orchestrator/runLauncher';
 import type { McpConfigWriter } from '../../orchestrator/mcpConfigWriter';
 import { WorkflowRegistry } from '../../orchestrator/workflowRegistry';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { registerCyboflowHandlers, setCyboflowHealth } from '../cyboflow';
 
@@ -42,15 +42,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-function makeSilentLogger(): LoggerLike {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
 }
 
 /**
@@ -108,7 +99,7 @@ function makeServices(
   overrides: Partial<AppServices> = {},
 ): AppServices {
   const dbLike = dbAdapter(db);
-  const logger = makeSilentLogger();
+  const logger = makeSpyLogger();
   const workflowRegistry = new WorkflowRegistry(dbLike, logger);
 
   const stubMcpConfigWriter: McpConfigWriter = {
@@ -281,9 +272,7 @@ describe('registerCyboflowHandlers — cyboflow:startRun', () => {
 
   it('returns { success: true, data: { runId, worktreePath, branchName } } on happy path', async () => {
     await withTempDir('cyboflow-ipc-test-', async (tmpDir) => {
-      const logger: LoggerLike = {
-        info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
-      };
+      const logger = makeSpyLogger();
       const dbLike = dbAdapter(db);
       const workflowRegistry = new WorkflowRegistry(dbLike, logger);
 

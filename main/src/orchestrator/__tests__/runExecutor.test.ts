@@ -30,24 +30,15 @@ import type {
 import type { WorkflowRow, WorkflowRunRow } from '../../../../shared/types/workflows';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { LoggerLike } from '../types';
 import type { McpConfigWriter } from '../mcpConfigWriter';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
 // Fixture factories
 // ---------------------------------------------------------------------------
-
-function makeLogger(): LoggerLike {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
-}
 
 function makeSpawner(): ClaudeSpawnerLike {
   return {
@@ -123,7 +114,7 @@ describe('RunExecutor.execute — missing rows', () => {
       getRunById: vi.fn().mockReturnValue(null),
       getById: vi.fn().mockReturnValue(null),
     };
-    const executor = new TestableRunExecutor(makeSpawner(), registry, makeLogger());
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
 
     await expect(executor.execute('missing-run-id')).rejects.toThrow(
       'workflow_runs row not found for runId=missing-run-id',
@@ -136,7 +127,7 @@ describe('RunExecutor.execute — missing rows', () => {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(null),
     };
-    const executor = new TestableRunExecutor(makeSpawner(), registry, makeLogger());
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
 
     await expect(executor.execute(run.id)).rejects.toThrow('workflow row not found for workflowId=');
   });
@@ -148,7 +139,7 @@ describe('RunExecutor.execute — missing rows', () => {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    const executor = new TestableRunExecutor(makeSpawner(), registry, makeLogger());
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
 
     await expect(executor.execute(run.id)).rejects.toThrow('worktree_path is null');
   });
@@ -163,7 +154,7 @@ describe('RunExecutor.execute — default getPrompt sentinel', () => {
       getById: vi.fn().mockReturnValue(workflow),
     };
     // Use base RunExecutor with no promptReader — confirms sentinel still fires
-    const executor = new RunExecutor(makeSpawner(), registry, makeLogger());
+    const executor = new RunExecutor(makeSpawner(), registry, makeSpyLogger());
 
     await expect(executor.execute(run.id)).rejects.toThrow('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected');
   });
@@ -178,7 +169,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
       getById: vi.fn().mockReturnValue(workflow),
     };
     const spawner = makeSpawner();
-    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
 
     await executor.execute(run.id);
 
@@ -227,7 +218,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
       },
     );
 
-    const executor = new OrderTrackingExecutor(spawner, registry, makeLogger());
+    const executor = new OrderTrackingExecutor(spawner, registry, makeSpyLogger());
     await executor.execute(run.id);
 
     expect(callOrder).toContain('bridgeEvents');
@@ -267,7 +258,7 @@ describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fir
       }
     }
 
-    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
 
     await executor.execute(run.id);
 
@@ -309,7 +300,7 @@ describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
       }
     }
 
-    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
 
     // Start execute() in background — it blocks on spawnCliProcess.
     const executePromise = executor.execute(run.id);
@@ -365,7 +356,7 @@ describe('RunExecutor.cancel — aborts spawner and disposes bridge', () => {
       }
     }
 
-    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
     const executePromise = executor.execute(run.id);
 
     await new Promise((r) => setTimeout(r, 0));
@@ -405,7 +396,7 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
       }
     }
 
-    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
     await executor.execute(run.id);
 
     expect(disposeSpy).toHaveBeenCalledOnce();
@@ -434,7 +425,7 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
       }
     }
 
-    const executor = new BridgeReturningExecutor(spawner, registry, makeLogger());
+    const executor = new BridgeReturningExecutor(spawner, registry, makeSpyLogger());
     await expect(executor.execute(run.id)).rejects.toThrow('spawn failed');
 
     // Despite the error, dispose() must have been called.
@@ -459,7 +450,7 @@ describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () =>
       },
     );
 
-    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
     await executor.execute(run.id);
 
     // The spawner should have been called with a preToolUseHook function.
@@ -484,7 +475,7 @@ describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () =>
       },
     );
 
-    const executor = new TestableRunExecutor(spawner, registry, makeLogger());
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
     await executor.execute(run.id);
 
     // For 'dontAsk', buildPreToolUseHook returns undefined so no hook is set.
@@ -525,7 +516,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     const reader = makeStubReader({
       '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: '' },
     });
-    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
 
     await executor.execute(run.id);
 
@@ -542,7 +533,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
       getById: vi.fn().mockReturnValue(workflow),
     };
     const reader = makeStubReader({}); // empty — will throw on any read
-    const executor = new RunExecutor(makeSpawner(), registry, makeLogger(), reader);
+    const executor = new RunExecutor(makeSpawner(), registry, makeSpyLogger(), reader);
 
     await expect(executor.execute(run.id)).rejects.toThrow('WorkflowPromptReadError');
   });
@@ -558,7 +549,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     const reader = makeStubReader({
       '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: 'always use TypeScript' },
     });
-    const executor = new RunExecutor(spawner, registry, makeLogger(), reader);
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
 
     await executor.execute(run.id);
 
@@ -615,7 +606,7 @@ describe('lifecycle transitions', () => {
       }
     }
 
-    const executor = new LifecycleTestExecutor(makeSpawner(), registry, makeLogger(), undefined, lt);
+    const executor = new LifecycleTestExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, lt);
 
     await executor.testLifecycleTransition(run.id, 'sdk_initialized');
     expect(running).toHaveBeenCalledOnce();
@@ -650,7 +641,7 @@ describe('lifecycle transitions', () => {
     };
     const spawner = makeSpawner(); // resolves successfully
 
-    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger(), undefined, lt);
     await executor.execute(run.id);
 
     expect(completed).toHaveBeenCalledOnce();
@@ -674,7 +665,7 @@ describe('lifecycle transitions', () => {
       new Error('SDK spawn failed with exit code 1'),
     );
 
-    const executor = new TestableRunExecutor(spawner, registry, makeLogger(), undefined, lt);
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger(), undefined, lt);
     await expect(executor.execute(run.id)).rejects.toThrow('SDK spawn failed with exit code 1');
 
     expect(failed).toHaveBeenCalledOnce();
@@ -782,7 +773,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     const executor = new TestableRunExecutor(
       spawner,
       registry,
-      makeLogger(),
+      makeSpyLogger(),
       undefined,
       lt,
       publisher,
@@ -857,7 +848,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     const executor = new TestableRunExecutor(
       makeSpawner(),
       registry,
-      makeLogger(),
+      makeSpyLogger(),
       undefined,
       lt,
       publisher,
@@ -888,7 +879,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       // Seed workflow
       const workflowId = randomUUID();
@@ -1001,7 +992,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const workflowId = randomUUID();
       db.prepare(
@@ -1095,7 +1086,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const workflowId = randomUUID();
       db.prepare(
@@ -1157,7 +1148,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const workflowId = randomUUID();
       db.prepare(
@@ -1276,7 +1267,7 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     const executor = new TestableRunExecutor(
       spawner,
       registry,
-      makeLogger(),
+      makeSpyLogger(),
       undefined,
       lt,
       publisher,

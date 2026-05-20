@@ -19,11 +19,11 @@ import { RunLauncher } from '../runLauncher';
 import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
-import type { LoggerLike } from '../types';
 import type { McpConfigWriter } from '../mcpConfigWriter';
 import type { RunExecutor } from '../runExecutor';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
@@ -35,15 +35,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-function makeLogger(): LoggerLike {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
 }
 
 // Shared stubs for the 4 required MCP collaborators.
@@ -80,7 +71,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       writeFileSync(gitignorePath, 'node_modules\n', 'utf-8');
@@ -97,7 +88,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       const original = 'node_modules\n.cyboflow/worktrees/\n';
@@ -118,7 +109,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       const original = '.cyboflow/worktrees\n';
@@ -137,7 +128,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       expect(existsSync(gitignorePath)).toBe(false);
@@ -155,7 +146,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
       const db = createTestDb();
       const fakeRegistry = {} as WorkflowRegistry;
       const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
       const gitignorePath = join(tmpDir, '.gitignore');
       writeFileSync(gitignorePath, 'dist/\n', 'utf-8');
@@ -178,7 +169,7 @@ describe('RunLauncher.launch', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       // Seed a workflow row so createRun can look it up
       const seedWorkflowId = randomUUID();
@@ -246,7 +237,7 @@ describe('RunLauncher.launch', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const fakeRegistry = {
         getById: vi.fn().mockReturnValue(null),
@@ -265,7 +256,7 @@ describe('RunLauncher.launch', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       // Seed a workflow
       const seedWorkflowId2 = randomUUID();
@@ -411,7 +402,7 @@ describe('RunLauncher.launch error handling', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
 
@@ -436,7 +427,7 @@ describe('RunLauncher.launch error handling', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
 
@@ -486,7 +477,7 @@ describe('RunLauncher.launch error handling', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
 
@@ -519,7 +510,7 @@ describe('RunLauncher.launch publisher', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       // Seed a workflow row
       const seedWorkflowId = randomUUID();
@@ -606,7 +597,7 @@ describe('RunLauncher.launch publisher', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const seedWorkflowId = randomUUID();
       db.prepare(
@@ -663,7 +654,7 @@ describe('RunLauncher constructor validation', () => {
     const adapter = dbAdapter(db);
     const fakeRegistry = {} as WorkflowRegistry;
     const fakeWorktree = {} as WorktreeManager;
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
     return { adapter, fakeRegistry, fakeWorktree, logger };
   }
 
@@ -717,7 +708,7 @@ describe('RunLauncher constructor validation', () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const workflowId = randomUUID();
       db.prepare(
@@ -821,7 +812,7 @@ describe('RunLauncher constructor validation', () => {
     await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
 
@@ -854,7 +845,7 @@ describe('RunLauncher constructor validation', () => {
     await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
       const db = createTestDb();
       const adapter = dbAdapter(db);
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
 
       const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
 
@@ -888,7 +879,7 @@ describe('RunLauncher constructor validation', () => {
     const adapter = dbAdapter(db);
     const fakeRegistry = {} as WorkflowRegistry;
     const fakeWorktree = {} as WorktreeManager;
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
     const fakeRunExecutor = { execute: vi.fn() } as unknown as RunExecutor;
 
     // Must NOT throw even though the four legacy collaborators are undefined

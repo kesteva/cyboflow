@@ -21,9 +21,9 @@ import { join } from 'path';
 import * as path from 'path';
 import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
-import type { LoggerLike } from '../types';
 import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
 // ---------------------------------------------------------------------------
@@ -36,23 +36,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   return db;
-}
-
-/** Creates a fake LoggerLike that records calls for assertion. */
-function makeLogger(): LoggerLike & {
-  warnCalls: Array<{ message: string; context?: Record<string, unknown> }>;
-  errorCalls: Array<{ message: string; context?: Record<string, unknown> }>;
-} {
-  const warnCalls: Array<{ message: string; context?: Record<string, unknown> }> = [];
-  const errorCalls: Array<{ message: string; context?: Record<string, unknown> }> = [];
-  return {
-    warnCalls,
-    errorCalls,
-    info: vi.fn(),
-    warn: (message, context) => warnCalls.push({ message, context }),
-    error: (message, context) => errorCalls.push({ message, context }),
-    debug: vi.fn(),
-  };
 }
 
 /** Write a minimal markdown file with optional frontmatter to a temp dir. */
@@ -85,11 +68,11 @@ function buildDescriptors(
 describe('WorkflowRegistry', () => {
   let db: Database.Database;
   let registry: WorkflowRegistry;
-  let logger: ReturnType<typeof makeLogger>;
+  let logger: ReturnType<typeof makeSpyLogger>;
 
   beforeEach(() => {
     db = createTestDb();
-    logger = makeLogger();
+    logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });
 
@@ -195,10 +178,11 @@ describe('WorkflowRegistry', () => {
 
         // TASK-601: the log level was raised from WARN to ERROR so missing
         // workflow files are fail-loud rather than silently swallowed.
-        expect(logger.errorCalls.length).toBeGreaterThan(0);
-        const errMsg = logger.errorCalls[0].message;
+        const errorCalls = logger.calls.filter((c) => c.level === 'error');
+        expect(errorCalls.length).toBeGreaterThan(0);
+        const errMsg = errorCalls[0].message;
         expect(errMsg).toContain('could not read workflow file');
-        const errCtx = logger.errorCalls[0].context;
+        const errCtx = errorCalls[0].ctx;
         expect(errCtx?.path).toBe(nonExistentPath);
       });
     });
@@ -588,7 +572,7 @@ describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
       const db = new Database(':memory:');
       db.exec(REGISTRY_SCHEMA);
 
-      const logger = makeLogger();
+      const logger = makeSpyLogger();
       const registry = new WorkflowRegistry(dbAdapter(db), logger);
 
       const finalDescriptors = resolvedPaths.map((rp) => ({
@@ -599,7 +583,7 @@ describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
       registry.seed(1, finalDescriptors);
 
       // No ERROR log should fire in the happy path.
-      expect(logger.errorCalls.length).toBe(0);
+      expect(logger.calls.filter((c) => c.level === 'error').length).toBe(0);
 
       // All 5 workflows should have permission_mode = 'acceptEdits'.
       interface ModeRow { name: string; permission_mode: string }
