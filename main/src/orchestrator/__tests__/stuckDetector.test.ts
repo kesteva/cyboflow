@@ -33,9 +33,9 @@ import {
   type PermissionServerLike,
   type StuckDetectorDeps,
 } from '../stuckDetector';
-import type { LoggerLike } from '../types';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
 // Database helpers
@@ -134,17 +134,6 @@ function seedApproval(
 // Fake implementations
 // ---------------------------------------------------------------------------
 
-function makeLogger(): LoggerLike & { calls: Array<{ level: string; message: string }> } {
-  const calls: Array<{ level: string; message: string }> = [];
-  return {
-    calls,
-    info: (message) => calls.push({ level: 'info', message }),
-    warn: (message) => calls.push({ level: 'warn', message }),
-    error: (message) => calls.push({ level: 'error', message }),
-    debug: (message) => calls.push({ level: 'debug', message }),
-  };
-}
-
 function makeClaudeManager(activeRunIds: Set<string> = new Set()): ClaudeManagerLike {
   return {
     hasActiveRunForId: (runId) => activeRunIds.has(runId),
@@ -174,7 +163,7 @@ describe('StuckDetector scheduling', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     const detector = new StuckDetector({
       db,
@@ -196,7 +185,7 @@ describe('StuckDetector scheduling', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     const detector = new StuckDetector({
       db,
@@ -226,7 +215,7 @@ describe('StuckDetector scheduling', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     const detector = new StuckDetector({
       db,
@@ -260,7 +249,7 @@ describe('StuckDetector 5-minute filter', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     // Two runs — both awaiting_review
     seedRun(rawDb, 'run-young', 'awaiting_review');
@@ -311,7 +300,7 @@ describe('StuckDetector classification: orphan_pty', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     seedRun(rawDb, 'run-orphan', 'awaiting_review');
     seedApproval(rawDb, 'approval-orphan', 'run-orphan', 6 * 60 * 1000);
@@ -345,7 +334,7 @@ describe('StuckDetector classification: stale_socket', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     seedRun(rawDb, 'run-socket', 'awaiting_review');
     seedApproval(rawDb, 'approval-socket', 'run-socket', 6 * 60 * 1000);
@@ -379,7 +368,7 @@ describe('StuckDetector classification: self_deadlock', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     seedRun(rawDb, 'run-self', 'awaiting_review');
     // Two pending approvals for the same run
@@ -415,7 +404,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     seedRun(rawDb, 'run-cross-1', 'awaiting_review');
     seedRun(rawDb, 'run-cross-2', 'awaiting_review'); // conflicting run
@@ -454,7 +443,7 @@ describe('StuckDetector status guard', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
     emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
@@ -501,7 +490,7 @@ describe('StuckDetector idempotency', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
     emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
@@ -537,7 +526,7 @@ describe('StuckDetector error isolation', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     seedRun(rawDb, 'run-error', 'awaiting_review');
     seedApproval(rawDb, 'approval-error', 'run-error', 6 * 60 * 1000);
@@ -589,7 +578,7 @@ describe('StuckDetector event emission shape', () => {
     const rawDb = createTestDb();
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
     const stuckEvents: StuckDetectedEvent[] = [];
     emitter.on('runs:stuck', (e: StuckDetectedEvent) => stuckEvents.push(e));
 
