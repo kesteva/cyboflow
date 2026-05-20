@@ -201,6 +201,7 @@ function StreamEventRow({ event }: { event: StreamEvent }): ReactElement {
 }
 
 function UnknownEventRow({ event }: { event: StreamEvent }): ReactElement {
+  const rawPayload = event.payload;
   return (
     <div className="mb-1 rounded border border-amber-500 bg-bg-secondary p-2 text-xs">
       <span className="font-semibold text-amber-500">Unrecognized event</span>
@@ -209,7 +210,7 @@ function UnknownEventRow({ event }: { event: StreamEvent }): ReactElement {
       <details className="mt-1">
         <summary className="cursor-pointer text-text-secondary">Show payload</summary>
         <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-text-secondary">
-          {JSON.stringify(event.payload, null, 2)}
+          {JSON.stringify(rawPayload, null, 2)}
         </pre>
       </details>
     </div>
