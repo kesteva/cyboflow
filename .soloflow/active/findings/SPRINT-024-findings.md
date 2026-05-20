@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-024
 pending_count: 5
-last_updated: "2026-05-20T05:35:00.000Z"
+last_updated: "2026-05-20T05:50:33.039Z"
 ---
 # Findings Queue
 
@@ -72,3 +72,12 @@ last_updated: "2026-05-20T05:35:00.000Z"
 - **location:** main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts
 - **description:** required to meet AC: sweep-grep gate AC requires all orchestrator test files to use shared fixture; preToolUseHookHelper.test.ts has a local makeLogger() that would violate the completeness gate. Claimed to migrate it alongside the other 6 identified files.
 - **resolved_by:** verifier — plan-prescribed: Implementation Step 1 ("Add any missed sites to files_owned") + AC-prescribed: sweep-grep gate AC4 would fail without this migration
+
+## FIND-SPRINT-024-8
+- **type:** scope_deviation
+- **source:** TASK-647 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
+- **description:** required to meet AC: this test file uses ClaudeCodeManager.setSharedDb() in beforeEach/afterEach and new ClaudeCodeManager() without db arg. Removing the static injector (AC-1) makes these calls compile errors. File must be updated to pass db as 5th constructor arg and remove setSharedDb calls.
+- **resolved_by:** TASK-647
