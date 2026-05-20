@@ -55,8 +55,9 @@ export interface ReviewQueueSliceState {
    * StuckReason that caused the run to be classified stuck.
    *
    * Populated when `applyStuckEvent` is called with a `reason` payload.
-   * Entries are written alongside runStatusMap but are NOT evicted on terminal
-   * status — the reason stays available for diagnostic display even after cancel.
+   * Entries are written alongside `runStatusMap` and are co-evicted by
+   * `setRunStatus` when the run reaches a terminal status (`completed` /
+   * `canceled` / `failed`).
    */
   runReasonMap: Record<string, StuckReason>;
 
@@ -65,6 +66,8 @@ export interface ReviewQueueSliceState {
    * values are Unix epoch milliseconds of when the run was classified stuck.
    *
    * Populated when `applyStuckEvent` is called with a `detectedAt` payload.
+   * Entries are co-evicted by `setRunStatus` when the run reaches a terminal
+   * status (`completed` / `canceled` / `failed`).
    */
   runDetectedAtMap: Record<string, number>;
 
@@ -95,10 +98,12 @@ export interface ReviewQueueSliceState {
    * ## Eviction semantics
    *
    * When `status` is a terminal value (`completed`, `canceled`, or `failed`),
-   * the entry is **removed** from `runStatusMap` instead of stored.  This
-   * prevents unbounded map growth: once a run reaches a terminal state it will
-   * never transition again, so tracking it provides no value and wastes memory.
-   * Non-terminal statuses are stored normally.
+   * the entry is **removed** from `runStatusMap` AND from the companion
+   * `runReasonMap` / `runDetectedAtMap`.  Once a run reaches a terminal
+   * state the only consumer (`PendingApprovalCard`) gates `useRunStuckDetails`
+   * on `isStuck`, which is false post-terminal — so reason/detectedAt entries
+   * become unreachable.  Co-eviction prevents unbounded growth of all three
+   * maps over a long-running app session.
    */
   setRunStatus: (runId: string, status: WorkflowRunStatus) => void;
 
@@ -145,13 +150,24 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
   },
 
   setRunStatus: (runId, status) => {
-    // Terminal statuses: evict the entry instead of storing it.
-    // See JSDoc on the interface method for the eviction rationale.
+    // Terminal statuses: evict the entry from all three maps to prevent
+    // unbounded growth. The sole consumer (PendingApprovalCard) gates
+    // useRunStuckDetails on `isStuck`, which becomes false the moment we
+    // remove runStatusMap[runId] — so the reason/detectedAt entries are
+    // unreachable anyway. Keeping them around is a slow memory leak.
     if (status === 'completed' || status === 'canceled' || status === 'failed') {
       set((state) => {
-        const next = { ...state.runStatusMap };
-        delete next[runId];
-        return { runStatusMap: next };
+        const nextStatus = { ...state.runStatusMap };
+        delete nextStatus[runId];
+        const nextReason = { ...state.runReasonMap };
+        delete nextReason[runId];
+        const nextDetectedAt = { ...state.runDetectedAtMap };
+        delete nextDetectedAt[runId];
+        return {
+          runStatusMap: nextStatus,
+          runReasonMap: nextReason,
+          runDetectedAtMap: nextDetectedAt,
+        };
       });
       return;
     }
@@ -258,6 +274,9 @@ export function pureApplyStuckEvent(
  * Applies a status update to a given runStatusMap snapshot without touching
  * the Zustand store.  Terminal statuses (`completed`, `canceled`, `failed`)
  * cause eviction of the key; all others are stored normally.
+ *
+ * Note: this helper operates on `runStatusMap` only.  Use
+ * `pureSetRunStatusAllMaps` to test multi-map eviction behavior.
  */
 export function pureSetRunStatus(
   map: Record<string, WorkflowRunStatus>,
@@ -271,4 +290,38 @@ export function pureSetRunStatus(
     return next;
   }
   return { ...map, [runId]: status };
+}
+
+/**
+ * Pure setRunStatus reducer that operates on all three slice maps — exported
+ * for unit testing. Mirrors the Zustand action: terminal statuses evict the
+ * key from all three maps; non-terminal statuses update only runStatusMap.
+ */
+export function pureSetRunStatusAllMaps(
+  maps: {
+    runStatusMap: Record<string, WorkflowRunStatus>;
+    runReasonMap: Record<string, StuckReason>;
+    runDetectedAtMap: Record<string, number>;
+  },
+  runId: string,
+  status: WorkflowRunStatus,
+): {
+  runStatusMap: Record<string, WorkflowRunStatus>;
+  runReasonMap: Record<string, StuckReason>;
+  runDetectedAtMap: Record<string, number>;
+} {
+  if (status === 'completed' || status === 'canceled' || status === 'failed') {
+    const nextStatus = { ...maps.runStatusMap };
+    const nextReason = { ...maps.runReasonMap };
+    const nextDetectedAt = { ...maps.runDetectedAtMap };
+    delete nextStatus[runId];
+    delete nextReason[runId];
+    delete nextDetectedAt[runId];
+    return { runStatusMap: nextStatus, runReasonMap: nextReason, runDetectedAtMap: nextDetectedAt };
+  }
+  return {
+    runStatusMap: { ...maps.runStatusMap, [runId]: status },
+    runReasonMap: maps.runReasonMap,
+    runDetectedAtMap: maps.runDetectedAtMap,
+  };
 }
