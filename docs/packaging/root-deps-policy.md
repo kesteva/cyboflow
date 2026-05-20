@@ -14,19 +14,14 @@ _(none yet — see Dead-dep entries below for pending cleanup)_
 
 ## Dead dependencies in main/package.json
 
-These packages are listed in `main/package.json` but have **zero importers** in
-`main/src/**`. They should be removed from `main/package.json` in a dedicated
-cleanup task (deletion is a behavior change requiring an explicit decision, so it
-is out of scope here).
+_(none — see Removed dependencies below)_
 
-- `electron-store@^11.0.0` — declared in `main/package.json` only. As of
-  2026-05-19, a full grep of `main/src/**/*.ts` finds no `import … from
-  'electron-store'` or `require('electron-store')` call anywhere. The dependency
-  appears to be a Crystal-era leftover that was never removed when window-state
-  persistence was later handled differently. Root `package.json` intentionally
-  omits it — adding it there would only entrench a dead dep in two places.
-  Recommended action: remove from `main/package.json` in a follow-up task (see
-  findings file for the logged finding).
+## Removed dependencies
+
+- `electron-store@^11.0.0` — removed in TASK-653 (sprint SPRINT-019 follow-up).
+  Was declared in `main/package.json` but had zero importers in `main/src/**`,
+  `frontend/src/**`, `shared/**`, or `scripts/**` — a Crystal-era leftover.
+  Removal verified by repo-wide grep returning zero hits.
 
 ## When to revisit
 
