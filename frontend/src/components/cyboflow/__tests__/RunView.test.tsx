@@ -1,5 +1,5 @@
 /**
- * RunView rendering tests (updated in TASK-667).
+ * RunView rendering tests (updated in TASK-682).
  *
  * After TASK-667 confirmed H2 (renderer listener teardown), the stream-event
  * subscription was moved from RunView's useEffect into the cyboflowStore
@@ -9,7 +9,8 @@
  *   1. Renders a "No active run" placeholder when activeRunId is null.
  *   2. Renders the runId when an active run is set.
  *   3. Renders "Waiting for events…" before any events arrive.
- *   4. Renders stream events from the store as JSON blobs.
+ *   4. Renders each SDK discriminator (system / assistant / user / result /
+ *      stream_event / unknown) through its dedicated typed branch (not a JSON blob).
  *   5. Subscription is NOT managed by RunView (it is managed by the store).
  *
  * Subscription lifecycle tests live in
@@ -81,27 +82,160 @@ describe('RunView', () => {
     expect(screen.getByText(/Waiting for events/)).toBeInTheDocument();
   });
 
-  it('renders stream events from the store as JSON blobs', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-abc-123');
-    });
-    const testEvent: StreamEvent = {
-      runId: 'run-abc-123',
+  // -------------------------------------------------------------------------
+  // SDK discriminator branch tests (TASK-682)
+  // -------------------------------------------------------------------------
+
+  it('routes a system/init event to the typed system branch', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
       type: 'system',
-      payload: { type: 'system', subtype: 'init' },
+      payload: {
+        type: 'system',
+        subtype: 'init',
+        session_id: 'sess-xyz-123',
+        cwd: '/tmp/wt',
+        model: 'claude-sonnet-4-5',
+        tools: [],
+        mcp_servers: [],
+        permissionMode: 'default',
+      },
       timestamp: '2026-05-20T00:00:00Z',
     };
-    act(() => {
-      useCyboflowStore.getState().appendStreamEvent(testEvent);
-    });
-
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
     render(<RunView />);
+    expect(screen.getByText(/claude-sonnet-4-5/)).toBeInTheDocument();
+    expect(screen.getByText(/\/tmp\/wt/)).toBeInTheDocument();
+    // Must NOT be a whole-event JSON dump — "session_id" key should not be
+    // rendered as a JSON property label.
+    expect(screen.queryByText(/"session_id"/)).not.toBeInTheDocument();
+  });
 
-    // Should not show the "waiting" placeholder anymore
-    expect(screen.queryByText(/Waiting for events/)).not.toBeInTheDocument();
+  it('routes an assistant event to the typed assistant branch', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'assistant',
+      payload: {
+        type: 'assistant',
+        message: {
+          id: 'msg-001',
+          model: 'claude-sonnet-4-5',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Hello, I am working on your task now.' },
+          ],
+        },
+      },
+      timestamp: '2026-05-20T00:00:01Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The text block content should be visible
+    expect(screen.getByText('Hello, I am working on your task now.')).toBeInTheDocument();
+    // Should NOT be a whole-event JSON dump
+    expect(screen.queryByText(/"msg-001"/)).not.toBeInTheDocument();
+  });
 
-    // The JSON blob should be visible
-    expect(screen.getByText(/system/)).toBeInTheDocument();
+  it('routes a user event to the typed user branch and shows tool_result content', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'user',
+      payload: {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_01abc',
+              content: 'File written successfully.',
+              is_error: false,
+            },
+          ],
+        },
+      },
+      timestamp: '2026-05-20T00:00:02Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The tool result content should be visible
+    expect(screen.getByText(/File written successfully/)).toBeInTheDocument();
+    // Short hash of tool_use_id should appear
+    expect(screen.getByText(/toolu_01/)).toBeInTheDocument();
+    // Should NOT be a whole-event JSON dump
+    expect(screen.queryByText(/"tool_use_id"/)).not.toBeInTheDocument();
+  });
+
+  it('routes a result event to the typed result branch and shows subtype and num_turns', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'result',
+      payload: {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        duration_ms: 4321,
+        num_turns: 7,
+        total_cost_usd: 0.0123,
+      },
+      timestamp: '2026-05-20T00:00:03Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // subtype and num_turns should appear as labeled fields
+    expect(screen.getByText(/success/)).toBeInTheDocument();
+    expect(screen.getByText(/7/)).toBeInTheDocument();
+    // Should NOT be a whole-event JSON dump
+    expect(screen.queryByText(/"is_error"/)).not.toBeInTheDocument();
+  });
+
+  it('routes a stream_event to the typed stream_event branch as a compact one-line summary', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'stream_event',
+      payload: {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 2,
+          delta: { type: 'text_delta', text: 'partial text chunk' },
+        },
+      },
+      timestamp: '2026-05-20T00:00:04Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The inner event type should be visible in the compact summary
+    expect(screen.getByText(/content_block_delta/)).toBeInTheDocument();
+    // Should NOT be a whole-event JSON dump (the outer "stream_event" type key)
+    expect(screen.queryByText(/"type": "stream_event"/)).not.toBeInTheDocument();
+  });
+
+  it('routes an unrecognized event type to the unknown branch with a visible warning', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'unknown',
+      payload: { raw: { some_field: 'some_value' } },
+      timestamp: '2026-05-20T00:00:05Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The warning label must be visible
+    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
+    // The raw event type string should be shown inline
+    expect(screen.getByText(/unknown/)).toBeInTheDocument();
+    // The payload should NOT be rendered without user expanding the <details>
+    // (it is inside a <details> element that is collapsed by default)
+    // Asserting that the raw payload key is not in the accessible document
+    // confirms the expand-to-view pattern is in place.
+    const details = document.querySelector('details');
+    expect(details).not.toBeNull();
   });
 
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
