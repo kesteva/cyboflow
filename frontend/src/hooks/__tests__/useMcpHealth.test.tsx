@@ -1,131 +1,97 @@
 /**
- * Unit tests for useMcpHealth hook.
+ * Unit tests for the refactored useMcpHealth hook.
  *
- * Verifies:
- *  (a) Initial state is { status: 'starting', restartAttempts: 0 } before the
- *      first getMcpHealth() resolves.
- *  (b) After the first tick resolves with { status: 'running' }, the hook
- *      returns that value.
- *  (c) Advancing fake timers by 5000ms triggers a second poll and the hook
- *      updates when the status changes.
- *  (d) Errors from getMcpHealth() are swallowed and the state stays at 'starting'.
+ * Post-TASK-626: useMcpHealth is a thin adapter over useMcpHealthStore.
+ * It no longer maintains its own polling loop. These tests verify the
+ * inverse lossy mapping from the store's 3-value UI status to the
+ * hook's 4-value McpServerHealth output:
+ *
+ *   store 'healthy'  → McpServerHealth.status 'running'
+ *   store 'starting' → McpServerHealth.status 'starting'
+ *   store 'error'    → McpServerHealth.status 'failed'
+ *
+ * Also verifies that no setInterval is registered by the hook itself.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
-import type { McpServerHealth } from '../../../../shared/types/mcpHealth';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook } from '@testing-library/react';
+import type { McpHealthState, McpHealthActions } from '../../stores/mcpHealthStore';
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi
+// Mock the Zustand store — inject status states without real IPC
 // ---------------------------------------------------------------------------
 
-const mockGetMcpHealth = vi.fn<() => Promise<McpServerHealth>>();
+type StorePick = Pick<McpHealthState & McpHealthActions, 'status' | 'lastError'>;
 
-vi.mock('../../utils/cyboflowApi', () => ({
-  getMcpHealth: mockGetMcpHealth,
+let mockStoreState: StorePick = {
+  status: 'starting',
+  lastError: null,
+};
+
+vi.mock('../../stores/mcpHealthStore', () => ({
+  useMcpHealthStore: (selector?: (s: McpHealthState & McpHealthActions) => unknown) => {
+    if (typeof selector === 'function') {
+      return selector(mockStoreState as unknown as McpHealthState & McpHealthActions);
+    }
+    return mockStoreState;
+  },
 }));
-
-beforeEach(() => {
-  vi.useFakeTimers();
-  mockGetMcpHealth.mockReset();
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-});
 
 // ---------------------------------------------------------------------------
 // Import under test (after mock setup)
 // ---------------------------------------------------------------------------
 
-const { useMcpHealth } = await import('../useMcpHealth');
-
-// Re-export alias used in test assertions
-type McpHealth = McpServerHealth;
+import { useMcpHealth } from '../useMcpHealth';
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('useMcpHealth', () => {
-  it('returns starting status as initial state before first fetch resolves', async () => {
-    // Never resolves during this test
-    mockGetMcpHealth.mockReturnValue(new Promise(() => undefined));
+describe('useMcpHealth (store adapter)', () => {
+  beforeEach(() => {
+    mockStoreState = { status: 'starting', lastError: null };
+  });
 
+  it('maps healthy→running', () => {
+    mockStoreState = { status: 'healthy', lastError: null };
     const { result } = renderHook(() => useMcpHealth());
+    expect(result.current.status).toBe('running');
+  });
 
+  it('maps starting→starting', () => {
+    mockStoreState = { status: 'starting', lastError: null };
+    const { result } = renderHook(() => useMcpHealth());
     expect(result.current.status).toBe('starting');
-    expect(result.current.restartAttempts).toBe(0);
+  });
+
+  it('maps error→failed', () => {
+    mockStoreState = { status: 'error', lastError: 'crash' };
+    const { result } = renderHook(() => useMcpHealth());
+    expect(result.current.status).toBe('failed');
+  });
+
+  it('passes lastError through from store', () => {
+    mockStoreState = { status: 'error', lastError: 'subprocess died' };
+    const { result } = renderHook(() => useMcpHealth());
+    expect(result.current.lastError).toBe('subprocess died');
+  });
+
+  it('returns undefined lastError when store lastError is null', () => {
+    mockStoreState = { status: 'healthy', lastError: null };
+    const { result } = renderHook(() => useMcpHealth());
     expect(result.current.lastError).toBeUndefined();
   });
 
-  it('updates state after first tick resolves with running status', async () => {
-    const runningHealth: McpHealth = { status: 'running', restartAttempts: 0 };
-    mockGetMcpHealth.mockResolvedValue(runningHealth);
-
+  it('always returns restartAttempts=0 (lossy — store does not track attempts)', () => {
+    mockStoreState = { status: 'error', lastError: null };
     const { result } = renderHook(() => useMcpHealth());
-
-    // Let the first tick (immediate call) resolve
-    await act(async () => {
-      await vi.runAllTicks();
-    });
-
-    expect(result.current.status).toBe('running');
     expect(result.current.restartAttempts).toBe(0);
   });
 
-  it('polls again after 5000ms and updates when status changes', async () => {
-    const runningHealth: McpHealth = { status: 'running', restartAttempts: 0 };
-    const failedHealth: McpHealth = { status: 'failed', restartAttempts: 2, lastError: 'subprocess died' };
-
-    // First call returns running; second call returns failed
-    mockGetMcpHealth
-      .mockResolvedValueOnce(runningHealth)
-      .mockResolvedValueOnce(failedHealth);
-
-    const { result } = renderHook(() => useMcpHealth());
-
-    // First tick resolves
-    await act(async () => {
-      await vi.runAllTicks();
-    });
-    expect(result.current.status).toBe('running');
-
-    // Advance 5s to trigger second poll
-    await act(async () => {
-      vi.advanceTimersByTime(5000);
-      await vi.runAllTicks();
-    });
-
-    expect(result.current.status).toBe('failed');
-    expect(result.current.lastError).toBe('subprocess died');
-    expect(result.current.restartAttempts).toBe(2);
-  });
-
-  it('stays at starting when getMcpHealth throws (orchestrator not ready)', async () => {
-    mockGetMcpHealth.mockRejectedValue(new Error('IPC not available'));
-
-    const { result } = renderHook(() => useMcpHealth());
-
-    await act(async () => {
-      await vi.runAllTicks();
-    });
-
-    // Error is swallowed; state stays at starting
-    expect(result.current.status).toBe('starting');
-  });
-
-  it('cleans up the interval on unmount', async () => {
-    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-    mockGetMcpHealth.mockResolvedValue({ status: 'running', restartAttempts: 0 });
-
-    const { unmount } = renderHook(() => useMcpHealth());
-
-    await act(async () => {
-      await vi.runAllTicks();
-    });
-
-    unmount();
-    expect(clearIntervalSpy).toHaveBeenCalled();
-    clearIntervalSpy.mockRestore();
+  it('does not register its own setInterval (polling is in the store)', () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    mockStoreState = { status: 'starting', lastError: null };
+    renderHook(() => useMcpHealth());
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    setIntervalSpy.mockRestore();
   });
 });
