@@ -5,3 +5,5 @@ last_updated: null
 ---
 
 # Findings Queue
+
+SPRINT-026 started with missing infra: docker, playwright, peekaboo; tests deferred.
