@@ -314,6 +314,12 @@ describe('PendingApprovalCard — Cancel and restart button', () => {
       expect(mockCancelAndRestartMutate).toHaveBeenCalledWith({ runId: 'run-group' });
     });
   });
+
+  it('Cancel and restart button title attribute documents partial functionality (TASK-627)', () => {
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const button = screen.getByRole('button', { name: /cancel and restart/i });
+    expect(button).toHaveAttribute('title', expect.stringContaining('TASK-304'));
+  });
 });
 
 // ---------------------------------------------------------------------------
