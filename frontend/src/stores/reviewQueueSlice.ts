@@ -24,8 +24,8 @@
  *
  * `cyboflow.events.onStuckDetected` will be added to the events router by
  * TASK-254 (orchestrator-and-trpc-router epic).  Until that lands, the
- * subscription is accessed via an interface cast through `unknown` — the same
- * pattern used in `useStuckNotifications.ts` (TASK-503).
+ * subscription is accessed via an interface cast through `unknown`.
+ * `useStuckNotifications` consumes slice state rather than its own subscription.
  *
  * TASK-502 — stuck-detection-and-observability epic.
  */
@@ -33,28 +33,7 @@ import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../utils/trpcClient';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
-import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
-
-// ---------------------------------------------------------------------------
-// Forward-looking tRPC subscription interface (TASK-254 dependency)
-// ---------------------------------------------------------------------------
-
-/**
- * Narrow interface for the `cyboflow.events.onStuckDetected` subscription that
- * TASK-254 will add to the events router.  Cast through `unknown` so this slice
- * compiles without a real router type update.
- */
-interface StuckEventsClient {
-  onStuckDetected: {
-    subscribe(
-      input: undefined,
-      callbacks: {
-        onData: (event: StuckDetectedEvent) => void;
-        onError: (err: unknown) => void;
-      },
-    ): { unsubscribe(): void };
-  };
-}
+import type { StuckDetectedEvent, StuckEventsClient, StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // State shape
