@@ -154,4 +154,41 @@ describe('cyboflowStore subscription lifecycle', () => {
     // State should reflect the second setActiveRun.
     expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
   });
+
+  it('(7) after rapid A→B switch, new subscription onEvent routes to current store state (not stale closure)', () => {
+    // Capture the onEvent callbacks for both subscriptions.
+    const capturedOnEvents: Array<(e: StreamEvent) => void> = [];
+    const unsub1 = vi.fn();
+    const unsub2 = vi.fn();
+
+    mockSubscribe.mockImplementation((args: { runId: string; onEvent: (e: StreamEvent) => void }) => {
+      capturedOnEvents.push(args.onEvent);
+      if (capturedOnEvents.length === 1) return unsub1;
+      return unsub2;
+    });
+
+    // Rapid A→B switch.
+    useCyboflowStore.getState().setActiveRun('run-A');
+    useCyboflowStore.getState().setActiveRun('run-B');
+
+    // After the switch, run-A's subscription must be torn down and store cleared.
+    expect(unsub1).toHaveBeenCalledOnce();
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(0);
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-B');
+
+    // Fire an event through run-B's onEvent callback.
+    const eventForB: StreamEvent = {
+      runId: 'run-B',
+      type: 'system',
+      payload: { source: 'run-B' },
+      timestamp: '2026-05-20T00:00:00Z',
+    };
+    capturedOnEvents[1](eventForB);
+
+    // The event must appear in the store and the store must still be on run-B.
+    const state = useCyboflowStore.getState();
+    expect(state.activeRunId).toBe('run-B');
+    expect(state.streamEvents).toHaveLength(1);
+    expect(state.streamEvents[0]).toEqual(eventForB);
+  });
 });
