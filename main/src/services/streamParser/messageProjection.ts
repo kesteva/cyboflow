@@ -19,7 +19,7 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactEvent, AssistantEvent, UserEvent, ResultEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, AssistantEvent, UserEvent, ResultEvent } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
 import type { ILogger } from './types';
 
@@ -66,17 +66,12 @@ export class MessageProjection {
       return null;
     }
 
-    // system/api_retry is informational — not renderable in the current design.
-    if ('type' in event && event.type === 'system' && (event as { subtype?: string }).subtype === 'api_retry') {
-      return null;
-    }
-
     try {
       if (!('type' in event)) return null;
 
       switch (event.type) {
         case 'system': {
-          const sysEvent = event as SystemInitEvent | SystemCompactEvent;
+          const sysEvent = event as SystemInitEvent | SystemCompactBoundaryEvent;
           return this.projectSystemEvent(sysEvent);
         }
         case 'assistant': {
@@ -103,7 +98,7 @@ export class MessageProjection {
   // System events
   // ---------------------------------------------------------------------------
 
-  private projectSystemEvent(event: SystemInitEvent | SystemCompactEvent): UnifiedMessage | null {
+  private projectSystemEvent(event: SystemInitEvent | SystemCompactBoundaryEvent): UnifiedMessage | null {
     const subtype = event.subtype;
 
     if (subtype === 'init') {
@@ -130,18 +125,23 @@ export class MessageProjection {
       };
     }
 
-    if (subtype === 'compact') {
-      const compact = event as SystemCompactEvent;
+    if (subtype === 'compact_boundary') {
+      const compact = event as SystemCompactBoundaryEvent;
       return {
         id: `context_compacted_msg_${++this.messageIdCounter}`,
         role: 'system',
         timestamp: new Date().toISOString(),
         segments: [
-          { type: 'text', content: compact.summary || '' },
           { type: 'system_info', info: {} }
         ],
         metadata: {
-          systemSubtype: 'context_compacted'
+          systemSubtype: 'context_compacted',
+          // compactTrigger / preTokens: camelCase forward-compat (FIND-SPRINT-026-5).
+          // No current renderer consumer reads these — RichOutputView.tsx:842 dispatches
+          // on systemSubtype only. When a renderer surfaces compact details, read from
+          // here (not the wire-layer snake_case fields on compact_metadata).
+          compactTrigger: compact.compact_metadata.trigger,
+          preTokens: compact.compact_metadata.pre_tokens,
         }
       };
     }
