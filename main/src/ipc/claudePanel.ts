@@ -2,7 +2,6 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { BaseAIPanelHandler } from './baseAIPanelHandler';
 import { ClaudePanelManager } from '../services/panels/claude/claudePanelManager';
-import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { panelManager } from '../services/panelManager';
 import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
@@ -254,11 +253,8 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
 }
 
 export function registerClaudePanelHandlers(ipcMain: IpcMain, services: AppServices): void {
-  // Wire the shared DB handle into ClaudeCodeManager so RawEventsSink can persist events.
-  // databaseService.getDb() is safe here: DatabaseService.initialize() is called before
-  // registerClaudePanelHandlers() in main/src/index.ts.
-  ClaudeCodeManager.setSharedDb(services.databaseService.getDb());
-
+  // DB injection now happens at construction time via cliManagerFactory.createManager()
+  // in main/src/index.ts (additionalOptions.db). No setter call required here.
   const handler = new ClaudePanelHandler(ipcMain, services, {
     panelType: 'claude',
     panelTypeName: 'Claude',
