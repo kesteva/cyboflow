@@ -1,8 +1,8 @@
 ---
-pending_count: 27
+pending_count: 26
 buckets:
   decisions: 1
-  actions: 4
+  actions: 3
   testing: 17
   deferred_visual: 5
 items: []
@@ -21,15 +21,6 @@ items: []
   level: design
 
 ## Actions
-
-- task: TASK-554
-  type: human_needed
-  plan_ref: .soloflow/active/plans/first-run-onboarding-and-self-host-acceptance/TASK-554-plan.md
-  verdict_notes: Manual 8-hour self-host acceptance run. Executor scaffolded the empty log on the TASK-554 worktree branch (cherry-pick or recreate it).
-  action: "Perform a full working-day self-host session using Cyboflow exclusively for SoloFlow workflows. Fill in .soloflow/active/acceptance/SELF-HOST-LOG.md per the plan: log every run, log every Crystal/CLI fallback before working around it, complete the Risk-Check Findings section after Cmd+Q (zombie PTY count, .db-wal size, raw_events row count + EXPLAIN), triage each fallback (fix-same-day vs defer-to-ROADMAP-002), set the final Verdict line."
-  severity: high
-  level: goal_backward
-  bucket: actions
 
 - task: SPRINT-015
   type: config_gap
