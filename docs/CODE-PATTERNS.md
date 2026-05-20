@@ -110,6 +110,13 @@ to a canonical example — read those for the actual implementation.
 - **Use it for:** Wrapping a `better-sqlite3` `Database` into the `DatabaseLike` (`{ prepare, transaction }`) shape required by orchestrator and tRPC handler tests. Do NOT clone locally — the `: DatabaseLike` return-type annotation is the build-time tripwire that catches future widening of `DatabaseLike`.
 - **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`; recurring drift fixed in FIND-SPRINT-017-11.
 
+### `main/src/orchestrator/__test_fixtures__/loggerLikeSpy`
+
+- **Path:** `main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts`
+- **Use it for:** A `vi.fn()`-based `LoggerLike` spy for orchestrator, IPC, and pipeline tests. `makeSpyLogger()` returns `LoggerLike & { calls: LogCall[] }` — each method is a Vitest spy and pushes structured entries onto `calls` for log assertions. `makeProdLoggerSpy()` returns a `Pick<Logger, 'warn' | 'info' | 'verbose'>`-shaped spy for service-layer call sites that pass the spy to code expecting the production `Logger` (cast via `as unknown as Logger` at the seam).
+- **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
+- **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
+
 ### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
 
 The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
