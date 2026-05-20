@@ -28,6 +28,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import ReviewQueueView from './components/ReviewQueueView';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
+import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -84,6 +85,14 @@ function App() {
     const unsubscribe = subscribeToMcpHealth();
     return unsubscribe;
   }, [subscribeToMcpHealth]);
+
+  // Subscribe to stuck-run events so RunStatusMap stays current for the lifetime
+  // of the app shell (not just while ReviewQueueView is mounted).
+  const subscribeToStuckEvents = useReviewQueueSlice((s) => s.subscribeToStuckEvents);
+  useEffect(() => {
+    const unsubscribe = subscribeToStuckEvents();
+    return unsubscribe;
+  }, [subscribeToStuckEvents]);
 
   // Load config on app startup
   useEffect(() => {
