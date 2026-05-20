@@ -1,11 +1,10 @@
 /**
  * Unit tests for the atomic awaiting_review transition helpers.
  *
- * Schema DDL is inlined here rather than loaded from
- * main/src/database/migrations/006_cyboflow_schema.sql because TASK-153
- * runs in a parallel worktree that does not yet have TASK-152's migration
- * file. The inlined DDL is byte-for-byte identical to what TASK-152 will
- * deliver — keeping these tests self-contained and post-merge green.
+ * DDL now comes from GATE_SCHEMA in
+ * main/src/database/__test_fixtures__/registrySchema.ts rather than being
+ * inlined here. That fixture is the single source of truth for schema used
+ * across test files.
  *
  * See TASK-153 plan "Lowest Confidence Area" for why concurrent-transaction
  * races cannot be truly reproduced in a single-threaded vitest run.
