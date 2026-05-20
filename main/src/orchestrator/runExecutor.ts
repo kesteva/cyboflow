@@ -386,7 +386,21 @@ export class RunExecutor {
     if (!this.lifecycleTransitions) return;
     try {
       switch (phase) {
+        // Transition `starting → running` BEFORE the SDK spawns so ApprovalRouter
+        // sees the run as 'running' when the SDK's PreToolUse hook fires. The SDK
+        // can invoke PreToolUse before its first stream event is dispatched to the
+        // bridge's onFirstMessage callback, so transitioning on `sdk_initialized`
+        // would race: tool calls would arrive at the router while status='starting'
+        // and be rejected with RunNotRunningError.
+        case 'pre_spawn':
+          await this.lifecycleTransitions.running(runId);
+          break;
         case 'sdk_initialized':
+          // Defensive idempotency: if pre_spawn somehow didn't fire (legacy code
+          // paths or test subclasses overriding bridgeEvents), still attempt the
+          // transition. transitionToRunning rejects when status≠'starting', so a
+          // double-call just emits a (logged) TransitionRejectedError that's
+          // safely swallowed below.
           await this.lifecycleTransitions.running(runId);
           break;
         case 'completed':
@@ -401,7 +415,6 @@ export class RunExecutor {
         case 'canceled':
           await this.lifecycleTransitions.canceled(runId);
           break;
-        case 'pre_spawn':
         case 'post_spawn':
           // no-op
           return;

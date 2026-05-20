@@ -19,6 +19,20 @@ import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import type { GitStatus } from './types/session';
 
+/**
+ * Crystal session IDs are 36-char dashed UUIDs (e.g. `91e56989-0674-...`).
+ * cyboflow workflow run IDs are 32-char no-dash hex (e.g. `0d33e5082da8...`)
+ * — the same value is used as panelId / sessionId per the TASK-663 invariant.
+ *
+ * Returns true for cyboflow run IDs so Crystal-era listeners can short-circuit
+ * before logging "Session X not found" validation failures against the
+ * `sessions` table, which cyboflow runs never write to.  Crystal pipelines
+ * still validate their own events normally.
+ */
+function isCyboflowRunId(id: string | undefined): boolean {
+  return typeof id === 'string' && /^[0-9a-f]{32}$/i.test(id);
+}
+
 export function setupEventListeners(services: AppServices, getMainWindow: () => BrowserWindow | null): void {
   const {
     sessionManager,
@@ -796,15 +810,18 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   });
 
   // Listen to claudeCodeManager events
-  claudeCodeManager.on('output', async (output: { 
-    panelId: string; 
-    sessionId: string; 
-    type: 'json' | 'stdout' | 'stderr'; 
-    data: unknown; 
-    timestamp: Date 
+  claudeCodeManager.on('output', async (output: {
+    panelId: string;
+    sessionId: string;
+    type: 'json' | 'stdout' | 'stderr';
+    data: unknown;
+    timestamp: Date
   }) => {
+    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
+    if (isCyboflowRunId(output.panelId) || isCyboflowRunId(output.sessionId)) return;
+
     // Validate the output has valid context
-    const validation = output.panelId 
+    const validation = output.panelId
       ? validatePanelEventContext(output, output.panelId, output.sessionId)
       : validateEventContext(output, output.sessionId);
 
@@ -851,6 +868,9 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   });
 
   claudeCodeManager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
+    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
+    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
     // Validate the event context
     const validation = panelId
       ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
@@ -910,6 +930,9 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   });
 
   claudeCodeManager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number; signal: string }) => {
+    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
+    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
     const validation = panelId
       ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
       : validateEventContext({ sessionId }, sessionId);
@@ -1057,8 +1080,11 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   });
 
   claudeCodeManager.on('error', async ({ panelId, sessionId, error }: { panelId?: string; sessionId: string; error: string }) => {
+    // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
+    if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+
     // Validate the event context
-    const validation = panelId 
+    const validation = panelId
       ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
       : validateEventContext({ sessionId }, sessionId);
 

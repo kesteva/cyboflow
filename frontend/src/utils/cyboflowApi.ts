@@ -94,9 +94,14 @@ export function subscribeToStreamEvents({
 }): () => void {
   const electron = requireElectron();
   const channel = `cyboflow:stream:${runId}`;
+  let received = 0;
   // The IPC preload bridges events as (...args) where args[0] is the payload.
   const handler = (...args: unknown[]) => {
     const payload = args[0] as StreamEvent;
+    received += 1;
+    if (received <= 3 || received % 25 === 0) {
+      console.info(`[cyboflowApi] stream event #${received} for ${runId.slice(0, 8)}:`, payload?.type);
+    }
     onEvent(payload);
   };
   electron.on(channel, handler);
