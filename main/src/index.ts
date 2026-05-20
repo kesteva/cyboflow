@@ -32,6 +32,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
+import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
 import type { DatabaseLike } from './orchestrator/types';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
@@ -744,6 +745,19 @@ app.whenReady().then(async () => {
     // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
     console.log('[Main] ApprovalRouter initialized');
+
+    // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
+    // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
+    // SDK run and updates DB rows, but does not yet send deny-replies on the
+    // permission socket. See approvalRouter.ts:328–337.
+    setCancelAndRestartDeps({
+      db,
+      approvalRouter: ApprovalRouter.getInstance(),
+      runQueues,
+      claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
+      logger: loggerLike,
+    });
+    console.log('[Main] cancelAndRestart deps wired');
   }
 
   // Track app lifecycle events
