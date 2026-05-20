@@ -98,24 +98,12 @@ vi.mock('fs', async (importOriginal) => {
 });
 
 // ---------------------------------------------------------------------------
-// Logger mock
-// ---------------------------------------------------------------------------
-
-function makeLogger() {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Import the class.  vi.mock calls are hoisted by Vitest so the mocks are in
 // place before the module under test resolves its own imports.
 // ---------------------------------------------------------------------------
 
 import { McpServerLifecycle } from '../mcpServerLifecycle';
+import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,8 +111,8 @@ import { McpServerLifecycle } from '../mcpServerLifecycle';
 
 const SOCKET_PATH = '/tmp/test-orch.sock';
 
-function makeLifecycle(loggerOverride?: ReturnType<typeof makeLogger>) {
-  const logger = loggerOverride ?? makeLogger();
+function makeLifecycle(loggerOverride?: ReturnType<typeof makeSpyLogger>) {
+  const logger = loggerOverride ?? makeSpyLogger();
   const lifecycle = new McpServerLifecycle(
     SOCKET_PATH,
     logger,

@@ -39,27 +39,28 @@ import type { ApproveRestOfRunResult, RejectRestOfRunResult } from '../../../../
 // See: user-needs research §5; risks research §10.
 // ---------------------------------------------------------------------------
 
+/** Narrow DatabaseLike surface required by the handlers below. */
+type DatabaseLike = {
+  prepare: (sql: string) => {
+    all: (...params: unknown[]) => unknown[];
+    run: (...params: unknown[]) => void;
+  };
+};
+
 /**
- * Core implementation of the approveRestOfRun logic — extracted for direct
- * unit testing without the tRPC wrapping.
+ * Shared implementation for approve/reject-rest-of-run.
  *
- * Selects all pending approvals for the given `runId` and sets each to
- * `status='approved'` under the per-run mutex.  Best-effort: if a single
- * approval update fails, the error is logged and iteration continues.
+ * Selects all pending approvals for `runId` and updates each to `decision`
+ * under the per-run mutex.  Best-effort: if a single UPDATE fails, the error
+ * is logged with a decision-derived prefix and iteration continues.
  *
- * @param db     - A narrow DatabaseLike surface (prepare + run).
- * @param runId  - The workflow_runs.id to scope the operation to.
- * @returns `{ decided: number }` — count of approvals approved in this call.
+ * Not exported — callers must use the named wrappers below.
  */
-export async function approveRestOfRunHandler(
-  db: {
-    prepare: (sql: string) => {
-      all: (...params: unknown[]) => unknown[];
-      run: (...params: unknown[]) => void;
-    };
-  },
+async function decideRestOfRunHandler(
+  db: DatabaseLike,
   runId: string,
-): Promise<ApproveRestOfRunResult> {
+  decision: 'approved' | 'rejected',
+): Promise<{ decided: number }> {
   return withLock(`run:${runId}`, async () => {
     // Select all pending approval IDs for this run only.
     const rows = db
@@ -75,19 +76,23 @@ export async function approveRestOfRunHandler(
     const now = new Date().toISOString();
     let decided = 0;
 
+    // Derive log-prefix and verb from decision so the messages appear verbatim.
+    const prefix = decision === 'approved' ? 'approveRestOfRun' : 'rejectRestOfRun';
+    const verb = decision === 'approved' ? 'approve' : 'reject';
+
     for (const row of rows) {
       try {
         db.prepare(
           `UPDATE approvals
-           SET status = 'approved', decided_at = ?, decided_by = 'user'
+           SET status = ?, decided_at = ?, decided_by = 'user'
            WHERE id = ? AND status = 'pending'`,
-        ).run(now, row.id);
+        ).run(decision, now, row.id);
         decided++;
       } catch (err) {
         // Best-effort: log and continue so a single failure does not block
         // the remaining approvals.
         console.error(
-          `[approveRestOfRun] Failed to approve ${row.id} for run ${runId}:`,
+          `[${prefix}] Failed to ${verb} ${row.id} for run ${runId}:`,
           err,
         );
       }
@@ -95,6 +100,25 @@ export async function approveRestOfRunHandler(
 
     return { decided };
   });
+}
+
+/**
+ * Core implementation of the approveRestOfRun logic — extracted for direct
+ * unit testing without the tRPC wrapping.
+ *
+ * Selects all pending approvals for the given `runId` and sets each to
+ * `status='approved'` under the per-run mutex.  Best-effort: if a single
+ * approval update fails, the error is logged and iteration continues.
+ *
+ * @param db     - A narrow DatabaseLike surface (prepare + run).
+ * @param runId  - The workflow_runs.id to scope the operation to.
+ * @returns `{ decided: number }` — count of approvals approved in this call.
+ */
+export async function approveRestOfRunHandler(
+  db: DatabaseLike,
+  runId: string,
+): Promise<ApproveRestOfRunResult> {
+  return decideRestOfRunHandler(db, runId, 'approved');
 }
 
 /**
@@ -110,47 +134,8 @@ export async function approveRestOfRunHandler(
  * @returns `{ decided: number }` — count of approvals rejected in this call.
  */
 export async function rejectRestOfRunHandler(
-  db: {
-    prepare: (sql: string) => {
-      all: (...params: unknown[]) => unknown[];
-      run: (...params: unknown[]) => void;
-    };
-  },
+  db: DatabaseLike,
   runId: string,
 ): Promise<RejectRestOfRunResult> {
-  return withLock(`run:${runId}`, async () => {
-    // Select all pending approval IDs for this run only.
-    const rows = db
-      .prepare(
-        `SELECT id FROM approvals WHERE run_id = ? AND status = 'pending'`,
-      )
-      .all(runId) as { id: string }[];
-
-    if (rows.length === 0) {
-      return { decided: 0 };
-    }
-
-    const now = new Date().toISOString();
-    let decided = 0;
-
-    for (const row of rows) {
-      try {
-        db.prepare(
-          `UPDATE approvals
-           SET status = 'rejected', decided_at = ?, decided_by = 'user'
-           WHERE id = ? AND status = 'pending'`,
-        ).run(now, row.id);
-        decided++;
-      } catch (err) {
-        // Best-effort: log and continue so a single failure does not block
-        // the remaining approvals.
-        console.error(
-          `[rejectRestOfRun] Failed to reject ${row.id} for run ${runId}:`,
-          err,
-        );
-      }
-    }
-
-    return { decided };
-  });
+  return decideRestOfRunHandler(db, runId, 'rejected');
 }

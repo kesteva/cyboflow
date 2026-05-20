@@ -110,6 +110,13 @@ to a canonical example — read those for the actual implementation.
 - **Use it for:** Wrapping a `better-sqlite3` `Database` into the `DatabaseLike` (`{ prepare, transaction }`) shape required by orchestrator and tRPC handler tests. Do NOT clone locally — the `: DatabaseLike` return-type annotation is the build-time tripwire that catches future widening of `DatabaseLike`.
 - **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`; recurring drift fixed in FIND-SPRINT-017-11.
 
+### `main/src/orchestrator/__test_fixtures__/loggerLikeSpy`
+
+- **Path:** `main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts`
+- **Use it for:** A `vi.fn()`-based `LoggerLike` spy for orchestrator, IPC, and pipeline tests. `makeSpyLogger()` returns `LoggerLike & { calls: LogCall[] }` — each method is a Vitest spy and pushes structured entries onto `calls` for log assertions. `makeProdLoggerSpy()` returns a `Pick<Logger, 'warn' | 'info' | 'verbose'>`-shaped spy for service-layer call sites that pass the spy to code expecting the production `Logger` (cast via `as unknown as Logger` at the seam).
+- **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
+- **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
+
 ### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
 
 The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
@@ -296,5 +303,18 @@ calls `expect.extend(...)` from `@testing-library/jest-dom` at module load, whic
 the workspace. When adding a new `vitest.config.ts` in either workspace, mirror the
 existing files; before planning a test-wiring task, grep both `@testing-library/jest-dom`
 and `test/setup.ts` — do not rely on a `.test.*` glob.
+
+## Database Schema
+
+### Canonical DDL Source
+
+The `workflow_runs` table and other cyboflow-era tables (`workflows`, `approvals`, `raw_events`, `messages`) live in TWO files that MUST stay in sync:
+
+- `main/src/database/schema.sql` — fresh-install fast path. Run once on a new DB.
+- `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
+
+**canonical DDL source for cyboflow tables: migration 006.** Treat it as the authoritative declaration; mirror any column add/drop into `schema.sql` in the same commit. Migration 007 (and any future 00N) extends the schema additively.
+
+A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite, applies the two paths side-by-side, and asserts the resulting column sets and FKs match. The script lives at `scripts/verify-schema-parity.js`; it does NOT compare test fixtures like `registrySchema.ts` — those are documented subsets and any drift is caught by the test suites that import them.
 
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.

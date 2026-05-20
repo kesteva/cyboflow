@@ -19,7 +19,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from '../approvalRouter';
 import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
-import type { LoggerLike } from '../types';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,19 +40,6 @@ function makePreToolInput(toolName: string): PreToolUseHookInput {
     transcript_path: '/tmp/test.jsonl',
     cwd: '/tmp',
   } as unknown as PreToolUseHookInput;
-}
-
-function makeLogger(): LoggerLike & { errorMessages: string[] } {
-  const errorMessages: string[] = [];
-  return {
-    errorMessages,
-    info: vi.fn(),
-    warn: vi.fn(),
-    debug: vi.fn(),
-    error: vi.fn((msg: string) => {
-      errorMessages.push(msg);
-    }),
-  };
 }
 
 const CALLER_ID = 'run-abc-123';
@@ -186,7 +173,7 @@ describe('routePreToolUseThroughApprovalRouter', () => {
       requestApproval,
     } as unknown as ApprovalRouter);
 
-    const logger = makeLogger();
+    const logger = makeSpyLogger();
 
     const result = await routePreToolUseThroughApprovalRouter(
       makePreToolInput('Bash'),
@@ -204,9 +191,10 @@ describe('routePreToolUseThroughApprovalRouter', () => {
     });
 
     // logger.error must be called with the callerLabel prefix
-    expect(logger.errorMessages).toHaveLength(1);
-    expect(logger.errorMessages[0]).toContain('[MyCallerLabel]');
-    expect(logger.errorMessages[0]).toContain('DB connection lost');
+    const errorCalls = logger.calls.filter((c) => c.level === 'error');
+    expect(errorCalls).toHaveLength(1);
+    expect(errorCalls[0].message).toContain('[MyCallerLabel]');
+    expect(errorCalls[0].message).toContain('DB connection lost');
   });
 
   // ─── Test 6: callerLabel prefix distinguishes two different log identities ─
@@ -217,8 +205,8 @@ describe('routePreToolUseThroughApprovalRouter', () => {
     const mockRouter = { requestApproval } as unknown as ApprovalRouter;
     vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue(mockRouter);
 
-    const loggerA = makeLogger();
-    const loggerB = makeLogger();
+    const loggerA = makeSpyLogger();
+    const loggerB = makeSpyLogger();
 
     await routePreToolUseThroughApprovalRouter(
       makePreToolInput('Bash'),
@@ -234,11 +222,13 @@ describe('routePreToolUseThroughApprovalRouter', () => {
       loggerB,
     );
 
-    expect(loggerA.errorMessages[0]).toContain('[PermissionModeMapper]');
-    expect(loggerB.errorMessages[0]).toContain('[ClaudeCodeManager]');
+    const errorCallsA = loggerA.calls.filter((c) => c.level === 'error');
+    const errorCallsB = loggerB.calls.filter((c) => c.level === 'error');
+    expect(errorCallsA[0].message).toContain('[PermissionModeMapper]');
+    expect(errorCallsB[0].message).toContain('[ClaudeCodeManager]');
 
     // The two prefixes must be distinct
-    expect(loggerA.errorMessages[0]).not.toContain('[ClaudeCodeManager]');
-    expect(loggerB.errorMessages[0]).not.toContain('[PermissionModeMapper]');
+    expect(errorCallsA[0].message).not.toContain('[ClaudeCodeManager]');
+    expect(errorCallsB[0].message).not.toContain('[PermissionModeMapper]');
   });
 });

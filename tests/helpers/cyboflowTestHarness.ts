@@ -19,22 +19,18 @@ import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
 import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
-import type { LoggerLike } from '../../main/src/orchestrator/types';
 import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
 import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../main/src/orchestrator/__test_fixtures__/dbAdapter';
+import { makeSpyLogger } from '../../main/src/orchestrator/__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
-// Null logger (suppresses noise during tests)
+// Spy logger — calls array is unused by the harness itself but available to
+// harness-extending tests.
 // ---------------------------------------------------------------------------
 
-const nullLogger: LoggerLike = {
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  debug: () => {},
-};
+const harnessLogger = makeSpyLogger();
 
 // ---------------------------------------------------------------------------
 // CyboflowTestHarness interface
@@ -94,7 +90,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
     (runId: string) => runQueueRegistry.getOrCreate(runId),
   );
 
-  const workflowRegistry = new WorkflowRegistry(dbLike, nullLogger);
+  const workflowRegistry = new WorkflowRegistry(dbLike, harnessLogger);
   const worktreeManager = new WorktreeManager();
 
   // Active runs: keyed by runId
@@ -258,7 +254,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
       const stubNodeResolver: NodeResolver = { getNodePath: async () => process.execPath };
       const stubMcpConfigWriter = new McpConfigWriter();
       const runLauncher = new RunLauncher(
-        dbLike, workflowRegistry, worktreeManager, nullLogger,
+        dbLike, workflowRegistry, worktreeManager, harnessLogger,
         stubMcpConfigWriter, stubOrchSocketProvider, stubBridgeScriptResolver, stubNodeResolver,
       );
 

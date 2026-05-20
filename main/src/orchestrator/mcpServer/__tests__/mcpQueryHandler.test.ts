@@ -15,8 +15,8 @@
  * 4. handleMessage returns { ok: false, error: 'unknown_message_type' } for an
  *    unrecognized type and never throws.
  *
- * All tests use an in-memory better-sqlite3 instance with minimal table creates
- * inlined (no real migration runner — tests are hermetic). A writes-capturing
+ * All tests use an in-memory better-sqlite3 instance initialised with the
+ * imported GATE_SCHEMA fixture (no real migration runner — tests are hermetic). A writes-capturing
  * socket test double is used to assert on the JSON response bodies.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -24,57 +24,7 @@ import Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-
-// ---------------------------------------------------------------------------
-// Minimal schema — only columns the handler reads or writes
-// ---------------------------------------------------------------------------
-
-const MINIMAL_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS workflows (
-    id TEXT PRIMARY KEY,
-    project_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    spec_json TEXT NOT NULL DEFAULT '{}',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS workflow_runs (
-    id TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    worktree_path TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'running',
-    policy_json TEXT NOT NULL DEFAULT '{}',
-    stuck_at DATETIME,
-    stuck_reason TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    started_at DATETIME,
-    ended_at DATETIME
-  );
-
-  CREATE TABLE IF NOT EXISTS approvals (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    tool_input_json TEXT NOT NULL,
-    tool_use_id TEXT NOT NULL,
-    rationale TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    decided_at DATETIME,
-    decided_by TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS raw_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`;
+import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -82,8 +32,8 @@ const MINIMAL_SCHEMA = `
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
-  db.pragma('foreign_keys = OFF'); // disabled: no FK to workflows in minimal schema
-  db.exec(MINIMAL_SCHEMA);
+  db.pragma('foreign_keys = OFF'); // disabled: preserving existing test contract (seeds workflow_runs without a parent workflow row)
+  db.exec(GATE_SCHEMA);
   return db;
 }
 

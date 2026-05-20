@@ -10,15 +10,7 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-// Local interface for combining user prompts with output messages
-interface UserPromptMessage {
-  type: 'user';
-  message: {
-    role: 'user';
-    content: Array<{ type: 'text'; text: string }>;
-  };
-  timestamp: string;
-}
+import type { UserPromptMessage } from './parseJsonMessage';
 
 // Interface for conversation messages from database
 interface ConversationMessage {
@@ -212,18 +204,23 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
           });
         }
         
-        // Combine user prompts with output messages (filter for JSON messages)
-        const allMessages = [...userPrompts];
-        if (outputResponse.success && outputResponse.data && Array.isArray(outputResponse.data)) {
-          // JSON messages are already in the correct format from getJsonMessages
-          // FIXME(SPRINT-015): local UserPromptMessage diverges from ClaudeJsonMessage — see FIND-SPRINT-015-12; resolve in B5 follow-up
-          allMessages.push(...(outputResponse.data as unknown as UserPromptMessage[]));
+        // Combine user prompts with output messages.
+        // outputResponse.data is UnifiedMessage[] at runtime (panels:get-json-messages returns
+        // MessageProjection output). Pass straight through — parseJsonMessage is shape-mismatched
+        // against UnifiedMessage and would drop assistant/tool/thinking messages.
+        // The deeper fix (correcting the IPC type declaration) is tracked in FIND-SPRINT-024-4.
+        const allMessages: unknown[] = [...userPrompts];
+        if (outputResponse.success && Array.isArray(outputResponse.data)) {
+          allMessages.push(...(outputResponse.data as unknown as UnifiedMessage[]));
         }
         
-        // Sort by timestamp to get correct order
+        // Sort by timestamp to get correct order. Items are either UserPromptMessage or
+        // UnifiedMessage — both have a string timestamp field.
         allMessages.sort((a, b) => {
-          const timeA = new Date(a.timestamp).getTime();
-          const timeB = new Date(b.timestamp).getTime();
+          const msgA = a as { timestamp?: string };
+          const msgB = b as { timestamp?: string };
+          const timeA = new Date(msgA.timestamp ?? '').getTime();
+          const timeB = new Date(msgB.timestamp ?? '').getTime();
           return timeA - timeB;
         });
         
