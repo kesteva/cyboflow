@@ -1,5 +1,5 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus, VersionUpdateInfo, ClaudeJsonMessage, GitCommands } from './session';
+import type { Session, SessionOutput, GitStatus, VersionUpdateInfo, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
@@ -7,6 +7,7 @@ import type { ToolPanel } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
+import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 
 interface LogEntry {
   timestamp: string;
@@ -313,7 +314,7 @@ interface ElectronAPI {
     // getOutput returns SessionOutput[] — IPCDataResponse so callers can pass directly to setSessionOutputs
     getOutput: (panelId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     getConversationMessages: (panelId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    getJsonMessages: (panelId: string) => Promise<IPCResponse<ClaudeJsonMessage[]>>;
+    getJsonMessages: (panelId: string) => Promise<IPCResponse<UnifiedMessage[]>>;
     // PromptMarker is locally typed; IPCDataResponse for direct .data access
     getPrompts: (panelId: string) => Promise<IPCDataResponse<unknown[]>>;
     continue: (panelId: string, input: string, model?: string) => Promise<IPCResponse<void>>;

@@ -205,13 +205,9 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         }
         
         // Combine user prompts with output messages.
-        // outputResponse.data is UnifiedMessage[] at runtime (panels:get-json-messages returns
-        // MessageProjection output). Pass straight through — parseJsonMessage is shape-mismatched
-        // against UnifiedMessage and would drop assistant/tool/thinking messages.
-        // The deeper fix (correcting the IPC type declaration) is tracked in FIND-SPRINT-024-4.
         const allMessages: unknown[] = [...userPrompts];
         if (outputResponse.success && Array.isArray(outputResponse.data)) {
-          allMessages.push(...(outputResponse.data as unknown as UnifiedMessage[]));
+          allMessages.push(...outputResponse.data);
         }
         
         // Sort by timestamp to get correct order. Items are either UserPromptMessage or
