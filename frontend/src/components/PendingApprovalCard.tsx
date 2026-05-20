@@ -124,6 +124,7 @@ export function PendingApprovalCard({ item, isFocused = false, onDecide }: Pendi
       setBusy(true);
       void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId })
         .then(() => { onDecide?.(); })
+        .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
         .finally(() => { setBusy(false); });
     }
 
@@ -131,6 +132,7 @@ export function PendingApprovalCard({ item, isFocused = false, onDecide }: Pendi
       setBusy(true);
       void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId })
         .then(() => { onDecide?.(); })
+        .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
         .finally(() => { setBusy(false); });
     }
 
@@ -155,6 +157,7 @@ export function PendingApprovalCard({ item, isFocused = false, onDecide }: Pendi
     setBusy(true);
     void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id })
       .then(() => { onDecide?.(); })
+      .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
       .finally(() => { setBusy(false); });
   }
 
@@ -162,6 +165,7 @@ export function PendingApprovalCard({ item, isFocused = false, onDecide }: Pendi
     setBusy(true);
     void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id })
       .then(() => { onDecide?.(); })
+      .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
       .finally(() => { setBusy(false); });
   }
 
