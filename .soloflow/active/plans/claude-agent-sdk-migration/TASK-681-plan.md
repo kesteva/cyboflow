@@ -1,8 +1,8 @@
 ---
 id: TASK-681
 idea: IDEA-014
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/schemas.ts
   - main/src/services/streamParser/messageProjection.ts
@@ -15,23 +15,23 @@ files_readonly:
   - main/src/services/streamParser/eventRouter.ts
   - main/src/services/streamParser/rawEventsSink.ts
 acceptance_criteria:
-  - criterion: "schemas.ts no longer declares Zod schemas for the legacy CLI shapes system/api_retry and system/compact"
+  - criterion: schemas.ts no longer declares Zod schemas for the legacy CLI shapes system/api_retry and system/compact
     verification: "grep -nE \"z\\.literal\\('(api_retry|compact)'\\)\" main/src/services/streamParser/schemas.ts returns 0 matches"
   - criterion: "schemas.ts top-level systemUnionSchema discriminated union contains exactly two branches: init and compact_boundary"
     verification: "grep -n 'systemUnionSchema = z.discriminatedUnion' -A 5 main/src/services/streamParser/schemas.ts shows only systemInitSchema and systemCompactBoundarySchema as branches (no systemApiRetrySchema, no systemCompactSchema)"
-  - criterion: "messageProjection.ts no longer has the api_retry skip branch and reads compact_metadata (not summary) from system events"
+  - criterion: messageProjection.ts no longer has the api_retry skip branch and reads compact_metadata (not summary) from system events
     verification: "grep -nE \"(api_retry|SystemCompactEvent|compact\\.summary|=== 'compact'[^_])\" main/src/services/streamParser/messageProjection.ts returns 0 matches"
   - criterion: "messageProjection.ts projectSystemEvent dispatches on subtype 'compact_boundary' (the SDK shape), producing a UnifiedMessage with systemSubtype='context_compacted' that carries trigger and pre_tokens in metadata"
     verification: "grep -n \"subtype === 'compact_boundary'\" main/src/services/streamParser/messageProjection.ts returns at least one match AND grep -n \"systemSubtype: 'context_compacted'\" main/src/services/streamParser/messageProjection.ts returns at least one match"
-  - criterion: "__tests__/sdkMockFactories.ts no longer exports systemApiRetry or systemCompact (legacy CLI factories)"
+  - criterion: __tests__/sdkMockFactories.ts no longer exports systemApiRetry or systemCompact (legacy CLI factories)
     verification: "grep -nE \"export function (systemApiRetry|systemCompact)\\(\" main/src/services/streamParser/__tests__/sdkMockFactories.ts returns 0 matches"
-  - criterion: "__tests__/schemas.test.ts no longer imports or references the retired legacy factories or their describe blocks"
+  - criterion: __tests__/schemas.test.ts no longer imports or references the retired legacy factories or their describe blocks
     verification: "grep -nE \"systemApiRetry|systemCompact[^B]\" main/src/services/streamParser/__tests__/schemas.test.ts returns 0 matches"
-  - criterion: "__tests__/messageProjection.test.ts is updated to assert compact_boundary projection (not the legacy compact shape) and no longer references SystemApiRetryEvent"
+  - criterion: __tests__/messageProjection.test.ts is updated to assert compact_boundary projection (not the legacy compact shape) and no longer references SystemApiRetryEvent
     verification: "grep -nE \"SystemApiRetryEvent|systemApiRetryEvent|subtype: 'compact'[^_]|subtype: 'api_retry'\" main/src/services/streamParser/__tests__/messageProjection.test.ts returns 0 matches AND grep -n \"subtype: 'compact_boundary'\" main/src/services/streamParser/__tests__/messageProjection.test.ts returns at least one match"
-  - criterion: "pnpm --filter main typecheck passes"
+  - criterion: pnpm --filter main typecheck passes
     verification: "cd <repo> && pnpm --filter main typecheck exits 0"
-  - criterion: "pnpm --filter main lint passes"
+  - criterion: pnpm --filter main lint passes
     verification: "cd <repo> && pnpm --filter main lint exits 0"
   - criterion: "pnpm --filter main test (vitest) is green, with all messageProjection.test.ts and schemas.test.ts cases passing"
     verification: "cd <repo> && pnpm --filter main test exits 0"
@@ -55,7 +55,6 @@ test_strategy:
       test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
 ---
-
 # Retire legacy stream-parser schema stubs and messageProjection dead branches
 
 ## Objective

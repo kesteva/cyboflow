@@ -1,8 +1,8 @@
 ---
 id: TASK-672
 idea: IDEA-SPRINT-024-compound
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/types/electron.d.ts
   - frontend/src/utils/api.ts
@@ -19,18 +19,18 @@ acceptance_criteria:
     verification: "grep -n 'getJsonMessages' frontend/src/types/electron.d.ts shows the line returning `Promise<IPCResponse<UnifiedMessage[]>>` and the file imports `UnifiedMessage` from `'../../../shared/types/unifiedMessage'`."
   - criterion: "frontend/src/utils/api.ts's getJsonMessages wrapper resolves to Promise<IPCResponse<UnifiedMessage[]>> via inference; no ClaudeJsonMessage reference remains in the wrapper."
     verification: "grep -n 'ClaudeJsonMessage' frontend/src/utils/api.ts returns 0 matches."
-  - criterion: "The inline `as unknown as UnifiedMessage` cast in frontend/src/components/panels/ai/MessagesView.tsx is removed."
+  - criterion: The inline `as unknown as UnifiedMessage` cast in frontend/src/components/panels/ai/MessagesView.tsx is removed.
     verification: "grep -n 'as unknown as UnifiedMessage' frontend/src/components/panels/ai/MessagesView.tsx returns 0 matches."
   - criterion: "The inline `as unknown as UnifiedMessage[]` cast in frontend/src/components/panels/ai/RichOutputView.tsx is removed."
     verification: "grep -n 'as unknown as UnifiedMessage' frontend/src/components/panels/ai/RichOutputView.tsx returns 0 matches."
-  - criterion: "No new TypeScript errors are introduced in either workspace."
-    verification: "Run `pnpm typecheck` from the repo root and confirm exit 0."
-  - criterion: "Existing frontend tests remain green and lint passes."
-    verification: "Run `pnpm --filter frontend test` and confirm exit 0. Run `pnpm lint` and confirm exit 0."
-  - criterion: "The TODO comments referencing FIND-SPRINT-024-4 are removed."
+  - criterion: No new TypeScript errors are introduced in either workspace.
+    verification: Run `pnpm typecheck` from the repo root and confirm exit 0.
+  - criterion: Existing frontend tests remain green and lint passes.
+    verification: Run `pnpm --filter frontend test` and confirm exit 0. Run `pnpm lint` and confirm exit 0.
+  - criterion: The TODO comments referencing FIND-SPRINT-024-4 are removed.
     verification: "grep -rn 'FIND-SPRINT-024-4' frontend/src returns 0 matches."
   - criterion: "Out-of-scope: the MessagesView session_info detection path is NOT reworked — only the type-level rewiring and cast removal land in this task."
-    verification: "Manual diff against HEAD~1 — only the cast removal and minimal typing adjustments."
+    verification: Manual diff against HEAD~1 — only the cast removal and minimal typing adjustments.
 depends_on: []
 estimated_complexity: low
 epic: claude-agent-sdk-migration
@@ -38,11 +38,10 @@ test_strategy:
   needed: true
   justification: "The IPC type alignment is verified primarily by TypeScript — once the cast is removed, any consumer that depended on `ClaudeJsonMessage` shape will surface as a compile error. No new test cases are needed; there are no existing unit tests for MessagesView.tsx or RichOutputView.tsx. The acceptance criteria's `pnpm typecheck` + `pnpm --filter frontend test` invocations are the primary verification."
   targets:
-    - behavior: "frontend typecheck succeeds with the new type signature (verifies no caller is broken by removing the `ClaudeJsonMessage` declaration)."
-      test_file: "frontend/tsconfig.json (via `pnpm --filter frontend exec tsc --noEmit`)"
+    - behavior: frontend typecheck succeeds with the new type signature (verifies no caller is broken by removing the `ClaudeJsonMessage` declaration).
+      test_file: frontend/tsconfig.json (via `pnpm --filter frontend exec tsc --noEmit`)
       type: integration
 ---
-
 # Fix stale IPC type declaration for panels:get-json-messages
 
 ## Objective
