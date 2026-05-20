@@ -139,9 +139,9 @@ export class RunLauncher {
         )
         .run(worktreePath, branchName, 'starting', runId);
 
-      // Wiring proof: emit a synthetic launch event so the renderer sees
-      // something immediately on first subscribe.  Richer events will come
-      // from the SDK pipeline once it is integrated (epic 7+).
+      // KEEP: synthetic run_started emission; closes a 50-500ms 'Waiting for events...'
+      // gap before the first real SDK event arrives. RunExecutor is now wired (see
+      // main/src/index.ts:580-589); real SDK events follow. Retained as UI-bootstrap aid.
       this.publisher?.publish(runId, {
         type: 'run_started',
         payload: { runId, worktreePath, branchName },
