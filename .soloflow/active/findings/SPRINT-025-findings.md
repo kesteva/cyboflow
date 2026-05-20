@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-025
-pending_count: 15
-last_updated: "2026-05-20T15:30:00.000Z"
+pending_count: 18
+last_updated: "2026-05-20T15:51:45.382Z"
 ---
 # Findings Queue
 
@@ -180,3 +180,100 @@ last_updated: "2026-05-20T15:30:00.000Z"
 - **location:** frontend/src/components/cyboflow/__tests__/RunView.test.tsx
 - **description:** RunView tests must be updated since the subscription was moved from RunView useEffect to the store. Tests that assert subscribe/unsubscribe is called by RunView are no longer valid and need to reflect the new architecture.
 - **resolved_by:** verifier — AC-prescribed: AC "All existing runEventBridge.test.ts cases continue to pass; any new tests added for the confirmed hypothesis pass" combined with the Phase 2 step 9 fix requires updating the RunView test surface to match the new no-subscription contract. Executor also amended `files_owned` to include the file.
+
+## FIND-SPRINT-025-18
+- **source:** SPRINT-025 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** main/src/events.ts:560
+- **description:** `attachProcessLifecycleHandlers` `exit` handler missing the `isCyboflowRunId` guard that TASK-667 added to the matching `spawned` handler at line 506.
+- **suggested_action:** Add `if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;` as the first line of the `manager.on(exit, ...)` handler at events.ts:560, mirroring the spawned-handler addition at line 510. Add a regression unit test or comment requiring the guard to appear in matched spawn/exit pairs. Consider extracting the spawn+exit handler pair into a `attachProcessLifecycleHandlersForTool(manager, tool, {skipForCyboflow: true})` helper so the guard is applied by construction rather than per-callback.
+- **resolved_by:** 
+
+
+
+```
+manager.on(spawned, async ({ panelId, sessionId }) => {
+  if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return; // line 510 — added by TASK-667
+  ...
+});
+
+manager.on(exit, async ({ panelId, sessionId, exitCode, signal }) => {
+  // NO GUARD — falls through to validatePanelEventContext / sessionManager queries
+  // line 560 onward
+});
+```
+
+When a cyboflow run terminates via the Claude Code manager, this unguarded handler runs `validatePanelEventContext`, `sessionManager.setSessionExitCode`, `sessionManager.updateSession`, `runCommandManager.stopRunCommands`, and `executionTracker.endExecution` against IDs the Crystal `sessions` table never wrote. The matching `claudeCodeManager.on(exit)` at line 937 IS guarded — only `attachProcessLifecycleHandlers` inner pair (506 + 560) is half-applied. The other guarded sites in the file (826, 877, 939, 1089) all apply the protection symmetrically across spawn/exit/output. This is exactly the cross-task drift pattern documented in CODE-PATTERNS.md "Extract-shared-utility refactors: prove completeness".
+
+Suspected tasks: TASK-667
+
+## FIND-SPRINT-025-19
+- **source:** SPRINT-025 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/ProjectView.tsx:176-193, frontend/src/components/SessionView.tsx:250-268
+- **description:** `handleAddTerminal` is duplicated near-verbatim across both views — same panelApi sequence, same body shape, differ only by session source and one extra `addToHistory` call.
+- **suggested_action:** Extract a `useAddTerminalPanel(session: Session | null, opts?: { addToHistory?: boolean }): () => Promise<void>` hook into `frontend/src/hooks/useAddTerminalPanel.ts` that encapsulates the panelApi.createPanel + addPanel + setActivePanelInStore + panelApi.setActivePanel sequence, and call it from both ProjectView and SessionView. The hook signature should accept a `Session | null` so both callers narrow uniformly; the optional `addToHistory` flag covers the SessionView extension. Pair the extraction with a unit test that catches future shape drift in `panelApi.createPanel({ type: terminal, ... })`. While there, add a CODE-PATTERNS.md entry under "Shared Utilities" so the next contributor finds it before re-cloning.
+- **resolved_by:** 
+
+
+```
+// ProjectView.tsx:176-193
+const handleAddTerminal = useCallback(async () => {
+  if (!mainRepoSessionId || !mainRepoSession) { console.warn(...); return; }
+  const newPanel = await panelApi.createPanel({ sessionId: mainRepoSessionId, type: terminal, title: Terminal, initialState: { cwd: mainRepoSession.worktreePath } });
+  addPanel(newPanel);
+  setActivePanelInStore(mainRepoSessionId, newPanel.id);
+  await panelApi.setActivePanel(mainRepoSessionId, newPanel.id);
+}, [mainRepoSessionId, mainRepoSession, addPanel, setActivePanelInStore]);
+
+// SessionView.tsx:250-268 — identical except for activeSession source + addToHistory
+const handleAddTerminal = useCallback(async () => {
+  if (!activeSession) { console.warn(...); return; }
+  const newPanel = await panelApi.createPanel({ sessionId: activeSession.id, type: terminal, title: Terminal, initialState: { cwd: activeSession.worktreePath } });
+  addPanel(newPanel);
+  setActivePanelInStore(activeSession.id, newPanel.id);
+  await panelApi.setActivePanel(activeSession.id, newPanel.id);
+  addToHistory(activeSession.id, newPanel.id);
+}, [activeSession, addPanel, setActivePanelInStore, addToHistory]);
+```
+
+The per-task code-reviewer reviews one file at a time and cannot see this. At sprint level the duplication is obvious. If the panelApi shape (`type`, `title`, `initialState.cwd`) ever changes — exactly what TASK-657 just changed at the IPC layer — both call sites must be updated in lockstep or a third future site will diverge. This is the same drift surface CODE-PATTERNS.md warns about for shared utilities.
+
+Suspected tasks: TASK-658
+
+## FIND-SPRINT-025-20
+- **source:** SPRINT-025 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/panels/TerminalPanel.tsx:268-273, main/src/ipc/panels.ts:9-33
+- **description:** Two tasks introduced "derive cwd from `panel.state.customState`" logic in the same sprint but neither shared the narrowing helper, and the frontend leg uses an unsafe type assertion that bypasses the pattern TASK-657 carefully established in the backend.
+
+Backend (TASK-657, main/src/ipc/panels.ts:13) — proper type guard:
+```
+function hasCwdString(state: ToolPanelState[customState]): state is { cwd: string } {
+  return typeof state === object && state !== null && cwd in state
+    && typeof (state as Record<string, unknown>).cwd === string
+    && ((state as Record<string, unknown>).cwd as string).length > 0;
+}
+```
+
+Frontend (TASK-659, frontend/src/components/panels/TerminalPanel.tsx:270-273) — unsafe cast:
+```
+const displayCwd =
+  (panel.state?.customState as TerminalPanelState | undefined)?.cwd ??
+  workingDirectory ??
+  ;
+```
+
+The cast assertion (`as TerminalPanelState | undefined`) will succeed at compile time for ANY object shape — including future non-terminal panel types whose `customState` happens to have a `cwd` field. If a non-terminal panel is rendered through this component path (or if `customState` is missing `cwd`), the runtime value silently falls through to `workingDirectory` or empty string instead of triggering a type error. The backend pattern would catch the same input and route to the `process.cwd()` fallback explicitly.
+
+FIND-SPRINT-025-7 already flagged the backend triplicate (`panels.ts` + `terminalPanelManager.ts` lines 82-91, 249-250, 286). With TASK-659 the same logic now spreads to the frontend too — four call sites total, none sharing a single source of truth. A `customState.cwd` schema change would have to update all four.
+
+Suspected tasks: TASK-657, TASK-659
+- **suggested_action:** Promote `hasCwdString` from `main/src/ipc/panels.ts:13` to `shared/types/panels.ts` (or a new `shared/types/panelCwd.ts`) so both packages import the same narrowing. Update both `main/src/ipc/panels.ts`, `main/src/services/terminalPanelManager.ts` (3 sites — already in FIND-SPRINT-025-7), AND `frontend/src/components/panels/TerminalPanel.tsx:270` to use it. The frontend hook becomes `const displayCwd = hasCwdString(panel.state?.customState) ? panel.state.customState.cwd : workingDirectory ?? ` — eliminating the unsafe assertion. Combine this with FIND-SPRINT-025-7s backend consolidation into one cleanup task.
+- **resolved_by:** 
