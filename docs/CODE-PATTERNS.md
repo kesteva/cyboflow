@@ -184,6 +184,16 @@ truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and t
 - TS↔Zod drift bridge: `main/src/services/streamParser/schemas.ts` `_typeCheck` catches
   required-field drift. Optional-field drift is a known gap (SPRINT-020 TASK-571 HUMAN_NEEDED).
 
+**StreamEvent discriminated-union narrowing:** `StreamEvent.type` (`frontend/src/utils/cyboflowApi.ts`)
+and `StreamEvent.payload` MUST be narrowed in the same pass. Leaving `payload: unknown`
+while `type` is a union forces `as ClaudeStreamEvent`-style casts at every consumer and
+defeats the discriminated-union design. If a non-SDK synthetic event exists (e.g. a
+bootstrap `run_started` row with no SDK payload), model it as its own union member
+(`{ type: 'run_started'; payload?: undefined }`) so `switch (event.type)` stays
+exhaustively auto-narrowed. A bare `payload: unknown` on a typed envelope is the
+tripwire — grep for it before merging.
+Canonical drift: FIND-SPRINT-026-20 — five surviving casts at `RunView.tsx:38,98,138,167,186`.
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with

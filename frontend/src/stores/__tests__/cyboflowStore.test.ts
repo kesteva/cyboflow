@@ -125,7 +125,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(capturedOnEvent).toBeDefined();
 
     // Simulate an event arriving from IPC.
-    const testEvent = {
+    const testEvent: StreamEvent = {
       runId: 'run-001',
       type: 'system',
       payload: { type: 'system' },
