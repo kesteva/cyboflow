@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useReviewQueueStore, useReviewQueueView } from '../stores/reviewQueueStore';
-import { PendingApprovalCard } from './PendingApprovalCard';
+import { PendingApprovalCard } from './ReviewQueue/PendingApprovalCard';
 import { useReviewQueueKeyboard } from '../hooks/useReviewQueueKeyboard';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
 import OnboardingCard, { dismissOnboarding } from './OnboardingCard';
+import { useReviewQueueSlice } from '../stores/reviewQueueSlice';
+import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 
 // Type for IPC response
 import type { IPCResponse } from '../utils/api';
@@ -12,11 +14,38 @@ function itemId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.id : item.items[0].id;
 }
 
+function itemRunId(item: QueueItem): string {
+  return item.kind === 'single' ? item.approval.runId : item.runId;
+}
+
+/**
+ * QueueRow wraps a single PendingApprovalCard and resolves its runStatus via
+ * the useRunStatus selector (which reads from useReviewQueueSlice.runStatusMap).
+ * Extracting this into a child component avoids calling useRunStatus inside a
+ * .map() callback, which would violate the Rules of Hooks.
+ */
+function QueueRow({
+  item,
+  isFocused,
+  runStatus,
+}: {
+  item: QueueItem;
+  isFocused: boolean;
+  runStatus: WorkflowRunStatus | undefined;
+}): React.JSX.Element {
+  return <PendingApprovalCard item={item} isFocused={isFocused} runStatus={runStatus} />;
+}
+
 export default function ReviewQueueView() {
   const queue = useReviewQueueStore(s => s.queue);
   const { blocking, normal } = useReviewQueueView();
   const allItems = [...blocking, ...normal];
   const { focusedIndex } = useReviewQueueKeyboard(allItems);
+
+  // Read per-run status from the reviewQueueSlice.  Each card gets its runStatus
+  // by looking up its runId in this map.  useRunStatus(runId) is the selector hook
+  // that wraps this lookup — see frontend/src/stores/reviewQueueSlice.ts.
+  const runStatusMap = useReviewQueueSlice((s) => s.runStatusMap);
 
   // Lifted dismissed state — controls OnboardingCard visibility from here so
   // both the "Got it" button and the y/n keypress path unmount the card within
@@ -115,10 +144,11 @@ export default function ReviewQueueView() {
                 Blocking
               </h3>
               {blocking.map((item, i) => (
-                <PendingApprovalCard
+                <QueueRow
                   key={itemId(item)}
                   item={item}
                   isFocused={i === focusedIndex}
+                  runStatus={runStatusMap[itemRunId(item)]}
                 />
               ))}
             </section>
@@ -128,10 +158,11 @@ export default function ReviewQueueView() {
               Pending
             </h3>
             {normal.map((item, i) => (
-              <PendingApprovalCard
+              <QueueRow
                 key={itemId(item)}
                 item={item}
                 isFocused={blocking.length + i === focusedIndex}
+                runStatus={runStatusMap[itemRunId(item)]}
               />
             ))}
           </section>
