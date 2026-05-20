@@ -186,6 +186,23 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
 }));
 
 // ---------------------------------------------------------------------------
+// Selector hooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Selector hook that returns the current WorkflowRunStatus for the given runId,
+ * or undefined when the runId is absent from the map.
+ *
+ * Used by ReviewQueueView to pass runStatus to each PendingApprovalCard.
+ * Exported for direct use in components and for unit testing via renderHook.
+ *
+ * @param runId - The workflow_runs.id to look up. When undefined, returns undefined.
+ */
+export function useRunStatus(runId: string | undefined): WorkflowRunStatus | undefined {
+  return useReviewQueueSlice((s) => (runId ? s.runStatusMap[runId] : undefined));
+}
+
+// ---------------------------------------------------------------------------
 // Pure reducer exports for unit testing
 // ---------------------------------------------------------------------------
 
