@@ -34,13 +34,15 @@
  * without receiving a 'running' probe from the main process.
  */
 import { create } from 'zustand';
-import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import type { McpServerHealth, McpHealthUiStatus } from '../../../shared/types/mcpHealth';
+import { toUiStatus } from '../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
 // Store status enum (three-value UI-level status)
 // ---------------------------------------------------------------------------
 
-export type McpHealthStatus = 'healthy' | 'starting' | 'error';
+/** @alias McpHealthUiStatus — preserved for backward-compat with existing imports. */
+export type McpHealthStatus = McpHealthUiStatus;
 
 // ---------------------------------------------------------------------------
 // State shape
@@ -74,22 +76,6 @@ export interface McpHealthActions {
    * once `cyboflow.events.onMcpHealth` is emitted by the orchestrator.
    */
   subscribeToMcpHealth: () => () => void;
-}
-
-// ---------------------------------------------------------------------------
-// Map IPC four-value status → UI three-value status
-// ---------------------------------------------------------------------------
-
-function toUiStatus(raw: McpServerHealth['status']): McpHealthStatus {
-  switch (raw) {
-    case 'running':
-      return 'healthy';
-    case 'starting':
-      return 'starting';
-    case 'failed':
-    case 'stopped':
-      return 'error';
-  }
 }
 
 // ---------------------------------------------------------------------------

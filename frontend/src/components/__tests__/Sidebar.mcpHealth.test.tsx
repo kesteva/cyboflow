@@ -1,30 +1,17 @@
 /**
- * Sidebar MCP health dot rendering tests.
+ * Sidebar MCP health indicator tests — post-TASK-626.
  *
- * Mocks useMcpHealth to return each of the four status values and asserts
- * that the dot's class name maps correctly:
- *   'running'  -> bg-status-success
- *   'starting' -> bg-status-warning
- *   'failed'   -> bg-status-error
- *   'stopped'  -> bg-status-error
+ * The Sidebar bottom MCP dot was removed in TASK-626. StatusBar's
+ * McpHealthIndicator is now the single MCP health surface.
  *
- * Also asserts the tooltip (title attribute) reflects the status string
- * and surfaces lastError when present.
+ * This file verifies:
+ *   (a) Sidebar no longer renders a MCP dot or MCP label text.
+ *   (b) useMcpHealth is not imported by Sidebar (verified by code grep,
+ *       enforced here via the absence of any MCP-related DOM nodes).
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { McpHealth } from '../../hooks/useMcpHealth';
-
-// ---------------------------------------------------------------------------
-// Mock useMcpHealth before the Sidebar import so vi.mock hoisting works
-// ---------------------------------------------------------------------------
-
-const mockMcpHealth: McpHealth = { status: 'starting', restartAttempts: 0 };
-
-vi.mock('../../hooks/useMcpHealth', () => ({
-  useMcpHealth: () => mockMcpHealth,
-}));
 
 // ---------------------------------------------------------------------------
 // Mock heavy Sidebar sub-components to keep this test fast and self-contained
@@ -80,11 +67,10 @@ import React from 'react';
 import { Sidebar } from '../Sidebar';
 
 // ---------------------------------------------------------------------------
-// Helper to set mock health and render
+// Helper
 // ---------------------------------------------------------------------------
 
-function renderSidebar(health: McpHealth) {
-  Object.assign(mockMcpHealth, health);
+function renderSidebar() {
   return render(
     <Sidebar
       onHelpClick={() => undefined}
@@ -100,52 +86,29 @@ function renderSidebar(health: McpHealth) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('Sidebar MCP health dot', () => {
-  it('renders a green dot when MCP status is running', () => {
-    renderSidebar({ status: 'running', restartAttempts: 0 });
-
-    const dot = document.querySelector('.bg-status-success.rounded-full');
-    expect(dot).toBeInTheDocument();
+describe('Sidebar — MCP indicator removed (TASK-626)', () => {
+  it('does not render a MCP dot (no .bg-status-success.rounded-full in bottom section)', () => {
+    renderSidebar();
+    // The sidebar should not contain any MCP-specific status dots in the bottom bar.
+    // Note: the StatusBar's McpHealthIndicator is NOT rendered in Sidebar tests.
+    // We verify the bottom bar has no MCP label.
+    const mcpLabel = screen.queryByText('MCP');
+    expect(mcpLabel).not.toBeInTheDocument();
   });
 
-  it('renders a yellow dot when MCP status is starting', () => {
-    renderSidebar({ status: 'starting', restartAttempts: 0 });
-
-    const dot = document.querySelector('.bg-status-warning.rounded-full');
-    expect(dot).toBeInTheDocument();
+  it('does not render a "MCP server:" tooltip anywhere in Sidebar', () => {
+    renderSidebar();
+    const mcpTitleEl = document.querySelector('[title^="MCP server:"]');
+    expect(mcpTitleEl).not.toBeInTheDocument();
   });
 
-  it('renders a red dot when MCP status is failed', () => {
-    renderSidebar({ status: 'failed', restartAttempts: 2 });
-
-    const dot = document.querySelector('.bg-status-error.rounded-full');
-    expect(dot).toBeInTheDocument();
+  it('still renders the project tree section', () => {
+    renderSidebar();
+    expect(screen.getByTestId('project-tree')).toBeInTheDocument();
   });
 
-  it('renders a red dot when MCP status is stopped', () => {
-    renderSidebar({ status: 'stopped', restartAttempts: 0 });
-
-    const dot = document.querySelector('.bg-status-error.rounded-full');
-    expect(dot).toBeInTheDocument();
-  });
-
-  it('shows MCP status in the title tooltip', () => {
-    renderSidebar({ status: 'running', restartAttempts: 0 });
-
-    const container = screen.getByTitle('MCP server: running');
-    expect(container).toBeInTheDocument();
-  });
-
-  it('includes lastError in tooltip when present', () => {
-    renderSidebar({ status: 'failed', restartAttempts: 2, lastError: 'subprocess died' });
-
-    const container = screen.getByTitle('MCP server: failed — subprocess died');
-    expect(container).toBeInTheDocument();
-  });
-
-  it('renders MCP label text', () => {
-    renderSidebar({ status: 'running', restartAttempts: 0 });
-
-    expect(screen.getByText('MCP')).toBeInTheDocument();
+  it('still renders the sidebar root element', () => {
+    renderSidebar();
+    expect(screen.getByTestId('sidebar')).toBeInTheDocument();
   });
 });
