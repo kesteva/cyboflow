@@ -4,7 +4,7 @@ import { join, dirname } from 'path';
 import { mkdir } from 'fs/promises';
 import { getShellPath } from '../utils/shellPath';
 import { withLock } from '../utils/mutex';
-import { buildCommitFooter } from '../utils/commitFooter';
+import { appendCommitFooter } from '../utils/commitFooter';
 import type { ConfigManager } from './configManager';
 import type { AnalyticsManager } from './analyticsManager';
 
@@ -646,13 +646,8 @@ export class WorktreeManager {
         const resetResult = await execWithShellPath(command, { cwd: worktreePath });
         lastOutput = resetResult.stdout || resetResult.stderr || '';
 
-        // Get config to check if Cyboflow footer is enabled (default: true)
-        const config = this.configManager?.getConfig();
-        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
-
         // Add Cyboflow footer if enabled
-        const footer = buildCommitFooter(enableCyboflowFooter);
-        const fullMessage = footer ? `${commitMessage}\n\n${footer}` : commitMessage;
+        const fullMessage = appendCommitFooter(commitMessage, this.configManager);
 
         // Properly escape commit message for cross-platform compatibility
         const escapedMessage = fullMessage.replace(/"/g, '\\"');
