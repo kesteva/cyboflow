@@ -297,4 +297,17 @@ the workspace. When adding a new `vitest.config.ts` in either workspace, mirror 
 existing files; before planning a test-wiring task, grep both `@testing-library/jest-dom`
 and `test/setup.ts` — do not rely on a `.test.*` glob.
 
+## Database Schema
+
+### Canonical DDL Source
+
+The `workflow_runs` table and other cyboflow-era tables (`workflows`, `approvals`, `raw_events`, `messages`) live in TWO files that MUST stay in sync:
+
+- `main/src/database/schema.sql` — fresh-install fast path. Run once on a new DB.
+- `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
+
+**canonical DDL source for cyboflow tables: migration 006.** Treat it as the authoritative declaration; mirror any column add/drop into `schema.sql` in the same commit. Migration 007 (and any future 00N) extends the schema additively.
+
+A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite, applies the two paths side-by-side, and asserts the resulting column sets and FKs match. The script lives at `scripts/verify-schema-parity.js`; it does NOT compare test fixtures like `registrySchema.ts` — those are documented subsets and any drift is caught by the test suites that import them.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
