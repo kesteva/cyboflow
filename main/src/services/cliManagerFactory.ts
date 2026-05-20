@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import type { Logger } from '../utils/logger';
 import type { ConfigManager } from './configManager';
 import type { SessionManager } from './sessionManager';
@@ -171,11 +172,18 @@ export class CliManagerFactory {
       sessionManager: unknown,
       logger?: Logger,
       configManager?: ConfigManager,
+      additionalOptions?: unknown,
     ) => {
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const db = options?.db as Database.Database | undefined;
+      if (!db) {
+        throw new TypeError('[CliManagerFactory] claude tool requires `db` in additionalOptions');
+      }
       return new ClaudeCodeManager(
         sessionManager as SessionManager,
         logger,
         configManager,
+        db,
       );
     };
 

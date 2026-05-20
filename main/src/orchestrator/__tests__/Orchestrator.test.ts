@@ -8,7 +8,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Orchestrator } from '../Orchestrator';
 import { RunQueueRegistry } from '../RunQueueRegistry';
-import type { DatabaseLike, LoggerLike, PreparedStatement } from '../types';
+import type { DatabaseLike, PreparedStatement } from '../types';
+import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
 // In-memory fakes
@@ -28,18 +29,6 @@ function makeFakeDb(): DatabaseLike {
   return {
     prepare: (_sql: string) => makeFakeStatement(),
     transaction: <T>(fn: (...args: unknown[]) => T) => fn,
-  };
-}
-
-/** Fake LoggerLike that collects every call for assertion. */
-function makeFakeLogger(): LoggerLike & { calls: Array<{ level: string; message: string }> } {
-  const calls: Array<{ level: string; message: string }> = [];
-  return {
-    calls,
-    info: (message) => calls.push({ level: 'info', message }),
-    warn: (message) => calls.push({ level: 'warn', message }),
-    error: (message) => calls.push({ level: 'error', message }),
-    debug: (message) => calls.push({ level: 'debug', message }),
   };
 }
 
@@ -63,12 +52,12 @@ function deferred<T = void>(): {
 
 describe('Orchestrator', () => {
   let db: DatabaseLike;
-  let logger: ReturnType<typeof makeFakeLogger>;
+  let logger: ReturnType<typeof makeSpyLogger>;
   let runQueues: RunQueueRegistry;
 
   beforeEach(() => {
     db = makeFakeDb();
-    logger = makeFakeLogger();
+    logger = makeSpyLogger();
     runQueues = new RunQueueRegistry();
   });
 

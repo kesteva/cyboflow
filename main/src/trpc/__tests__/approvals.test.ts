@@ -11,7 +11,7 @@
  *     does not throw.
  *  3. Sweep: grep confirms no global approve-all symbol exists in the codebase.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { execSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
@@ -205,5 +205,99 @@ describe('rejectRestOfRun handler', () => {
 
     // The grep should return empty output (no matches outside test files).
     expect(result.trim()).toBe('');
+  });
+});
+
+describe('decideRestOfRunHandler error logging', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test: approve branch — UPDATE failure logs with [approveRestOfRun] prefix
+  // -------------------------------------------------------------------------
+  it('logs [approveRestOfRun] prefix when UPDATE throws during approve', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const db = createTestDb();
+    // Seed 2 pending approvals so we can force the second UPDATE to throw.
+    const ids = seedPendingApprovals(db, 'run-err-approve', 2);
+
+    // Wrap db.prepare so the second UPDATE call (for ids[1]) throws.
+    let updateCallCount = 0;
+    const realPrepare = db.prepare.bind(db);
+    const wrappedDb = {
+      prepare: (sql: string) => {
+        const stmt = realPrepare(sql);
+        if (sql.includes('SET status = ?')) {
+          return {
+            all: (...params: unknown[]) => stmt.all(...params),
+            run: (...params: unknown[]) => {
+              updateCallCount++;
+              if (updateCallCount === 2) {
+                throw new Error('simulated UPDATE failure');
+              }
+              return stmt.run(...params);
+            },
+          };
+        }
+        return stmt;
+      },
+    };
+
+    const result = await approveRestOfRunHandler(wrappedDb, 'run-err-approve');
+
+    // First approval succeeded, second threw — decided should be 1.
+    expect(result).toEqual({ decided: 1 });
+
+    // console.error was called once with the [approveRestOfRun] prefix.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    const [msg] = errorSpy.mock.calls[0];
+    expect(msg).toContain('[approveRestOfRun]');
+    expect(msg).toContain(`Failed to approve ${ids[1]}`);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test: reject branch — UPDATE failure logs with [rejectRestOfRun] prefix
+  // -------------------------------------------------------------------------
+  it('logs [rejectRestOfRun] prefix when UPDATE throws during reject', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const db = createTestDb();
+    // Seed 2 pending approvals so we can force the second UPDATE to throw.
+    const ids = seedPendingApprovals(db, 'run-err-reject', 2);
+
+    // Wrap db.prepare so the second UPDATE call (for ids[1]) throws.
+    let updateCallCount = 0;
+    const realPrepare = db.prepare.bind(db);
+    const wrappedDb = {
+      prepare: (sql: string) => {
+        const stmt = realPrepare(sql);
+        if (sql.includes('SET status = ?')) {
+          return {
+            all: (...params: unknown[]) => stmt.all(...params),
+            run: (...params: unknown[]) => {
+              updateCallCount++;
+              if (updateCallCount === 2) {
+                throw new Error('simulated UPDATE failure');
+              }
+              return stmt.run(...params);
+            },
+          };
+        }
+        return stmt;
+      },
+    };
+
+    const result = await rejectRestOfRunHandler(wrappedDb, 'run-err-reject');
+
+    // First approval succeeded, second threw — decided should be 1.
+    expect(result).toEqual({ decided: 1 });
+
+    // console.error was called once with the [rejectRestOfRun] prefix.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    const [msg] = errorSpy.mock.calls[0];
+    expect(msg).toContain('[rejectRestOfRun]');
+    expect(msg).toContain(`Failed to reject ${ids[1]}`);
   });
 });

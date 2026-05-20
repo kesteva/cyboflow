@@ -479,6 +479,9 @@ async function initializeServices() {
     sessionManager,
     logger,
     configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
     skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
   gitDiffManager = new GitDiffManager(logger, analyticsManager);

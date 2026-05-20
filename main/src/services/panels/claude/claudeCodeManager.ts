@@ -71,7 +71,7 @@ interface StubCliProcess {
 /** Per-run pipeline tuple stored in the pipelines map. */
 interface PipelineTuple {
   router: EventRouter;
-  sink: RawEventsSink | null;
+  sink: RawEventsSink;
   runId: string;
 }
 
@@ -84,16 +84,6 @@ interface PipelineTuple {
  * overrides every PTY-touching method with SDK equivalents.
  */
 export class ClaudeCodeManager extends AbstractCliManager {
-  /**
-   * Shared better-sqlite3 handle for pipeline persistence (RawEventsSink).
-   * Injected at boot via ClaudeCodeManager.setSharedDb().
-   */
-  private static sharedDb: Database.Database | null = null;
-
-  static setSharedDb(db: Database.Database | null): void {
-    ClaudeCodeManager.sharedDb = db;
-  }
-
   /**
    * Inject the orchestrator IPC socket path so the cyboflow MCP server entry
    * can be included in per-session mcpServers options.
@@ -127,10 +117,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
-    logger?: Logger,
-    configManager?: ConfigManager,
+    logger: Logger | undefined,
+    configManager: ConfigManager | undefined,
+    private readonly db: Database.Database,
   ) {
     super(sessionManager, logger, configManager);
+    if (db == null) {
+      throw new TypeError('[ClaudeCodeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -244,14 +238,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Build SDK options.
       const sdkOptions = this.buildSdkOptions(options);
 
-      // Set up the per-run pipeline (EventRouter + optional RawEventsSink).
+      // Set up the per-run pipeline (EventRouter + RawEventsSink).
       const runId = panelId;
       const router = new EventRouter();
-      const db = ClaudeCodeManager.sharedDb;
-      const sink = db ? new RawEventsSink(db, this.logger) : null;
-      if (sink) {
-        sink.attachToRouter(router, runId);
-      }
+      const sink = new RawEventsSink(this.db, this.logger);
+      sink.attachToRouter(router, runId);
       this.pipelines.set(panelId, { router, sink, runId });
 
       // Abort controller for cancellation.
@@ -544,7 +535,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private cleanupPipeline(panelId: string): void {
     const pl = this.pipelines.get(panelId);
     if (!pl) return;
-    pl.sink?.dispose(pl.runId);
+    pl.sink.dispose(pl.runId);
     pl.router.clearRun(pl.runId);
     this.pipelines.delete(panelId);
   }
@@ -782,10 +773,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Satisfies AC#4 production-callsite requirement for transitionToAwaitingReview.
    */
   private tryTransitionToAwaitingReview(params: TransitionToAwaitingReviewParams): void {
-    const db = ClaudeCodeManager.sharedDb;
-    if (!db) return;
     try {
-      transitionToAwaitingReview(db, params);
+      transitionToAwaitingReview(this.db, params);
     } catch (err) {
       this.logger?.warn(
         `[ClaudeCodeManager] transitionToAwaitingReview skipped (no workflow_runs row yet): ${err instanceof Error ? err.message : String(err)}`

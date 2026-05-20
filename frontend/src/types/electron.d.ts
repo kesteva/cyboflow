@@ -83,7 +83,6 @@ interface ElectronAPI {
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
     // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
-    getJsonMessages: (sessionId: string) => Promise<IPCResponse<ClaudeJsonMessage[]>>;
     // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data
     getStatistics: (sessionId: string) => Promise<IPCDataResponse<unknown>>;
     getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly

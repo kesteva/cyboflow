@@ -137,8 +137,7 @@ describe('ClaudeCodeManager.killProcess', () => {
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    ClaudeCodeManager.setSharedDb(db);
-    mgr = new ClaudeCodeManager(createMockSessionManager());
+    mgr = new ClaudeCodeManager(createMockSessionManager(), undefined, undefined, db);
     // Spy on clearPendingForRun to assert it is called from runSdkQuery's
     // finally block (single-sourced), not directly from killProcess.
     clearPendingForRunSpy = vi.spyOn(
@@ -149,7 +148,7 @@ describe('ClaudeCodeManager.killProcess', () => {
 
   afterEach(() => {
     ApprovalRouter._resetForTesting();
-    ClaudeCodeManager.setSharedDb(null);
+    db.close();
     vi.clearAllMocks();
   });
 

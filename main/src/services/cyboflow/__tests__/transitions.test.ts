@@ -1,11 +1,10 @@
 /**
  * Unit tests for the atomic awaiting_review transition helpers.
  *
- * Schema DDL is inlined here rather than loaded from
- * main/src/database/migrations/006_cyboflow_schema.sql because TASK-153
- * runs in a parallel worktree that does not yet have TASK-152's migration
- * file. The inlined DDL is byte-for-byte identical to what TASK-152 will
- * deliver — keeping these tests self-contained and post-merge green.
+ * DDL now comes from GATE_SCHEMA in
+ * main/src/database/__test_fixtures__/registrySchema.ts rather than being
+ * inlined here. That fixture is the single source of truth for schema used
+ * across test files.
  *
  * See TASK-153 plan "Lowest Confidence Area" for why concurrent-transaction
  * races cannot be truly reproduced in a single-threaded vitest run.
@@ -19,78 +18,7 @@ import {
   TransitionRejectedError,
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
-
-// ---------------------------------------------------------------------------
-// Inline schema DDL (mirrors 006_cyboflow_schema.sql from TASK-152)
-// ---------------------------------------------------------------------------
-
-const SCHEMA_DDL = `
--- Migration 006: Cyboflow orchestrator schema (5 net-new tables)
--- Strictly disjoint from the inherited sessions/tool_panels tables — no cross-FK.
-
-CREATE TABLE IF NOT EXISTS workflows (
-  id TEXT PRIMARY KEY,
-  project_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  spec_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  project_id INTEGER NOT NULL,
-  worktree_path TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
-  policy_json TEXT NOT NULL,
-  stuck_at DATETIME,
-  stuck_reason TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  started_at DATETIME,
-  ended_at DATETIME,
-  FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  role TEXT NOT NULL,
-  content_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  tool_input_json TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
-  decided_at DATETIME,
-  decided_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
-CREATE INDEX IF NOT EXISTS idx_raw_events_type_run ON raw_events(event_type, run_id);
-CREATE INDEX IF NOT EXISTS idx_approvals_status_created ON approvals(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
-`;
+import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -130,7 +58,7 @@ describe('transitions', () => {
 
   beforeEach(() => {
     db = new Database(':memory:');
-    db.exec(SCHEMA_DDL);
+    db.exec(GATE_SCHEMA);
     seedWorkflow(db);
   });
 

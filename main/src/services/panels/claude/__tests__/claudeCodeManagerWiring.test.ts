@@ -1,6 +1,7 @@
 /**
  * Unit tests for ClaudeCodeManager.composeSystemPromptAppend per-spawn
- * precedence (TASK-661 acceptance criteria).
+ * precedence (TASK-661 acceptance criteria) and logger-wire coverage
+ * (TASK-649 acceptance criteria).
  *
  * Behavior covered:
  *   - When both dbSession-derived append AND per-spawn systemPromptAppend are
@@ -11,6 +12,8 @@
  *   - When only dbSession append is present, behavior is unchanged from prior
  *     to TASK-661.
  *   - When neither is present, undefined is returned.
+ *   - Logger spy is wired through ClaudeCodeManager → RawEventsSink: warn()
+ *     is called when RawEventsSink.handleEvent fails to INSERT (TASK-649).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -20,8 +23,13 @@ import { join } from 'path';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
+import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
+import type { Logger } from '../../../../utils/logger';
+
+type LoggerSpy = ReturnType<typeof makeProdLoggerSpy>;
+
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -111,19 +119,20 @@ function createMockSessionManager(sessionAppend?: string): SessionManager {
 
 describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence', () => {
   let db: Database.Database;
+  let logger: LoggerSpy;
 
   beforeEach(() => {
     capturedQueryOptions = null;
     db = createTestDb();
+    logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    ClaudeCodeManager.setSharedDb(db);
   });
 
   afterEach(() => {
     ApprovalRouter._resetForTesting();
-    ClaudeCodeManager.setSharedDb(null);
+    db.close();
     vi.clearAllMocks();
   });
 
@@ -134,11 +143,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -162,11 +172,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -188,11 +199,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => 'global instruction'),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -214,11 +226,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
-      undefined,
+      logger as unknown as Logger,
       {
         getSystemPromptAppend: vi.fn(() => undefined),
         getConfig: vi.fn(() => ({ verbose: false })),
       } as unknown as import('../../../configManager').ConfigManager,
+      db,
     );
 
     await mgr.spawnCliProcess({
@@ -233,5 +246,57 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     const append = capturedQueryOptions?.systemPrompt?.append;
     expect(append === undefined || append === null).toBe(true);
+  });
+
+  it('constructor throws TypeError when db is undefined (no silent degraded mode)', () => {
+    expect(() => {
+      new ClaudeCodeManager(
+        createMockSessionManager(),
+        undefined,
+        undefined,
+        undefined as unknown as Database.Database, // simulate a caller bypassing TS
+      );
+    }).toThrow(/db argument is required/i);
+  });
+
+  it('logger spy receives warn() when RawEventsSink INSERT fails — proves the ClaudeCodeManager → pipeline logger wire', async () => {
+    // Use a fake DB whose prepared statement's run() always throws.
+    // This forces RawEventsSink.handleEvent into its fail-soft catch block,
+    // which calls this.logger?.warn(...).  Because ClaudeCodeManager passes
+    // `this.logger` to new RawEventsSink(this.db, this.logger) during
+    // spawnCliProcess, the spy must observe the call — proving the logger
+    // reference flows from manager construction through to the pipeline.
+    // Reference: rawEventsSink.ts:112-116 (fail-soft catch).
+    const fakeStmt = { run: vi.fn(() => { throw new Error('simulated INSERT failure'); }) };
+    const fakeDb = {
+      prepare: vi.fn(() => fakeStmt),
+    } as unknown as Database.Database;
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      fakeDb,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-logger-wire',
+      sessionId: 'session-logger-wire',
+      worktreePath: '/tmp/test',
+      prompt: 'trigger warn via pipeline',
+      permissionMode: 'ignore',
+    });
+
+    // Let the async SDK iterator and RawEventsSink dispatch settle.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // logger.warn must have been called by RawEventsSink.handleEvent with the
+    // fail-soft message; matches the sibling assertion in
+    // streamParser/__tests__/rawEventsSink.test.ts.
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[rawEventsSink]'));
   });
 });
