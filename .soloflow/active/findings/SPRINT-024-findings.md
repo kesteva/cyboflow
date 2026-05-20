@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-024
 pending_count: 5
-last_updated: "2026-05-20T05:05:00.000Z"
+last_updated: "2026-05-20T05:35:00.000Z"
 ---
 # Findings Queue
 
@@ -54,3 +54,21 @@ last_updated: "2026-05-20T05:05:00.000Z"
 - **description:** The fix commit bb926cd hard-codes `setSessionInfo(null)` in the initial-load path of MessagesView.tsx, dropping session_info detection from `panels:get-json-messages` payload. In practice this preserves pre-existing behavior (the prior baseline code's `'type' in msgData && msgData.type === 'session_info'` check was already dead against UnifiedMessage shape because UnifiedMessage uses `role` not `type`, so foundSessionInfo never matched), so this is NOT a user-visible regression on the load path. However, the realtime `session:output` handler (lines 67-119) still has session_info detection logic that may also be dead/stale against current message shapes — its `parsedData.type === 'session_info'` check looks for a Crystal-era shape that may not be emitted by the current Electron app. Worth verifying whether the MessagesView Session Information card has ever rendered post-UnifiedMessage migration, or whether the entire feature should be reworked to drive off UnifiedMessage metadata.systemSubtype === 'init' like RichOutputView does (line 764).
 - **suggested_action:** When FIND-SPRINT-024-4 is addressed (correcting the IPC type to UnifiedMessage), also redesign MessagesView's Session Information card to read from the system init UnifiedMessage (`role === 'system' && metadata.systemSubtype === 'init'` carries `metadata.sessionInfo`). Keep the current `setSessionInfo(null)` hard-code as a TODO until the rework lands.
 - **resolved_by:** 
+
+## FIND-SPRINT-024-6
+- **type:** scope_deviation
+- **source:** TASK-646 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/__tests__/runExecutor.test.ts
+- **description:** required to meet AC: sweep-grep gate AC requires all orchestrator test files to use shared fixture; runExecutor.test.ts has a local makeLogger() that would violate the completeness gate. Claimed to migrate it alongside the other 6 identified files.
+- **resolved_by:** verifier — plan-prescribed: Implementation Step 1 ("Add any missed sites to files_owned") + AC-prescribed: sweep-grep gate AC4 would fail without this migration
+
+## FIND-SPRINT-024-7
+- **type:** scope_deviation
+- **source:** TASK-646 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/__tests__/preToolUseHookHelper.test.ts
+- **description:** required to meet AC: sweep-grep gate AC requires all orchestrator test files to use shared fixture; preToolUseHookHelper.test.ts has a local makeLogger() that would violate the completeness gate. Claimed to migrate it alongside the other 6 identified files.
+- **resolved_by:** verifier — plan-prescribed: Implementation Step 1 ("Add any missed sites to files_owned") + AC-prescribed: sweep-grep gate AC4 would fail without this migration
