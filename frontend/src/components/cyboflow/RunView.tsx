@@ -16,7 +16,7 @@
  *
  * TODO(epic-7-trpc-cutover): migrate to trpc.cyboflow.events.onStreamEvent({ runId })
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 import type {
@@ -34,7 +34,7 @@ import type {
 // Row components — one per SDK discriminator
 // ---------------------------------------------------------------------------
 
-function SystemEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as
     | SystemInitEvent
     | SystemApiRetryEvent
@@ -94,7 +94,7 @@ function SystemEventRow({ event }: { event: StreamEvent }): JSX.Element {
   );
 }
 
-function AssistantEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function AssistantEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as AssistantEvent;
   const content = payload.message?.content ?? [];
 
@@ -134,7 +134,7 @@ function AssistantEventRow({ event }: { event: StreamEvent }): JSX.Element {
   );
 }
 
-function UserEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function UserEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as UserEvent;
   const content = payload.message?.content ?? [];
 
@@ -163,7 +163,7 @@ function UserEventRow({ event }: { event: StreamEvent }): JSX.Element {
   );
 }
 
-function ResultEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function ResultEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as ResultEvent;
   const costStr = payload.total_cost_usd !== undefined
     ? `$${payload.total_cost_usd.toFixed(4)}`
@@ -182,7 +182,7 @@ function ResultEventRow({ event }: { event: StreamEvent }): JSX.Element {
   );
 }
 
-function StreamEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function StreamEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as ClaudeStreamEventVariant;
   const inner = payload.event;
   const deltaText =
@@ -200,7 +200,7 @@ function StreamEventRow({ event }: { event: StreamEvent }): JSX.Element {
   );
 }
 
-function UnknownEventRow({ event }: { event: StreamEvent }): JSX.Element {
+function UnknownEventRow({ event }: { event: StreamEvent }): ReactElement {
   return (
     <div className="mb-1 rounded border border-amber-500 bg-bg-secondary p-2 text-xs">
       <span className="font-semibold text-amber-500">Unrecognized event</span>
@@ -220,7 +220,7 @@ function UnknownEventRow({ event }: { event: StreamEvent }): JSX.Element {
 // Dispatch helper
 // ---------------------------------------------------------------------------
 
-function renderEvent(event: StreamEvent): JSX.Element {
+function renderEvent(event: StreamEvent): ReactElement {
   switch (event.type) {
     case 'system':       return <SystemEventRow event={event} />;
     case 'assistant':    return <AssistantEventRow event={event} />;
