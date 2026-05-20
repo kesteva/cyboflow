@@ -14,3 +14,28 @@ export interface McpServerHealth {
   lastError?: string;
   restartAttempts: number;
 }
+
+/**
+ * UI-side three-value collapse of McpServerHealth.status.
+ * Maps:
+ *   'running'  → 'healthy'
+ *   'starting' → 'starting'
+ *   'failed' | 'stopped' → 'error'
+ *
+ * Canonical UI status type — used by mcpHealthStore and any UI consumer.
+ * Do NOT duplicate this union in individual stores or hooks.
+ */
+export type McpHealthUiStatus = 'healthy' | 'starting' | 'error';
+
+/**
+ * Canonical raw-status → UI-status mapping. Single source of truth — both
+ * mcpHealthStore and useMcpHealth (and any future surface) must use this.
+ */
+export function toUiStatus(raw: McpServerHealth['status']): McpHealthUiStatus {
+  switch (raw) {
+    case 'running':  return 'healthy';
+    case 'starting': return 'starting';
+    case 'failed':
+    case 'stopped':  return 'error';
+  }
+}
