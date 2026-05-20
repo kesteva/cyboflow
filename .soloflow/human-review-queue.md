@@ -400,3 +400,23 @@ items: []
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
+
+- sprint: SPRINT-023
+  type: deferred
+  bucket: testing
+  dedup_key: visual_web_electron_unreachable
+  level: ground_truth
+  severity: medium
+  action: "Launch `pnpm dev` (full Electron with Vite dev server at http://localhost:4521), then manually verify these sprint-touched flows: (1) Review Queue stuck-aware card swap + tooltip with detectedAt (TASK-622/623/624); (2) Cancel-and-restart button tooltip + WARN log on TASK-304 no-op (TASK-627); (3) OnboardingCard dismissal via onDecide for both keyboard and click paths (TASK-625); (4) StatusBar is the sole MCP health surface — Sidebar no longer shows MCP dot (TASK-626); (5) commit footer presence in a fresh cyboflow run commit (TASK-628). Also confirm the pre-existing `useStuckNotifications subscription error: No \"subscription\"-procedure on path \"cyboflow.events.onStuckDetected\"` warning (observed in pre-sprint debug log) does not regress — TASK-623 aligned the hook with the canonical StuckDetectedEvent schema."
+  blocked_checks:
+    - "visual_web — Electron renderer at http://localhost:4521 unreachable (no `pnpm dev` session running); per CLAUDE.md the renderer cannot bootstrap standalone."
+    - "visual_macos — Peekaboo MCP available with both permissions granted, but no cyboflow UI window discoverable (macOS UI session at loginwindow); cannot attach to / capture an unmounted Electron window."
+  flows_deferred:
+    - "Review Queue stuck-aware card swap + StuckBadge tooltip (TASK-622/623/624)"
+    - "Cancel-and-restart tooltip + WARN log (TASK-627)"
+    - "OnboardingCard dismissal via onDecide — keyboard + click paths (TASK-625)"
+    - "Sidebar MCP dot removed; StatusBar is single MCP surface (TASK-626)"
+    - "Commit footer composition for cyboflow runs (TASK-628)"
+    - "Sprint-wide cross-task: App.tsx top-level subscribeToStuckEvents mount with TASK-623 useStuckNotifications — no duplicate subscriptions / missed events"
+    - "Stuck inspector modal reason+detectedAt persistence through reviewQueueSlice (TASK-624)"
+  created_at: "2026-05-19T19:15:00.000Z"

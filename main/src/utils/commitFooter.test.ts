@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildCommitFooter } from './commitFooter';
+import { buildCommitFooter, isCommitFooterEnabled, appendCommitFooter } from './commitFooter';
+import type { ConfigManager } from '../services/configManager';
 
 const CYBOFLOW_URL = 'https://github.com/cyboflow/cyboflow';
 const CO_AUTHOR = 'Co-Authored-By: Cyboflow <hello@cyboflow.com>';
@@ -22,5 +23,45 @@ describe('buildCommitFooter', () => {
   it('returns empty string when disabled', () => {
     const result = buildCommitFooter(false);
     expect(result).toBe('');
+  });
+});
+
+// Helper to create a minimal ConfigManager mock
+function makeConfigManager(enableCyboflowFooter?: boolean): ConfigManager {
+  return {
+    getConfig: () => ({ enableCyboflowFooter }),
+  } as unknown as ConfigManager;
+}
+
+describe('isCommitFooterEnabled', () => {
+  it('returns true when configManager is undefined', () => {
+    expect(isCommitFooterEnabled(undefined)).toBe(true);
+  });
+
+  it('returns true when enableCyboflowFooter is undefined (default-on)', () => {
+    expect(isCommitFooterEnabled(makeConfigManager(undefined))).toBe(true);
+  });
+
+  it('returns false only when enableCyboflowFooter === false (explicit opt-out)', () => {
+    expect(isCommitFooterEnabled(makeConfigManager(false))).toBe(false);
+  });
+});
+
+describe('appendCommitFooter', () => {
+  it('returns message unchanged when disabled', () => {
+    const msg = 'my commit message';
+    expect(appendCommitFooter(msg, makeConfigManager(false))).toBe(msg);
+  });
+
+  it("returns message + '\\n\\n' + footer when enabled (byte-equal)", () => {
+    const msg = 'my commit message';
+    const footer = buildCommitFooter(true);
+    expect(appendCommitFooter(msg, makeConfigManager(true))).toBe(`${msg}\n\n${footer}`);
+  });
+
+  it('handles undefined configManager same as missing key (default-on)', () => {
+    const msg = 'my commit message';
+    const footer = buildCommitFooter(true);
+    expect(appendCommitFooter(msg, undefined)).toBe(`${msg}\n\n${footer}`);
   });
 });

@@ -22,6 +22,7 @@ import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { WorkflowRunStatus } from '../../../../shared/types/stuckInspection';
 import { StuckBadge } from './StuckBadge';
 import { StuckInspectorModal } from './StuckInspectorModal';
+import { useRunStuckDetails } from '../../stores/reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -40,8 +41,17 @@ interface PendingApprovalCardProps {
    * Human-readable explanation of why the run is stuck.
    * Forwarded to <StuckBadge reason=…> as the hover tooltip.
    * Only meaningful when runStatus === 'stuck'.
+   *
+   * @deprecated Prefer letting the card resolve reason+detectedAt from
+   * useRunStuckDetails by runId. This prop is kept for backward compatibility
+   * with test mocks and any future explicit pass-through.
    */
   stuckReason?: string | null;
+  /**
+   * Called once after a successful approve or reject mutation. Optional.
+   * Not invoked on mutation error or on cancel-and-restart.
+   */
+  onDecide?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +98,11 @@ function CardChrome({
   const [cancelBusy, setCancelBusy] = useState(false);
   const isStuck = runStatus === 'stuck';
 
+  // Resolve reason + detectedAt from the slice.  Only active when stuck.
+  const { reason: stuckReasonObj, detectedAt } = useRunStuckDetails(isStuck ? runId : undefined);
+  // Prefer the slice's StuckReason.kind; fall back to the legacy stuckReason prop.
+  const stuckReasonLabel = stuckReasonObj ? stuckReasonObj.kind : stuckReason;
+
   const focusClass = isFocused
     ? ' ring-2 ring-interactive'
     : ' focus-within:ring-2 focus-within:ring-interactive';
@@ -111,7 +126,7 @@ function CardChrome({
       <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-xs text-text-muted">{representative.workflowName}</span>
         <span className="text-sm font-semibold text-text-primary">{label}</span>
-        {isStuck && <StuckBadge reason={stuckReason} />}
+        {isStuck && <StuckBadge reason={stuckReasonLabel} detectedAt={detectedAt} />}
         {isBlocking && (
           <span className="ml-1 text-xs font-medium text-status-error">
             blocked {formatAge(representative.createdAt)}
@@ -163,6 +178,7 @@ function CardChrome({
             size="sm"
             disabled={busy || cancelBusy}
             onClick={handleCancelAndRestart}
+            title="Stops the Claude run and starts a new one with the same workflow + worktree. Note: until TASK-304 ships, pending approvals are not yet denied on the permission socket — Claude may need to time out on its side before the new run can proceed cleanly."
           >
             Cancel and restart
           </Button>
@@ -196,6 +212,7 @@ export function PendingApprovalCard({
   isFocused = false,
   runStatus,
   stuckReason,
+  onDecide,
 }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
@@ -207,6 +224,8 @@ export function PendingApprovalCard({
     function handleApprove(): void {
       setBusy(true);
       void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId })
+        .then(() => { onDecide?.(); })
+        .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
         .finally(() => { setBusy(false); });
     }
 
@@ -214,7 +233,9 @@ export function PendingApprovalCard({
       setBusy(true);
       void Promise.all(
         items.map((a) => trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id })),
-      ).finally(() => { setBusy(false); });
+      ).then(() => { onDecide?.(); })
+        .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
+        .finally(() => { setBusy(false); });
     }
 
     return (
@@ -240,12 +261,16 @@ export function PendingApprovalCard({
   function handleApprove(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
+      .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
       .finally(() => { setBusy(false); });
   }
 
   function handleReject(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
+      .catch(() => { /* mutation error: leave card visible, do not call onDecide */ })
       .finally(() => { setBusy(false); });
   }
 

@@ -1,16 +1,17 @@
 /**
  * Unit tests for useStuckNotifications.
  *
- * Five cases:
- *   1. First stuck event per session fires a notification.
- *   2. Second event with the same sessionId is suppressed (constructor called once).
- *   3. Different sessionId fires a second notification.
+ * Six cases:
+ *   1. First stuck event per runId fires a notification.
+ *   2. Second event with the same runId is suppressed (constructor called once).
+ *   3. Different runId fires a second notification.
  *   4. Remount resets the suppression set (in-memory only).
  *   5. notifications.enabled === false gates the hook — no notification fired.
+ *   6. Notification title contains warning emoji and body matches new format using stuck reason from reason.kind.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import type { StuckDetectedEvent } from '../useStuckNotifications';
+import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // Fake tRPC subscription factory
@@ -80,9 +81,8 @@ const { useStuckNotifications } = await import('../useStuckNotifications');
 function makeEvent(overrides: Partial<StuckDetectedEvent> = {}): StuckDetectedEvent {
   return {
     runId: 'run-001',
-    sessionId: 'session-A',
-    workflowName: 'My Workflow',
-    reason: 'orphan_pty',
+    approvalId: 'approval-001',
+    reason: { kind: 'orphan_pty' },
     detectedAt: Date.now(),
     ...overrides,
   };
@@ -112,14 +112,14 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('useStuckNotifications', () => {
-  it('fires a notification for the first stuck event in a session', async () => {
+  it('fires a notification for the first stuck event for a runId', async () => {
     const { unmount } = renderHook(() => useStuckNotifications());
 
     // Allow the settings useEffect to resolve
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A', workflowName: 'Alpha' }));
+      emitStuck(makeEvent({ runId: 'run-001' }));
       // Let requestPermission() resolve
       await Promise.resolve();
     });
@@ -127,44 +127,44 @@ describe('useStuckNotifications', () => {
     expect(MockNotification).toHaveBeenCalledTimes(1);
     const [title, opts] = MockNotification.mock.calls[0] as [string, NotificationOptions];
     expect(title).toContain('⚠️');
-    expect(opts.body).toMatch(/Run "Alpha" is stuck/);
+    expect(opts.body).toMatch(/Run run-001 is stuck/);
 
     unmount();
   });
 
-  it('suppresses a second stuck event for the same sessionId', async () => {
+  it('suppresses a second stuck event for the same runId', async () => {
     const { unmount } = renderHook(() => useStuckNotifications());
 
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A', runId: 'run-001' }));
+      emitStuck(makeEvent({ runId: 'run-001', approvalId: 'approval-001' }));
       await Promise.resolve();
     });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A', runId: 'run-002' }));
+      emitStuck(makeEvent({ runId: 'run-001', approvalId: 'approval-002' }));
       await Promise.resolve();
     });
 
-    // Only one notification despite two events with the same sessionId
+    // Only one notification despite two events with the same runId
     expect(MockNotification).toHaveBeenCalledTimes(1);
 
     unmount();
   });
 
-  it('fires a second notification for a different sessionId', async () => {
+  it('fires a second notification for a different runId', async () => {
     const { unmount } = renderHook(() => useStuckNotifications());
 
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A' }));
+      emitStuck(makeEvent({ runId: 'run-001' }));
       await Promise.resolve();
     });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-B' }));
+      emitStuck(makeEvent({ runId: 'run-002' }));
       await Promise.resolve();
     });
 
@@ -180,7 +180,7 @@ describe('useStuckNotifications', () => {
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A' }));
+      emitStuck(makeEvent({ runId: 'run-001' }));
       await Promise.resolve();
     });
 
@@ -198,10 +198,10 @@ describe('useStuckNotifications', () => {
 
     await act(async () => { await Promise.resolve(); });
 
-    // Same sessionId that was suppressed before — must fire again because the
+    // Same runId that was suppressed before — must fire again because the
     // suppression set lives in-memory only (new ref on remount).
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A' }));
+      emitStuck(makeEvent({ runId: 'run-001' }));
       await Promise.resolve();
     });
 
@@ -222,7 +222,7 @@ describe('useStuckNotifications', () => {
     });
 
     await act(async () => {
-      emitStuck(makeEvent({ sessionId: 'session-A' }));
+      emitStuck(makeEvent({ runId: 'run-001' }));
       await Promise.resolve();
     });
 
@@ -238,9 +238,8 @@ describe('useStuckNotifications', () => {
 
     await act(async () => {
       emitStuck(makeEvent({
-        sessionId: 'session-C',
-        workflowName: 'Test Flow',
-        reason: 'self_deadlock',
+        runId: 'run-003',
+        reason: { kind: 'self_deadlock' },
       }));
       await Promise.resolve();
     });
@@ -248,7 +247,7 @@ describe('useStuckNotifications', () => {
     expect(MockNotification).toHaveBeenCalledTimes(1);
     const [title, opts] = MockNotification.mock.calls[0] as [string, NotificationOptions];
     expect(title).toContain('⚠️');
-    expect(opts.body).toMatch(/Run "Test Flow" is stuck: self-deadlock/);
+    expect(opts.body).toMatch(/is stuck: self-deadlock/);
 
     unmount();
   });

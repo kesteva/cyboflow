@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import type { Logger } from '../utils/logger';
 import { execSync } from '../utils/commandExecutor';
 import { buildGitCommitCommand } from '../utils/shellEscape';
+import { isCommitFooterEnabled } from '../utils/commitFooter';
 import {
   CommitModeSettings,
   CommitResult,
@@ -97,12 +98,8 @@ export class CommitManager extends EventEmitter {
 
       const fullMessage = prefix + commitMessage;
 
-      // Check if Cyboflow footer is enabled (default: true)
-      const config = this.configManager?.getConfig();
-      const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
-
       // Build commit command with Cyboflow footer if enabled
-      const commitCommand = buildGitCommitCommand(fullMessage, enableCyboflowFooter) + ' --no-verify';
+      const commitCommand = buildGitCommitCommand(fullMessage, isCommitFooterEnabled(this.configManager)) + ' --no-verify';
       const result = execSync(commitCommand, { cwd: worktreePath, encoding: 'utf8' });
 
       // Extract commit hash from output
@@ -207,9 +204,7 @@ export class CommitManager extends EventEmitter {
 
         // Commit with final message
         const commitMessage = options.commitMessage || 'Finalized session changes';
-        const config = this.configManager?.getConfig();
-        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
-        const commitCommand = buildGitCommitCommand(commitMessage, enableCyboflowFooter);
+        const commitCommand = buildGitCommitCommand(commitMessage, isCommitFooterEnabled(this.configManager));
         execSync(commitCommand, { cwd: worktreePath });
 
         const commitHash = execSync('git log -1 --format=%H', {

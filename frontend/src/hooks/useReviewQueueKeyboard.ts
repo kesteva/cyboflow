@@ -35,7 +35,10 @@ import type { QueueItem } from '../utils/reviewQueueSelectors';
  * function (which React.StrictMode would invoke twice in dev, doubling
  * network calls).
  */
-export function useReviewQueueKeyboard(queue: QueueItem[]): {
+export function useReviewQueueKeyboard(
+  queue: QueueItem[],
+  onDecide?: () => void,
+): {
   focusedIndex: number;
   setFocusedIndex: (i: number) => void;
 } {
@@ -44,6 +47,11 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
   // Refs keep the handler stable — no need to re-register on every render.
   const focusedIndexRef = useRef(focusedIndex);
   const queueRef = useRef(queue);
+
+  // Keep onDecide in a ref so the stable handler can always read the latest value
+  // without being recreated (avoids re-registering the global listener on every render).
+  const onDecideRef = useRef(onDecide);
+  useEffect(() => { onDecideRef.current = onDecide; }, [onDecide]);
 
   // Keep refs in sync on every render (runs synchronously after paint).
   useEffect(() => {
@@ -109,6 +117,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             } else {
               void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId: focused.runId });
             }
+            onDecideRef.current?.();
           }
           break;
         }
@@ -121,6 +130,7 @@ export function useReviewQueueKeyboard(queue: QueueItem[]): {
             } else {
               void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId: focused.runId });
             }
+            onDecideRef.current?.();
           }
           break;
         }

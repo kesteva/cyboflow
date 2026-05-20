@@ -28,6 +28,30 @@ export function getDevDebugLogPath(stream: DevLogStream): string {
 }
 
 /**
+ * Formats an array of console arguments into a single string, suitable for
+ * writing to a debug log. Object values are JSON-stringified; Error instances
+ * are rendered as `Error: {message}\nStack: {stack}`; circular structures are
+ * represented by a descriptive placeholder; all other values use String().
+ */
+export function formatConsoleArgs(args: unknown[]): string {
+  return args
+    .map((arg) => {
+      if (typeof arg === 'object' && arg !== null) {
+        if (arg instanceof Error) {
+          return `Error: ${arg.message}\nStack: ${arg.stack}`;
+        }
+        try {
+          return JSON.stringify(arg, null, 2);
+        } catch {
+          return `[Object with circular structure: ${(arg as Record<string, unknown>).constructor?.name || 'Object'}]`;
+        }
+      }
+      return String(arg);
+    })
+    .join(' ');
+}
+
+/**
  * Appends one formatted line to the appropriate dev-mode debug log.
  * Format: `[<ISO timestamp>] [<SOURCE> <LEVEL>] <message>\n`
  * (matches the format the AI assistant reads in `pnpm dev`).

@@ -32,6 +32,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
+import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
 import type { DatabaseLike } from './orchestrator/types';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
@@ -48,7 +49,7 @@ import {
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import * as fs from 'fs';
-import { getDevDebugLogPath, appendDevDebugLog } from './utils/devDebugLog';
+import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 
 export let mainWindow: BrowserWindow | null = null;
@@ -261,9 +262,7 @@ async function createWindow() {
   // Override console methods to forward to renderer and logger
   console.log = (...args: unknown[]) => {
     // Format the message
-    const message = args.map(arg =>
-      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-    ).join(' ');
+    const message = formatConsoleArgs(args);
 
     // Write to logger if available
     if (logger) {
@@ -303,20 +302,7 @@ async function createWindow() {
         return;
       }
 
-      const message = args.map(arg => {
-        if (typeof arg === 'object' && arg !== null) {
-          if (arg instanceof Error) {
-            return `Error: ${arg.message}\nStack: ${arg.stack}`;
-          }
-          try {
-            return JSON.stringify(arg, null, 2);
-          } catch (e) {
-            // Handle circular structure
-            return `[Object with circular structure: ${arg.constructor?.name || 'Object'}]`;
-          }
-        }
-        return String(arg);
-      }).join(' ');
+      const message = formatConsoleArgs(args);
 
       // Extract Error object if present
       const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
@@ -346,20 +332,7 @@ async function createWindow() {
   };
 
   console.warn = (...args: unknown[]) => {
-    const message = args.map(arg => {
-      if (typeof arg === 'object' && arg !== null) {
-        if (arg instanceof Error) {
-          return `Error: ${arg.message}\nStack: ${arg.stack}`;
-        }
-        try {
-          return JSON.stringify(arg, null, 2);
-        } catch (e) {
-          // Handle circular structure
-          return `[Object with circular structure: ${arg.constructor?.name || 'Object'}]`;
-        }
-      }
-      return String(arg);
-    }).join(' ');
+    const message = formatConsoleArgs(args);
 
     // Extract Error object if present for warnings too
     const errorObj = args.find(arg => arg instanceof Error) as Error | undefined;
@@ -386,20 +359,7 @@ async function createWindow() {
   };
 
   console.info = (...args: unknown[]) => {
-    const message = args.map(arg => {
-      if (typeof arg === 'object' && arg !== null) {
-        if (arg instanceof Error) {
-          return `Error: ${arg.message}\nStack: ${arg.stack}`;
-        }
-        try {
-          return JSON.stringify(arg, null, 2);
-        } catch (e) {
-          // Handle circular structure
-          return `[Object with circular structure: ${arg.constructor?.name || 'Object'}]`;
-        }
-      }
-      return String(arg);
-    }).join(' ');
+    const message = formatConsoleArgs(args);
 
     if (logger) {
       logger.info(message);
@@ -423,20 +383,7 @@ async function createWindow() {
   };
 
   console.debug = (...args: unknown[]) => {
-    const message = args.map(arg => {
-      if (typeof arg === 'object' && arg !== null) {
-        if (arg instanceof Error) {
-          return `Error: ${arg.message}\nStack: ${arg.stack}`;
-        }
-        try {
-          return JSON.stringify(arg, null, 2);
-        } catch (e) {
-          // Handle circular structure
-          return `[Object with circular structure: ${arg.constructor?.name || 'Object'}]`;
-        }
-      }
-      return String(arg);
-    }).join(' ');
+    const message = formatConsoleArgs(args);
 
     // In development, also write to backend debug log file
     if (isDevelopment) {
@@ -744,6 +691,19 @@ app.whenReady().then(async () => {
     // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
     console.log('[Main] ApprovalRouter initialized');
+
+    // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
+    // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
+    // SDK run and updates DB rows, but does not yet send deny-replies on the
+    // permission socket. See approvalRouter.ts:328–337.
+    setCancelAndRestartDeps({
+      db,
+      approvalRouter: ApprovalRouter.getInstance(),
+      runQueues,
+      claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
+      logger: loggerLike,
+    });
+    console.log('[Main] cancelAndRestart deps wired');
   }
 
   // Track app lifecycle events

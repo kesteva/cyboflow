@@ -50,11 +50,17 @@ vi.mock('../../../utils/trpcClient', () => ({
           mutate: mockCancelAndRestartMutate,
         },
       },
+      events: {
+        onStuckDetected: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
     },
   },
 }));
 
 import { PendingApprovalCard } from '../PendingApprovalCard';
+import { useReviewQueueSlice } from '../../../stores/reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -188,6 +194,8 @@ describe('PendingApprovalCard — modal open/close behavior', () => {
 describe('PendingApprovalCard — StuckBadge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset all slice maps so tests start with clean state.
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
   });
 
   it('renders STUCK badge when runStatus is "stuck"', () => {
@@ -205,10 +213,42 @@ describe('PendingApprovalCard — StuckBadge', () => {
     expect(screen.queryByText('STUCK')).not.toBeInTheDocument();
   });
 
-  it('StuckBadge shows stuckReason as tooltip title attribute', () => {
+  it('StuckBadge shows stuckReason as tooltip title attribute (legacy prop fallback)', () => {
     render(<PendingApprovalCard item={singleItem} runStatus="stuck" stuckReason="cross_run_deadlock" />);
     const badge = screen.getByText('STUCK');
     expect(badge).toHaveAttribute('title', 'cross_run_deadlock');
+  });
+
+  it('StuckBadge title includes both reason kind and relative-time suffix when detectedAt is in the slice', () => {
+    // Seed the slice with reason + detectedAt (2 minutes ago)
+    useReviewQueueSlice.setState({
+      runStatusMap: { [baseApproval.runId]: 'stuck' },
+      runReasonMap: { [baseApproval.runId]: { kind: 'cross_run_deadlock', conflictingRunId: 'run-other' } },
+      runDetectedAtMap: { [baseApproval.runId]: Date.now() - 120_000 },
+    });
+
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const badge = screen.getByText('STUCK');
+    const title = badge.getAttribute('title') ?? '';
+    expect(title).toContain('cross_run_deadlock');
+    // 120 seconds = 2 minutes → formatAge returns '2m'
+    expect(title).toContain('2m');
+  });
+
+  it('StuckBadge title contains only reason kind when runDetectedAtMap has no entry for runId', () => {
+    // Seed reason only — no detectedAt
+    useReviewQueueSlice.setState({
+      runStatusMap: { [baseApproval.runId]: 'stuck' },
+      runReasonMap: { [baseApproval.runId]: { kind: 'orphan_pty' } },
+      runDetectedAtMap: {},
+    });
+
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const badge = screen.getByText('STUCK');
+    const title = badge.getAttribute('title') ?? '';
+    expect(title).toBe('orphan_pty');
+    // Should NOT contain a relative time suffix separator
+    expect(title).not.toContain('·');
   });
 });
 
@@ -273,6 +313,111 @@ describe('PendingApprovalCard — Cancel and restart button', () => {
     await waitFor(() => {
       expect(mockCancelAndRestartMutate).toHaveBeenCalledWith({ runId: 'run-group' });
     });
+  });
+
+  it('Cancel and restart button title attribute documents partial functionality (TASK-627)', () => {
+    render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
+    const button = screen.getByRole('button', { name: /cancel and restart/i });
+    expect(button).toHaveAttribute('title', expect.stringContaining('TASK-304'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: onDecide callback (TASK-625)
+// ---------------------------------------------------------------------------
+
+describe('PendingApprovalCard — onDecide callback (single variant)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('onDecide is called once after successful Approve mutation', async () => {
+    const onDecide = vi.fn();
+    mockApproveMutate.mockResolvedValueOnce(undefined);
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is called once after successful Reject mutation', async () => {
+    const onDecide = vi.fn();
+    mockRejectMutate.mockResolvedValueOnce(undefined);
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is not called when the prop is omitted (no errors thrown)', async () => {
+    render(<PendingApprovalCard item={singleItem} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    });
+    // No assertion on onDecide — just ensure no throw
+  });
+
+  it('onDecide is NOT called when the Approve mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockApproveMutate.mockRejectedValueOnce(new Error('network error'));
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(mockApproveMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('onDecide is NOT called when the Reject mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockRejectMutate.mockRejectedValueOnce(new Error('network error'));
+    render(<PendingApprovalCard item={singleItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => {
+      expect(mockRejectMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+});
+
+describe('PendingApprovalCard — onDecide callback (group variant)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('onDecide is called once after successful group Approve mutation', async () => {
+    const onDecide = vi.fn();
+    mockApproveRestOfRunMutate.mockResolvedValueOnce({ decided: 1 });
+    render(<PendingApprovalCard item={groupItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is called once after successful group Reject mutation', async () => {
+    const onDecide = vi.fn();
+    // group reject calls Promise.all(items.map(a => reject.mutate(...))), not rejectRestOfRun
+    mockRejectMutate.mockResolvedValue(undefined);
+    render(<PendingApprovalCard item={groupItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('onDecide is NOT called when the group Approve mutation rejects', async () => {
+    const onDecide = vi.fn();
+    mockApproveRestOfRunMutate.mockRejectedValueOnce(new Error('server error'));
+    render(<PendingApprovalCard item={groupItem} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => {
+      expect(mockApproveRestOfRunMutate).toHaveBeenCalledTimes(1);
+    });
+    expect(onDecide).not.toHaveBeenCalled();
   });
 });
 

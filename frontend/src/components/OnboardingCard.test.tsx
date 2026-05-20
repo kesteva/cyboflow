@@ -64,14 +64,34 @@ vi.mock('../stores/reviewQueueStore', () => {
   };
 });
 
+// Capture the onDecide callback so the y/n dismissal test can invoke it.
+let capturedKeyboardOnDecide: (() => void) | undefined;
+
 vi.mock('../hooks/useReviewQueueKeyboard', () => ({
-  useReviewQueueKeyboard: () => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
+  useReviewQueueKeyboard: (_queue: QueueItem[], onDecide?: () => void) => {
+    capturedKeyboardOnDecide = onDecide;
+    return { focusedIndex: 0, setFocusedIndex: vi.fn() };
+  },
 }));
 
-vi.mock('./PendingApprovalCard', () => ({
+// ReviewQueueView now imports from './ReviewQueue/PendingApprovalCard' (the stuck-aware variant).
+vi.mock('./ReviewQueue/PendingApprovalCard', () => ({
   PendingApprovalCard: ({ item }: { item: QueueItem }) => {
     const toolName = item.kind === 'single' ? item.approval.toolName : item.toolName;
     return <div data-testid="pending-approval-card">{toolName}</div>;
+  },
+}));
+
+// Mock tRPC client — reviewQueueSlice (imported transitively via ReviewQueueView) requires it.
+vi.mock('../utils/trpcClient', () => ({
+  trpc: {
+    cyboflow: {
+      events: {
+        onStuckDetected: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
+    },
   },
 }));
 
@@ -165,6 +185,7 @@ const fakeApproval: Approval = {
 describe('ReviewQueueView — first approve/reject auto-dismisses OnboardingCard', () => {
   beforeEach(() => {
     mockQueue = [fakeApproval];
+    capturedKeyboardOnDecide = undefined;
     mockInit.mockClear();
 
     // Default: preference not set
@@ -183,7 +204,7 @@ describe('ReviewQueueView — first approve/reject auto-dismisses OnboardingCard
     mockQueue = [];
   });
 
-  it('pressing y with pending approvals calls preferences:set with cyboflow_onboarding_dismissed and unmounts the card', async () => {
+  it('triggering onDecide (keyboard path) calls preferences:set with cyboflow_onboarding_dismissed and unmounts the card', async () => {
     render(<ReviewQueueView />);
 
     // Wait for the onboarding card to finish checking its preference
@@ -191,9 +212,10 @@ describe('ReviewQueueView — first approve/reject auto-dismisses OnboardingCard
       expect(screen.getByText(/Cyboflow pauses Claude/)).toBeInTheDocument();
     });
 
-    // Simulate pressing y
+    // Simulate the keyboard hook calling onDecide (the consolidated dismissal path)
+    expect(capturedKeyboardOnDecide).toBeDefined();
     await act(async () => {
-      fireEvent.keyDown(window, { key: 'y', bubbles: true });
+      capturedKeyboardOnDecide?.();
     });
 
     expect(mockInvoke).toHaveBeenCalledWith(

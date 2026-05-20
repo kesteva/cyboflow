@@ -26,8 +26,9 @@ export function escapeShellArg(arg: string): string {
  */
 export function buildGitCommitCommand(message: string, enableCyboflowFooter: boolean = true): string {
   // Create the full commit message with signature
-  const footer = buildCommitFooter(enableCyboflowFooter);
-  const fullMessage = footer ? `${message}\n\n${footer}` : message;
+  const fullMessage = enableCyboflowFooter
+    ? `${message}\n\n${buildCommitFooter(true)}`
+    : message;
 
   const escapedMessage = escapeShellArg(fullMessage);
   return `git commit -m ${escapedMessage}`;
