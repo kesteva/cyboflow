@@ -15,6 +15,7 @@
  *     calling its `applyStuckEvent` action.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook } from '@testing-library/react';
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ vi.mock('../../utils/trpcClient', () => ({
   },
 }));
 
-import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice } from '../reviewQueueSlice';
+import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice, useRunStatus } from '../reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // pureApplyStuckEvent — pure function tests
@@ -217,5 +218,46 @@ describe('pureSetRunStatus', () => {
     const result = pureSetRunStatus(map, 'run-1', 'completed');
     expect('run-1' in result).toBe(false);
     expect(result['run-2']).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useRunStatus — selector hook tests (via renderHook)
+// ---------------------------------------------------------------------------
+
+describe('useRunStatus', () => {
+  beforeEach(() => {
+    useReviewQueueSlice.setState({ runStatusMap: {} });
+  });
+
+  it('returns the status from runStatusMap when the runId is present', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    const { result } = renderHook(() => useRunStatus('run-1'));
+    expect(result.current).toBe('stuck');
+  });
+
+  it('returns undefined when the runId is absent from runStatusMap', () => {
+    const { result } = renderHook(() => useRunStatus('run-missing'));
+    expect(result.current).toBeUndefined();
+  });
+
+  it('returns undefined when runId is undefined', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    const { result } = renderHook(() => useRunStatus(undefined));
+    expect(result.current).toBeUndefined();
+  });
+
+  it('tracks state changes — returns updated value after setState', () => {
+    const { result, rerender } = renderHook(() => useRunStatus('run-1'));
+    expect(result.current).toBeUndefined();
+
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    rerender();
+    expect(result.current).toBe('stuck');
+
+    // Clear entry → should return undefined again.
+    useReviewQueueSlice.setState({ runStatusMap: {} });
+    rerender();
+    expect(result.current).toBeUndefined();
   });
 });
