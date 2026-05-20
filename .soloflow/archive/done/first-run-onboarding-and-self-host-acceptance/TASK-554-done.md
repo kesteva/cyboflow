@@ -2,8 +2,10 @@
 id: TASK-554
 idea: IDEA-012
 idea_id: IDEA-012
-status: in-flight
+status: archived
 created: "2026-05-11T00:00:00Z"
+archived_at: "2026-05-20T22:00:00Z"
+archive_reason: "Manual 8-hour self-host acceptance run deferred indefinitely — gating it as a tracked open item is not productive. Scaffolded log lives at .soloflow/active/acceptance/SELF-HOST-LOG.md (cherry-picked to main). Resume by editing the log and re-opening this task if/when v1 ship readiness is being re-evaluated."
 files_owned:
   - .soloflow/active/acceptance/SELF-HOST-LOG.md
 files_readonly:
