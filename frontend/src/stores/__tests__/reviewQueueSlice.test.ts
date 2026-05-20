@@ -40,7 +40,7 @@ vi.mock('../../utils/trpcClient', () => ({
   },
 }));
 
-import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice, useRunStatus, useRunStuckDetails } from '../reviewQueueSlice';
+import { pureApplyStuckEvent, pureSetRunStatus, pureSetRunStatusAllMaps, useReviewQueueSlice, useRunStatus, useRunStuckDetails } from '../reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // pureApplyStuckEvent — pure function tests
@@ -220,6 +220,75 @@ describe('useReviewQueueSlice — setRunStatus', () => {
     expect('run-1' in useReviewQueueSlice.getState().runStatusMap).toBe(false);
     expect(useReviewQueueSlice.getState().runStatusMap['run-2']).toBe('running');
   });
+
+  it('clears all three maps when status is completed', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: { 'run-1': 'stuck' },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    });
+    const { setRunStatus } = useReviewQueueSlice.getState();
+    setRunStatus('run-1', 'completed');
+    const state = useReviewQueueSlice.getState();
+    expect('run-1' in state.runStatusMap).toBe(false);
+    expect('run-1' in state.runReasonMap).toBe(false);
+    expect('run-1' in state.runDetectedAtMap).toBe(false);
+  });
+
+  it('evicts runReasonMap and runDetectedAtMap entries when status is canceled', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: { 'run-1': 'stuck' },
+      runReasonMap: { 'run-1': { kind: 'orphan_pty' } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    });
+    useReviewQueueSlice.getState().setRunStatus('run-1', 'canceled');
+    const state = useReviewQueueSlice.getState();
+    expect('run-1' in state.runStatusMap).toBe(false);
+    expect('run-1' in state.runReasonMap).toBe(false);
+    expect('run-1' in state.runDetectedAtMap).toBe(false);
+  });
+
+  it('evicts all three maps when status is failed', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: { 'run-1': 'stuck' },
+      runReasonMap: { 'run-1': { kind: 'stale_socket' } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    });
+    useReviewQueueSlice.getState().setRunStatus('run-1', 'failed');
+    const state = useReviewQueueSlice.getState();
+    expect('run-1' in state.runStatusMap).toBe(false);
+    expect('run-1' in state.runReasonMap).toBe(false);
+    expect('run-1' in state.runDetectedAtMap).toBe(false);
+  });
+
+  it('non-terminal status does not touch runReasonMap or runDetectedAtMap', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: { 'run-1': 'stuck' },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    });
+    useReviewQueueSlice.getState().setRunStatus('run-1', 'running');
+    const state = useReviewQueueSlice.getState();
+    expect(state.runStatusMap['run-1']).toBe('running');
+    expect(state.runReasonMap['run-1']).toEqual({ kind: 'self_deadlock' });
+    expect(state.runDetectedAtMap['run-1']).toBe(1700000000000);
+  });
+
+  it('does not affect other runIds in reason/detectedAt maps when evicting', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: { 'run-1': 'stuck', 'run-2': 'stuck' },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' }, 'run-2': { kind: 'orphan_pty' } },
+      runDetectedAtMap: { 'run-1': 100, 'run-2': 200 },
+    });
+    useReviewQueueSlice.getState().setRunStatus('run-1', 'completed');
+    const state = useReviewQueueSlice.getState();
+    expect('run-1' in state.runStatusMap).toBe(false);
+    expect('run-1' in state.runReasonMap).toBe(false);
+    expect('run-1' in state.runDetectedAtMap).toBe(false);
+    expect(state.runStatusMap['run-2']).toBe('stuck');
+    expect(state.runReasonMap['run-2']).toEqual({ kind: 'orphan_pty' });
+    expect(state.runDetectedAtMap['run-2']).toBe(200);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -261,6 +330,75 @@ describe('pureSetRunStatus', () => {
     const result = pureSetRunStatus(map, 'run-1', 'completed');
     expect('run-1' in result).toBe(false);
     expect(result['run-2']).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pureSetRunStatusAllMaps — pure function tests (multi-map eviction)
+// ---------------------------------------------------------------------------
+
+describe('pureSetRunStatusAllMaps', () => {
+  it('evicts all three maps when status is completed', () => {
+    const maps = {
+      runStatusMap: { 'run-1': 'stuck' as WorkflowRunStatus },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' as const } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    };
+    const result = pureSetRunStatusAllMaps(maps, 'run-1', 'completed');
+    expect('run-1' in result.runStatusMap).toBe(false);
+    expect('run-1' in result.runReasonMap).toBe(false);
+    expect('run-1' in result.runDetectedAtMap).toBe(false);
+  });
+
+  it('evicts all three maps when status is canceled', () => {
+    const maps = {
+      runStatusMap: { 'run-1': 'stuck' as WorkflowRunStatus },
+      runReasonMap: { 'run-1': { kind: 'orphan_pty' as const } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    };
+    const result = pureSetRunStatusAllMaps(maps, 'run-1', 'canceled');
+    expect('run-1' in result.runStatusMap).toBe(false);
+    expect('run-1' in result.runReasonMap).toBe(false);
+    expect('run-1' in result.runDetectedAtMap).toBe(false);
+  });
+
+  it('evicts all three maps when status is failed', () => {
+    const maps = {
+      runStatusMap: { 'run-1': 'stuck' as WorkflowRunStatus },
+      runReasonMap: { 'run-1': { kind: 'stale_socket' as const } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    };
+    const result = pureSetRunStatusAllMaps(maps, 'run-1', 'failed');
+    expect('run-1' in result.runStatusMap).toBe(false);
+    expect('run-1' in result.runReasonMap).toBe(false);
+    expect('run-1' in result.runDetectedAtMap).toBe(false);
+  });
+
+  it('non-terminal status updates only runStatusMap, leaves reason/detectedAt maps unchanged', () => {
+    const maps = {
+      runStatusMap: { 'run-1': 'stuck' as WorkflowRunStatus },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' as const } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    };
+    const result = pureSetRunStatusAllMaps(maps, 'run-1', 'running');
+    expect(result.runStatusMap['run-1']).toBe('running');
+    expect(result.runReasonMap).toBe(maps.runReasonMap); // same reference — no allocation
+    expect(result.runDetectedAtMap).toBe(maps.runDetectedAtMap); // same reference — no allocation
+  });
+
+  it('does not affect other runIds in any map when evicting', () => {
+    const maps = {
+      runStatusMap: { 'run-1': 'stuck' as WorkflowRunStatus, 'run-2': 'stuck' as WorkflowRunStatus },
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' as const }, 'run-2': { kind: 'orphan_pty' as const } },
+      runDetectedAtMap: { 'run-1': 100, 'run-2': 200 },
+    };
+    const result = pureSetRunStatusAllMaps(maps, 'run-1', 'completed');
+    expect('run-1' in result.runStatusMap).toBe(false);
+    expect('run-1' in result.runReasonMap).toBe(false);
+    expect('run-1' in result.runDetectedAtMap).toBe(false);
+    expect(result.runStatusMap['run-2']).toBe('stuck');
+    expect(result.runReasonMap['run-2']).toEqual({ kind: 'orphan_pty' });
+    expect(result.runDetectedAtMap['run-2']).toBe(200);
   });
 });
 
