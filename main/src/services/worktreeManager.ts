@@ -5,6 +5,7 @@ import { mkdir } from 'fs/promises';
 import { getShellPath } from '../utils/shellPath';
 import { withLock } from '../utils/mutex';
 import { appendCommitFooter } from '../utils/commitFooter';
+import { escapeShellArg } from '../utils/shellEscape';
 import type { ConfigManager } from './configManager';
 import type { AnalyticsManager } from './analyticsManager';
 
@@ -649,9 +650,8 @@ export class WorktreeManager {
         // Add Cyboflow footer if enabled
         const fullMessage = appendCommitFooter(commitMessage, this.configManager);
 
-        // Properly escape commit message for cross-platform compatibility
-        const escapedMessage = fullMessage.replace(/"/g, '\\"');
-        command = `git commit -m "${escapedMessage}"`;
+        // Use escapeShellArg to safely quote the commit message and prevent shell injection.
+        command = `git commit -m ${escapeShellArg(fullMessage)}`;
         executedCommands.push(`git commit -m "..." (in ${worktreePath})`);
         const commitResult = await execWithShellPath(command, { cwd: worktreePath });
         lastOutput = commitResult.stdout || commitResult.stderr || '';

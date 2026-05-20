@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { API } from '../utils/api';
-import { trpc } from '../utils/trpcClient';
-import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
+import { useReviewQueueSlice } from '../stores/reviewQueueSlice';
+import type { StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,34 +29,13 @@ export function stuckReasonText(reason: StuckReason): string {
 }
 
 // ---------------------------------------------------------------------------
-// Subscription interface — forward-looking tRPC surface
-//
-// `cyboflow.events.onStuckDetected` will be added to the events router by
-// TASK-254 (orchestrator-and-trpc-router epic).  Until that lands, this hook
-// accesses the subscription via an interface cast through `unknown` to remain
-// type-safe without relying on `any`.
-// ---------------------------------------------------------------------------
-
-interface StuckEventsClient {
-  onStuckDetected: {
-    subscribe(
-      input: undefined,
-      callbacks: {
-        onData: (event: StuckDetectedEvent) => void;
-        onError: (err: unknown) => void;
-      },
-    ): { unsubscribe(): void };
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
 /**
- * Subscribes to stuck-run events and fires exactly one macOS desktop
- * notification per app-launch run (`runId`).  Subsequent stuck events
- * for the same run are suppressed silently to avoid notification fatigue.
+ * Observes `useReviewQueueSlice.runStatusMap` for transitions into `'stuck'`
+ * and fires exactly one macOS desktop notification per `runId` per app launch.
+ * The slice owns the tRPC subscription; this hook is a downstream observer.
  *
  * Mounted exactly once at the `App` top level — never inside a view component
  * so the suppression set is never reset by a view unmount.
@@ -101,32 +80,37 @@ export function useStuckNotifications(): void {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: runs once on mount only
   }, []);
 
-  // -- Subscribe to stuck events --------------------------------------------
+  // -- Observe slice runStatusMap for stuck transitions ---------------------
 
   useEffect(() => {
-    // Access the forward-looking `onStuckDetected` subscription via a typed
-    // cast through `unknown`.  The actual procedure is added to
-    // `cyboflow.events` by TASK-254 (orchestrator-and-trpc-router epic).
-    // The cast is safe: the shape is validated at the interface level
-    // (`StuckEventsClient`) and the subscription is mocked in unit tests.
-    const events = trpc.cyboflow.events as unknown as StuckEventsClient;
+    // Snapshot of runIds we have seen as stuck — used to detect transitions
+    // (a runId entering the map at 'stuck' or moving from non-stuck → 'stuck').
+    // Initialize from current state so a stuck entry already present at mount
+    // does NOT immediately re-fire — first-real-transition semantics.
+    const prevStuck = new Set<string>(
+      Object.entries(useReviewQueueSlice.getState().runStatusMap)
+        .filter(([, status]) => status === 'stuck')
+        .map(([runId]) => runId),
+    );
 
-    const subscription = events.onStuckDetected.subscribe(undefined, {
-      onData: (event: StuckDetectedEvent) => {
-        const { runId, reason } = event;
+    const unsubscribe = useReviewQueueSlice.subscribe((state) => {
+      for (const [runId, status] of Object.entries(state.runStatusMap)) {
+        if (status !== 'stuck') continue;
+        if (prevStuck.has(runId)) continue;
+        prevStuck.add(runId);
 
-        // Suppression: only notify once per runId per app launch
-        if (notifiedRunsRef.current.has(runId)) return;
-
-        // Settings gate: respect the global notifications.enabled flag
-        if (!settings.enabled) return;
-
+        // Per-app-launch suppression
+        if (notifiedRunsRef.current.has(runId)) continue;
+        if (!settings.enabled) continue;
         notifiedRunsRef.current.add(runId);
 
+        const reason = state.runReasonMap[runId];
         requestPermission().then((hasPermission) => {
           if (!hasPermission) return;
           new Notification('Run Stuck ⚠️', {
-            body: `Run ${runId.slice(0, 8)} is stuck: ${stuckReasonText(reason)}`,
+            body: reason
+              ? `Run ${runId.slice(0, 8)} is stuck: ${stuckReasonText(reason)}`
+              : `Run ${runId.slice(0, 8)} is stuck`,
             icon: '/favicon.ico',
             badge: '/favicon.ico',
             requireInteraction: false,
@@ -134,14 +118,9 @@ export function useStuckNotifications(): void {
         }).catch((err: unknown) => {
           console.warn('[useStuckNotifications] Failed to show notification:', err);
         });
-      },
-      onError: (err: unknown) => {
-        console.warn('[useStuckNotifications] subscription error:', err);
-      },
+      }
     });
 
-    return () => {
-      subscription.unsubscribe();
-    };
+    return unsubscribe;
   }, [settings.enabled]);
 }

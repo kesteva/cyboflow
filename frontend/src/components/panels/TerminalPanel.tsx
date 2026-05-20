@@ -1,11 +1,13 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Folder } from 'lucide-react';
 import { useSession } from '../../contexts/SessionContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { TerminalPanelProps } from '../../types/panelComponents';
 import { renderLog, devLog } from '../../utils/console';
 import { getTerminalTheme } from '../../utils/terminalTheme';
+import type { TerminalPanelState } from '../../../../shared/types/panels';
 import '@xterm/xterm/css/xterm.css';
 
 // Type for terminal state restoration
@@ -263,15 +265,34 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
     );
   }
 
+  // Derive the cwd to display in the header.
+  // Priority: panel.state.customState.cwd → SessionContext.workingDirectory → ''
+  const displayCwd =
+    (panel.state?.customState as TerminalPanelState | undefined)?.cwd ??
+    workingDirectory ??
+    '';
+
   // Always render the terminal div to keep XTerm instance alive
   return (
-    <div className="h-full w-full relative">
-      <div ref={terminalRef} className="h-full w-full" />
-      {!isInitialized && (
-        <div className="absolute inset-0 flex items-center justify-center bg-surface-primary bg-opacity-80">
-          <div className="text-text-secondary">Initializing terminal...</div>
-        </div>
-      )}
+    <div className="h-full w-full flex flex-col">
+      {/* Breadcrumb header showing the current working directory */}
+      <div
+        data-testid="terminal-cwd-breadcrumb"
+        className="h-6 flex items-center gap-1 px-2 border-b border-border-primary bg-surface-secondary flex-shrink-0"
+        title={displayCwd}
+      >
+        <Folder className="w-3 h-3 text-text-secondary flex-shrink-0" />
+        <span className="font-mono text-xs text-text-secondary truncate">{displayCwd}</span>
+      </div>
+      {/* xterm viewport — must fill remaining height so ResizeObserver/FitAddon works */}
+      <div className="flex-1 min-h-0 relative">
+        <div ref={terminalRef} className="h-full w-full" />
+        {!isInitialized && (
+          <div className="absolute inset-0 flex items-center justify-center bg-surface-primary bg-opacity-80">
+            <div className="text-text-secondary">Initializing terminal...</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 });

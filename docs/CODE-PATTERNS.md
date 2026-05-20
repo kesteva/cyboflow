@@ -10,6 +10,9 @@ to a canonical example — read those for the actual implementation.
 - **Test colocation:** Unit tests live in `__tests__/` subdirectories next to the file
   under test (e.g. `main/src/services/__tests__/gitStatusManager.test.ts`). E2E tests
   are top-level in `tests/`.
+- **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
+  `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
+  examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and pending `rawEvents.ts` via TASK-676).
 - **Barrels:** No barrel `index.ts` re-exports used; import paths are explicit.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
   (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`.
@@ -116,6 +119,13 @@ to a canonical example — read those for the actual implementation.
 - **Use it for:** A `vi.fn()`-based `LoggerLike` spy for orchestrator, IPC, and pipeline tests. `makeSpyLogger()` returns `LoggerLike & { calls: LogCall[] }` — each method is a Vitest spy and pushes structured entries onto `calls` for log assertions. `makeProdLoggerSpy()` returns a `Pick<Logger, 'warn' | 'info' | 'verbose'>`-shaped spy for service-layer call sites that pass the spy to code expecting the production `Logger` (cast via `as unknown as Logger` at the seam).
 - **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
 - **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
+
+### `main/src/orchestrator/__tests__/__fixtures__/rawEvents`
+
+- **Path:** `main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts` (will move to `__test_fixtures__/rawEvents.ts` via TASK-676)
+- **Use it for:** Any test that needs a `raw_events` table — persistence (`bridgeEvents`, `RawEventsSink`), consumption (`runExecutor`), or schema reconciliation. Exports `RAW_EVENTS_DDL`, `makeRawEventsDb()` (in-memory `better-sqlite3` with the table created and FKs off), and `countRawEvents(db, runId)`. Do NOT inline `CREATE TABLE ... raw_events` locally — a migration 006 schema change must propagate via this single source.
+- **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
+- **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.
 
 ### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
 

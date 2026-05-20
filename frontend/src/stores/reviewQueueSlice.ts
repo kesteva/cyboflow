@@ -24,8 +24,8 @@
  *
  * `cyboflow.events.onStuckDetected` will be added to the events router by
  * TASK-254 (orchestrator-and-trpc-router epic).  Until that lands, the
- * subscription is accessed via an interface cast through `unknown` — the same
- * pattern used in `useStuckNotifications.ts` (TASK-503).
+ * subscription is accessed via an interface cast through `unknown`.
+ * `useStuckNotifications` consumes slice state rather than its own subscription.
  *
  * TASK-502 — stuck-detection-and-observability epic.
  */
@@ -33,28 +33,7 @@ import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../utils/trpcClient';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
-import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
-
-// ---------------------------------------------------------------------------
-// Forward-looking tRPC subscription interface (TASK-254 dependency)
-// ---------------------------------------------------------------------------
-
-/**
- * Narrow interface for the `cyboflow.events.onStuckDetected` subscription that
- * TASK-254 will add to the events router.  Cast through `unknown` so this slice
- * compiles without a real router type update.
- */
-interface StuckEventsClient {
-  onStuckDetected: {
-    subscribe(
-      input: undefined,
-      callbacks: {
-        onData: (event: StuckDetectedEvent) => void;
-        onError: (err: unknown) => void;
-      },
-    ): { unsubscribe(): void };
-  };
-}
+import type { StuckDetectedEvent, StuckEventsClient, StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // State shape
@@ -76,8 +55,9 @@ export interface ReviewQueueSliceState {
    * StuckReason that caused the run to be classified stuck.
    *
    * Populated when `applyStuckEvent` is called with a `reason` payload.
-   * Entries are written alongside runStatusMap but are NOT evicted on terminal
-   * status — the reason stays available for diagnostic display even after cancel.
+   * Entries are written alongside `runStatusMap` and are co-evicted by
+   * `setRunStatus` when the run reaches a terminal status (`completed` /
+   * `canceled` / `failed`).
    */
   runReasonMap: Record<string, StuckReason>;
 
@@ -86,6 +66,8 @@ export interface ReviewQueueSliceState {
    * values are Unix epoch milliseconds of when the run was classified stuck.
    *
    * Populated when `applyStuckEvent` is called with a `detectedAt` payload.
+   * Entries are co-evicted by `setRunStatus` when the run reaches a terminal
+   * status (`completed` / `canceled` / `failed`).
    */
   runDetectedAtMap: Record<string, number>;
 
@@ -116,10 +98,12 @@ export interface ReviewQueueSliceState {
    * ## Eviction semantics
    *
    * When `status` is a terminal value (`completed`, `canceled`, or `failed`),
-   * the entry is **removed** from `runStatusMap` instead of stored.  This
-   * prevents unbounded map growth: once a run reaches a terminal state it will
-   * never transition again, so tracking it provides no value and wastes memory.
-   * Non-terminal statuses are stored normally.
+   * the entry is **removed** from `runStatusMap` AND from the companion
+   * `runReasonMap` / `runDetectedAtMap`.  Once a run reaches a terminal
+   * state the only consumer (`PendingApprovalCard`) gates `useRunStuckDetails`
+   * on `isStuck`, which is false post-terminal — so reason/detectedAt entries
+   * become unreachable.  Co-eviction prevents unbounded growth of all three
+   * maps over a long-running app session.
    */
   setRunStatus: (runId: string, status: WorkflowRunStatus) => void;
 
@@ -166,13 +150,24 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
   },
 
   setRunStatus: (runId, status) => {
-    // Terminal statuses: evict the entry instead of storing it.
-    // See JSDoc on the interface method for the eviction rationale.
+    // Terminal statuses: evict the entry from all three maps to prevent
+    // unbounded growth. The sole consumer (PendingApprovalCard) gates
+    // useRunStuckDetails on `isStuck`, which becomes false the moment we
+    // remove runStatusMap[runId] — so the reason/detectedAt entries are
+    // unreachable anyway. Keeping them around is a slow memory leak.
     if (status === 'completed' || status === 'canceled' || status === 'failed') {
       set((state) => {
-        const next = { ...state.runStatusMap };
-        delete next[runId];
-        return { runStatusMap: next };
+        const nextStatus = { ...state.runStatusMap };
+        delete nextStatus[runId];
+        const nextReason = { ...state.runReasonMap };
+        delete nextReason[runId];
+        const nextDetectedAt = { ...state.runDetectedAtMap };
+        delete nextDetectedAt[runId];
+        return {
+          runStatusMap: nextStatus,
+          runReasonMap: nextReason,
+          runDetectedAtMap: nextDetectedAt,
+        };
       });
       return;
     }
@@ -274,22 +269,35 @@ export function pureApplyStuckEvent(
 }
 
 /**
- * Pure setRunStatus reducer — exported for unit testing.
- *
- * Applies a status update to a given runStatusMap snapshot without touching
- * the Zustand store.  Terminal statuses (`completed`, `canceled`, `failed`)
- * cause eviction of the key; all others are stored normally.
+ * Pure setRunStatus reducer that operates on all three slice maps — exported
+ * for unit testing. Mirrors the Zustand action: terminal statuses evict the
+ * key from all three maps; non-terminal statuses update only runStatusMap.
  */
-export function pureSetRunStatus(
-  map: Record<string, WorkflowRunStatus>,
+export function pureSetRunStatusAllMaps(
+  maps: {
+    runStatusMap: Record<string, WorkflowRunStatus>;
+    runReasonMap: Record<string, StuckReason>;
+    runDetectedAtMap: Record<string, number>;
+  },
   runId: string,
   status: WorkflowRunStatus,
-): Record<string, WorkflowRunStatus> {
+): {
+  runStatusMap: Record<string, WorkflowRunStatus>;
+  runReasonMap: Record<string, StuckReason>;
+  runDetectedAtMap: Record<string, number>;
+} {
   if (status === 'completed' || status === 'canceled' || status === 'failed') {
-    if (!(runId in map)) return map; // already absent — no allocation
-    const next = { ...map };
-    delete next[runId];
-    return next;
+    const nextStatus = { ...maps.runStatusMap };
+    const nextReason = { ...maps.runReasonMap };
+    const nextDetectedAt = { ...maps.runDetectedAtMap };
+    delete nextStatus[runId];
+    delete nextReason[runId];
+    delete nextDetectedAt[runId];
+    return { runStatusMap: nextStatus, runReasonMap: nextReason, runDetectedAtMap: nextDetectedAt };
   }
-  return { ...map, [runId]: status };
+  return {
+    runStatusMap: { ...maps.runStatusMap, [runId]: status },
+    runReasonMap: maps.runReasonMap,
+    runDetectedAtMap: maps.runDetectedAtMap,
+  };
 }
