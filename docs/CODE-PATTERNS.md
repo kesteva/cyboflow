@@ -10,6 +10,9 @@ to a canonical example — read those for the actual implementation.
 - **Test colocation:** Unit tests live in `__tests__/` subdirectories next to the file
   under test (e.g. `main/src/services/__tests__/gitStatusManager.test.ts`). E2E tests
   are top-level in `tests/`.
+- **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
+  `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
+  examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and pending `rawEvents.ts` via TASK-676).
 - **Barrels:** No barrel `index.ts` re-exports used; import paths are explicit.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
   (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`.
