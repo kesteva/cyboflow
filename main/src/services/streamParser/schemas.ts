@@ -80,42 +80,6 @@ const systemInitSchema = z.object({
 }).passthrough();
 
 /**
- * system/api_retry: legacy CLI shape.
- *
- * NOTE: The Claude Agent SDK does NOT emit this exact shape. The SDK surfaces retry-ish
- * signals via SDKStatusMessage and rate-limit signals via SDKRateLimitEvent.
- * Retained to keep messageProjection.ts's api_retry skip branch compiling during the
- * migration window. T8 owns its eventual removal.
- */
-const systemApiRetrySchema = z.object({
-  type: z.literal('system'),
-  subtype: z.literal('api_retry'),
-  attempt: z.number(),
-  max_retries: z.number(),
-  retry_delay_ms: z.number(),
-  error_status: z.number().optional(),
-  error: z.object({
-    category: z.string(),
-    message: z.string().optional(),
-  }).passthrough().optional(),
-}).passthrough();
-
-/**
- * system/compact: LEGACY — `--include-partial-messages` CLI shape for context-window compaction.
- *
- * The Claude Agent SDK emits the SAME semantic event with a DIFFERENT shape — see
- * systemCompactBoundarySchema below. Retained to keep messageProjection.ts's existing compact
- * handler (which reads `summary`) compiling during the migration. T8 owns removal once
- * messageProjection.ts switches to reading compact_metadata from systemCompactBoundarySchema.
- */
-const systemCompactSchema = z.object({
-  type: z.literal('system'),
-  subtype: z.literal('compact'),
-  session_id: z.string().optional(),
-  summary: z.string().optional(),
-}).passthrough();
-
-/**
  * system/compact_boundary: Claude Agent SDK shape for context-window compaction.
  */
 const systemCompactBoundarySchema = z.object({
@@ -132,8 +96,6 @@ const systemCompactBoundarySchema = z.object({
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemInitSchema,
-  systemApiRetrySchema,
-  systemCompactSchema,
   systemCompactBoundarySchema,
 ]);
 
