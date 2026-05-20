@@ -5,6 +5,7 @@ import type { DatabaseService } from '../database/database';
 import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
+import { escapeShellArg } from '../utils/shellEscape';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -74,9 +75,9 @@ export class RunCommandManager extends EventEmitter {
             const shellInfo = ShellDetector.getDefaultShell();
             this.logger?.verbose(`Using shell: ${shellInfo.path} (${shellInfo.name})`);
             
-            // Prepare command with environment variable
-            const escapedWorktreePath = worktreePath.replace(/'/g, "'\"'\"'");
-            const commandWithEnv = `export WORKTREE_PATH='${escapedWorktreePath}' && ${commandLine}`;
+            // Prepare command with environment variable — use escapeShellArg to safely quote
+            // the worktree path and prevent shell injection from adversarial directory names.
+            const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
             
             // Get shell command arguments
             const { shell, args: shellArgs } = ShellDetector.getShellCommandArgs(commandWithEnv);
