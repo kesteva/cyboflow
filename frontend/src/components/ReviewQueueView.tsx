@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useReviewQueueStore, useReviewQueueView } from '../stores/reviewQueueStore';
 import { PendingApprovalCard } from './ReviewQueue/PendingApprovalCard';
 import { useReviewQueueKeyboard } from '../hooks/useReviewQueueKeyboard';
@@ -28,19 +28,20 @@ function QueueRow({
   item,
   isFocused,
   runStatus,
+  onDecide,
 }: {
   item: QueueItem;
   isFocused: boolean;
   runStatus: WorkflowRunStatus | undefined;
+  onDecide?: () => void;
 }): React.JSX.Element {
-  return <PendingApprovalCard item={item} isFocused={isFocused} runStatus={runStatus} />;
+  return <PendingApprovalCard item={item} isFocused={isFocused} runStatus={runStatus} onDecide={onDecide} />;
 }
 
 export default function ReviewQueueView() {
   const queue = useReviewQueueStore(s => s.queue);
   const { blocking, normal } = useReviewQueueView();
   const allItems = [...blocking, ...normal];
-  const { focusedIndex } = useReviewQueueKeyboard(allItems);
 
   // Read per-run status from the reviewQueueSlice.  Each card gets its runStatus
   // by looking up its runId in this map.  useRunStatus(runId) is the selector hook
@@ -48,8 +49,8 @@ export default function ReviewQueueView() {
   const runStatusMap = useReviewQueueSlice((s) => s.runStatusMap);
 
   // Lifted dismissed state — controls OnboardingCard visibility from here so
-  // both the "Got it" button and the y/n keypress path unmount the card within
-  // the same React render cycle.
+  // both the "Got it" button and the card button / y/n keypress paths unmount
+  // the card within the same React render cycle.
   const [onboardingDismissed, setOnboardingDismissed] = useState(false);
 
   // One-shot ref guards against writing the preference more than once.
@@ -77,34 +78,16 @@ export default function ReviewQueueView() {
     })();
   }, []);
 
-  // Register a keydown listener for y/n that dismisses the onboarding card once.
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key !== 'y' && event.key !== 'n') return;
-      if (onboardingDismissedRef.current) return;
+  // Single shared dismiss callback — wired to keyboard shortcuts and card buttons.
+  // Guards via onboardingDismissedRef so it is idempotent (no-op after first call).
+  const handleDecide = useCallback(() => {
+    if (onboardingDismissedRef.current) return;
+    onboardingDismissedRef.current = true;
+    setOnboardingDismissed(true);
+    void dismissOnboarding();
+  }, []);
 
-      // Guard: only fire if there's something in the queue to act on.
-      if (allItems.length === 0) return;
-
-      const target = event.target;
-      if (target instanceof HTMLInputElement) return;
-      if (target instanceof HTMLTextAreaElement) return;
-      if (
-        target instanceof HTMLElement &&
-        (target.isContentEditable || target.contentEditable === 'true')
-      ) return;
-
-      onboardingDismissedRef.current = true;
-      setOnboardingDismissed(true);
-      void dismissOnboarding();
-    }
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [allItems.length]);
+  const { focusedIndex } = useReviewQueueKeyboard(allItems, handleDecide);
 
   // Scroll the focused card into view whenever focusedIndex changes.
   useEffect(() => {
@@ -126,11 +109,7 @@ export default function ReviewQueueView() {
       </div>
       <OnboardingCard
         dismissed={onboardingDismissed}
-        onDismiss={() => {
-          onboardingDismissedRef.current = true;
-          setOnboardingDismissed(true);
-          void dismissOnboarding();
-        }}
+        onDismiss={handleDecide}
       />
       {totalCount === 0 ? (
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
@@ -149,6 +128,7 @@ export default function ReviewQueueView() {
                   item={item}
                   isFocused={i === focusedIndex}
                   runStatus={runStatusMap[itemRunId(item)]}
+                  onDecide={handleDecide}
                 />
               ))}
             </section>
@@ -163,6 +143,7 @@ export default function ReviewQueueView() {
                 item={item}
                 isFocused={blocking.length + i === focusedIndex}
                 runStatus={runStatusMap[itemRunId(item)]}
+                onDecide={handleDecide}
               />
             ))}
           </section>
