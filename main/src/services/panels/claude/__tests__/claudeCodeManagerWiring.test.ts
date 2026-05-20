@@ -310,12 +310,9 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     // Let the async SDK iterator and RawEventsSink dispatch settle.
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    // logger.warn must have been called by RawEventsSink.handleEvent.
-    expect(logger.warn).toHaveBeenCalled();
-    // Inspect warn.mock.calls[0] to verify the fail-soft message content.
-    // (warn.mock.calls is the vitest Mock API surface; cast needed since LoggerSpy
-    // types warn as a plain function, not a vi.fn Mock.)
-    const warn = logger.warn as unknown as import('vitest').MockInstance;
-    expect(warn.mock.calls[0][0]).toContain('[rawEventsSink]');
+    // logger.warn must have been called by RawEventsSink.handleEvent with the
+    // fail-soft message; matches the sibling assertion in
+    // streamParser/__tests__/rawEventsSink.test.ts.
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[rawEventsSink]'));
   });
 });
