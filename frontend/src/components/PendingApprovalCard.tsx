@@ -9,6 +9,11 @@ interface PendingApprovalCardProps {
   item: QueueItem;
   /** When true, renders a visible focus ring for keyboard-navigation highlighting. */
   isFocused?: boolean;
+  /**
+   * Called once after a successful approve or reject mutation. Optional.
+   * Not invoked on mutation error or on cancel-and-restart.
+   */
+  onDecide?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +112,7 @@ function CardChrome({
  * Carries data-approval-id and role="listitem" for keyboard-nav targeting
  * (TASK-404). For groups, data-approval-id is the first item's id.
  */
-export function PendingApprovalCard({ item, isFocused = false }: PendingApprovalCardProps): React.ReactElement {
+export function PendingApprovalCard({ item, isFocused = false, onDecide }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
   if (item.kind === 'group') {
@@ -118,12 +123,14 @@ export function PendingApprovalCard({ item, isFocused = false }: PendingApproval
     function handleApprove(): void {
       setBusy(true);
       void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId })
+        .then(() => { onDecide?.(); })
         .finally(() => { setBusy(false); });
     }
 
     function handleReject(): void {
       setBusy(true);
       void trpc.cyboflow.approvals.rejectRestOfRun.mutate({ runId })
+        .then(() => { onDecide?.(); })
         .finally(() => { setBusy(false); });
     }
 
@@ -147,12 +154,14 @@ export function PendingApprovalCard({ item, isFocused = false }: PendingApproval
   function handleApprove(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
       .finally(() => { setBusy(false); });
   }
 
   function handleReject(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
       .finally(() => { setBusy(false); });
   }
 

@@ -47,6 +47,11 @@ interface PendingApprovalCardProps {
    * with test mocks and any future explicit pass-through.
    */
   stuckReason?: string | null;
+  /**
+   * Called once after a successful approve or reject mutation. Optional.
+   * Not invoked on mutation error or on cancel-and-restart.
+   */
+  onDecide?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +211,7 @@ export function PendingApprovalCard({
   isFocused = false,
   runStatus,
   stuckReason,
+  onDecide,
 }: PendingApprovalCardProps): React.ReactElement {
   const [busy, setBusy] = useState(false);
 
@@ -217,6 +223,7 @@ export function PendingApprovalCard({
     function handleApprove(): void {
       setBusy(true);
       void trpc.cyboflow.approvals.approveRestOfRun.mutate({ runId })
+        .then(() => { onDecide?.(); })
         .finally(() => { setBusy(false); });
     }
 
@@ -224,7 +231,8 @@ export function PendingApprovalCard({
       setBusy(true);
       void Promise.all(
         items.map((a) => trpc.cyboflow.approvals.reject.mutate({ approvalId: a.id })),
-      ).finally(() => { setBusy(false); });
+      ).then(() => { onDecide?.(); })
+        .finally(() => { setBusy(false); });
     }
 
     return (
@@ -250,12 +258,14 @@ export function PendingApprovalCard({
   function handleApprove(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.approve.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
       .finally(() => { setBusy(false); });
   }
 
   function handleReject(): void {
     setBusy(true);
     void trpc.cyboflow.approvals.reject.mutate({ approvalId: approval.id })
+      .then(() => { onDecide?.(); })
       .finally(() => { setBusy(false); });
   }
 
