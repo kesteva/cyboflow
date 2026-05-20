@@ -834,6 +834,8 @@ Run `pnpm build:main` before `pnpm dev`.
 
 ### Smoke 1 — Panel create + prompt + stream (AC#13)
 
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#13 Manual smoke 1.
+
 - [ ] `pnpm dev` launches Electron window without errors.
 - [ ] Create a new Claude panel.
 - [ ] Send: `Say hello and explain in one sentence what file I'm currently in.`
@@ -849,6 +851,8 @@ Run `pnpm build:main` before `pnpm dev`.
 
 ### Smoke 2 — Tool intercept + approval (AC#14)
 
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#14 Manual smoke 2.
+
 - [ ] From panel in Smoke 1, send: `List the files in the current directory using the bash tool.`
 - [ ] Review queue shows the bash tool-call request.
 - [ ] Click Approve. Tool completes.
@@ -863,6 +867,8 @@ Run `pnpm build:main` before `pnpm dev`.
 
 ### Smoke 3 — Session resume across panel restart (AC#15)
 
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#15 Manual smoke 3.
+
 - [ ] Send: `My favorite color is teal. Remember this.` Wait for completion.
 - [ ] Close the panel (right-click → close).
 - [ ] Reopen the panel for the same session / restart.
@@ -876,6 +882,8 @@ Run `pnpm build:main` before `pnpm dev`.
 ---
 
 ### Smoke 4 — PATH isolation (AC#16)
+
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#16 Manual smoke 4.
 
 Run in a fresh terminal:
 ```bash
@@ -900,6 +908,8 @@ Then repeat Smoke 1 in this PATH-filtered context.
 
 ### Smoke 5 — Workflow run emits real SDK events (AC#17)
 
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#17 Manual smoke 5 (severity: high).
+
 - [ ] Open the cyboflow tab.
 - [ ] Click `Start run` on any workflow.
 - [ ] Observe the RunView event log.
@@ -918,6 +928,8 @@ Then repeat Smoke 1 in this PATH-filtered context.
 ---
 
 ### Smoke 6 — No UX regressions (AC#18)
+
+> Tracked in `.soloflow/human-review-queue.md` — task: TASK-683, action: AC#18 Manual smoke 6.
 
 Walk the full user flow:
 
@@ -989,8 +1001,9 @@ no binary probe is attempted during panel operation.
    caused by `tests/cyboflow-day3-gate.spec.ts` importing `vitest` being picked up by Playwright.
    Both need separate fixing tasks.
 
-2. **Manual smokes AC#13-#18** — Deferred to human reviewer via the human-review-queue entries
-   appended by TASK-683. See the templated checklists above.
+2. **Manual smokes AC#13-#18** — Deferred to human reviewer via the human-review-queue
+   entries appended post-verifier by the orchestrator (FIND-SPRINT-026-12 remediation);
+   each Smoke N heading above links to its queue entry.
 
 3. **Synthetic `run_started` latency measurement** — A follow-up improvement (not in scope for
    TASK-683): instrument the first-real-event latency programmatically and consider removing
