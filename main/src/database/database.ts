@@ -1351,13 +1351,21 @@ export class DatabaseService {
       this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN error_message TEXT").run();
       console.log('[Database] Reconciled workflow_runs: added error_message column');
     }
+    // stuck_detected_at is added by migration 007, but Tier 2 historically
+    // treated it as orphan drift and rebuilt to drop it (see canonical-shape
+    // rebuild below).  That left the column unrecoverable after any rebuild —
+    // and StuckDetector.prepare() throws SqliteError on boot when it's absent,
+    // which cascades into ApprovalRouter never getting initialized.  Restore
+    // it here, idempotently.
+    if (!has('stuck_detected_at')) {
+      this.db.prepare("ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER").run();
+      console.log('[Database] Reconciled workflow_runs: added stuck_detected_at column');
+    }
 
     // Tier 2: rebuild to canonical 006 shape if column-level drift remains
-    // that ALTER TABLE cannot fix. Two known cases from in-place 006 edits:
-    //   (a) worktree_path declared NOT NULL — canonical is nullable; INSERTs
-    //       that omit worktree_path fail with NOT NULL constraint.
-    //   (b) extra stuck_detected_at column from an earlier in-place edit
-    //       that was later renamed/removed in the canonical shape.
+    // that ALTER TABLE cannot fix. Known case from in-place 006 edits:
+    //   worktree_path declared NOT NULL — canonical is nullable; INSERTs that
+    //   omit worktree_path fail with NOT NULL constraint.
     // SQLite has no ALTER COLUMN, so the only fix is recreate. PRAGMA
     // foreign_keys=OFF is required because approvals.run_id and
     // raw_events.run_id FK into workflow_runs(id) ON DELETE CASCADE.
@@ -1365,10 +1373,9 @@ export class DatabaseService {
       .prepare("PRAGMA table_info(workflow_runs)")
       .all() as SqliteTableInfo[];
     const worktreePath = colsAfterTier1.find((c) => c.name === 'worktree_path');
-    const hasStuckDetectedAt = colsAfterTier1.some((c) => c.name === 'stuck_detected_at');
     const worktreePathIsNotNull = worktreePath !== undefined && worktreePath.notnull === 1;
 
-    if (worktreePathIsNotNull || hasStuckDetectedAt) {
+    if (worktreePathIsNotNull) {
       console.log('[Database] Reconciling workflow_runs: rebuilding table to canonical 006 shape');
       this.db.exec(`
         PRAGMA foreign_keys=OFF;
@@ -1384,6 +1391,7 @@ export class DatabaseService {
           policy_json TEXT,
           stuck_at DATETIME,
           stuck_reason TEXT,
+          stuck_detected_at INTEGER,
           error_message TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1394,12 +1402,12 @@ export class DatabaseService {
         INSERT INTO workflow_runs_reconcile_new (
           id, workflow_id, project_id, status, permission_mode_snapshot,
           worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
-          error_message, created_at, updated_at, started_at, ended_at
+          stuck_detected_at, error_message, created_at, updated_at, started_at, ended_at
         )
           SELECT
             id, workflow_id, project_id, status, permission_mode_snapshot,
             worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
-            error_message, created_at, updated_at, started_at, ended_at
+            stuck_detected_at, error_message, created_at, updated_at, started_at, ended_at
           FROM workflow_runs;
         DROP TABLE workflow_runs;
         ALTER TABLE workflow_runs_reconcile_new RENAME TO workflow_runs;
