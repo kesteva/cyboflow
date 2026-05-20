@@ -33,8 +33,9 @@ import {
   type PermissionServerLike,
   type StuckDetectorDeps,
 } from '../stuckDetector';
-import type { DatabaseLike, LoggerLike } from '../types';
+import type { LoggerLike } from '../types';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Database helpers
@@ -82,17 +83,6 @@ function createTestDb(): Database.Database {
   }
 
   return db;
-}
-
-/**
- * Build a DatabaseLike adapter over a better-sqlite3 instance.
- */
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 // ---------------------------------------------------------------------------
