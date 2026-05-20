@@ -1,9 +1,49 @@
 ---
 sprint: SPRINT-025
-pending_count: 10
-last_updated: "2026-05-20T14:30:00.000Z"
+pending_count: 14
+last_updated: "2026-05-20T15:05:00.000Z"
 ---
 # Findings Queue
+
+## FIND-SPRINT-025-13
+- **source:** TASK-670 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** high
+- **status:** open
+- **location:** main/src/services/gitDiffManager.ts:489-490, 596-597
+- **description:** TASK-670 migrated three ad-hoc escape sites (file.ts, worktreeManager.ts, runCommandManager.ts) but two equivalent — and arguably more dangerous — sites in `gitDiffManager.ts` remained untouched and use ONLY a naive `"${filePath}"` double-quote wrapper with no escape function at all: `execSync(\`wc -l < "${filePath}"\`, ...)` at line 490 and `execSync(\`cat "${filePath}"\`, ...)` at line 597. The `filePath` is built from `${worktreePath}/${cleanFile}` where `cleanFile` originates from `git ls-files --others --exclude-standard` (untracked file enumeration). Git's `ls-files` output normally does not contain shell-active characters but CAN — a malicious or compromised repo could include a file named like `'; rm -rf /; echo '.txt` which would split out of the double-quote wrapper because `"..."` does not protect against `$(...)`, backticks, `\`, or single-quote-escape-doublequote combinations. The TASK-670 plan's pre-flight grep (step 1) only searched for the specific `.replace(/"/g, '\\"')` pattern and missed sites that use NO escape function at all — i.e. raw template interpolation. The bug class is identical to what TASK-670 fixed; the migration is incomplete.
+- **suggested_action:** Spawn a follow-up task to migrate `getDiffStats` (lines 480-505) and `createDiffForUntrackedFiles` (lines 585-620) in `main/src/services/gitDiffManager.ts` to either (a) `escapeShellArg(filePath)` from `main/src/utils/shellEscape.ts`, OR — preferable — (b) `child_process.spawnSync('wc', ['-l', filePath], {...})` and `fs.readFileSync(filePath)` respectively, eliminating the shell entirely. Option (b) is structurally safer for these two specific sites because `wc -l < file` can be replaced by `fs.readFileSync(filePath, 'utf8').split('\n').length - 1` (no subprocess at all) and `cat file` should just be `fs.readFileSync(filePath, 'utf8')`. The fact that these sites use shell `cat`/`wc` for what is plain file I/O is itself a smell — the unsanitized shell exposure is gratuitous.
+- **resolved_by:** 
+
+## FIND-SPRINT-025-12
+- **source:** TASK-670 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** medium
+- **status:** open
+- **location:** main/src/ipc/file.ts:245, 275
+- **description:** Two `execAsync(\`git commit -F ${tmpFile}\`, ...)` call sites interpolate the temp-file path into the shell command without escaping. `tmpFile` is built as `path.join(os.tmpdir(), \`cyboflow-commit-${Date.now()}.txt\`)` so the only attack surface is the system tmpdir prefix — but tmpdir paths CAN contain spaces on macOS (`/var/folders/<random>/T/...`, generally safe) and on Windows where `os.tmpdir()` resolves to a user-profile path that frequently contains spaces (e.g. `C:\Users\First Last\AppData\Local\Temp`). On any such system the bare interpolation breaks word-splitting and the commit silently fails. Lower-priority than FIND-SPRINT-025-13 because the input is bounded (system-controlled prefix + deterministic suffix) but it still warrants migration to `escapeShellArg` or — better — `child_process.execFile('git', ['commit', '-F', tmpFile], {...})` which sidesteps the shell entirely. Note that `pnpm dev` works on macOS today only because `/var/folders/...` historically has no spaces; this is a latent cross-platform defect.
+- **suggested_action:** Either (a) wrap both `tmpFile` interpolations in `escapeShellArg(tmpFile)` after importing from `../utils/shellEscape`, OR (b) switch the two `execAsync` calls to `execFile` (`promisify(execFile)('git', ['commit', '-F', tmpFile], { cwd: session.worktreePath })`). Option (b) is structurally safer and consistent with the spawn-with-args path the TASK-670 "Hardest Decision" section flagged as the preferred long-term direction.
+- **resolved_by:** 
+
+## FIND-SPRINT-025-11
+- **source:** TASK-670 (code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/ipc/file.ts (git:execute-project handler), main/src/ipc/dashboard.ts (multiple sites), main/src/services/{commitManager,executionTracker,gitDiffManager,gitPlumbingCommands,gitStatusManager,worktreeManager}.ts
+- **description:** TASK-670 closes the worst injection surface (`git:execute-project` accepted unfiltered user `args[]`), but a structural opportunity remains: the "Hardest Decision" section of the TASK-670 plan explicitly identifies `spawn('git', args, { cwd })` / `execFile` as the safer model because no shell, no escaping, no possibility of injection. The plan deferred this for `git:execute-project` specifically because of the sync-to-async return-shape rewrite — but the same argument applies repo-wide: ~30 `execSync(\`git ... ${interpolatedValue}\`)` sites across the listed files interpolate `mainBranch`, `remoteName`, `remoteBranch`, `fromCommit`, `toCommit`, `commitHash`, and `worktreePath` into shell templates. Most of these values are git-output-derived (relatively safe — hex SHAs, ref names) BUT `mainBranch` and `remoteName` are user-configured via the project settings UI, and a project configured with a malicious branch name (e.g. `main; touch /tmp/x`) would inherit the same injection class TASK-670 just fixed. The aggregate risk is medium because the attacker needs control of a project settings record (already-privileged context), but the fix is structurally cheap: introduce a `runGit(cwd, args[]): Promise<{stdout, stderr}>` helper that uses `execFile` and migrate the call sites incrementally.
+- **suggested_action:** Spawn a follow-up planning task to: (1) add `runGit(cwd, args[], opts?)` and `runGitSync(cwd, args[], opts?)` helpers to `main/src/utils/shellEscape.ts` (or a new `main/src/utils/gitExec.ts`) backed by `child_process.execFile` / `execFileSync`; (2) audit `grep -rn "execSync\`git \\|execAsync\`git " main/src --include='*.ts'` for migration candidates; (3) migrate one file per task to keep diffs reviewable. Prioritize files that interpolate user-configured values (`mainBranch`, `remoteName`) before those that only interpolate git-derived hashes. This is the natural extension of TASK-670 and was explicitly flagged as the preferred long-term direction in the TASK-670 plan's "Hardest Decision" section.
+- **resolved_by:** 
+
+## FIND-SPRINT-025-10
+- **source:** TASK-669 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/reviewQueueSlice.ts:281 (pureSetRunStatus)
+- **description:** After TASK-669 introduced `pureSetRunStatusAllMaps` to mirror the Zustand action's multi-map eviction, the original single-map `pureSetRunStatus` helper has zero production callers — `grep -rn "pureSetRunStatus\b" frontend` shows only the helper's own export and its test block. The Zustand action and tests for it now exercise the multi-map path; the single-map helper is purely a historical artifact of TASK-502/TASK-668 and risks drift: a future contributor could call `pureSetRunStatus` thinking they are getting full eviction semantics and silently leak `runReasonMap` / `runDetectedAtMap` entries (exactly the bug TASK-669 fixed). The dual export also bloats the file header comment ("Note: this helper operates on `runStatusMap` only. Use `pureSetRunStatusAllMaps` to test multi-map eviction behavior.") with disambiguation that exists only because both helpers ship side-by-side.
+- **suggested_action:** Remove `pureSetRunStatus` (lines 281-293) and its 6-case test block (`reviewQueueSlice.test.ts:298-334`), keeping only `pureSetRunStatusAllMaps` as the canonical pure reducer for `setRunStatus`. The "Note:" disambiguation comment on `pureSetRunStatusAllMaps` becomes redundant and can also be trimmed. Minor: while editing, consider porting the "same-reference when no-op" optimization from `pureSetRunStatus` (`if (!(runId in map)) return map`) to the eviction branch of `pureSetRunStatusAllMaps` for consistency, though review-queue cardinality makes the allocation cost negligible.
+- **resolved_by:** 
 
 ## FIND-SPRINT-025-9
 - **source:** TASK-665 (code-reviewer)
