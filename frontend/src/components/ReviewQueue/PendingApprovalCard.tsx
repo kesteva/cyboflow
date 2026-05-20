@@ -22,6 +22,7 @@ import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { WorkflowRunStatus } from '../../../../shared/types/stuckInspection';
 import { StuckBadge } from './StuckBadge';
 import { StuckInspectorModal } from './StuckInspectorModal';
+import { useRunStuckDetails } from '../../stores/reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -40,6 +41,10 @@ interface PendingApprovalCardProps {
    * Human-readable explanation of why the run is stuck.
    * Forwarded to <StuckBadge reason=…> as the hover tooltip.
    * Only meaningful when runStatus === 'stuck'.
+   *
+   * @deprecated Prefer letting the card resolve reason+detectedAt from
+   * useRunStuckDetails by runId. This prop is kept for backward compatibility
+   * with test mocks and any future explicit pass-through.
    */
   stuckReason?: string | null;
 }
@@ -88,6 +93,11 @@ function CardChrome({
   const [cancelBusy, setCancelBusy] = useState(false);
   const isStuck = runStatus === 'stuck';
 
+  // Resolve reason + detectedAt from the slice.  Only active when stuck.
+  const { reason: stuckReasonObj, detectedAt } = useRunStuckDetails(isStuck ? runId : undefined);
+  // Prefer the slice's StuckReason.kind; fall back to the legacy stuckReason prop.
+  const stuckReasonLabel = stuckReasonObj ? stuckReasonObj.kind : stuckReason;
+
   const focusClass = isFocused
     ? ' ring-2 ring-interactive'
     : ' focus-within:ring-2 focus-within:ring-interactive';
@@ -111,7 +121,7 @@ function CardChrome({
       <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-xs text-text-muted">{representative.workflowName}</span>
         <span className="text-sm font-semibold text-text-primary">{label}</span>
-        {isStuck && <StuckBadge reason={stuckReason} />}
+        {isStuck && <StuckBadge reason={stuckReasonLabel} detectedAt={detectedAt} />}
         {isBlocking && (
           <span className="ml-1 text-xs font-medium text-status-error">
             blocked {formatAge(representative.createdAt)}
