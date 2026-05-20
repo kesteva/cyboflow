@@ -22,8 +22,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
-import type { DatabaseLike } from '../../types';
 import type * as net from 'net';
+import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Minimal schema — only columns the handler reads or writes
@@ -85,14 +85,6 @@ function createTestDb(): Database.Database {
   db.pragma('foreign_keys = OFF'); // disabled: no FK to workflows in minimal schema
   db.exec(MINIMAL_SCHEMA);
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 /**
