@@ -394,6 +394,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
       },
       mcpServers: this.composeMcpServers(options),
       env: this.composeRunEnv(options),
+      // Isolate from ~/.claude/settings.json: the user's interactive-mode
+      // permission rules (e.g. defaultMode: 'auto' + Bash(...) allow list)
+      // would auto-approve tools without firing our PreToolUse hook, bypassing
+      // ApprovalRouter and skipping the approval queue entirely. Workflow runs
+      // route every tool through ApprovalRouter regardless of user prefs.
+      // 'project' is retained so CLAUDE.md in the worktree still loads.
+      settingSources: ['project'],
       // When permissionMode is 'ignore', omit PreToolUse entirely so every tool call
       // is auto-allowed by the SDK — matching the pre-SDK "skip the bridge" behavior.
       ...(options.permissionMode !== 'ignore' ? {
