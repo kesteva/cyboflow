@@ -139,9 +139,12 @@ export class RunLauncher {
         )
         .run(worktreePath, branchName, 'starting', runId);
 
-      // Wiring proof: emit a synthetic launch event so the renderer sees
-      // something immediately on first subscribe.  Richer events will come
-      // from the SDK pipeline once it is integrated (epic 7+).
+      // KEEP: synthetic run_started emission. The renderer subscribes to
+      // cyboflow:stream:<runId> as soon as startRun resolves; without this
+      // synthetic publish there is a 50-500ms window where the panel shows
+      // 'Waiting for events...' before the first real SDK event arrives.
+      // RunExecutor is now wired (see main/src/index.ts:580-589) and real SDK
+      // events follow; this remains as a UI-bootstrap aid.
       this.publisher?.publish(runId, {
         type: 'run_started',
         payload: { runId, worktreePath, branchName },
