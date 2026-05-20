@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { glob } from 'glob';
 import { appendCommitFooter } from '../utils/commitFooter';
+import { escapeShellArgs } from '../utils/shellEscape';
 import type { AppServices } from './types';
 import type { Session } from '../types/session';
 
@@ -807,14 +808,9 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
       // Import execSync from child_process
       const { execSync } = require('child_process');
       
-      // Execute git command
-      const result = execSync(`git ${request.args.map(arg => {
-        // Properly escape arguments for shell
-        if (arg.includes(' ') || arg.includes('\n') || arg.includes('"')) {
-          return `"${arg.replace(/"/g, '\\"')}"`;
-        }
-        return arg;
-      }).join(' ')}`, {
+      // Execute git command — use escapeShellArgs to safely quote every argument
+      // and prevent shell injection from user-supplied request.args values.
+      const result = execSync(`git ${escapeShellArgs(request.args)}`, {
         cwd: project.path,
         encoding: 'utf-8',
         maxBuffer: 1024 * 1024 * 10 // 10MB buffer
