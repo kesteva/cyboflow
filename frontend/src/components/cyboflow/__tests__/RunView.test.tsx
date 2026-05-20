@@ -10,7 +10,7 @@
  *   2. Renders the runId when an active run is set.
  *   3. Renders "Waiting for events…" before any events arrive.
  *   4. Renders each SDK discriminator (system / assistant / user / result /
- *      stream_event / unknown) through its dedicated typed branch (not a JSON blob).
+ *      stream_event / unknown) through its dedicated typed branch (no raw JSON dump).
  *   5. Subscription is NOT managed by RunView (it is managed by the store).
  *
  * Subscription lifecycle tests live in
