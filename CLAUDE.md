@@ -11,6 +11,7 @@ Load these before doing non-trivial work; they own the details so this file can 
 - `docs/cyboflow_system_design.md` — product spec, scope decisions, extension points.
 - `docs/crystal-legacy/` — historical Crystal docs preserved for reference (CLI tool integration guides, troubleshooting).
 - `docs/signing/APPLE_DEVELOPER_SETUP.md` — Apple signing env-var contract and provisioning steps. Load before any build, packaging, or release task.
+- `docs/VISUAL-VERIFICATION-SETUP.md` — Electron visual-verification contract (visual_web non-functional; visual_macos via Peekaboo; two macOS permissions).
 
 ## `@cyboflow-hidden` Convention
 
