@@ -10,9 +10,9 @@
  *   cyboflow:startRun       — launch a new workflow run
  *   cyboflow:stream:<runId> — push channel for stream events (renderer-side only)
  *   cyboflow:approveRun     — approve / deny a day-3 gate approval request
+ *   cyboflow:mcp-health     — polled by mcpHealthStore (removed from this util in TASK-626)
  */
 import type { WorkflowRow } from '../../../shared/types/workflows';
-import type { McpServerHealth } from '../../../shared/types/mcpHealth';
 import type { IPCResponse } from './api';
 
 // ---------------------------------------------------------------------------
@@ -109,18 +109,6 @@ export function subscribeToStreamEvents({
 }
 
 /**
- * Return a point-in-time snapshot of the MCP server's health.
- *
- * Routes through the raw-IPC bridge; tRPC migration is a separate future task
- * (TBD-tRPC-cutover, see docs/ARCHITECTURE.md "cyboflow.* transport status").
- * When tRPC migration lands, swap to `trpc.cyboflow.health.mcpServer.query()`.
- */
-export async function getMcpHealth(): Promise<McpServerHealth> {
-  const electron = requireElectron();
-  return electron.invoke('cyboflow:mcp-health') as Promise<McpServerHealth>;
-}
-
-/**
  * Approve or deny a day-3 gate approval request.
  *
  * NOTE: The main-process handler is currently a NOT_IMPLEMENTED stub.
@@ -155,5 +143,4 @@ export const cyboflowApi = {
   startRun,
   subscribeToStreamEvents,
   approveRun,
-  getMcpHealth,
 };

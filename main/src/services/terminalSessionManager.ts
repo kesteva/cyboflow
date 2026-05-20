@@ -45,6 +45,11 @@ export class TerminalSessionManager extends EventEmitter {
         TERM: 'xterm-256color',  // Ensure TERM is set for color support
         COLORTERM: 'truecolor',  // Enable 24-bit color
         LANG: process.env.LANG || 'en_US.UTF-8',  // Set locale for proper character handling
+        // Canonical Cyboflow env var exposed to PTY subprocesses.
+        CYBOFLOW_SESSION_ID: sessionId,
+        // @deprecated Legacy Crystal-era name kept for backward compat with user
+        // shell scripts. TODO(post-v1): remove after deprecation window.
+        CRYSTAL_SESSION_ID: sessionId,
       },
     });
 

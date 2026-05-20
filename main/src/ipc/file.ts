@@ -3,7 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { glob } from 'glob';
-import { buildCommitFooter } from '../utils/commitFooter';
+import { appendCommitFooter } from '../utils/commitFooter';
 import type { AppServices } from './types';
 import type { Session } from '../types/session';
 
@@ -234,13 +234,8 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         // Stage all changes
         await execAsync('git add -A', { cwd: session.worktreePath });
 
-        // Check if Cyboflow footer is enabled (default: true)
-        const config = configManager.getConfig();
-        const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
-
         // Create the commit with Cyboflow signature if enabled
-        const footer = buildCommitFooter(enableCyboflowFooter);
-        const commitMessage = footer ? `${request.message}\n\n${footer}` : request.message;
+        const commitMessage = appendCommitFooter(request.message, configManager);
 
         // Use a temporary file to handle commit messages with special characters
         const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-${Date.now()}.txt`);
@@ -269,13 +264,8 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
           // Try to commit again in case the pre-commit hook made changes
           try {
             await execAsync('git add -A', { cwd: session.worktreePath });
-            
-            // Check if Cyboflow footer is enabled (default: true)
-            const config = configManager.getConfig();
-            const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
 
-            const retryFooter = buildCommitFooter(enableCyboflowFooter);
-            const retryMessage = retryFooter ? `${request.message}\n\n${retryFooter}` : request.message;
+            const retryMessage = appendCommitFooter(request.message, configManager);
 
             // Use a temporary file for retry as well
             const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-retry-${Date.now()}.txt`);

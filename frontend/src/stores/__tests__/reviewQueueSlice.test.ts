@@ -15,6 +15,7 @@
  *     calling its `applyStuckEvent` action.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook } from '@testing-library/react';
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ vi.mock('../../utils/trpcClient', () => ({
   },
 }));
 
-import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice } from '../reviewQueueSlice';
+import { pureApplyStuckEvent, pureSetRunStatus, useReviewQueueSlice, useRunStatus, useRunStuckDetails } from '../reviewQueueSlice';
 
 // ---------------------------------------------------------------------------
 // pureApplyStuckEvent — pure function tests
@@ -83,8 +84,8 @@ describe('pureApplyStuckEvent', () => {
 
 describe('useReviewQueueSlice — applyStuckEvent', () => {
   beforeEach(() => {
-    // Reset the store state between tests by setting runStatusMap to empty.
-    useReviewQueueSlice.setState({ runStatusMap: {} });
+    // Reset the store state between tests by setting all maps to empty.
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
     vi.clearAllMocks();
   });
 
@@ -131,6 +132,49 @@ describe('useReviewQueueSlice — applyStuckEvent', () => {
     expect(runStatusMap['run-1']).toBe('stuck');
     expect(runStatusMap['run-2']).toBe('stuck');
   });
+
+  it('writes reason and detectedAt into runReasonMap and runDetectedAtMap when provided', () => {
+    const { applyStuckEvent } = useReviewQueueSlice.getState();
+
+    applyStuckEvent({
+      runId: 'r1',
+      reason: { kind: 'self_deadlock' },
+      detectedAt: 1700000000000,
+    });
+
+    const state = useReviewQueueSlice.getState();
+    expect(state.runStatusMap['r1']).toBe('stuck');
+    expect(state.runReasonMap['r1']).toEqual({ kind: 'self_deadlock' });
+    expect(state.runDetectedAtMap['r1']).toBe(1700000000000);
+  });
+
+  it('without reason/detectedAt — only writes runStatusMap, leaves reason/detectedAt maps unchanged', () => {
+    const { applyStuckEvent } = useReviewQueueSlice.getState();
+
+    applyStuckEvent({ runId: 'r1' });
+
+    const state = useReviewQueueSlice.getState();
+    expect(state.runStatusMap['r1']).toBe('stuck');
+    expect('r1' in state.runReasonMap).toBe(false);
+    expect('r1' in state.runDetectedAtMap).toBe(false);
+  });
+
+  it('does not clobber other runIds when writing reason/detectedAt', () => {
+    useReviewQueueSlice.setState({
+      runStatusMap: {},
+      runReasonMap: { 'r2': { kind: 'orphan_pty' } },
+      runDetectedAtMap: { 'r2': 999 },
+    });
+
+    const { applyStuckEvent } = useReviewQueueSlice.getState();
+    applyStuckEvent({ runId: 'r1', reason: { kind: 'stale_socket' }, detectedAt: 1234 });
+
+    const state = useReviewQueueSlice.getState();
+    expect(state.runReasonMap['r2']).toEqual({ kind: 'orphan_pty' });
+    expect(state.runDetectedAtMap['r2']).toBe(999);
+    expect(state.runReasonMap['r1']).toEqual({ kind: 'stale_socket' });
+    expect(state.runDetectedAtMap['r1']).toBe(1234);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -139,7 +183,7 @@ describe('useReviewQueueSlice — applyStuckEvent', () => {
 
 describe('useReviewQueueSlice — setRunStatus', () => {
   beforeEach(() => {
-    useReviewQueueSlice.setState({ runStatusMap: {} });
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
   });
 
   it('sets an arbitrary non-terminal status for a run', () => {
@@ -217,5 +261,95 @@ describe('pureSetRunStatus', () => {
     const result = pureSetRunStatus(map, 'run-1', 'completed');
     expect('run-1' in result).toBe(false);
     expect(result['run-2']).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useRunStatus — selector hook tests (via renderHook)
+// ---------------------------------------------------------------------------
+
+describe('useRunStatus', () => {
+  beforeEach(() => {
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
+  });
+
+  it('returns the status from runStatusMap when the runId is present', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    const { result } = renderHook(() => useRunStatus('run-1'));
+    expect(result.current).toBe('stuck');
+  });
+
+  it('returns undefined when the runId is absent from runStatusMap', () => {
+    const { result } = renderHook(() => useRunStatus('run-missing'));
+    expect(result.current).toBeUndefined();
+  });
+
+  it('returns undefined when runId is undefined', () => {
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    const { result } = renderHook(() => useRunStatus(undefined));
+    expect(result.current).toBeUndefined();
+  });
+
+  it('tracks state changes — returns updated value after setState', () => {
+    const { result, rerender } = renderHook(() => useRunStatus('run-1'));
+    expect(result.current).toBeUndefined();
+
+    useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
+    rerender();
+    expect(result.current).toBe('stuck');
+
+    // Clear entry → should return undefined again.
+    useReviewQueueSlice.setState({ runStatusMap: {} });
+    rerender();
+    expect(result.current).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useRunStuckDetails — selector hook tests (via store.getState)
+// ---------------------------------------------------------------------------
+
+describe('useRunStuckDetails', () => {
+  beforeEach(() => {
+    useReviewQueueSlice.setState({ runStatusMap: {}, runReasonMap: {}, runDetectedAtMap: {} });
+  });
+
+  it('returns reason and detectedAt from the maps when the runId is present', () => {
+    useReviewQueueSlice.setState({
+      runReasonMap: { 'run-1': { kind: 'self_deadlock' } },
+      runDetectedAtMap: { 'run-1': 1700000000000 },
+    });
+
+    const { result } = renderHook(() => useRunStuckDetails('run-1'));
+    expect(result.current.reason).toEqual({ kind: 'self_deadlock' });
+    expect(result.current.detectedAt).toBe(1700000000000);
+  });
+
+  it('returns undefined for both fields when the runId is absent from maps', () => {
+    const { result } = renderHook(() => useRunStuckDetails('run-missing'));
+    expect(result.current.reason).toBeUndefined();
+    expect(result.current.detectedAt).toBeUndefined();
+  });
+
+  it('returns undefined for both fields when runId is undefined', () => {
+    useReviewQueueSlice.setState({
+      runReasonMap: { 'run-1': { kind: 'orphan_pty' } },
+      runDetectedAtMap: { 'run-1': 123456 },
+    });
+
+    const { result } = renderHook(() => useRunStuckDetails(undefined));
+    expect(result.current.reason).toBeUndefined();
+    expect(result.current.detectedAt).toBeUndefined();
+  });
+
+  it('can be read from store.getState() directly — confirms slice maps are correct shape', () => {
+    useReviewQueueSlice.setState({
+      runReasonMap: { 'r1': { kind: 'cross_run_deadlock', conflictingRunId: 'r2' } },
+      runDetectedAtMap: { 'r1': 5000 },
+    });
+
+    const state = useReviewQueueSlice.getState();
+    expect(state.runReasonMap['r1']).toEqual({ kind: 'cross_run_deadlock', conflictingRunId: 'r2' });
+    expect(state.runDetectedAtMap['r1']).toBe(5000);
   });
 });

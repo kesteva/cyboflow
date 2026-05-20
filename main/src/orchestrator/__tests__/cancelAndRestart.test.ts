@@ -32,6 +32,7 @@ import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike } from '../types';
 import { cancelAndRestartHandler, type CancelAndRestartDeps as HandlerDeps } from '../cancelAndRestartHandler';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // DB helpers
@@ -46,14 +47,6 @@ function createTestDb(): Database.Database {
   db.exec(readFileSync(SCHEMA_006, 'utf8'));
   db.exec(readFileSync(SCHEMA_007, 'utf8'));
   return db;
-}
-
-function dbAdapter(db: Database.Database): DatabaseLike {
-  return {
-    prepare: (sql) => db.prepare(sql),
-    transaction: <T>(fn: (...args: unknown[]) => T) =>
-      db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +312,66 @@ describe('cancelAndRestartHandler', () => {
     expect(loggerErrors.length).toBeGreaterThanOrEqual(1);
     expect(loggerErrors[0].msg).toContain('[cancelAndRestart]');
     expect(loggerErrors[0].ctx['runId']).toBe(runId);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-627 / SPRINT-023 A4: DEBUG log emitted after clearPendingForRun
+  // (TASK-304 no-op). Downgraded from warn to debug to avoid log-flood on
+  // every Cancel-and-restart click — the tooltip surfaces the limitation
+  // to users; debug level keeps the trace available for diagnostics.
+  // -------------------------------------------------------------------------
+
+  it('emits a DEBUG with TASK-304 reference after clearPendingForRun', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    const loggerDebugs: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const testLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerDebugs.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
+    };
+
+    const deps: HandlerDeps = {
+      ...makeDeps(db, spy, runQueues),
+      logger: testLogger,
+    };
+
+    await cancelAndRestartHandler(runId, deps);
+
+    expect(loggerDebugs.length).toBe(1);
+    expect(loggerDebugs[0].msg).toContain('[cancelAndRestart]');
+    expect(loggerDebugs[0].msg).toContain('TASK-304');
+    expect(loggerDebugs[0].ctx['runId']).toBe(runId);
+    expect(testLogger.debug).toHaveBeenCalledWith(expect.stringContaining('TASK-304'), expect.objectContaining({ runId }));
+  });
+
+  it('does NOT emit the TASK-304 DEBUG when the run is already terminal (noOp path)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'completed');
+
+    const loggerDebugs: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const testLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn((_msg: string, ctx?: Record<string, unknown>) => {
+        loggerDebugs.push({ msg: _msg, ctx: ctx ?? {} });
+      }),
+    };
+
+    const deps: HandlerDeps = {
+      ...makeDeps(db, spy, runQueues),
+      logger: testLogger,
+    };
+
+    const result = await cancelAndRestartHandler(runId, deps);
+
+    expect('noOp' in result && result.noOp).toBe(true);
+    expect(loggerDebugs.length).toBe(0);
   });
 
   it('still works without a logger when claudeManagerStop rejects', async () => {

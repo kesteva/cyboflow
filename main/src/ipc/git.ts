@@ -2,6 +2,7 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { execSync } from '../utils/commandExecutor';
 import { buildGitCommitCommand, escapeShellArg } from '../utils/shellEscape';
+import { isCommitFooterEnabled } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
 import { panelEventBus } from '../services/panelEventBus';
@@ -312,9 +313,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       execSync('git add -A', { cwd: session.worktreePath });
 
       // Create the commit with Cyboflow's signature using safe escaping
-      const config = configManager.getConfig();
-      const enableCyboflowFooter = config?.enableCyboflowFooter !== false;
-      const commitCommand = buildGitCommitCommand(message, enableCyboflowFooter);
+      const commitCommand = buildGitCommitCommand(message, isCommitFooterEnabled(configManager));
 
       try {
         execSync(commitCommand, { 

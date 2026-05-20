@@ -1,31 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { API } from '../utils/api';
 import { trpc } from '../utils/trpcClient';
+import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/**
- * Discriminated union for the four stuck-detection variants.
- *
- * Mirrors `shared/types/stuckDetection.ts` (TASK-501).  Defined inline here
- * so TASK-503 does not depend on that file landing before this task can
- * compile or be tested.
- */
-export type StuckReasonKind =
-  | 'self_deadlock'
-  | 'cross_run_deadlock'
-  | 'orphan_pty'
-  | 'stale_socket';
-
-export interface StuckDetectedEvent {
-  runId: string;
-  sessionId: string;
-  workflowName: string;
-  reason: StuckReasonKind;
-  detectedAt: number;
-}
 
 interface NotificationSettings {
   enabled: boolean;
@@ -36,11 +16,11 @@ interface NotificationSettings {
 // ---------------------------------------------------------------------------
 
 /**
- * Map each `StuckReasonKind` variant to a short human-readable string shown
+ * Map each `StuckReason` variant to a short human-readable string shown
  * in the notification body.
  */
-export function stuckReasonText(kind: StuckReasonKind): string {
-  switch (kind) {
+export function stuckReasonText(reason: StuckReason): string {
+  switch (reason.kind) {
     case 'self_deadlock': return 'self-deadlock';
     case 'cross_run_deadlock': return 'cross-run deadlock';
     case 'orphan_pty': return 'Claude process exited';
@@ -75,8 +55,8 @@ interface StuckEventsClient {
 
 /**
  * Subscribes to stuck-run events and fires exactly one macOS desktop
- * notification per app-launch session (`sessionId`).  Subsequent stuck events
- * for the same session are suppressed silently to avoid notification fatigue.
+ * notification per app-launch run (`runId`).  Subsequent stuck events
+ * for the same run are suppressed silently to avoid notification fatigue.
  *
  * Mounted exactly once at the `App` top level — never inside a view component
  * so the suppression set is never reset by a view unmount.
@@ -89,8 +69,8 @@ interface StuckEventsClient {
  * the set so the user sees at least one stuck notification per restart.
  */
 export function useStuckNotifications(): void {
-  /** Sessions that have already triggered a notification this app launch. */
-  const notifiedSessionsRef = useRef<Set<string>>(new Set());
+  /** Runs that have already triggered a notification this app launch. */
+  const notifiedRunsRef = useRef<Set<string>>(new Set());
 
   const [settings, setSettings] = useState<NotificationSettings>({
     enabled: true,
@@ -133,20 +113,20 @@ export function useStuckNotifications(): void {
 
     const subscription = events.onStuckDetected.subscribe(undefined, {
       onData: (event: StuckDetectedEvent) => {
-        const { sessionId, workflowName, reason } = event;
+        const { runId, reason } = event;
 
-        // Suppression: only notify once per sessionId per app launch
-        if (notifiedSessionsRef.current.has(sessionId)) return;
+        // Suppression: only notify once per runId per app launch
+        if (notifiedRunsRef.current.has(runId)) return;
 
         // Settings gate: respect the global notifications.enabled flag
         if (!settings.enabled) return;
 
-        notifiedSessionsRef.current.add(sessionId);
+        notifiedRunsRef.current.add(runId);
 
         requestPermission().then((hasPermission) => {
           if (!hasPermission) return;
           new Notification('Run Stuck ⚠️', {
-            body: `Run "${workflowName}" is stuck: ${stuckReasonText(reason)}`,
+            body: `Run ${runId.slice(0, 8)} is stuck: ${stuckReasonText(reason)}`,
             icon: '/favicon.ico',
             badge: '/favicon.ico',
             requireInteraction: false,
