@@ -258,6 +258,98 @@ export interface StreamEvent {
 }
 
 /**
+ * Orchestrator-synthetic event emitted once at SDK run start (claudeCodeManager.ts:251-260).
+ * This is NOT an SDK wire event — it is synthesized by the main process and emitted before
+ * the SDK iterator begins. It carries run metadata the renderer needs to display the
+ * "Run started" header card.
+ */
+export interface SessionInfoEvent {
+  type: 'session_info';
+  initial_prompt: string;
+  claude_command: string;
+  worktree_path: string;
+  model: string;
+  permission_mode: string;
+  timestamp: string;
+}
+
+/**
+ * SDK `rate_limit_event` — emitted when the claude.ai subscription rate-limit gate is checked.
+ * The `rate_limit_info` object is nested (not flat) per sdk.d.ts:SDKRateLimitEvent.
+ *
+ * NOTE: The IDEA description incorrectly described `status`, `resetsAt`, and `overageStatus`
+ * as direct fields; they are nested inside `rate_limit_info`. The schema matches sdk.d.ts.
+ */
+export interface RateLimitEvent {
+  type: 'rate_limit_event';
+  rate_limit_info: {
+    status: 'allowed' | 'allowed_warning' | 'rejected';
+    resetsAt?: number;
+    rateLimitType?: 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'overage';
+    utilization?: number;
+    overageStatus?: 'allowed' | 'allowed_warning' | 'rejected';
+    overageResetsAt?: number;
+    overageDisabledReason?: string;
+    isUsingOverage?: boolean;
+    surpassedThreshold?: number;
+  };
+  uuid: string;
+  session_id: string;
+}
+
+/**
+ * SDK `system/hook_started` — emitted when a registered hook begins executing.
+ * Source: sdk.d.ts:SDKHookStartedMessage.
+ */
+export interface SystemHookStartedEvent {
+  type: 'system';
+  subtype: 'hook_started';
+  hook_id: string;
+  hook_name: string;
+  hook_event: string;
+  uuid: string;
+  session_id: string;
+}
+
+/**
+ * SDK `system/hook_response` — emitted when a registered hook finishes.
+ * Source: sdk.d.ts:SDKHookResponseMessage.
+ *
+ * NOTE: The IDEA description incorrectly listed the outcome enum as `allow | deny | defer`;
+ * sdk.d.ts confirms it is `success | error | cancelled`.
+ */
+export interface SystemHookResponseEvent {
+  type: 'system';
+  subtype: 'hook_response';
+  hook_id: string;
+  hook_name: string;
+  hook_event: string;
+  output: string;
+  stdout: string;
+  stderr: string;
+  exit_code?: number;
+  outcome: 'success' | 'error' | 'cancelled';
+  uuid: string;
+  session_id: string;
+}
+
+/**
+ * SDK `system/status` — emitted to report SDK internal status changes such as context
+ * compaction in progress or a model API request being issued.
+ * Source: sdk.d.ts:SDKStatusMessage.
+ */
+export interface SystemStatusEvent {
+  type: 'system';
+  subtype: 'status';
+  status: 'compacting' | 'requesting' | null;
+  permissionMode?: string;
+  compact_result?: 'success' | 'failed';
+  compact_error?: string;
+  uuid: string;
+  session_id: string;
+}
+
+/**
  * Parser-only catch-all variant for events that do not match any known wire discriminant.
  *
  * The sentinel discriminant is `kind: '__unknown__'` (not `type`) so it cannot collide with
@@ -278,18 +370,28 @@ export interface UnknownStreamEvent {
 // ---------------------------------------------------------------------------
 
 /**
- * The full set of events emitted by `claude --output-format stream-json --verbose
- * --include-partial-messages`. Discriminate on `event.type` for all real wire variants;
- * discriminate on `event.kind === '__unknown__'` for the catch-all.
+ * The full set of events emitted by the Claude Agent SDK and the cyboflow orchestrator.
+ * Discriminate on `event.type` for all real wire variants; discriminate on
+ * `event.kind === '__unknown__'` for the catch-all.
  *
- * For `system` events, also check `event.subtype` (`'init' | 'api_retry' | 'compact' | 'compact_boundary'`).
+ * For `system` events, also check `event.subtype`
+ * (`'init' | 'api_retry' | 'compact' | 'compact_boundary' | 'hook_started' | 'hook_response' | 'status'`).
  * For `result` events, also check `event.subtype` (`'success' | 'error_max_turns' | ...`).
+ *
+ * Additional top-level discriminators added in TASK-696:
+ *   - `session_info` — orchestrator-synthetic run-metadata card (SessionInfoEvent)
+ *   - `rate_limit_event` — SDK subscription rate-limit gate (RateLimitEvent)
  */
 export type ClaudeStreamEvent =
   | SystemInitEvent
   | SystemApiRetryEvent
   | SystemCompactEvent
   | SystemCompactBoundaryEvent
+  | SystemHookStartedEvent
+  | SystemHookResponseEvent
+  | SystemStatusEvent
+  | SessionInfoEvent
+  | RateLimitEvent
   | AssistantEvent
   | UserEvent
   | ResultEvent
