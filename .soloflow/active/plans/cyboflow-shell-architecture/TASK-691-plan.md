@@ -1,8 +1,8 @@
 ---
 id: TASK-691
 idea: IDEA-017
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/components/SessionView.tsx
   - frontend/src/components/StravuFileSearch.tsx
@@ -34,34 +34,34 @@ files_readonly:
   - frontend/src/hooks/useClaudePanel.ts
   - frontend/src/hooks/useAddTerminalShortcut.ts
 acceptance_criteria:
-  - criterion: "SessionView.tsx and sole-importer descendants are deleted from the working tree."
+  - criterion: SessionView.tsx and sole-importer descendants are deleted from the working tree.
     verification: "test ! -e frontend/src/components/SessionView.tsx && test ! -e frontend/src/hooks/useSessionView.ts && test ! -e frontend/src/stores/sessionHistoryStore.ts && test ! -e frontend/src/components/session/SessionHeader.tsx && test ! -e frontend/src/components/session/SessionInput.tsx && test ! -e frontend/src/components/session/RichOutputSettingsPanel.tsx && test ! -e frontend/src/components/session/GitErrorDialog.tsx && test ! -e frontend/src/components/session/FolderArchiveDialog.tsx && test ! -e frontend/src/components/session/CommitMessageDialog.tsx && test ! -e frontend/src/components/StravuFileSearch.tsx — all exit 0"
-  - criterion: "No SessionView references remain in frontend/src/."
+  - criterion: No SessionView references remain in frontend/src/.
     verification: "grep -rn 'SessionView' frontend/src/ returns 0 matches"
-  - criterion: "No useSessionView references remain in frontend/src/."
+  - criterion: No useSessionView references remain in frontend/src/.
     verification: "grep -rn 'useSessionView' frontend/src/ returns 0 matches"
-  - criterion: "No imports of deleted session-only descendants remain."
+  - criterion: No imports of deleted session-only descendants remain.
     verification: "grep -rnE \"from\\s+['\\\"][^'\\\"]*(session/SessionHeader|session/SessionInput|session/RichOutputSettingsPanel|session/GitErrorDialog|session/FolderArchiveDialog|session/CommitMessageDialog|StravuFileSearch|sessionHistoryStore)\" frontend/src/ returns 0 matches"
-  - criterion: "Preservation set still resolves importers."
+  - criterion: Preservation set still resolves importers.
     verification: "grep -rnE \"from\\s+['\\\"][^'\\\"]*(session/ThinkingPlaceholder|SessionListItem|stores/sessionStore|panels/ai/RichOutputView|panels/ai/MessagesView|panels/claude/ClaudePanel|panels/claude/SessionStats|panels/claude/PromptNavigation|panels/diff/CombinedDiffView)\" frontend/src/ returns ≥1 match per pattern"
-  - criterion: "TypeScript compiles with zero errors."
-    verification: "pnpm typecheck exits 0"
-  - criterion: "ESLint passes."
-    verification: "pnpm lint exits 0"
-  - criterion: "Unit/component test suites pass."
+  - criterion: TypeScript compiles with zero errors.
+    verification: pnpm typecheck exits 0
+  - criterion: ESLint passes.
+    verification: pnpm lint exits 0
+  - criterion: Unit/component test suites pass.
     verification: "pnpm test:unit exits 0"
-  - criterion: "docs/CODE-PATTERNS.md no longer points at deleted SessionView.tsx as canonical @cyboflow-hidden example."
+  - criterion: docs/CODE-PATTERNS.md no longer points at deleted SessionView.tsx as canonical @cyboflow-hidden example.
     verification: "grep -n 'SessionView' docs/CODE-PATTERNS.md returns 0 matches"
-  - criterion: "worktreeManager.ts @cyboflow-hidden re-enable hint does not reference deleted SessionView.tsx."
+  - criterion: worktreeManager.ts @cyboflow-hidden re-enable hint does not reference deleted SessionView.tsx.
     verification: "grep -n 'SessionView' main/src/services/worktreeManager.ts returns 0 matches"
-depends_on: [TASK-690]
+depends_on:
+  - TASK-690
 estimated_complexity: high
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: false
   justification: "Pure deletion sweep. Deleted files have no co-located test specs (verified: no frontend/src/components/session/__tests__/, no Session* test files). Existing test suites (RunView, useAddTerminalShortcut, Sidebar.mcpHealth, reviewQueue stores) do NOT import any deleted module. Typecheck-green + lint-green + grep-zero gates are the correctness contract."
 ---
-
 # Delete SessionView and unreachable Crystal-era session descendants
 
 ## Objective

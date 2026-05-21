@@ -1,8 +1,8 @@
 ---
 id: TASK-686
 idea: IDEA-017
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - docs/SHELL-LAYOUT.md
   - frontend/src/App.tsx
@@ -12,16 +12,16 @@ files_readonly:
 acceptance_criteria:
   - criterion: "docs/SHELL-LAYOUT.md exists and documents the three-column shell geometry (ReviewQueueView left rail, Sidebar second column, CyboflowRoot main area)"
     verification: "test -f docs/SHELL-LAYOUT.md && grep -q 'ReviewQueueView' docs/SHELL-LAYOUT.md && grep -q 'Sidebar' docs/SHELL-LAYOUT.md && grep -q 'CyboflowRoot' docs/SHELL-LAYOUT.md"
-  - criterion: "docs/SHELL-LAYOUT.md cross-references docs/cyboflow_system_design.md §5.7 (review queue spec)"
+  - criterion: docs/SHELL-LAYOUT.md cross-references docs/cyboflow_system_design.md §5.7 (review queue spec)
     verification: "grep -E '(5\\.7|§5\\.7|Section 5\\.7)' docs/SHELL-LAYOUT.md"
-  - criterion: "docs/SHELL-LAYOUT.md documents the four deferred decisions so TASK-687 through TASK-692 can cite it"
+  - criterion: docs/SHELL-LAYOUT.md documents the four deferred decisions so TASK-687 through TASK-692 can cite it
     verification: "grep -q 'TASK-687' docs/SHELL-LAYOUT.md && grep -q 'TASK-688' docs/SHELL-LAYOUT.md && grep -q 'TASK-690' docs/SHELL-LAYOUT.md && grep -q 'TASK-692' docs/SHELL-LAYOUT.md"
-  - criterion: "frontend/src/App.tsx contains a code comment that references docs/SHELL-LAYOUT.md near the ReviewQueueView/Sidebar/CyboflowRoot mount site"
+  - criterion: frontend/src/App.tsx contains a code comment that references docs/SHELL-LAYOUT.md near the ReviewQueueView/Sidebar/CyboflowRoot mount site
     verification: "grep -n 'docs/SHELL-LAYOUT.md' frontend/src/App.tsx"
   - criterion: "App.tsx edit is comment-only — no JSX, hook, or import changes"
     verification: "git diff frontend/src/App.tsx | grep -E '^[-+]' | grep -vE '^[-+]{3}' | grep -vE '^[-+]\\s*(//|\\*|/\\*|\\{/\\*|$)' returns no lines"
-  - criterion: "pnpm typecheck passes"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm typecheck passes
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-shell-architecture
@@ -29,7 +29,6 @@ test_strategy:
   needed: false
   justification: "Docs-only task plus a single comment-line edit in App.tsx. No runtime behavior, no exported symbols, no UI surface changes. Acceptance is doc-content and comment-presence checks; pnpm typecheck guards the App.tsx edit against accidental syntax breakage."
 ---
-
 # Settle shell layout: lock review queue as left rail and define column geometry
 
 ## Objective
