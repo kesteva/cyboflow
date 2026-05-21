@@ -12,6 +12,12 @@
  * tRPC v11 subscription leak fix: pinned to trpc-electron@0.1.2 +
  * @trpc/server@^11.17.0 (stable v11 — includes PR #6161 fix).
  *
+ * Symbol.asyncDispose clash fix (TASK-695): trpc-electron@0.1.2's main-process
+ * makeAsyncResource threw when Node 22 already attached Symbol.asyncDispose to
+ * async-generator iterators. Fixed via patches/trpc-electron@0.1.2.patch (pnpm
+ * patch). NO renderer-side shim required — renderer's dist/renderer.mjs already
+ * uses the safe nullish-fallback pattern.
+ *
  * SINGLE SOURCE RULE: Do NOT create a second createTRPCProxyClient instance.
  * tRPC v11 subscriptions register IPC listeners per client instance — a second
  * instance causes duplicate event delivery. All renderer code must import
