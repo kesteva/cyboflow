@@ -1,8 +1,8 @@
 ---
 id: TASK-685
 idea: IDEA-016
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/ipc/app.ts
   - main/src/database/database.ts
@@ -19,7 +19,7 @@ acceptance_criteria:
     verification: "grep -n 'discordShown\\|updateLastAppOpenDiscordShown' main/src/database/database.ts returns 0 matches; grep -n 'discordShown' main/src/ipc/app.ts returns 0 matches"
   - criterion: "The app:record-open IPC handler signature drops the discordShown parameter"
     verification: "grep -n 'discordShown' main/src/ipc/app.ts returns 0 matches and the handler signature in main/src/ipc/app.ts at the 'app:record-open' line reads `(_event, welcomeHidden: boolean)`"
-  - criterion: "The internal call site in main/src/index.ts no longer passes a discordShown argument"
+  - criterion: The internal call site in main/src/index.ts no longer passes a discordShown argument
     verification: "grep -n 'recordAppOpen' main/src/index.ts shows the call as `databaseService.recordAppOpen(false, currentVersion)` (two args, not three)"
   - criterion: "Both ('hide_discord', 'false') default-preference seed lines are removed"
     verification: "grep -n \"hide_discord\" main/src/database/database.ts returns ONLY the new idempotent DELETE statement (one match); the two INSERT seed lines at the user_preferences init/repair blocks are gone"
@@ -27,20 +27,20 @@ acceptance_criteria:
     verification: "grep -n \"DELETE FROM user_preferences WHERE key = 'hide_discord'\" main/src/database/database.ts returns exactly 1 match, located inside the user_preferences init/migration block"
   - criterion: "The app_opens.discord_shown column declaration at the CREATE TABLE site is preserved with a one-line code comment documenting the orphan choice (IDEA-016 assumption #3)"
     verification: "grep -B1 -n 'discord_shown BOOLEAN DEFAULT 0' main/src/database/database.ts shows a comment on the immediately preceding line explaining the orphan disposition (text mentions 'orphan' or 'IDEA-016')"
-  - criterion: "pnpm typecheck passes with no new errors"
-    verification: "pnpm typecheck exits 0"
-  - criterion: "pnpm lint passes with no new errors"
-    verification: "pnpm lint exits 0"
+  - criterion: pnpm typecheck passes with no new errors
+    verification: pnpm typecheck exits 0
+  - criterion: pnpm lint passes with no new errors
+    verification: pnpm lint exits 0
   - criterion: "Manual launch verification: `pnpm dev` launches the Electron app on macOS, no Discord modal appears, and cyboflow-backend-debug.log contains no errors mentioning 'app:update-discord-shown', 'updateLastAppOpenDiscordShown', or 'discord_shown'"
     verification: "Launch with `pnpm dev`, wait for renderer to bootstrap, confirm no DiscordPopup-shaped modal renders; then `grep -iE 'app:update-discord-shown|updateLastAppOpenDiscordShown|discord_shown' cyboflow-backend-debug.log` returns 0 matches"
-depends_on: [TASK-684]
+depends_on:
+  - TASK-684
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: false
   justification: "Pure code-deletion + signature-narrowing task touching main/src/ipc/app.ts, main/src/database/database.ts, and main/src/index.ts. Sibling-test directory scan: main/src/ipc/__tests__/ contains sessionJsonMessages.test.ts, cyboflow-stream-publisher.test.ts, cyboflow.test.ts, fileGitExecuteProject.test.ts, panelsInitialize.test.ts — grep confirms none reference the deleted handlers or methods. main/src/database/__tests__/ contains fileMigrationRunner.test.ts and cyboflowSchema.test.ts — neither references the affected symbols. The grep-zero ACs and the manual launch AC are sufficient coverage."
 ---
-
 # Remove discord IPC handler and strip discord_shown from database layer
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-684
 idea: IDEA-016
-status: ready
+status: in-flight
 created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/components/DiscordPopup.tsx
