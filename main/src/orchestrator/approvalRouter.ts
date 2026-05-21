@@ -434,6 +434,43 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
+   * Boot-time recovery. The Unix permission socket from the previous app
+   * session is gone (path is keyed on the previous process.pid), so any
+   * workflow_runs row in 'awaiting_review' cannot be resumed. Transition
+   * them to 'failed' with error_message='app_restart' and flip any orphaned
+   * pending approvals to 'timed_out' for audit consistency.
+   *
+   * Returns the number of workflow_runs rows transitioned.
+   */
+  recoverStaleAwaitingReview(): number {
+    const transition = this.db.transaction(() => {
+      const staleRunIds = this.db
+        .prepare(`SELECT id FROM workflow_runs WHERE status = 'awaiting_review'`)
+        .all() as { id: string }[];
+      if (staleRunIds.length === 0) return 0;
+      const placeholders = staleRunIds.map(() => '?').join(',');
+      const ids = staleRunIds.map(r => r.id);
+      this.db
+        .prepare(`UPDATE workflow_runs
+                     SET status = 'failed',
+                         error_message = 'app_restart',
+                         ended_at = CURRENT_TIMESTAMP,
+                         updated_at = CURRENT_TIMESTAMP
+                   WHERE id IN (${placeholders})`)
+        .run(...ids);
+      this.db
+        .prepare(`UPDATE approvals SET status = 'timed_out', decided_at = CURRENT_TIMESTAMP, decided_by = 'system' WHERE run_id IN (${placeholders}) AND status = 'pending'`)
+        .run(...ids);
+      return staleRunIds.length;
+    });
+    const count = transition();
+    if (count > 0) {
+      console.log(`[ApprovalRouter] Boot recovery transitioned ${count} stale awaiting_review run(s) to failed`);
+    }
+    return count;
+  }
+
+  /**
    * Returns a snapshot of all currently in-flight approval requests.
    * Used by the renderer's review-queue subscription.
    */
