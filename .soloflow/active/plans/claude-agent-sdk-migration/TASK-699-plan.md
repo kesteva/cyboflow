@@ -1,5 +1,5 @@
 ---
-id: TASK-684
+id: TASK-699
 idea: IDEA-014
 status: ready
 created: 2026-05-20T00:00:00Z

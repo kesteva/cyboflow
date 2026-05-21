@@ -1,5 +1,5 @@
 ---
-id: TASK-686
+id: TASK-701
 idea: SPRINT-026-compounder
 status: ready
 created: 2026-05-20T00:00:00Z
