@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-027
-pending_count: 5
-last_updated: "2026-05-20T18:50:00.000Z"
+pending_count: 6
+last_updated: "2026-05-21T02:08:36.181Z"
 ---
 # Findings Queue
 
@@ -27,6 +27,7 @@ SPRINT-027 started with missing infra: playwright (stale shadows), peekaboo (CLI
 - **description:** Pre-existing test failure: killProcess mid-stream test times out at 5000ms. Test: killProcess mid-stream clears pipelines, sdkRuns, and processes maps. Unrelated to TASK-673 changes.
 - **suggested_action:** Investigate ClaudeCodeManager.killProcess test — likely needs a longer timeout or a mock that resolves faster.
 - **resolved_by:** 
+
 
 
 
@@ -67,4 +68,16 @@ SoloFlow workflow defect: TASK-674 (SPRINT-025-compounder) was a duplicate of TA
 - **location:** main/src/ipc/git.ts:415,425,505,515,547,557
 - **description:** TASK-679 step 8 instructed adding `// TODO(TASK-680): migrate to runGit(cwd, args[])` markers above every remaining `execSync(\`git ... ${var}\`)` template-literal site in main/src/. Six multi-line forms in main/src/ipc/git.ts were missed because they wrap as `execSync(\n  \`git diff --name-only ${var}\`,\n  { ... })` rather than putting the template literal on the same line as `execSync(`. A single-line-anchored grep pattern would skip these. The migrated code in TASK-679 is correct — this finding only concerns the completeness of the breadcrumb trail for the TASK-680 follow-up. Affected lines: 415 (`git diff ${fromCommit.hash}` via captureCommitDiff helper — possibly intentional skip if helper is non-execSync), 425 (`git diff --name-only ${fromCommit.hash}`), 505 (`git diff ${fromCommitHash}`), 515 (`git diff --name-only ${fromCommitHash}`), 547 (`git diff ${fromCommitHash}`), 557 (`git diff --name-only ${fromCommitHash}`).
 - **suggested_action:** When TASK-680 is planned, broaden the grep target to `grep -rnE 'execSync\([^)]*\\\`git[^\\\`]*\\\$\\{' main/src/` (multi-line) or use a tool like `ast-grep` to catch wrapped forms. Alternatively, add the missing 6 TODO markers in a quick pre-TASK-680 sweep.
+- **resolved_by:** 
+
+## FIND-SPRINT-027-7
+- **source:** SPRINT-027 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/terminalPanelManager.ts:287-288
+- **description:** hasCwdString shared guard drift — terminalPanelManager.restoreTerminalState reimplements the exact non-empty-string check as an inline ternary (`typeof state.cwd === "string" && state.cwd.length > 0 ? state.cwd : process.cwd()`) and the comment above it explicitly admits it `Mirrors hasCwdString's non-empty-string check (shared/types/panels.ts)`. TASK-677 promoted the guard everywhere else in this file (line 249 uses `hasCwdString(panel.state.customState) ? panel.state.customState.cwd : process.cwd()`), but missed this site because it operates on `state.cwd` (already-narrowed TerminalPanelState) rather than raw `customState`.
+
+Suspected tasks: TASK-677
+- **suggested_action:** Either (a) extract a sibling `pickCwdOrCwd(state: TerminalPanelState | { cwd?: string } | undefined): string` helper in shared/types/panels.ts that wraps hasCwdString, or (b) call hasCwdString on `state` directly: `hasCwdString(state) ? state.cwd : process.cwd()` (since `TerminalPanelState` extends a superset of `{ cwd?: string }`, the guard's `customState` parameter type is structurally compatible). Drops the inline duplication and the comment explaining it.
 - **resolved_by:** 
