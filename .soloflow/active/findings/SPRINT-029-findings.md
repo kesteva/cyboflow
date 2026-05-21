@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-029
-pending_count: 2
-last_updated: "2026-05-21T21:09:00.000Z"
+pending_count: 4
+last_updated: "2026-05-21T21:30:00.000Z"
 ---
 # Findings Queue
 
@@ -32,3 +32,21 @@ last_updated: "2026-05-21T21:09:00.000Z"
 - **location:** main/src/orchestrator/__tests__/approvalRouter.test.ts
 - **description:** All approvalRouter unit tests fail on this machine due to better-sqlite3 NODE_MODULE_VERSION mismatch. The pnpm store has better-sqlite3 compiled for Electron (NMV 136) while the local node is v22.15.1 (NMV 127). Running pnpm electron:rebuild or pnpm rebuild inside the main workspace would fix this, but doing so as a side-effect of a task commit is out of scope. All 16 pre-existing tests + 2 new TASK-305 tests fail with ERR_DLOPEN_FAILED. Typecheck passes cleanly.
 - **suggested_action:** Run pnpm electron:rebuild or pnpm rebuild from the main workspace to recompile better-sqlite3 for the host Node version. This is a one-time environment fix.
+
+## FIND-SPRINT-029-4
+- **type:** bug
+- **source:** TASK-706 (verifier)
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/trpc/__tests__/router.test.ts:113-127
+- **description:** TASK-706 (currently being verified) replaced the 5 stub procedures in main/src/orchestrator/trpc/routers/approvals.ts with live ApprovalRouter+DB wiring. router.test.ts lines 113-127 contain 3 stale assertions on the OLD stub behavior (listPending returns [], approve/reject return {success:true} without ApprovalRouter init). Those assertions now fail with `TRPCError: ApprovalRouter has not been initialized` because the live mutation calls ApprovalRouter.getInstance() which the test does not initialize. router.test.ts is owned by TASK-695 (already merged); TASK-706 cannot modify it per files_owned scoping. TASK-706's own dedicated approvals.test.ts (9 tests) covers the new live behavior — full coverage of the renderer→ApprovalRouter wiring is preserved.
+- **suggested_action:** Schedule a small follow-on task in a future sprint to either (a) delete the 3 stale assertions from router.test.ts since they are now redundant with the dedicated approvals.test.ts coverage, or (b) update them to initialize ApprovalRouter and seed approvals before calling listPending/approve/reject. Option (a) is preferred — the dedicated approvals.test.ts file is the canonical home for these assertions and router.test.ts should only verify the router shape/wiring, not handler behavior.
+
+## FIND-SPRINT-029-5
+- **type:** anti-pattern
+- **source:** TASK-706 (verifier)
+- **severity:** medium
+- **status:** open
+- **location:** main/src/utils/mutex.ts:1,46
+- **description:** main/src/utils/mutex.ts contains two latent TS6133 ("declared but never read") errors: `import { Logger } from './logger';` at line 1 and `const lockId = this.lockCounts.get(resourceName);` at line 46. The Logger import is dead since the file inlines its own console-based logger; lockId is computed but never used (the original Crystal design had it as a debug aid). These errors existed at base SHA 28f8281 (the Crystal fork point) but were latent because no file in frontend/'s tsc reachable set imported any module that transitively imported mutex.ts. TASK-706 changed that — main/src/orchestrator/trpc/routers/approvals.ts now imports approveRestOfRunHandler from main/src/trpc/routers/approvals.ts, which imports `withLock` from main/src/utils/mutex.ts. Because shared/types/trpc.ts re-exports AppRouter from main/src/orchestrator/trpc/router (which composes approvalsRouter), frontend tsc (which sets `noUnusedLocals: true`) now reaches mutex.ts and surfaces the errors. The result: pnpm typecheck fails with exit 2 — directly contradicting TASK-706 AC #11 ("pnpm typecheck and pnpm lint exit 0"). The errors are NOT in TASK-706's files_owned, but the AC is broad and the regression is causally TASK-706's. Recommended fix (one line each): remove the unused `Logger` import; remove or use `lockId`.
+- **suggested_action:** Add main/src/utils/mutex.ts to TASK-706's executor change set and delete the two unused declarations (line 1 import and line 46 const). The fix is two-line and AC-prescribed by AC #11. Alternative: a tiny follow-on task that fixes only mutex.ts and re-runs typecheck. Either way, do not merge TASK-706 with typecheck failing.
