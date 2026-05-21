@@ -282,10 +282,7 @@ export class TerminalPanelManager {
     }
     
     // Initialize terminal first
-    // Mirrors hasCwdString's non-empty-string check (shared/types/panels.ts) — state.cwd is already
-    // typed as string|undefined so the guard is structural here, but the empty-string handling matches.
-    const restoreCwd =
-      typeof state.cwd === 'string' && state.cwd.length > 0 ? state.cwd : process.cwd();
+    const restoreCwd = hasCwdString(state) ? state.cwd : process.cwd();
     await this.initializeTerminal(panel, restoreCwd);
     
     const terminal = this.terminals.get(panel.id);
