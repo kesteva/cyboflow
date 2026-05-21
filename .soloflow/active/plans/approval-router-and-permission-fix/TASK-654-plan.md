@@ -1,8 +1,8 @@
 ---
 id: TASK-654
 idea: SPRINT-020
-status: in-flight
-created: 2026-05-19T00:00:00Z
+status: ready
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/cli/BaseCliPanel.tsx
   - frontend/src/components/Settings.tsx
@@ -48,13 +48,13 @@ acceptance_criteria:
   - criterion: "The 'ignore' contract is documented in `docs/CODE-PATTERNS.md` under a new `## permissionMode contract` heading."
     verification: "grep -nE '^## permissionMode contract' docs/CODE-PATTERNS.md returns 1 match. grep -nE 'DEFAULT_PERMISSION_MODE' docs/CODE-PATTERNS.md returns at least 1 match (within the new section)."
   - criterion: "Regression test: getOrCreateMainRepoSession resolves new session's permission_mode to 'approve' when the parent project's default_permission_mode column is NULL."
-    verification: "test -f main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts; `pnpm --filter main exec vitest run src/services/__tests__/sessionManager.mainRepoPermission.test.ts` exits 0."
+    verification: test -f main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts; `pnpm --filter main exec vitest run src/services/__tests__/sessionManager.mainRepoPermission.test.ts` exits 0.
   - criterion: "Repo-wide sweep — no defaults to 'ignore' in product code."
     verification: "grep -rnE \"\\|\\| 'ignore'\" main/src/ frontend/src/ shared/ returns 0 matches. grep -rnE 'value=\"ignore\"' frontend/src/ tests/ returns 0 matches."
   - criterion: "Type union `'approve' | 'ignore'` remains intact across shared/types — 'ignore' preserved as typed escape hatch."
     verification: "grep -rn \"'approve' | 'ignore'\" shared/types/ main/src/types/ returns at least 5 matches."
   - criterion: "`pnpm typecheck`, `pnpm lint`, `pnpm --filter main test`, `pnpm --filter frontend test` all exit 0."
-    verification: "Run each command — exit code 0."
+    verification: Run each command — exit code 0.
 depends_on: []
 estimated_complexity: medium
 epic: approval-router-and-permission-fix
@@ -63,14 +63,13 @@ test_strategy:
   justification: "sessionManager has no existing sibling test for the inline || fallback at line 453; the Playwright spec actively asserts the broken 'ignore' state and must be realigned in lockstep."
   targets:
     - behavior: "getOrCreateMainRepoSession returns a session with permission_mode === 'approve' when the parent project's default_permission_mode is NULL."
-      test_file: "main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts"
+      test_file: main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts
       type: unit
     - behavior: "Playwright spec asserts the 'approve' radio is the only one visible and is checked by default."
-      test_file: "tests/permissions-ui-fixed.spec.ts"
+      test_file: tests/permissions-ui-fixed.spec.ts
       type: integration
 prerequisites: []
 ---
-
 # Complete the permissionMode='ignore' sweep — UI surfaces, DB layer, and contract documentation
 
 ## Objective
