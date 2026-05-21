@@ -22,14 +22,16 @@
  * runId so transaction semantics and queue serialization are exercised
  * end-to-end without spinning up Electron or the MCP bridge.
  */
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import PQueue from 'p-queue';
-import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
+import { ApprovalRouter, RunNotRunningError, APPROVAL_TIMEOUT_MS, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
+import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -698,6 +700,265 @@ describe('ApprovalRouter', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case 14 (TASK-303): expires after 60min with socket deny
+  //
+  //  When the 60-minute timer fires, expireApproval() should:
+  //   - Set approvals.status = 'timed_out' (the schema-valid value for auto-expiry).
+  //   - Invoke socketReply with { behavior: 'deny', ... }.
+  //   - Resolve the requestApproval promise with a deny decision.
+  //   - Leave workflow_runs.status in 'awaiting_review' (Claude yields on its own).
+  //   - Remove the entry from this.pending.
+  // -------------------------------------------------------------------------
+  it('expires after 60min with socket deny — approvals timed_out, workflow_runs stays awaiting_review', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-014';
+      seedRun(db, runId, 'running');
+
+      // Start the approval request.
+      const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, socketReply);
+
+      // Wait for the transaction to commit.
+      await qf.getOrCreate(runId).onIdle();
+
+      // Confirm run is awaiting_review and entry is in-flight.
+      const runMid = db
+        .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+        .get(runId) as { status: string };
+      expect(runMid.status).toBe('awaiting_review');
+      expect(router.getPending()).toHaveLength(1);
+
+      // Advance fake timers past the 60-minute threshold.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+
+      // Wait for expireApproval's queue task to drain.
+      await qf.getOrCreate(runId).onIdle();
+
+      // socketReply must have been called with a deny decision.
+      expect(socketReply).toHaveBeenCalledOnce();
+      expect(socketReply.mock.calls[0][0].behavior).toBe('deny');
+
+      // The requestApproval promise must resolve with deny.
+      const decision = await approvalPromise;
+      expect(decision.behavior).toBe('deny');
+
+      // approvals row must be 'timed_out'.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+      const approval = db
+        .prepare("SELECT status, decided_by FROM approvals WHERE id = ?")
+        .get(approvalId) as { status: string; decided_by: string };
+      expect(approval.status).toBe('timed_out');
+      expect(approval.decided_by).toBe('timeout');
+
+      // workflow_runs.status must remain 'awaiting_review' (not changed by expiry).
+      const runAfter = db
+        .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+        .get(runId) as { status: string };
+      expect(runAfter.status).toBe('awaiting_review');
+
+      // The pending entry must have been removed.
+      expect(router.getPending()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 15 (TASK-303): clears timer on respond
+  //
+  //  Calling respond() before the timeout fires must cancel the timer.
+  //  After a normal respond(deny) call, advancing time by >60 minutes must
+  //  NOT result in a second socketReply invocation.
+  // -------------------------------------------------------------------------
+  it('clears timer on respond — no second socketReply after advancing 60min past expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-015';
+      seedRun(db, runId, 'running');
+
+      const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/x' }, socketReply);
+
+      // Wait for transaction to commit.
+      await qf.getOrCreate(runId).onIdle();
+
+      // Get the approvalId.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+
+      // Respond with deny before the timer fires.
+      await router.respond(approvalId, { behavior: 'deny', message: 'user rejected' });
+      await approvalPromise;
+
+      // socketReply should have been called exactly once (from the respond path).
+      expect(socketReply).toHaveBeenCalledTimes(1);
+      expect(socketReply.mock.calls[0][0].behavior).toBe('deny');
+
+      // Advance time well past the 60-minute threshold.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+
+      // Wait for any lingering queue tasks.
+      await qf.getOrCreate(runId).onIdle();
+
+      // socketReply must STILL have been called only once — the timer was cancelled.
+      expect(socketReply).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 16 (TASK-303): pending entry removed on expiry
+  //
+  //  After the timeout fires, this.pending must no longer contain the entry
+  //  and the approvals row must show 'timed_out'.  This validates the
+  //  database state cleanup path in expireApproval.
+  // -------------------------------------------------------------------------
+  it('pending entry removed on expiry — getPending() empty; approvals row timed_out', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-016';
+      seedRun(db, runId, 'running');
+
+      const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'pwd' }, socketReply);
+
+      await qf.getOrCreate(runId).onIdle();
+      expect(router.getPending()).toHaveLength(1);
+
+      // Fire the timer.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+      await qf.getOrCreate(runId).onIdle();
+
+      // Entry must be gone from pending.
+      expect(router.getPending()).toHaveLength(0);
+
+      // The promise must resolve (not hang).
+      const decision = await approvalPromise;
+      expect(decision.behavior).toBe('deny');
+
+      // approvals row must be 'timed_out'.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+      const approval = db
+        .prepare("SELECT status FROM approvals WHERE id = ?")
+        .get(approvalId) as { status: string };
+      expect(approval.status).toBe('timed_out');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case G (TASK-305): recoverStaleAwaitingReview transitions awaiting_review
+  //                    rows to failed; leaves other statuses untouched.
+  //
+  //  Seed: 2 workflow_runs rows with status='awaiting_review', 1 with
+  //        status='running'. Call recovery. Assert:
+  //   (a) return value is 2.
+  //   (b) the 2 awaiting_review rows now have status='failed' and
+  //       error_message='app_restart'.
+  //   (c) the running row is unchanged.
+  // -------------------------------------------------------------------------
+  it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    seedRun(db, 'run-G1', 'awaiting_review');
+    seedRun(db, 'run-G2', 'awaiting_review');
+    seedRun(db, 'run-G3', 'running');
+
+    const count = router.recoverStaleAwaitingReview();
+
+    // (a) return value is 2
+    expect(count).toBe(2);
+
+    // (b) the two awaiting_review rows are now 'failed' with error_message='app_restart'
+    const g1 = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
+      .get('run-G1') as { status: string; error_message: string };
+    expect(g1.status).toBe('failed');
+    expect(g1.error_message).toBe('app_restart');
+
+    const g2 = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
+      .get('run-G2') as { status: string; error_message: string };
+    expect(g2.status).toBe('failed');
+    expect(g2.error_message).toBe('app_restart');
+
+    // (c) the running row is unchanged
+    const g3 = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get('run-G3') as { status: string };
+    expect(g3.status).toBe('running');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case H (TASK-305): recoverStaleAwaitingReview cancels pending approvals
+  //                    for recovered runs to status='timed_out'.
+  //
+  //  Seed: 1 awaiting_review workflow_runs row with 1 approvals row
+  //        status='pending'. Call recovery. Assert:
+  //   - The approvals row is now status='timed_out', decided_at is set,
+  //     decided_by='system'.
+  // -------------------------------------------------------------------------
+  it("recoverStaleAwaitingReview cancels pending approvals for recovered runs", () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-H1';
+    seedRun(db, runId, 'awaiting_review');
+
+    // Manually insert a pending approvals row for this run.
+    const approvalId = 'approval-H1';
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO approvals
+         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+    ).run(approvalId, runId, 'bash', '{}', approvalId, now);
+
+    // Run recovery.
+    const count = router.recoverStaleAwaitingReview();
+    expect(count).toBe(1);
+
+    // The approval row must now be 'timed_out' with decided_at set and decided_by='system'.
+    const approval = db
+      .prepare("SELECT status, decided_at, decided_by FROM approvals WHERE id = ?")
+      .get(approvalId) as { status: string; decided_at: string | null; decided_by: string };
+    expect(approval.status).toBe('timed_out');
+    expect(approval.decided_at).not.toBeNull();
+    expect(approval.decided_by).toBe('system');
+  });
+
+  // -------------------------------------------------------------------------
   // Case 13: DB error during clearPendingForRun is swallowed — the method
   //          does NOT throw and the awaiting Promise still resolves with deny.
   //
@@ -705,6 +966,9 @@ describe('ApprovalRouter', () => {
   //  console.warn instead of re-throwing.  This invariant is critical:
   //  termination must not propagate a DB error up into the runSdkQuery
   //  finally block and corrupt the cleanup chain.
+  //
+  // NOTE: keep this test BEFORE the PreToolUse end-to-end block — it is the
+  // last test in the main describe, numbered 13.
   // -------------------------------------------------------------------------
   it('clearPendingForRun swallows a DB error and still resolves the pending promise with deny', async () => {
     const db = createTestDb();
@@ -753,5 +1017,130 @@ describe('ApprovalRouter', () => {
 
     // socketReply must NOT have been called.
     expect(socketReply.mock.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PreToolUse end-to-end: real ApprovalRouter + real SQLite
+// ---------------------------------------------------------------------------
+// Helpers (re-declared locally so this describe is self-contained and
+// co-located test helpers from the parent describe are not exported)
+
+function createE2ETestDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  db.exec(readFileSync(join(process.cwd(), 'src/database/migrations/006_cyboflow_schema.sql'), 'utf8'));
+  return db;
+}
+
+function makePreToolInput(toolName: string, input: Record<string, unknown> = {}): PreToolUseHookInput {
+  return {
+    hook_event_name: 'PreToolUse',
+    tool_name: toolName,
+    tool_input: input,
+    tool_use_id: 'e2e-tool-use-id',
+    session_id: 'e2e-session',
+    transcript_path: '/tmp/e2e.jsonl',
+    cwd: '/tmp',
+  } as unknown as PreToolUseHookInput;
+}
+
+describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real SQLite)", () => {
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // E2E Test 1: routePreToolUseThroughApprovalRouter inserts approvals row,
+  //             flips workflow_runs.status, and returns allow on respond(allow)
+  // -------------------------------------------------------------------------
+  it("routePreToolUseThroughApprovalRouter inserts approvals row, flips workflow_runs.status, and returns allow on respond(allow)", async () => {
+    const db = createE2ETestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'e2e-run-001';
+    seedRun(db, runId, 'running');
+
+    // Fire the helper without a logger — verifies no-logger path works.
+    const helperPromise = routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Bash', { command: 'ls' }),
+      runId,
+      'E2ETest',
+      // no logger argument
+    );
+
+    // Wait for the queue task to complete (transaction committed).
+    await qf.getOrCreate(runId).onIdle();
+
+    // (a) approvals row must exist with status='pending'.
+    const approval = db
+      .prepare("SELECT id, tool_name, status FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string; tool_name: string; status: string } | undefined;
+    expect(approval).toBeDefined();
+    expect(approval?.tool_name).toBe('Bash');
+    expect(approval?.status).toBe('pending');
+
+    // (b) workflow_runs.status must be 'awaiting_review'.
+    const run = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get(runId) as { status: string };
+    expect(run.status).toBe('awaiting_review');
+
+    // (c) After respond(allow), helper must resolve to permissionDecision:'allow'.
+    await router.respond(approval!.id, { behavior: 'allow' });
+    const result = await helperPromise;
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+      },
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // E2E Test 2: 'approvalCreated' emitted exactly once with correct payload
+  //             (bridge contract regression)
+  // -------------------------------------------------------------------------
+  it("emits 'approvalCreated' exactly once with the inserted ApprovalRequest payload (bridge contract)", async () => {
+    const db = createE2ETestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'e2e-run-002';
+    seedRun(db, runId, 'running');
+
+    // Listen for the approvalCreated event.
+    const emitted: unknown[] = [];
+    router.on('approvalCreated', (request) => { emitted.push(request); });
+
+    const helperPromise = routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Bash', { command: 'echo hello' }),
+      runId,
+      'E2EBridgeTest',
+    );
+
+    // Wait for the queue task to commit.
+    await qf.getOrCreate(runId).onIdle();
+
+    // Exactly one event must have been emitted.
+    expect(emitted).toHaveLength(1);
+
+    // Payload must satisfy ApprovalRequest shape.
+    const req = emitted[0] as { id: string; runId: string; toolName: string; input: unknown; timestamp: number };
+    expect(typeof req.id).toBe('string');
+    expect(req.runId).toBe(runId);
+    expect(req.toolName).toBe('Bash');
+    expect(req.input).toEqual({ command: 'echo hello' });
+    expect(typeof req.timestamp).toBe('number');
+
+    // Clean up: respond to avoid dangling promises.
+    await router.respond(req.id, { behavior: 'deny' });
+    await helperPromise;
   });
 });

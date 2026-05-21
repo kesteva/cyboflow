@@ -17,6 +17,8 @@
  *      signal abort and terminates cleanly when the signal is aborted.
  *   8. cyboflow.events.onApprovalCreated is a placeholder: yields zero events
  *      before signal abort and terminates cleanly when the signal is aborted.
+ *   9. cyboflow.events.onStuckDetected is a placeholder: yields zero events
+ *      before signal abort and terminates cleanly when the signal is aborted.
  */
 import { describe, it, expect } from 'vitest';
 import { TRPCError, callProcedure, isAsyncIterable } from '@trpc/server/unstable-core-do-not-import';
@@ -104,25 +106,9 @@ describe('appRouter (createCaller)', () => {
     );
   });
 
-  // cyboflow.approvals procedures are working stubs (not throwNotImplemented)
-  // — they return empty/success values so the review-queue UI has a live read
-  // path even before the full approval-router epic lands.
-
-  it('cyboflow.approvals.listPending returns an empty array (stub — DB not yet wired)', async () => {
-    const result = await caller.cyboflow.approvals.listPending();
-    expect(Array.isArray(result)).toBe(true);
-    expect(result).toHaveLength(0);
-  });
-
-  it('cyboflow.approvals.approve resolves { success: true } (stub)', async () => {
-    const result = await caller.cyboflow.approvals.approve({ approvalId: 'a-1' });
-    expect(result).toEqual({ success: true });
-  });
-
-  it('cyboflow.approvals.reject resolves { success: true } (stub)', async () => {
-    const result = await caller.cyboflow.approvals.reject({ approvalId: 'a-1' });
-    expect(result).toEqual({ success: true });
-  });
+  // cyboflow.approvals procedures (listPending, approve, reject) are live —
+  // see main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts for
+  // integration coverage against ApprovalRouter + real SQLite.
 
   it('cyboflow.workflows.list throws NOT_IMPLEMENTED', async () => {
     await expect(caller.cyboflow.workflows.list()).rejects.toSatisfy(isNotImplemented);
@@ -206,6 +192,29 @@ describe('appRouter subscription placeholders', () => {
 
     const result = await callSubscription(
       'cyboflow.events.onApprovalCreated',
+      undefined,
+      controller.signal,
+    );
+
+    expect(isAsyncIterable(result)).toBe(true);
+
+    const iterable = result as AsyncIterable<unknown>;
+    const collected: unknown[] = [];
+
+    controller.abort();
+
+    for await (const ev of iterable) {
+      collected.push(ev);
+    }
+
+    expect(collected).toHaveLength(0);
+  });
+
+  it('cyboflow.events.onStuckDetected yields zero events and terminates on abort', async () => {
+    const controller = new AbortController();
+
+    const result = await callSubscription(
+      'cyboflow.events.onStuckDetected',
       undefined,
       controller.signal,
     );
