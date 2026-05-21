@@ -24,13 +24,6 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   });
 
-  // Welcome tracking handler (for compatibility)
-  ipcMain.handle('track-welcome-dismissed', () => {
-    // This handler exists for compatibility with other parts of the codebase
-    // Our Discord popup logic handles this differently
-    console.log('[App] Welcome dismissed (tracked for compatibility)');
-    return { success: true };
-  });
 
   // App opens tracking
   ipcMain.handle('app:record-open', (_event, welcomeHidden: boolean) => {
