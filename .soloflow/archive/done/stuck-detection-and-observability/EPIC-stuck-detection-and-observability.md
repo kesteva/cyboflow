@@ -1,7 +1,7 @@
 ---
 epic: stuck-detection-and-observability
 created: 2026-05-11T00:00:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-011]
 ---
 
