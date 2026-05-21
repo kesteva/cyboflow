@@ -312,6 +312,7 @@ function App() {
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
         </div>
+        {/* Shell geometry (ReviewQueueView | Sidebar | CyboflowRoot) is documented in docs/SHELL-LAYOUT.md. */}
         {/* Main content row: review queue + sidebar + primary panel */}
         <div className="flex flex-1 overflow-hidden">
           <ErrorBoundary fallback={(error) => (
