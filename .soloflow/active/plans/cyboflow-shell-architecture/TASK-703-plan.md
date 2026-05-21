@@ -1,8 +1,8 @@
 ---
 id: TASK-703
 idea: SPRINT-028-compounder
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - frontend/src/components/DraggableProjectTreeView.tsx
   - frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx
@@ -13,26 +13,25 @@ files_readonly:
   - frontend/src/utils/cyboflowApi.ts
   - docs/SHELL-LAYOUT.md
 acceptance_criteria:
-  - criterion: "handleRunClick no longer calls navigateToSessions(); it calls setActiveProjectId(run.project_id) after setActiveRun"
+  - criterion: handleRunClick no longer calls navigateToSessions(); it calls setActiveProjectId(run.project_id) after setActiveRun
     verification: "grep -nE 'navigateToSessions\\(\\)' frontend/src/components/DraggableProjectTreeView.tsx returns 0 matches AND grep -nE 'setActiveProjectId\\(run\\.project_id\\)' frontend/src/components/DraggableProjectTreeView.tsx returns >=1 match"
   - criterion: "runs test asserts setActiveProjectId is called with the run's project_id"
     verification: "grep -nE 'setActiveProjectId' frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx returns >=2 matches"
-  - criterion: "pnpm --filter frontend test exits 0"
-    verification: "pnpm --filter frontend test exits 0"
-  - criterion: "pnpm typecheck exits 0"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm --filter frontend test exits 0
+    verification: pnpm --filter frontend test exits 0
+  - criterion: pnpm typecheck exits 0
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: true
-  justification: "REG-SPRINT-028-1 was missed because navigationStore mock returned only navigateToSessions; need an assertion locking the new contract."
+  justification: REG-SPRINT-028-1 was missed because navigationStore mock returned only navigateToSessions; need an assertion locking the new contract.
   targets:
-    - behavior: "Clicking a run row calls useNavigationStore.getState().setActiveProjectId(run.project_id) and does NOT call navigateToSessions"
-      test_file: "frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx"
+    - behavior: Clicking a run row calls useNavigationStore.getState().setActiveProjectId(run.project_id) and does NOT call navigateToSessions
+      test_file: frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx
       type: component
 ---
-
 # B1 — Fix REG-SPRINT-028-1: handleRunClick un-mounts CyboflowRoot
 
 ## Objective

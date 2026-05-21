@@ -1,8 +1,8 @@
 ---
 id: TASK-699
 idea: IDEA-014
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/RunView.tsx
   - frontend/src/components/cyboflow/__tests__/RunView.test.tsx
@@ -12,20 +12,20 @@ files_readonly:
   - shared/types/claudeStream.ts
   - .soloflow/active/findings/SPRINT-026-findings.md
 acceptance_criteria:
-  - criterion: "RunView.SystemEventRow no longer contains the api_retry or compact subtype branches"
+  - criterion: RunView.SystemEventRow no longer contains the api_retry or compact subtype branches
     verification: "grep -nE \"subtype === 'api_retry'|subtype === 'compact'\" frontend/src/components/cyboflow/RunView.tsx returns 0 matches"
-  - criterion: "RunView.tsx no longer imports SystemApiRetryEvent or SystemCompactEvent"
+  - criterion: RunView.tsx no longer imports SystemApiRetryEvent or SystemCompactEvent
     verification: "grep -nE 'SystemApiRetryEvent|SystemCompactEvent' frontend/src/components/cyboflow/RunView.tsx returns 0 matches"
-  - criterion: "SystemApiRetryEvent / SystemCompactEvent exports remain intact in shared/types/claudeStream.ts (retention rationale per TASK-681 preserved)"
+  - criterion: SystemApiRetryEvent / SystemCompactEvent exports remain intact in shared/types/claudeStream.ts (retention rationale per TASK-681 preserved)
     verification: "grep -nE 'export interface SystemApiRetryEvent|export interface SystemCompactEvent' shared/types/claudeStream.ts returns 2 matches"
-  - criterion: "RunView unit test no longer asserts that api_retry / compact subtypes render through SystemEventRow"
+  - criterion: RunView unit test no longer asserts that api_retry / compact subtypes render through SystemEventRow
     verification: "grep -nE \"routes a system/api_retry|routes a system/compact[^_]\" frontend/src/components/cyboflow/__tests__/RunView.test.tsx returns 0 matches"
-  - criterion: "RunView unit test asserts api_retry and compact subtype payloads route to UnknownEventRow (the Unrecognized event label)"
+  - criterion: RunView unit test asserts api_retry and compact subtype payloads route to UnknownEventRow (the Unrecognized event label)
     verification: "grep -nE \"api_retry .*Unrecognized|compact .*Unrecognized|routes (an? )?retired api_retry|routes (an? )?retired compact\" frontend/src/components/cyboflow/__tests__/RunView.test.tsx returns ≥2 matches"
-  - criterion: "pnpm --filter frontend test exits 0 with the RunView.test.tsx assertions passing"
-    verification: "pnpm --filter frontend test exits 0"
-  - criterion: "pnpm typecheck exits 0 (no orphaned-import errors after removing the two type names from RunView.tsx)"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm --filter frontend test exits 0 with the RunView.test.tsx assertions passing
+    verification: pnpm --filter frontend test exits 0
+  - criterion: pnpm typecheck exits 0 (no orphaned-import errors after removing the two type names from RunView.tsx)
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: claude-agent-sdk-migration
@@ -34,13 +34,12 @@ test_strategy:
   justification: "Sibling test RunView.test.tsx contains two asserts that exercise the now-dead api_retry and compact branches (lines 245-264, 266-283). These tests will fail unless updated. They must be transformed to assert the post-TASK-681 truth: subtype api_retry/compact narrowing-rejects and routes through UnknownEventRow with the Unrecognized event label visible."
   targets:
     - behavior: "An event with payload.subtype === 'api_retry' (which the main-process narrower would reject) reaches the renderer with event.type === 'unknown' and renders via UnknownEventRow (visible 'Unrecognized event' label)"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
     - behavior: "An event with payload.subtype === 'compact' (also rejected by the narrower) renders via UnknownEventRow with the Unrecognized event label"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
 ---
-
 # B1 — Remove dead api_retry / compact renderer branches in RunView
 
 ## Objective

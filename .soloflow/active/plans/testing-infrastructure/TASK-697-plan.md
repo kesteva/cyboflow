@@ -1,8 +1,8 @@
 ---
 id: TASK-697
 idea: SPRINT-027-compound
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
 files_readonly:
@@ -14,20 +14,20 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Test 'killProcess mid-stream clears pipelines, sdkRuns, and processes maps' passes in isolation (single-file run)"
     verification: "cd main && npx vitest run src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts -> exit 0, both cases pass."
-  - criterion: "Same test passes deterministically in the full main-package suite -- 3 consecutive runs green"
+  - criterion: Same test passes deterministically in the full main-package suite -- 3 consecutive runs green
     verification: "cd main && npx vitest run && npx vitest run && npx vitest run -- each exits 0; killProcess mid-stream completes < 500ms each run."
-  - criterion: "Test does NOT await an unresolvable promise -- spawnPromise is no longer awaited before killProcess"
+  - criterion: Test does NOT await an unresolvable promise -- spawnPromise is no longer awaited before killProcess
     verification: "grep -n 'await spawnPromise' returns 0 matches BEFORE the killProcess call; if awaited at all, it is AFTER killProcess."
-  - criterion: "clearPendingForRun single-source invariant preserved"
+  - criterion: clearPendingForRun single-source invariant preserved
     verification: "grep -n 'toHaveBeenCalledOnce|not.toHaveBeenCalled' returns both assertions, unchanged."
-  - criterion: "No real wall-clock waits in the test"
+  - criterion: No real wall-clock waits in the test
     verification: "grep -n 'setTimeout' returns 0 matches in the test body (or only as a bound-on-assertion, not a wait-for-state)."
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "The artifact IS a test file. Work is rewriting the test to be deterministic. Acceptance via test itself passing reliably."
+  justification: The artifact IS a test file. Work is rewriting the test to be deterministic. Acceptance via test itself passing reliably.
   targets:
     - behavior: "killProcess mid-stream: maps populated after spawn registration, then emptied after killProcess; clearPendingForRunSpy called once."
       test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
@@ -36,7 +36,6 @@ test_strategy:
       test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
 ---
-
 # Fix intermittent killProcess mid-stream test timeout
 
 ## Objective

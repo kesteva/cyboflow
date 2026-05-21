@@ -1,7 +1,7 @@
 ---
 id: TASK-696
 idea: IDEA-021
-status: ready
+status: in-flight
 created: "2026-05-20T23:55:00Z"
 files_owned:
   - shared/types/claudeStream.ts

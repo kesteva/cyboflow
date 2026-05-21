@@ -1,8 +1,8 @@
 ---
 id: TASK-700
 idea: IDEA-014
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/utils/cyboflowApi.ts
   - frontend/src/components/cyboflow/RunView.tsx
@@ -21,20 +21,20 @@ acceptance_criteria:
     verification: "grep -nE \"'run_started'\" frontend/src/utils/cyboflowApi.ts shared/types/claudeStream.ts returns ≥1 match in a StreamEventType union declaration"
   - criterion: "RunView.renderEvent handles 'run_started' with a dedicated case rendering a Starting placeholder row"
     verification: "grep -nE \"case 'run_started'\" frontend/src/components/cyboflow/RunView.tsx returns ≥1 match AND grep -nE 'Starting' frontend/src/components/cyboflow/RunView.tsx returns ≥1 match"
-  - criterion: "StreamEventPublisher.publish in runLauncher.ts types event.type as StreamEventType (not bare string)"
+  - criterion: StreamEventPublisher.publish in runLauncher.ts types event.type as StreamEventType (not bare string)
     verification: "grep -nE 'event: \\{ type: StreamEventType' main/src/orchestrator/runLauncher.ts returns ≥1 match"
   - criterion: "StreamEvent.payload in cyboflowApi.ts is no longer typed as bare 'unknown' inside a single non-union interface; the StreamEvent type is a discriminated union over event.type"
     verification: "grep -nE 'export type StreamEvent =' frontend/src/utils/cyboflowApi.ts returns ≥1 match (union form) AND `grep -nE 'export interface StreamEvent ' frontend/src/utils/cyboflowApi.ts` returns 0 matches"
   - criterion: "RunView.tsx no longer contains 'as SystemInitEvent', 'as AssistantEvent', 'as UserEvent', 'as ResultEvent', or 'as ClaudeStreamEventVariant' casts on event.payload"
     verification: "grep -cE 'payload as (SystemInitEvent|AssistantEvent|UserEvent|ResultEvent|ClaudeStreamEventVariant)' frontend/src/components/cyboflow/RunView.tsx returns 0"
-  - criterion: "RunView unit test asserts run_started renders the Starting placeholder text"
+  - criterion: RunView unit test asserts run_started renders the Starting placeholder text
     verification: "grep -nE \"run_started\" frontend/src/components/cyboflow/__tests__/RunView.test.tsx returns ≥1 match AND the new test body includes an assertion on /Starting/"
-  - criterion: "pnpm --filter frontend test exits 0"
-    verification: "pnpm --filter frontend test exits 0"
-  - criterion: "pnpm --filter main test exits 0 (runLauncher / runEventBridge tests pass with the tightened publish signature; pre-existing FIND-SPRINT-026-10 failures are tracked separately under B4/TASK-702)"
-    verification: "pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runLauncher.test.ts main/src/orchestrator/__tests__/runEventBridge.test.ts exits 0"
-  - criterion: "pnpm typecheck exits 0 end-to-end"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm --filter frontend test exits 0
+    verification: pnpm --filter frontend test exits 0
+  - criterion: pnpm --filter main test exits 0 (runLauncher / runEventBridge tests pass with the tightened publish signature; pre-existing FIND-SPRINT-026-10 failures are tracked separately under B4/TASK-702)
+    verification: pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runLauncher.test.ts main/src/orchestrator/__tests__/runEventBridge.test.ts exits 0
+  - criterion: pnpm typecheck exits 0 end-to-end
+    verification: pnpm typecheck exits 0
 depends_on:
   - TASK-699
 estimated_complexity: medium
@@ -43,12 +43,11 @@ test_strategy:
   needed: true
   justification: "Tightening StreamEventPublisher.publish from `type: string` to `type: StreamEventType` is a compile-time contract change that the main-process tests exercise via literal { type: 'run_started', payload, timestamp } objects. They must still typecheck and pass. The renderer-side test must lock in the new run_started → Starting placeholder mapping (this is the AC#8 path-B intent from TASK-683). The 5 cast-removals in RunView.tsx are typecheck-driven."
   targets:
-    - behavior: "RunView renders the Starting placeholder row when a run_started StreamEvent is appended"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunView.test.tsx"
+    - behavior: RunView renders the Starting placeholder row when a run_started StreamEvent is appended
+      test_file: frontend/src/components/cyboflow/__tests__/RunView.test.tsx
       type: component
 prerequisites: []
 ---
-
 # B2 — Fix run_started cross-task contract: tighten StreamEventType union and StreamEvent.payload
 
 ## Objective
