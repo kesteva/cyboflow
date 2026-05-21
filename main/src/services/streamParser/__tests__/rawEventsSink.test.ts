@@ -17,21 +17,7 @@ import Database from 'better-sqlite3';
 import { EventRouter } from '../eventRouter';
 import { RawEventsSink } from '../rawEventsSink';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
-
-// ---------------------------------------------------------------------------
-// Schema DDL (matches 006_cyboflow_schema.sql exactly — columns: id, run_id,
-// event_type, payload_json, created_at; NO event_subtype column).
-// ---------------------------------------------------------------------------
-
-const RAW_EVENTS_DDL = `
-  CREATE TABLE IF NOT EXISTS raw_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`;
+import { makeRawEventsDb, countRawEvents } from '../../../orchestrator/__test_fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant
@@ -96,21 +82,6 @@ const unknownEvent: ClaudeStreamEvent = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeDb(): Database.Database {
-  const db = new Database(':memory:');
-  // Disable FK enforcement — keeps tests focused on sink behaviour, not FK seeding.
-  db.pragma('foreign_keys = OFF');
-  db.exec(RAW_EVENTS_DDL);
-  return db;
-}
-
-function countRows(db: Database.Database, runId: string): number {
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM raw_events WHERE run_id = ?')
-    .get(runId) as { n: number };
-  return row.n;
-}
-
 interface RawEventRow {
   event_type: string;
   payload_json: string;
@@ -132,7 +103,7 @@ describe('RawEventsSink', () => {
   const RUN_ID = 'run-test-001';
 
   beforeEach(() => {
-    db = makeDb();
+    db = makeRawEventsDb();
     router = new EventRouter();
   });
 
@@ -156,7 +127,7 @@ describe('RawEventsSink', () => {
       router.emitForRun(RUN_ID, event);
     }
 
-    expect(countRows(db, RUN_ID)).toBe(5);
+    expect(countRawEvents(db, RUN_ID)).toBe(5);
 
     const rows = selectRows(db, RUN_ID);
 
@@ -183,7 +154,7 @@ describe('RawEventsSink', () => {
   // -------------------------------------------------------------------------
 
   it('logs warn and continues when INSERT throws; 5 events with 1 failure → 4 rows', () => {
-    const failDb = makeDb();
+    const failDb = makeRawEventsDb();
     const mockLogger = { warn: vi.fn() };
     const sink = new RawEventsSink(failDb, mockLogger);
 
@@ -219,7 +190,7 @@ describe('RawEventsSink', () => {
     }).not.toThrow();
 
     // 4 rows persisted (events 1, 2, 4, 5)
-    expect(countRows(failDb, RUN_ID)).toBe(4);
+    expect(countRawEvents(failDb, RUN_ID)).toBe(4);
 
     // Exactly one warn call
     expect(mockLogger.warn).toHaveBeenCalledOnce();
@@ -241,7 +212,7 @@ describe('RawEventsSink', () => {
 
     router.emitForRun(RUN_ID, unknownEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
 
     const rows = selectRows(db, RUN_ID);
     expect(rows[0].event_type).toBe('unknown');
@@ -263,7 +234,7 @@ describe('RawEventsSink', () => {
     // Dispatch 2 events — should produce 2 rows.
     router.emitForRun(RUN_ID, systemEvent);
     router.emitForRun(RUN_ID, assistantEvent);
-    expect(countRows(db, RUN_ID)).toBe(2);
+    expect(countRawEvents(db, RUN_ID)).toBe(2);
 
     // Dispose — detach the listener.
     sink.dispose(RUN_ID);
@@ -271,7 +242,7 @@ describe('RawEventsSink', () => {
     // Dispatch 2 more events — should produce NO new rows.
     router.emitForRun(RUN_ID, resultEvent);
     router.emitForRun(RUN_ID, streamEvent);
-    expect(countRows(db, RUN_ID)).toBe(2);
+    expect(countRawEvents(db, RUN_ID)).toBe(2);
   });
 
   it('dispose() with no argument detaches all runId listeners', () => {
@@ -283,16 +254,16 @@ describe('RawEventsSink', () => {
 
     router.emitForRun(RUN_A, systemEvent);
     router.emitForRun(RUN_B, assistantEvent);
-    expect(countRows(db, RUN_A)).toBe(1);
-    expect(countRows(db, RUN_B)).toBe(1);
+    expect(countRawEvents(db, RUN_A)).toBe(1);
+    expect(countRawEvents(db, RUN_B)).toBe(1);
 
     // Dispose all.
     sink.dispose();
 
     router.emitForRun(RUN_A, resultEvent);
     router.emitForRun(RUN_B, streamEvent);
-    expect(countRows(db, RUN_A)).toBe(1);
-    expect(countRows(db, RUN_B)).toBe(1);
+    expect(countRawEvents(db, RUN_A)).toBe(1);
+    expect(countRawEvents(db, RUN_B)).toBe(1);
   });
 
   it('dispose() is idempotent — calling twice does not throw', () => {
@@ -315,7 +286,7 @@ describe('RawEventsSink', () => {
     // First attach: emit one event → 1 row
     sink.attachToRouter(router, RUN_ID);
     router.emitForRun(RUN_ID, systemEvent);
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
 
     // Re-attach to the same runId on the same router — old listener must be
     // removed so the next event is NOT written twice.
@@ -323,7 +294,7 @@ describe('RawEventsSink', () => {
     router.emitForRun(RUN_ID, assistantEvent);
 
     // Still exactly 2 rows (1 from before + 1 from after re-attach), not 3.
-    expect(countRows(db, RUN_ID)).toBe(2);
+    expect(countRawEvents(db, RUN_ID)).toBe(2);
 
     const rows = selectRows(db, RUN_ID);
     expect(rows[0].event_type).toBe('system');
@@ -352,7 +323,7 @@ describe('RawEventsSink', () => {
 
     router.emitForRun(RUN_ID, largeEvent);
 
-    expect(countRows(db, RUN_ID)).toBe(1);
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
 
     const rows = selectRows(db, RUN_ID);
     const parsed = JSON.parse(rows[0].payload_json) as typeof largeEvent;
