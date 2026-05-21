@@ -175,10 +175,19 @@ export class CliManagerFactory {
       additionalOptions?: unknown,
     ) => {
       const options = additionalOptions as Record<string, unknown> | undefined;
-      const db = options?.db as Database.Database | undefined;
-      if (!db) {
+      const dbCandidate = options?.db;
+      if (!dbCandidate) {
         throw new TypeError('[CliManagerFactory] claude tool requires `db` in additionalOptions');
       }
+      if (
+        typeof dbCandidate !== 'object' ||
+        typeof (dbCandidate as { prepare?: unknown }).prepare !== 'function'
+      ) {
+        throw new TypeError(
+          '[CliManagerFactory] claude tool: additionalOptions.db must be a better-sqlite3 Database instance (received a value lacking a .prepare() method)',
+        );
+      }
+      const db = dbCandidate as Database.Database;
       return new ClaudeCodeManager(
         sessionManager as SessionManager,
         logger,
