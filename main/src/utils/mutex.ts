@@ -1,5 +1,3 @@
-import { Logger } from './logger';
-
 // Use console logging for mutex operations since logger might not be available
 const logger = {
   debug: (msg: string) => console.log(`[Mutex] ${msg}`),
@@ -42,8 +40,6 @@ export class Mutex {
     // Store the lock
     this.locks.set(resourceName, lockPromise);
     this.lockCounts.set(resourceName, (this.lockCounts.get(resourceName) || 0) + 1);
-    
-    const lockId = this.lockCounts.get(resourceName);
 
     // Return the release function
     return () => {
