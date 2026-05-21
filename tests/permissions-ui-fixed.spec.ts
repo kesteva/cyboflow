@@ -31,9 +31,9 @@ test.describe('Permission UI Elements', () => {
     await expect(approveRadio).toBeVisible();
     await expect(approveRadio).toBeChecked();
 
-    // Verify 'ignore' radio does NOT exist
-    const ignoreRadio = page.locator('input[name="defaultPermissionMode"][value="ignore"]');
-    await expect(ignoreRadio).toHaveCount(0);
+    // Verify no radio buttons other than 'approve' exist in this group
+    const allRadios = page.locator('input[name="defaultPermissionMode"]');
+    await expect(allRadios).toHaveCount(1);
   });
 
   test('Approve radio is the only option and is checked by default', async ({ page }) => {
