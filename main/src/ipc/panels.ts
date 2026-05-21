@@ -2,23 +2,8 @@ import { IpcMain, BrowserWindow } from 'electron';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
 import { databaseService } from '../services/database';
-import { CreatePanelRequest, PanelEventType, ToolPanel, ToolPanelState, BaseAIPanelState } from '../../../shared/types/panels';
+import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
 import type { AppServices } from './types';
-
-/**
- * Type guard: narrows customState to `{ cwd: string }` when it is an object
- * with a non-empty string `cwd` property.  Mirrors the narrowing pattern at
- * terminalPanelManager.ts:249 (`'cwd' in panel.state.customState`).
- */
-function hasCwdString(state: ToolPanelState['customState']): state is { cwd: string } {
-  return (
-    typeof state === 'object' &&
-    state !== null &&
-    'cwd' in state &&
-    typeof (state as Record<string, unknown>).cwd === 'string' &&
-    ((state as Record<string, unknown>).cwd as string).length > 0
-  );
-}
 
 /**
  * Resolve the working directory for a terminal panel in priority order:
