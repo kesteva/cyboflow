@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-027
-pending_count: 3
-last_updated: "2026-05-21T01:10:00.000Z"
+pending_count: 4
+last_updated: "2026-05-21T01:18:30.028Z"
 ---
 # Findings Queue
 
@@ -29,6 +29,7 @@ SPRINT-027 started with missing infra: playwright (stale shadows), peekaboo (CLI
 - **resolved_by:** 
 
 
+
 SoloFlow workflow defect: TASK-674 (SPRINT-025-compounder) was a duplicate of TASK-671 (SPRINT-024-compound) — both targeted the same 4 stale assertions in runExecutor.test.ts. Acceptance met by a5f0a83. Compound's task-extraction step should deduplicate against open backlog tasks targeting the same files/symbols.
 
 ## FIND-SPRINT-027-3
@@ -50,3 +51,10 @@ SoloFlow workflow defect: TASK-674 (SPRINT-025-compounder) was a duplicate of TA
 - **description:** With TASK-676 consolidating the orchestrator-side raw_events fixture, the registry-side `registrySchema.ts` still inlines its own copy of the raw_events DDL (as part of GATE_SCHEMA). The two now describe the same table from two different fixture trees. Not a defect today — they're scoped to different test suites — but the next contributor to add a column to raw_events has to remember to update both files plus the production migration. Worth considering a shared root-level constant or having GATE_SCHEMA import RAW_EVENTS_DDL from the orchestrator fixture.
 - **suggested_action:** Either (a) re-export `RAW_EVENTS_DDL` from `main/src/orchestrator/__test_fixtures__/rawEvents.ts` and have `registrySchema.ts` concatenate it into GATE_SCHEMA, or (b) leave as-is and add an inline comment in both fixtures pointing at each other. Defer to next compounder pass.
 - **resolved_by:** 
+
+## FIND-SPRINT-027-5
+- **source:** TASK-677 (verifier)
+- **type:** claude-md
+- **severity:** low
+- **status:** open
+- **description:** verification.visual_web=true but the Playwright MCP target (http://localhost:4521) has stale shadows: dev server not running and Electron preload electronTRPC is unreachable. TerminalPanel.tsx displayCwd render path could not be exercised in this verifier run. Already escalated under dedup_key visual_web_electron_unreachable. CLAUDE.md / VISUAL-VERIFICATION-SETUP.md should call out that visual_web with playwright_target.kind=electron requires either (a) a live `pnpm dev` server, (b) a Playwright-Electron CDP attach launcher, or (c) visual_web=false.
