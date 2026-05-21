@@ -111,7 +111,7 @@ describe('SessionManager.getOrCreateMainRepoSession — permissionMode defaults'
     // Arrange: project has null default_permission_mode (common for legacy rows before migration 008)
     const project = makeProject({ default_permission_mode: undefined }); // undefined ≈ NULL from DB
     const db = makeDbMock(project, 'approve');
-    const mgr = new SessionManager(db as unknown as Parameters<typeof SessionManager>[0]);
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
 
     // Act
     const session = await mgr.getOrCreateMainRepoSession(1);
@@ -130,7 +130,7 @@ describe('SessionManager.getOrCreateMainRepoSession — permissionMode defaults'
     const projectWithoutField = makeProject();
     delete (projectWithoutField as Partial<Project>).default_permission_mode;
     const db = makeDbMock(projectWithoutField, 'approve');
-    const mgr = new SessionManager(db as unknown as Parameters<typeof SessionManager>[0]);
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
 
     // Act
     const session = await mgr.getOrCreateMainRepoSession(1);
