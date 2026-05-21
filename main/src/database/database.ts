@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
+import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -277,7 +278,7 @@ export class DatabaseService {
     
     if (!hasPermissionModeColumn) {
       // Add permission_mode column to sessions table
-      this.db.prepare("ALTER TABLE sessions ADD COLUMN permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore'))").run();
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore'))").run();
     }
 
     // Add project support migration (wrapped in transaction)
@@ -363,7 +364,7 @@ export class DatabaseService {
     const hasDefaultPermissionModeColumn = projectsTableInfo.some((col: SqliteTableInfo) => col.name === 'default_permission_mode');
     
     if (!hasDefaultPermissionModeColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT 'ignore' CHECK(default_permission_mode IN ('approve', 'ignore'))").run();
+      this.db.prepare("ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT 'approve' CHECK(default_permission_mode IN ('approve', 'ignore'))").run();
     }
 
     // Add open_ide_command column to projects table if it doesn't exist
@@ -490,7 +491,7 @@ export class DatabaseService {
             archived BOOLEAN DEFAULT 0,
             last_viewed_at DATETIME,
             project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore')),
+            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
             run_started_at DATETIME,
             is_main_repo BOOLEAN DEFAULT 0,
             display_order INTEGER
@@ -638,7 +639,7 @@ export class DatabaseService {
             archived BOOLEAN DEFAULT 0,
             last_viewed_at DATETIME,
             project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore')),
+            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
             run_started_at DATETIME,
             is_main_repo BOOLEAN DEFAULT 0,
             display_order INTEGER,
@@ -1614,7 +1615,7 @@ export class DatabaseService {
     const result = this.db.prepare(`
       INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, display_order, commit_mode, commit_structured_prompt_template, commit_checkpoint_prefix)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || 'ignore', openIdeCommand || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
@@ -2051,7 +2052,7 @@ export class DatabaseService {
         data.worktree_path,
         data.project_id,
         data.folder_id || null,
-        data.permission_mode || 'ignore',
+        data.permission_mode || DEFAULT_PERMISSION_MODE,
         data.is_main_repo ? 1 : 0,
         displayOrder,
         data.auto_commit !== undefined ? (data.auto_commit ? 1 : 0) : 1,
