@@ -278,7 +278,7 @@ export class DatabaseService {
     
     if (!hasPermissionModeColumn) {
       // Add permission_mode column to sessions table
-      this.db.prepare("ALTER TABLE sessions ADD COLUMN permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore'))").run();
+      this.db.prepare("ALTER TABLE sessions ADD COLUMN permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore'))").run();
     }
 
     // Add project support migration (wrapped in transaction)
@@ -364,7 +364,7 @@ export class DatabaseService {
     const hasDefaultPermissionModeColumn = projectsTableInfo.some((col: SqliteTableInfo) => col.name === 'default_permission_mode');
     
     if (!hasDefaultPermissionModeColumn) {
-      this.db.prepare("ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT 'ignore' CHECK(default_permission_mode IN ('approve', 'ignore'))").run();
+      this.db.prepare("ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT 'approve' CHECK(default_permission_mode IN ('approve', 'ignore'))").run();
     }
 
     // Add open_ide_command column to projects table if it doesn't exist
@@ -491,7 +491,7 @@ export class DatabaseService {
             archived BOOLEAN DEFAULT 0,
             last_viewed_at DATETIME,
             project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore')),
+            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
             run_started_at DATETIME,
             is_main_repo BOOLEAN DEFAULT 0,
             display_order INTEGER
@@ -639,7 +639,7 @@ export class DatabaseService {
             archived BOOLEAN DEFAULT 0,
             last_viewed_at DATETIME,
             project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
-            permission_mode TEXT DEFAULT 'ignore' CHECK(permission_mode IN ('approve', 'ignore')),
+            permission_mode TEXT DEFAULT 'approve' CHECK(permission_mode IN ('approve', 'ignore')),
             run_started_at DATETIME,
             is_main_repo BOOLEAN DEFAULT 0,
             display_order INTEGER,
