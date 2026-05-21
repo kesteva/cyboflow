@@ -44,7 +44,7 @@ interface DragState {
   overFolderId: string | null;
 }
 
-/** No props — sessionSortAscending removed; runs are always newest-first. */
+/** No props — sort order is always newest-first by created_at DESC. */
 export type DraggableProjectTreeViewProps = Record<string, never>;
 
 // ---------------------------------------------------------------------------
