@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
+import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -1614,7 +1615,7 @@ export class DatabaseService {
     const result = this.db.prepare(`
       INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, display_order, commit_mode, commit_structured_prompt_template, commit_checkpoint_prefix)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || 'ignore', openIdeCommand || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
@@ -2051,7 +2052,7 @@ export class DatabaseService {
         data.worktree_path,
         data.project_id,
         data.folder_id || null,
-        data.permission_mode || 'ignore',
+        data.permission_mode || DEFAULT_PERMISSION_MODE,
         data.is_main_repo ? 1 : 0,
         displayOrder,
         data.auto_commit !== undefined ? (data.auto_commit ? 1 : 0) : 1,
