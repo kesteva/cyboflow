@@ -35,18 +35,13 @@ export async function routePreToolUseThroughApprovalRouter(
   callerLabel: string,
   logger?: LoggerLike,
 ): Promise<HookJSONOutput> {
-  console.error('[DIAG-hook] routePreToolUseThroughApprovalRouter entry callerId=', callerId, 'tool=', pretool.tool_name);
-  if (!logger) console.error('[DIAG-hook] loggerLike undefined callerId=', callerId);
-
   try {
-    console.error('[DIAG-hook] before requestApproval callerId=', callerId);
     const decision = await ApprovalRouter.getInstance().requestApproval(
       callerId,
       pretool.tool_name,
       pretool.tool_input as Record<string, unknown>,
       () => {},
     );
-    console.error('[DIAG-hook] requestApproval returned callerId=', callerId, 'behavior=', decision.behavior);
 
     if (decision.behavior === 'allow') {
       return {
@@ -66,7 +61,6 @@ export async function routePreToolUseThroughApprovalRouter(
       },
     };
   } catch (err) {
-    console.error('[DIAG-hook] requestApproval THREW callerId=', callerId, 'tool=', pretool.tool_name, 'err=', err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err));
     logger?.error(
       `[${callerLabel}] PreToolUse hook failed for ${pretool.tool_name}: ${err instanceof Error ? err.message : String(err)}`,
     );

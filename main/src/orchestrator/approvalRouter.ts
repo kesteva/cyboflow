@@ -175,7 +175,6 @@ export class ApprovalRouter extends EventEmitter {
     input: Record<string, unknown>,
     socketReply: (decision: ApprovalDecision) => void,
   ): Promise<ApprovalDecision> {
-    console.error('[DIAG-approval] requestApproval entry runId=', runId, 'tool=', toolName);
     if (!this.db) throw new Error('ApprovalRouter db handle undefined');
 
     const approvalId = randomUUID();
@@ -198,9 +197,7 @@ export class ApprovalRouter extends EventEmitter {
       rejectDecision = rej;
     });
 
-    console.error('[DIAG-approval] before queue.add runId=', runId, 'approvalId=', approvalId);
     await this.getQueueForRun(runId).add(async () => {
-      console.error('[DIAG-approval] queue task entered runId=', runId, 'approvalId=', approvalId);
       // Atomic: UPDATE workflow_runs + INSERT approvals in one transaction.
       const txn = this.db.transaction(() => {
         const updateStmt = this.db.prepare(
@@ -225,9 +222,7 @@ export class ApprovalRouter extends EventEmitter {
       });
 
       // Execute the transaction — throws RunNotRunningError on guard failure.
-      console.error('[DIAG-approval] before txn.run runId=', runId, 'approvalId=', approvalId);
       (txn as () => void)();
-      console.error('[DIAG-approval] after txn.run runId=', runId, 'approvalId=', approvalId);
 
       // Schedule the 60-minute auto-expiry timer per ROADMAP-001 §5.7.
       const timeoutHandle = setTimeout(() => {
@@ -241,11 +236,9 @@ export class ApprovalRouter extends EventEmitter {
         reject: rejectDecision,
         timeoutHandle,
       });
-      console.error('[DIAG-approval] pending set runId=', runId, 'approvalId=', approvalId, 'pendingSize=', this.pending.size);
 
       // Notify renderer subscribers (e.g. the review queue UI).
       this.emit('approvalCreated', request);
-      console.error('[DIAG-approval] emit approvalCreated runId=', runId, 'approvalId=', approvalId, 'listeners=', this.listenerCount('approvalCreated'));
     });
 
     return decisionPromise;
