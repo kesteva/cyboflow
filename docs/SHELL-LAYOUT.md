@@ -30,5 +30,5 @@ The `ReviewQueueView` left rail is the differentiator surface described in
 ## Cross-references
 
 - Product framing: `docs/cyboflow_system_design.md` §5.7.
-- Current mount site: `frontend/src/App.tsx` lines 374-432.
+- Current mount site: `frontend/src/App.tsx` lines 317-375.
 - Epic: `.soloflow/active/plans/cyboflow-shell-architecture/EPIC-cyboflow-shell-architecture.md`.
