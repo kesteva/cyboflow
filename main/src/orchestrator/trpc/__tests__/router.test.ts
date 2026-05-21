@@ -106,25 +106,9 @@ describe('appRouter (createCaller)', () => {
     );
   });
 
-  // cyboflow.approvals procedures are working stubs (not throwNotImplemented)
-  // — they return empty/success values so the review-queue UI has a live read
-  // path even before the full approval-router epic lands.
-
-  it('cyboflow.approvals.listPending returns an empty array (stub — DB not yet wired)', async () => {
-    const result = await caller.cyboflow.approvals.listPending();
-    expect(Array.isArray(result)).toBe(true);
-    expect(result).toHaveLength(0);
-  });
-
-  it('cyboflow.approvals.approve resolves { success: true } (stub)', async () => {
-    const result = await caller.cyboflow.approvals.approve({ approvalId: 'a-1' });
-    expect(result).toEqual({ success: true });
-  });
-
-  it('cyboflow.approvals.reject resolves { success: true } (stub)', async () => {
-    const result = await caller.cyboflow.approvals.reject({ approvalId: 'a-1' });
-    expect(result).toEqual({ success: true });
-  });
+  // cyboflow.approvals procedures (listPending, approve, reject) are live —
+  // see main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts for
+  // integration coverage against ApprovalRouter + real SQLite.
 
   it('cyboflow.workflows.list throws NOT_IMPLEMENTED', async () => {
     await expect(caller.cyboflow.workflows.list()).rejects.toSatisfy(isNotImplemented);
