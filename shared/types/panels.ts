@@ -213,6 +213,26 @@ export interface PanelCapabilities {
   canAppearInWorktrees?: boolean; // Whether panel can appear in worktree sessions
 }
 
+/**
+ * Type guard: narrows ToolPanelState['customState'] to `{ cwd: string }` when
+ * it is an object with a non-empty string `cwd` property.
+ *
+ * Use this guard at every site that needs to read `customState.cwd` to avoid
+ * the unsafe `as TerminalPanelState | undefined` cast pattern. Returns false
+ * for null, undefined, empty-string cwd, or non-string cwd values.
+ */
+export function hasCwdString(
+  state: ToolPanelState['customState']
+): state is { cwd: string } {
+  return (
+    typeof state === 'object' &&
+    state !== null &&
+    'cwd' in state &&
+    typeof (state as Record<string, unknown>).cwd === 'string' &&
+    ((state as Record<string, unknown>).cwd as string).length > 0
+  );
+}
+
 // Panel Registry - Currently only terminal is implemented
 export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
   terminal: {
