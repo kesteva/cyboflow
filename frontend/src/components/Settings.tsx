@@ -7,7 +7,6 @@ import type { AppConfig } from '../types/config';
 import { useConfigStore } from '../stores/configStore';
 import {
   Shield,
-  ShieldOff,
   Sun,
   Moon,
   Settings as SettingsIcon,
@@ -36,7 +35,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState('');
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
-  const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve' | 'ignore'>('approve');
+  const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve'>('approve');
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
@@ -73,7 +72,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setAnthropicApiKey(data.anthropicApiKey || '');
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
-      setDefaultPermissionMode(data.defaultPermissionMode || 'approve');
+      // Only 'approve' is a valid UI selection; coerce any legacy 'ignore' value to 'approve'.
+      setDefaultPermissionMode('approve');
       setAutoCheckUpdates(data.autoCheckUpdates !== false); // Default to true
       setDevMode(data.devMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
@@ -281,35 +281,16 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               <SettingsSection
                 title="Default Security Mode"
                 description="How Claude should handle potentially risky operations"
-                icon={defaultPermissionMode === 'approve' ? <Shield className="w-4 h-4" /> : <ShieldOff className="w-4 h-4" />}
+                icon={<Shield className="w-4 h-4" />}
               >
                 <div className="space-y-3">
                   <label className="flex items-start gap-3 cursor-pointer p-3 rounded-lg hover:bg-surface-hover transition-colors border border-border-secondary">
                     <input
                       type="radio"
                       name="defaultPermissionMode"
-                      value="ignore"
-                      checked={defaultPermissionMode === 'ignore'}
-                      onChange={(e) => setDefaultPermissionMode(e.target.value as 'ignore' | 'approve')}
-                      className="text-interactive mt-1"
-                    />
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <ShieldOff className="w-4 h-4 text-text-tertiary" />
-                        <span className="text-sm font-medium text-text-primary">Fast & Flexible</span>
-                      </div>
-                      <p className="text-xs text-text-tertiary leading-relaxed">
-                        Claude executes commands quickly without asking permission. Great for development workflows.
-                      </p>
-                    </div>
-                  </label>
-                  <label className="flex items-start gap-3 cursor-pointer p-3 rounded-lg hover:bg-surface-hover transition-colors border border-border-secondary">
-                    <input
-                      type="radio"
-                      name="defaultPermissionMode"
                       value="approve"
                       checked={defaultPermissionMode === 'approve'}
-                      onChange={(e) => setDefaultPermissionMode(e.target.value as 'ignore' | 'approve')}
+                      onChange={(e) => setDefaultPermissionMode(e.target.value as 'approve')}
                       className="text-interactive mt-1"
                     />
                     <div className="flex-1">
