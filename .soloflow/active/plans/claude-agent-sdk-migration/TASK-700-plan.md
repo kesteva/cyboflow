@@ -1,5 +1,5 @@
 ---
-id: TASK-685
+id: TASK-700
 idea: IDEA-014
 status: ready
 created: 2026-05-20T00:00:00Z
@@ -31,12 +31,12 @@ acceptance_criteria:
     verification: "grep -nE \"run_started\" frontend/src/components/cyboflow/__tests__/RunView.test.tsx returns ≥1 match AND the new test body includes an assertion on /Starting/"
   - criterion: "pnpm --filter frontend test exits 0"
     verification: "pnpm --filter frontend test exits 0"
-  - criterion: "pnpm --filter main test exits 0 (runLauncher / runEventBridge tests pass with the tightened publish signature; pre-existing FIND-SPRINT-026-10 failures are tracked separately under B4/TASK-687)"
+  - criterion: "pnpm --filter main test exits 0 (runLauncher / runEventBridge tests pass with the tightened publish signature; pre-existing FIND-SPRINT-026-10 failures are tracked separately under B4/TASK-702)"
     verification: "pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runLauncher.test.ts main/src/orchestrator/__tests__/runEventBridge.test.ts exits 0"
   - criterion: "pnpm typecheck exits 0 end-to-end"
     verification: "pnpm typecheck exits 0"
 depends_on:
-  - TASK-684
+  - TASK-699
 estimated_complexity: medium
 epic: claude-agent-sdk-migration
 test_strategy:
@@ -95,7 +95,7 @@ Close two coupled cross-task drifts surfaced by FIND-SPRINT-026-16 and FIND-SPRI
 
 5. **Edit `frontend/src/components/cyboflow/RunView.tsx`:**
    - Change each row component's parameter type from `event: StreamEvent` to its per-arm narrowed form (`Extract<StreamEvent, { type: 'system' }>` etc.). Then delete the `as` casts on `event.payload` at lines 38, 98, 138, 167, 186.
-   - `SystemEventRow` already removed api_retry/compact branches in TASK-684 — this task picks up the cleaner narrowing.
+   - `SystemEventRow` already removed api_retry/compact branches in TASK-699 — this task picks up the cleaner narrowing.
    - Add a `case 'run_started':` arm before the `case 'unknown':` arm in `renderEvent` rendering a minimal placeholder:
      ```tsx
      case 'run_started':
@@ -127,7 +127,7 @@ Close two coupled cross-task drifts surfaced by FIND-SPRINT-026-16 and FIND-SPRI
 7. **Validation:**
    - `pnpm typecheck` → exit 0.
    - `pnpm --filter frontend test` → exit 0.
-   - `pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runLauncher.test.ts main/src/orchestrator/__tests__/runEventBridge.test.ts` → exit 0 (full `pnpm --filter main test` may still surface FIND-SPRINT-026-10 pre-existing failures owned by TASK-687).
+   - `pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runLauncher.test.ts main/src/orchestrator/__tests__/runEventBridge.test.ts` → exit 0 (full `pnpm --filter main test` may still surface FIND-SPRINT-026-10 pre-existing failures owned by TASK-702).
 
 8. **Completeness gate** — re-run the ACs above.
 
@@ -151,4 +151,4 @@ Whether to hoist `StreamEventType` to `shared/types/` or keep it in `frontend/sr
 
 ## Lowest Confidence Area
 
-The per-arm `Extract<StreamEvent, { type: '…' }>` parameter typing for each row component. TypeScript's `Extract<>` correctly narrows the union, and after TASK-684 lands `SystemEventRow` only needs `SystemInitEvent | SystemCompactBoundaryEvent` on `payload` — but if TASK-684 has not yet landed, the row's payload type still references `SystemApiRetryEvent` / `SystemCompactEvent`. **depends_on: [TASK-684]** is encoded for this reason.
+The per-arm `Extract<StreamEvent, { type: '…' }>` parameter typing for each row component. TypeScript's `Extract<>` correctly narrows the union, and after TASK-699 lands `SystemEventRow` only needs `SystemInitEvent | SystemCompactBoundaryEvent` on `payload` — but if TASK-699 has not yet landed, the row's payload type still references `SystemApiRetryEvent` / `SystemCompactEvent`. **depends_on: [TASK-699]** is encoded for this reason.
