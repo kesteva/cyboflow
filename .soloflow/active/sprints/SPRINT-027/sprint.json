@@ -6,9 +6,6 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-675": {
-      "status": "pending"
-    },
     "TASK-676": {
       "status": "pending"
     },
