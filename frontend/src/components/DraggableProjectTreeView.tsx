@@ -3,8 +3,7 @@ import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Sett
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
-// SessionListItem import preserved — TASK-689 owns its removal
-import { SessionListItem as _SessionListItem } from './SessionListItem';
+// @cyboflow-hidden: SessionListItem — TASK-689 owns its deletion. Grep anchor preserved.
 import { CreateSessionDialog } from './CreateSessionDialog';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
