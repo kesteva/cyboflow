@@ -357,4 +357,25 @@ The `workflow_runs` table and other cyboflow-era tables (`workflows`, `approvals
 
 A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite, applies the two paths side-by-side, and asserts the resulting column sets and FKs match. The script lives at `scripts/verify-schema-parity.js`; it does NOT compare test fixtures like `registrySchema.ts` — those are documented subsets and any drift is caught by the test suites that import them.
 
+## permissionMode contract
+
+**Source of truth:** `shared/types/permissionMode.ts` exports both the type alias and the default constant:
+
+```typescript
+export type PermissionMode = 'approve' | 'ignore';
+export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
+```
+
+**Rules — enforced by grep-gate in TASK-654:**
+
+1. **No UI surface may expose `'ignore'` as selectable.** The Settings.tsx Default Security Mode section and the BaseCliPanel.tsx Permission Mode dropdown must each offer only `value="approve"`. Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
+
+2. **No default or fallback may resolve to `'ignore'`.** Use `DEFAULT_PERMISSION_MODE` (imported from `shared/types/permissionMode`) wherever a missing value must be filled in. Verification: `grep -rnE "\|\| 'ignore'" main/src/ frontend/src/ shared/` must return 0 matches.
+
+3. **`'ignore'` remains a valid typed value** — it is consumed by `claudeCodeManager.ts:389` (omits the PreToolUse hook for a legitimate debug bypass) and by test fixtures. Do NOT remove `'ignore'` from the `PermissionMode` union or the DB CHECK constraint — legacy rows and the manager's bypass path depend on it.
+
+4. **DB CHECK constraint is `IN ('approve', 'ignore')`** — both values are persisted. Migration 008 (`main/src/database/migrations/008_permission_mode_approve_default.sql`) backfills NULL rows to `'approve'` on legacy installs. The DEFAULT clause on new columns uses `'approve'`.
+
+5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts.
+
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
