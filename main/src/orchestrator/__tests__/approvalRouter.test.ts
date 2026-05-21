@@ -871,6 +871,92 @@ describe('ApprovalRouter', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case G (TASK-305): recoverStaleAwaitingReview transitions awaiting_review
+  //                    rows to failed; leaves other statuses untouched.
+  //
+  //  Seed: 2 workflow_runs rows with status='awaiting_review', 1 with
+  //        status='running'. Call recovery. Assert:
+  //   (a) return value is 2.
+  //   (b) the 2 awaiting_review rows now have status='failed' and
+  //       error_message='app_restart'.
+  //   (c) the running row is unchanged.
+  // -------------------------------------------------------------------------
+  it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    seedRun(db, 'run-G1', 'awaiting_review');
+    seedRun(db, 'run-G2', 'awaiting_review');
+    seedRun(db, 'run-G3', 'running');
+
+    const count = router.recoverStaleAwaitingReview();
+
+    // (a) return value is 2
+    expect(count).toBe(2);
+
+    // (b) the two awaiting_review rows are now 'failed' with error_message='app_restart'
+    const g1 = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
+      .get('run-G1') as { status: string; error_message: string };
+    expect(g1.status).toBe('failed');
+    expect(g1.error_message).toBe('app_restart');
+
+    const g2 = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
+      .get('run-G2') as { status: string; error_message: string };
+    expect(g2.status).toBe('failed');
+    expect(g2.error_message).toBe('app_restart');
+
+    // (c) the running row is unchanged
+    const g3 = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get('run-G3') as { status: string };
+    expect(g3.status).toBe('running');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case H (TASK-305): recoverStaleAwaitingReview cancels pending approvals
+  //                    for recovered runs to status='timed_out'.
+  //
+  //  Seed: 1 awaiting_review workflow_runs row with 1 approvals row
+  //        status='pending'. Call recovery. Assert:
+  //   - The approvals row is now status='timed_out', decided_at is set,
+  //     decided_by='system'.
+  // -------------------------------------------------------------------------
+  it("recoverStaleAwaitingReview cancels pending approvals for recovered runs", () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'run-H1';
+    seedRun(db, runId, 'awaiting_review');
+
+    // Manually insert a pending approvals row for this run.
+    const approvalId = 'approval-H1';
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO approvals
+         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+    ).run(approvalId, runId, 'bash', '{}', approvalId, now);
+
+    // Run recovery.
+    const count = router.recoverStaleAwaitingReview();
+    expect(count).toBe(1);
+
+    // The approval row must now be 'timed_out' with decided_at set and decided_by='system'.
+    const approval = db
+      .prepare("SELECT status, decided_at, decided_by FROM approvals WHERE id = ?")
+      .get(approvalId) as { status: string; decided_at: string | null; decided_by: string };
+    expect(approval.status).toBe('timed_out');
+    expect(approval.decided_at).not.toBeNull();
+    expect(approval.decided_by).toBe('system');
+  });
+
+  // -------------------------------------------------------------------------
   // Case 13: DB error during clearPendingForRun is swallowed — the method
   //          does NOT throw and the awaiting Promise still resolves with deny.
   //
