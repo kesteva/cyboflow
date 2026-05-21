@@ -1,8 +1,8 @@
 ---
 id: TASK-674
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/runExecutor.test.ts
 files_readonly:
@@ -10,9 +10,9 @@ files_readonly:
   - main/src/orchestrator/runEventBridge.ts
 acceptance_criteria:
   - criterion: "All 4 previously failing test cases in runExecutor.test.ts pass: 'onLifecycleTransition routes each phase', 'source arg: lifecycleTransitions.running() fires when source emits output event', 'source absent: bridgeEvents short-circuits; running() is not called', and 'bridge drops output event when panelId has run- prefix (old broken behaviour)'."
-    verification: "Run `pnpm --filter @cyboflow/main test -- runExecutor.test.ts` from the repo root; exit code 0 and all 4 named cases appear in the passing list."
-  - criterion: "No existing passing test case in runExecutor.test.ts regresses."
-    verification: "Same vitest invocation as above — every prior `✓` line still shows `✓` (no new failures introduced)."
+    verification: Run `pnpm --filter @cyboflow/main test -- runExecutor.test.ts` from the repo root; exit code 0 and all 4 named cases appear in the passing list.
+  - criterion: No existing passing test case in runExecutor.test.ts regresses.
+    verification: Same vitest invocation as above — every prior `✓` line still shows `✓` (no new failures introduced).
   - criterion: "Test assertions accurately reflect the post-715b6c9 production contract: `pre_spawn` phase calls `lifecycleTransitions.running(runId)` once per `execute()` invocation, independent of whether the bridge later fires `sdk_initialized`."
     verification: "Inspect the updated test bodies and confirm each case either (a) accounts for the pre-spawn running() call in its expectation count, or (b) explicitly explains via comment why pre_spawn is bypassed in that test's setup (e.g. test calls `testLifecycleTransition` directly rather than `execute`)."
   - criterion: "The bridge-drop regression test still verifies its core invariant: when an output event has a mismatched panelId (`run-<runId>` prefix), `countRawEvents(db, runId)` remains 0 — i.e. the bridge filter still works."
@@ -25,19 +25,18 @@ test_strategy:
   justification: "This task IS a test fix. The 'tests' to update are the 4 listed cases themselves; no separate test file needs to be authored."
   targets:
     - behavior: "onLifecycleTransition routes each phase to the right transition helper, accounting for the pre_spawn → running() call introduced in commit 715b6c9."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "When source EventEmitter is wired, both pre_spawn and sdk_initialized phases fire running() — total call count is 2, not 1."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
     - behavior: "When source is absent, only pre_spawn fires running() (call count is 1); bridgeEvents() short-circuits and does NOT fire a second running()."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
     - behavior: "When the bridge sees an output event with a mismatched panelId (`run-<runId>` prefix), no raw_events row is inserted; running() may still be called once via pre_spawn but the bridge correctly filters."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
 ---
-
 # Fix 4 stale runExecutor.test.ts cases broken by pre-sprint lifecycle and panelId changes
 
 ## Objective

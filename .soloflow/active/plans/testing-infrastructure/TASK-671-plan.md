@@ -1,8 +1,8 @@
 ---
 id: TASK-671
 idea: IDEA-SPRINT-024-compound
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/runExecutor.test.ts
 files_readonly:
@@ -16,11 +16,11 @@ files_readonly:
 acceptance_criteria:
   - criterion: "All previously failing tests in main/src/orchestrator/__tests__/runExecutor.test.ts pass. Specifically the four assertions called out by FIND-SPRINT-024-1 (the `expect(running).toHaveBeenCalledOnce()` at approximately line 626 inside 'onLifecycleTransition routes each phase...'; the `expect(running).toHaveBeenCalledOnce()` at approximately line 807 inside 'source arg: lifecycleTransitions.running() fires when source emits output event'; the `expect(running).not.toHaveBeenCalled()` at approximately line 862 inside 'source absent: bridgeEvents short-circuits...'; and the `expect(running).not.toHaveBeenCalled()` at approximately line 1301 inside 'bridge drops output event when panelId has run- prefix...') all pass."
     verification: "Run `cd main && pnpm exec vitest run src/orchestrator/__tests__/runExecutor.test.ts --reporter=verbose` and confirm exit 0 with zero failed tests."
-  - criterion: "No production source file under main/src/orchestrator/ or main/src/services/ is modified — the fix is test-state hygiene only."
-    verification: "Run `git diff --name-only HEAD` after the change and confirm the only modified file is main/src/orchestrator/__tests__/runExecutor.test.ts."
-  - criterion: "The full main vitest suite remains green (no test made worse by the change)."
+  - criterion: No production source file under main/src/orchestrator/ or main/src/services/ is modified — the fix is test-state hygiene only.
+    verification: Run `git diff --name-only HEAD` after the change and confirm the only modified file is main/src/orchestrator/__tests__/runExecutor.test.ts.
+  - criterion: The full main vitest suite remains green (no test made worse by the change).
     verification: "Run `cd main && pnpm exec vitest run` and confirm exit 0; pre-task baseline (492 pass, 5 fail per FIND-SPRINT-024-1) → expected post-task baseline 497 pass, 0 fail."
-  - criterion: "runExecutor.test.ts continues to use makeSpyLogger() from __test_fixtures__/loggerLikeSpy (the TASK-646 migration is preserved)."
+  - criterion: runExecutor.test.ts continues to use makeSpyLogger() from __test_fixtures__/loggerLikeSpy (the TASK-646 migration is preserved).
     verification: "grep -n 'makeSpyLogger' main/src/orchestrator/__tests__/runExecutor.test.ts returns at least 1 hit; grep -nE 'function makeLogger|const makeLogger|nullLogger' main/src/orchestrator/__tests__/runExecutor.test.ts returns 0 hits."
 depends_on: []
 estimated_complexity: low
@@ -29,7 +29,6 @@ test_strategy:
   needed: false
   justification: "This task IS a test-file repair — the work is to make four pre-existing failing tests pass without touching production code. The acceptance criteria are themselves verified by running the existing test file. Adding new tests for the spy-reset machinery would test test infrastructure, which has no contractual surface to verify."
 ---
-
 # Fix pre-existing spy state bleed in runExecutor.test.ts
 
 ## Objective

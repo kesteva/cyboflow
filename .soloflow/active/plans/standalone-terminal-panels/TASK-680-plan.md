@@ -1,8 +1,8 @@
 ---
 id: TASK-680
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useAddTerminalPanel.ts
   - frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx
@@ -22,10 +22,10 @@ acceptance_criteria:
     verification: "Run `grep -n 'panelApi.createPanel' frontend/src/components/ProjectView.tsx` and confirm only the createPanel calls outside the deleted handleAddTerminal block remain (there are 2 unrelated calls at lines 57 and 68 that are NOT to be touched). Run `grep -n 'useAddTerminalPanel' frontend/src/components/ProjectView.tsx` and confirm 1 hit."
   - criterion: "Both files continue to wire the hook's returned callback into `useAddTerminalShortcut(handleAddTerminal)` and the `<PanelTabBar onAddTerminal={handleAddTerminal} />` prop — call sites are unchanged in shape."
     verification: "Run `grep -n 'useAddTerminalShortcut(handleAddTerminal)' frontend/src/components/SessionView.tsx frontend/src/components/ProjectView.tsx` and confirm 2 hits (1 per file). Run `grep -n 'onAddTerminal={handleAddTerminal}' frontend/src/components/SessionView.tsx frontend/src/components/ProjectView.tsx` and confirm 2 hits."
-  - criterion: "Tests pass — both the new hook test and the existing component tests."
-    verification: "Run `pnpm --filter @cyboflow/frontend test`; exit code 0."
-  - criterion: "Typecheck passes."
-    verification: "Run `pnpm typecheck`; exit code 0."
+  - criterion: Tests pass — both the new hook test and the existing component tests.
+    verification: Run `pnpm --filter @cyboflow/frontend test`; exit code 0.
+  - criterion: Typecheck passes.
+    verification: Run `pnpm typecheck`; exit code 0.
 depends_on: []
 estimated_complexity: low
 epic: standalone-terminal-panels
@@ -34,16 +34,15 @@ test_strategy:
   justification: "A new hook needs unit/integration coverage: the happy path (creates panel, adds to store, sets active, fires onAfterActivate), the no-session guard (returns early with a console.warn, never calls panelApi), and the no-worktreePath fallback (passes undefined/empty to initialState.cwd). Existing SessionView and ProjectView tests (if any) cover the integration path."
   targets:
     - behavior: "Happy path: useAddTerminalPanel returns a callback that calls panelApi.createPanel with the correct shape, calls addPanel, calls setActivePanel, calls panelApi.setActivePanel, and invokes onAfterActivate when provided."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx"
+      test_file: frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx
       type: unit
     - behavior: "Guard: when session is null/undefined, the callback logs a warning with the logTag and does NOT call panelApi.createPanel."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx"
+      test_file: frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx
       type: unit
     - behavior: "onAfterActivate is optional — when omitted (ProjectView pattern), the callback completes without invoking it."
-      test_file: "frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx"
+      test_file: frontend/src/hooks/__tests__/useAddTerminalPanel.test.tsx
       type: unit
 ---
-
 # Extract useAddTerminalPanel hook and consolidate ProjectView + SessionView handleAddTerminal duplication
 
 ## Objective

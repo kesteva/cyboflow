@@ -1,8 +1,8 @@
 ---
 id: TASK-679
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/utils/runGit.ts
   - main/src/utils/__tests__/runGit.test.ts
@@ -24,11 +24,11 @@ acceptance_criteria:
   - criterion: "`main/src/services/commitManager.ts` lines 197 (`execSync(\\\\`git merge-base HEAD ${mainBranch}\\\\`)`) and 203 (`execSync(\\\\`git reset --soft ${mergeBase}\\\\`)`) are migrated to `runGit(worktreePath, ['merge-base', 'HEAD', mainBranch])` and `runGit(worktreePath, ['reset', '--soft', mergeBase])`."
     verification: "Run `grep -nE 'execSync\\(.*git (merge-base|reset)' main/src/services/commitManager.ts` and confirm 0 hits. Run `grep -n 'runGit\\b' main/src/services/commitManager.ts` and confirm at least 2 hits."
   - criterion: "Unit tests for `runGit` and `runGitAsync` cover the adversarial-arg case: an arg containing `$(touch /tmp/cyboflow-rungit-pwned)` is passed as a positional arg and the marker file is NOT created (proving `execFile` does not invoke a shell)."
-    verification: "Run `pnpm --filter @cyboflow/main test -- runGit.test.ts`; exit 0 and the adversarial test case appears in the passing list."
+    verification: Run `pnpm --filter @cyboflow/main test -- runGit.test.ts`; exit 0 and the adversarial test case appears in the passing list.
   - criterion: "All previously passing tests in the main workspace continue to pass — no behavioral regression introduced by the migration of the 4 sites (2 in file.ts, 2 in commitManager.ts)."
-    verification: "Run `pnpm --filter @cyboflow/main test`; exit 0."
-  - criterion: "Typecheck passes."
-    verification: "Run `pnpm typecheck`; exit code 0."
+    verification: Run `pnpm --filter @cyboflow/main test`; exit 0.
+  - criterion: Typecheck passes.
+    verification: Run `pnpm typecheck`; exit code 0.
 depends_on: []
 estimated_complexity: medium
 epic: crystal-cuts-and-rebrand
@@ -37,22 +37,21 @@ test_strategy:
   justification: "The runGit helper is a new utility shared across several call sites — needs direct unit tests covering: (a) success path with arg array; (b) adversarial-arg case proving no shell parsing; (c) error path (non-zero exit propagates with stderr); (d) options (cwd, encoding, env). The 4 migrated call sites are exercised by existing commitManager and file.ts integration tests."
   targets:
     - behavior: "runGit / runGitAsync invoke git with positional args; an arg containing $(...) is treated as a literal string, not a shell command."
-      test_file: "main/src/utils/__tests__/runGit.test.ts"
+      test_file: main/src/utils/__tests__/runGit.test.ts
       type: unit
-    - behavior: "Non-zero git exit codes throw an error containing the stderr message."
-      test_file: "main/src/utils/__tests__/runGit.test.ts"
+    - behavior: Non-zero git exit codes throw an error containing the stderr message.
+      test_file: main/src/utils/__tests__/runGit.test.ts
       type: unit
     - behavior: "cwd, encoding, and env options are honored."
-      test_file: "main/src/utils/__tests__/runGit.test.ts"
+      test_file: main/src/utils/__tests__/runGit.test.ts
       type: unit
-    - behavior: "Existing commitManager tests still pass after migrating the merge-base + reset --soft call sites."
-      test_file: "main/src/services/__tests__/commitManager.test.ts"
+    - behavior: Existing commitManager tests still pass after migrating the merge-base + reset --soft call sites.
+      test_file: main/src/services/__tests__/commitManager.test.ts
       type: integration
     - behavior: "Existing file.ts IPC tests (git:commit handler) still pass after migrating the two `git commit -F` call sites."
-      test_file: "main/src/ipc/__tests__/file.test.ts"
+      test_file: main/src/ipc/__tests__/file.test.ts
       type: integration
 ---
-
 # Introduce runGit helper and migrate the 4 highest-priority execSync git sites
 
 ## Objective
