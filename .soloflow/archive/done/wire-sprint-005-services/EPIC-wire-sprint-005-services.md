@@ -1,7 +1,7 @@
 ---
 epic: wire-sprint-005-services
 created: 2026-05-13T22:55:00.000Z
-status: active
+status: complete
 originating_ideas: [SPRINT-004-005-compound]
 ---
 
