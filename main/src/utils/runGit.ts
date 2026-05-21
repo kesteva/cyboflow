@@ -9,6 +9,12 @@
  * Use runGit (sync) when the caller is already synchronous (e.g. inside a
  * non-async function or a pre-existing execSync chain). Prefer runGitAsync
  * for any new code path or any async caller.
+ *
+ * TASK-698: Removed the dead binary-encoding option from RunGitOptions.
+ * Both functions always return string — the Buffer branch was unreachable
+ * and zero callers used it. If a future caller needs raw Buffer output,
+ * add a separate `runGitBinary` helper rather than re-introducing
+ * polymorphism here.
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -16,31 +22,26 @@ import { promisify } from 'node:util';
 const execFileAsyncPromise = promisify(execFile);
 
 export interface RunGitOptions {
-  encoding?: 'utf8' | 'buffer';
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
 }
 
 export function runGit(cwd: string, args: string[], options: RunGitOptions = {}): string {
-  const encoding = options.encoding ?? 'utf8';
   const result = execFileSync('git', args, {
     cwd,
-    encoding: encoding as BufferEncoding,
+    encoding: 'utf8',
     maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024, // 10 MB default; safer than execSync default
     env: options.env,
   });
-  // execFileSync returns Buffer when encoding === 'buffer', else string.
-  // We type the public surface as string for the common case; callers needing
-  // Buffer can cast (rare).
-  return typeof result === 'string' ? result : (result as Buffer).toString('utf8');
+  return result;
 }
 
 export async function runGitAsync(cwd: string, args: string[], options: RunGitOptions = {}): Promise<string> {
   const { stdout } = await execFileAsyncPromise('git', args, {
     cwd,
-    encoding: (options.encoding ?? 'utf8') as BufferEncoding,
+    encoding: 'utf8',
     maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
     env: options.env,
   });
-  return typeof stdout === 'string' ? stdout : (stdout as Buffer).toString('utf8');
+  return stdout;
 }
