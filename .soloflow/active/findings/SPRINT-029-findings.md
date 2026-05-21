@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-029
-pending_count: 4
-last_updated: "2026-05-21T21:30:00.000Z"
+pending_count: 5
+last_updated: "2026-05-21T21:55:00.000Z"
 ---
 # Findings Queue
 
@@ -50,3 +50,12 @@ last_updated: "2026-05-21T21:30:00.000Z"
 - **location:** main/src/utils/mutex.ts:1,46
 - **description:** main/src/utils/mutex.ts contains two latent TS6133 ("declared but never read") errors: `import { Logger } from './logger';` at line 1 and `const lockId = this.lockCounts.get(resourceName);` at line 46. The Logger import is dead since the file inlines its own console-based logger; lockId is computed but never used (the original Crystal design had it as a debug aid). These errors existed at base SHA 28f8281 (the Crystal fork point) but were latent because no file in frontend/'s tsc reachable set imported any module that transitively imported mutex.ts. TASK-706 changed that — main/src/orchestrator/trpc/routers/approvals.ts now imports approveRestOfRunHandler from main/src/trpc/routers/approvals.ts, which imports `withLock` from main/src/utils/mutex.ts. Because shared/types/trpc.ts re-exports AppRouter from main/src/orchestrator/trpc/router (which composes approvalsRouter), frontend tsc (which sets `noUnusedLocals: true`) now reaches mutex.ts and surfaces the errors. The result: pnpm typecheck fails with exit 2 — directly contradicting TASK-706 AC #11 ("pnpm typecheck and pnpm lint exit 0"). The errors are NOT in TASK-706's files_owned, but the AC is broad and the regression is causally TASK-706's. Recommended fix (one line each): remove the unused `Logger` import; remove or use `lockId`.
 - **suggested_action:** Add main/src/utils/mutex.ts to TASK-706's executor change set and delete the two unused declarations (line 1 import and line 46 const). The fix is two-line and AC-prescribed by AC #11. Alternative: a tiny follow-on task that fixes only mutex.ts and re-runs typecheck. Either way, do not merge TASK-706 with typecheck failing.
+
+## FIND-SPRINT-029-6
+- **type:** infra
+- **severity:** low
+- **source:** SPRINT-029 sprint-verifier
+- **status:** open
+- **location:** package.json (postinstall hook), pnpm-lock.yaml, cyboflow-backend-debug.log
+- **description:** Recurring infra friction: running `pnpm dev` triggers `electron-builder install-app-deps` which rebuilds better-sqlite3 against Electron's NODE_MODULE_VERSION 136. The host node v22.15.1 uses NMV 127, so any subsequent `pnpm --filter main test` (or any other node-only test runner) fails with ERR_DLOPEN_FAILED on `new Database(:memory:)` across ~239 tests. FIND-SPRINT-029-3 hit this once already this sprint; the sprint-verifier hit it a second time after a separate `pnpm dev` run. `pnpm rebuild better-sqlite3` clears it. The fingerprint is now stable across two sprints.
+- **suggested_action:** Consider one of: (a) a `pretest:main` script that runs `pnpm rebuild better-sqlite3` if NMV mismatch is detected; (b) switching `pnpm --filter main test` to use Electron's bundled node via `electron-vitest` or similar; (c) documenting the manual `pnpm rebuild better-sqlite3` step in CLAUDE.md under "Common Commands" so future verifiers don't have to rediscover it. Option (a) or (c) is lowest-risk. Not blocking; informational only.

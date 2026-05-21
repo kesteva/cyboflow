@@ -1,9 +1,9 @@
 ---
-pending_count: 38
+pending_count: 40
 buckets:
   decisions: 2
   actions: 5
-  testing: 26
+  testing: 28
   deferred_visual: 5
 items: []
 ---
@@ -118,10 +118,10 @@ items: []
   plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
   action: "verification.visual_macos=true but visual_macos verification could not run because: (1) pnpm dev was not running at sprint-verifier time (no Electron/Vite process; port 4521 returned 000); (2) Peekaboo MCP reports Accessibility permission NOT granted (only Screen Recording is granted). Per CLAUDE.md L41 and docs/VISUAL-VERIFICATION-SETUP.md, both grants are required for Peekaboo to drive UI events. Resolution: grant Accessibility to the Peekaboo MCP host (Claude Code) in System Settings > Privacy & Security > Accessibility, AND start pnpm dev before re-running sprint verification. This is closely related to the TASK-672 entry above (dedup_key: visual_macos_unavailable) but separately scoped because TASK-672 was filed against an individual task while this entry is sprint-level and also covers the 'pnpm dev not running' precondition."
   blocked_checks:
-    - "Pass 1 visual_macos — Discord modal absence (TASK-684 + TASK-685)"
+    - Pass 1 visual_macos — Discord modal absence (TASK-684 + TASK-685)
     - "Pass 1 visual_macos — Sidebar project > runs list rendering + status dots + 'No runs yet' empty state (TASK-687)"
     - "Pass 1 visual_macos — Run-row click -> CyboflowRoot RunView round trip (TASK-687 x TASK-688; also see REG-SPRINT-028-1)"
-    - "Pass 1 visual_macos — WorkflowPicker modal open/select/start/close round trip (TASK-688)"
+    - Pass 1 visual_macos — WorkflowPicker modal open/select/start/close round trip (TASK-688)
   level: sprint
   severity: medium
   created_at: "2026-05-21T09:00:00.000Z"
@@ -428,12 +428,37 @@ items: []
   plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
   action: "tests/cyboflow-day3-gate.spec.ts imports from 'vitest' (line 17) but is collected by Playwright when 'pnpm test' is run without a spec filter — Playwright fails with 'Vitest cannot be imported in a CommonJS module using require()'. This blocks running the full Playwright suite; sprint verifiers and CI must filter by spec name to make progress. Spec is unchanged in SPRINT-028 (last touched in TASK-605); pre-existing limitation. Resolution: either (a) move cyboflow-day3-gate.spec.ts out of the Playwright testDir into a vitest config (it already has a dedicated test:gate script that uses vitest.config.gate.ts), (b) add a Playwright testIgnore for *-gate.spec.ts in playwright.config.ts, or (c) rewrite the spec to use Playwright's test runner instead of vitest. Currently noted as low-severity informational because the per-spec workaround works."
   blocked_checks:
-    - "Full pnpm test (Playwright) run — collection blocked by cyboflow-day3-gate.spec.ts vitest import"
+    - Full pnpm test (Playwright) run — collection blocked by cyboflow-day3-gate.spec.ts vitest import
   level: sprint
   severity: low
   created_at: "2026-05-21T09:00:00.000Z"
   affected_tasks:
     - SPRINT-028
+
+- task: TASK-694
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/approval-router-and-permission-fix/TASK-694-plan.md
+  action: "Run pnpm dev, trigger a real workflow that uses Bash within seconds, wait 30s, then verify: (1) sqlite3 ~/.cyboflow/cyboflow.db -separator | \"SELECT id, tool_name, status FROM approvals; SELECT id, status FROM workflow_runs;\" shows a pending approvals row and the matching workflow_runs row at awaiting_review; (2) grep -c \"\\[DIAG-approval\\]\" cyboflow-backend-debug.log returns >= 6. These ACs were deferred because parallel-worktree execution disables visual_verify which requires single-process pnpm dev focus."
+  blocked_checks:
+    - AC4 (sqlite3 approvals INSERT + workflow_runs.status=awaiting_review after live run)
+    - AC5 (cyboflow-backend-debug.log DIAG-approval checkpoint sequence)
+  level: visual
+  severity: high
+
+- task: TASK-695
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/approval-router-and-permission-fix/TASK-695-plan.md
+  action: "Run pnpm dev (full Electron) and exercise two end-to-end paths that the integration test suite cannot drive: (1) the trpc-electron@0.1.2 Symbol.asyncDispose patch — open the app, allow the renderer to subscribe to cyboflow.events.onApprovalCreated and cyboflow.events.onStuckDetected, then close the window and reopen; confirm cyboflow-frontend-debug.log does NOT contain any 'AsyncIterableIterator does not have Symbol.asyncDispose' or related TRPC link errors. (2) the new onStuckDetected subscription wired in main/src/orchestrator/trpc/routers/events.ts + frontend/src/stores/reviewQueueSlice.ts — start a workflow that stalls long enough to trigger a stuck event, confirm a desktop notification fires and reviewQueueSlice.runStatusMap reflects the stuck state. Per-task verification deferred these because parallel-worktree execution disables visual_verify; sprint-level verifier could not run them because pnpm dev had Electron exited at verification time."
+  blocked_checks:
+    - AC4 (trpc-electron patch — no Symbol.asyncDispose errors in cyboflow-frontend-debug.log under a full launch+close+relaunch cycle)
+    - AC5 (events.onStuckDetected subscription delivers a stuck event and reviewQueueSlice updates)
+  level: visual
+  severity: high
+  created_at: "2026-05-21T21:50:00.000Z"
+  affected_tasks:
+    - TASK-695
 
 ## Deferred Visual
 
