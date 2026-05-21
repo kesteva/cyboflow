@@ -746,6 +746,7 @@ export class DatabaseService {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           welcome_hidden BOOLEAN DEFAULT 0,
+          -- Orphaned column (IDEA-016): no migration written; cheaper to leave than alter
           discord_shown BOOLEAN DEFAULT 0,
           app_version TEXT
         )
@@ -800,16 +801,14 @@ export class DatabaseService {
       
       // Set default preferences
       this.db.prepare(`
-        INSERT INTO user_preferences (key, value) VALUES 
+        INSERT INTO user_preferences (key, value) VALUES
         ('hide_welcome', 'false'),
-        ('hide_discord', 'false'),
         ('welcome_shown', 'false')
       `).run();
     } else {
       // For existing users, ensure default preferences exist
       const defaultPreferences = [
         { key: 'hide_welcome', value: 'false' },
-        { key: 'hide_discord', value: 'false' },
         { key: 'welcome_shown', value: 'false' }
       ];
       
@@ -821,6 +820,9 @@ export class DatabaseService {
         }
       }
     }
+
+    // Clean up the legacy 'hide_discord' preference row (IDEA-016). Idempotent: no-op if absent.
+    this.db.prepare("DELETE FROM user_preferences WHERE key = 'hide_discord'").run();
 
     // Add worktree_folder column to projects table if it doesn't exist
     const projectsTableInfoWorktree = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];
@@ -2822,27 +2824,26 @@ export class DatabaseService {
   }
 
   // App opens operations
-  recordAppOpen(welcomeHidden: boolean, discordShown: boolean = false, appVersion?: string): void {
+  recordAppOpen(welcomeHidden: boolean, appVersion?: string): void {
     this.db.prepare(`
-      INSERT INTO app_opens (welcome_hidden, discord_shown, app_version)
-      VALUES (?, ?, ?)
-    `).run(welcomeHidden ? 1 : 0, discordShown ? 1 : 0, appVersion || null);
+      INSERT INTO app_opens (welcome_hidden, app_version)
+      VALUES (?, ?)
+    `).run(welcomeHidden ? 1 : 0, appVersion || null);
   }
 
-  getLastAppOpen(): { opened_at: string; welcome_hidden: boolean; discord_shown: boolean; app_version?: string } | null {
+  getLastAppOpen(): { opened_at: string; welcome_hidden: boolean; app_version?: string } | null {
     const result = this.db.prepare(`
-      SELECT opened_at, welcome_hidden, discord_shown, app_version
+      SELECT opened_at, welcome_hidden, app_version
       FROM app_opens
       ORDER BY opened_at DESC
       LIMIT 1
-    `).get() as { opened_at: string; welcome_hidden: number; discord_shown: number; app_version?: string } | undefined;
+    `).get() as { opened_at: string; welcome_hidden: number; app_version?: string } | undefined;
 
     if (!result) return null;
 
     return {
       opened_at: result.opened_at,
       welcome_hidden: Boolean(result.welcome_hidden),
-      discord_shown: Boolean(result.discord_shown),
       app_version: result.app_version
     };
   }
@@ -2857,14 +2858,6 @@ export class DatabaseService {
     `).get() as { app_version: string } | undefined;
 
     return result?.app_version || null;
-  }
-
-  updateLastAppOpenDiscordShown(): void {
-    this.db.prepare(`
-      UPDATE app_opens
-      SET discord_shown = 1
-      WHERE id = (SELECT id FROM app_opens ORDER BY opened_at DESC LIMIT 1)
-    `).run();
   }
 
   // User preferences operations

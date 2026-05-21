@@ -738,7 +738,7 @@ app.whenReady().then(async () => {
     }
 
     // Record app open in database with version
-    databaseService.recordAppOpen(false, false, currentVersion);
+    databaseService.recordAppOpen(false, currentVersion);
   } catch (error) {
     console.error('[Analytics] Failed to track app lifecycle events:', error);
   }
