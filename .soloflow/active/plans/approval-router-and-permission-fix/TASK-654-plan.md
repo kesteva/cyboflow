@@ -1,7 +1,7 @@
 ---
 id: TASK-654
 idea: SPRINT-020
-status: ready
+status: in-flight
 created: "2026-05-19T00:00:00Z"
 files_owned:
   - frontend/src/components/panels/cli/BaseCliPanel.tsx

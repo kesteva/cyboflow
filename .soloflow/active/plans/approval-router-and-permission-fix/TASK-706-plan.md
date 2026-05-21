@@ -1,7 +1,7 @@
 ---
 id: TASK-706
 idea: IDEA-007
-status: ready
+status: in-flight
 created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/approvals.ts
@@ -28,7 +28,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "ContextDeps in context.ts gains an optional `db?: DatabaseLike` field; createContext threads it onto the returned context object."
     verification: "grep -nE 'db\\??:\\s*DatabaseLike' main/src/orchestrator/trpc/context.ts returns at least 2 matches (interface + return); grep -nE 'import type \\{ DatabaseLike \\}' main/src/orchestrator/trpc/context.ts returns 1 match"
-  - criterion: "main/src/index.ts wires the live database handle into createContext via the existing attachOrchestratorTrpc call site."
+  - criterion: main/src/index.ts wires the live database handle into createContext via the existing attachOrchestratorTrpc call site.
     verification: "grep -nE 'createContext\\(\\{[^}]*db:' main/src/index.ts returns exactly 1 match"
   - criterion: "approvals.ts listPending no longer emits the [approvals.listPending] DB not yet wired warning."
     verification: "grep -n 'DB not yet wired into tRPC context' main/src/orchestrator/trpc/routers/approvals.ts returns 0 matches"
@@ -40,11 +40,11 @@ acceptance_criteria:
     verification: "grep -nE \"behavior:\\s*'deny'\" main/src/orchestrator/trpc/routers/approvals.ts returns 1 match"
   - criterion: "ApprovalNotFoundError from the router is mapped to TRPCError code 'NOT_FOUND'."
     verification: "grep -nE \"code:\\s*'NOT_FOUND'\" main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match; grep -n 'ApprovalNotFoundError' main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match"
-  - criterion: "approveRestOfRun delegates to approveRestOfRunHandler from main/src/trpc/routers/approvals.ts; the NOT_IMPLEMENTED throw is removed."
+  - criterion: approveRestOfRun delegates to approveRestOfRunHandler from main/src/trpc/routers/approvals.ts; the NOT_IMPLEMENTED throw is removed.
     verification: "grep -n 'approveRestOfRunHandler' main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match; grep -nE \"code:\\s*'NOT_IMPLEMENTED'\" main/src/orchestrator/trpc/routers/approvals.ts returns 0 matches"
-  - criterion: "rejectRestOfRun delegates to rejectRestOfRunHandler."
+  - criterion: rejectRestOfRun delegates to rejectRestOfRunHandler.
     verification: "grep -n 'rejectRestOfRunHandler' main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match"
-  - criterion: "New test file main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts exists with at least one test asserting listPending returns shaped rows after seeding the approvals table."
+  - criterion: New test file main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts exists with at least one test asserting listPending returns shaped rows after seeding the approvals table.
     verification: "test -f main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts && grep -nE \"it\\(.+listPending returns\" main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts returns at least 1 match"
   - criterion: "Integration test: approve(approvalId) resolves the in-flight ApprovalRouter decision promise with behavior:'allow' and propagates a NOT_FOUND TRPCError for unknown approvalId."
     verification: "grep -nE \"it\\(.+approve.+resolves.+allow\" main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts returns 1 match; grep -nE 'NOT_FOUND' main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts returns at least 1 match; pnpm --filter @cyboflow/main test approvals exits 0"
@@ -78,7 +78,6 @@ test_strategy:
       test_file: main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts
       type: integration
 ---
-
 # Wire tRPC approvals router to ApprovalRouter + DB
 
 ## Objective
