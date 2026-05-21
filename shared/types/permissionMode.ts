@@ -6,4 +6,5 @@
  * expose it as selectable; NO default/fallback may resolve to it.
  */
 export type PermissionMode = 'approve' | 'ignore';
-export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
+// Satisfies PermissionMode — TypeScript infers the literal type 'approve'.
+export const DEFAULT_PERMISSION_MODE = 'approve' satisfies PermissionMode;
