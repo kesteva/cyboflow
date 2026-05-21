@@ -6,15 +6,30 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-671": { "status": "pending" },
-    "TASK-673": { "status": "pending" },
-    "TASK-674": { "status": "pending" },
-    "TASK-675": { "status": "pending" },
-    "TASK-676": { "status": "pending" },
-    "TASK-677": { "status": "pending" },
-    "TASK-678": { "status": "pending" },
-    "TASK-679": { "status": "pending" },
-    "TASK-680": { "status": "pending" }
+    "TASK-673": {
+      "status": "pending"
+    },
+    "TASK-674": {
+      "status": "pending"
+    },
+    "TASK-675": {
+      "status": "pending"
+    },
+    "TASK-676": {
+      "status": "pending"
+    },
+    "TASK-677": {
+      "status": "pending"
+    },
+    "TASK-678": {
+      "status": "pending"
+    },
+    "TASK-679": {
+      "status": "pending"
+    },
+    "TASK-680": {
+      "status": "pending"
+    }
   },
   "playwright_target": {
     "kind": "electron",
