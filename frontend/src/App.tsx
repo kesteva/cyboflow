@@ -15,7 +15,6 @@ import { UpdateDialog } from './components/UpdateDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
 import { PermissionDialog } from './components/PermissionDialog';
-import { DiscordPopup } from './components/DiscordPopup';
 import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
@@ -51,7 +50,6 @@ function App() {
   const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [updateVersionInfo, setUpdateVersionInfo] = useState<VersionUpdateInfo | null>(null);
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
-  const [isDiscordOpen, setIsDiscordOpen] = useState(false);
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
@@ -184,7 +182,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // Show welcome screen and Discord popup intelligently based on user state
+    // Show welcome screen intelligently based on user state
     // This should only run once when the app is loaded, not when sessions change
     // Don't show welcome while analytics consent dialog is open
     if (!isLoaded || hasCheckedWelcome || isAnalyticsConsentOpen) {
@@ -199,86 +197,32 @@ function App() {
       // Get preferences from database
       const hideWelcomeResult = await window.electron.invoke('preferences:get', 'hide_welcome') as IPCResponse<string>;
       const welcomeShownResult = await window.electron.invoke('preferences:get', 'welcome_shown') as IPCResponse<string>;
-      const hideDiscordResult = await window.electron.invoke('preferences:get', 'hide_discord') as IPCResponse<string>;
-      
+
       const hideWelcome = hideWelcomeResult?.data === 'true';
       const hasSeenWelcome = welcomeShownResult?.data === 'true';
-      const hideDiscord = hideDiscordResult?.data === 'true';
-      
-      
-      // Track whether we're showing the welcome screen
-      let welcomeScreenShown = false;
-      
+
       // If user explicitly said "don't show again", respect that preference
-      if (hideWelcome) {
-        welcomeScreenShown = false;
-      } else {
+      if (!hideWelcome) {
         try {
           const projectsResponse = await API.projects.getAll();
           const hasProjects = projectsResponse.success && projectsResponse.data && projectsResponse.data.length > 0;
           // Get sessions from the API to avoid stale closure
           const sessionsResponse = await API.sessions.getAll();
           const hasSessions = sessionsResponse.success && sessionsResponse.data && sessionsResponse.data.length > 0;
-          
+
           // Show welcome if:
           // 1. First time user (no projects and never seen welcome)
           // 2. Returning user with no active data (no projects and no sessions)
           const isFirstTimeUser = !hasProjects && !hasSeenWelcome;
           const isReturningUserWithNoData = !hasProjects && !hasSessions && hasSeenWelcome;
-          
-          
+
           if (isFirstTimeUser || isReturningUserWithNoData) {
             setIsWelcomeOpen(true);
-            welcomeScreenShown = true;
             // Mark that welcome has been shown at least once
             await window.electron.invoke('preferences:set', 'welcome_shown', 'true');
-          } else {
-            welcomeScreenShown = false;
           }
         } catch (error) {
           console.error('Error checking initial state:', error);
-          welcomeScreenShown = false;
-        }
-      }
-      
-      // If welcome screen is not shown and Discord hasn't been hidden, check if we should show Discord popup
-      if (!welcomeScreenShown && !hideDiscord) {
-        
-        try {
-          // Get the last app open to see if Discord was already shown
-          const result = await window.electron.invoke('app:get-last-open') as IPCResponse<{ discord_shown?: boolean }>;
-          
-          if (result?.success && result.data) {
-            const lastOpen = result.data;
-            
-            // Show Discord popup if it hasn't been shown yet
-            if (!lastOpen.discord_shown) {
-              setIsDiscordOpen(true);
-              // Mark that we're showing the Discord popup
-              if (window.electron?.invoke) {
-                await window.electron.invoke('app:update-discord-shown');
-              }
-            } else {
-              // Discord already shown
-            }
-          } else {
-            // No previous app open - show Discord popup
-            setIsDiscordOpen(true);
-            // Will update discord shown status after recording app open
-          }
-        } catch (error) {
-          // Error checking Discord popup
-        }
-        
-        // Record this app open
-        if (window.electron?.invoke) {
-          await window.electron.invoke('app:record-open', hideWelcome, false);
-          
-          // If we showed Discord popup and there was no previous app open, update the status
-          const result = await window.electron.invoke('app:get-last-open') as IPCResponse<{ discord_shown?: boolean }>;
-          if (!result?.data?.discord_shown && isDiscordOpen) {
-            await window.electron.invoke('app:update-discord-shown');
-          }
         }
       }
     };
@@ -288,8 +232,6 @@ function App() {
     checkInitialState();
   }, [isLoaded, isAnalyticsConsentOpen]); // Also wait for analytics consent dialog to close
 
-  // Discord popup logic is now combined with welcome screen logic above
-  
   useEffect(() => {
     // Set up permission request listener
     const handlePermissionRequest = (...args: unknown[]) => {
@@ -370,6 +312,7 @@ function App() {
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
         </div>
+        {/* Shell geometry (ReviewQueueView | Sidebar | CyboflowRoot) is documented in docs/SHELL-LAYOUT.md. */}
         {/* Main content row: review queue + sidebar + primary panel */}
         <div className="flex flex-1 overflow-hidden">
           <ErrorBoundary fallback={(error) => (
@@ -456,10 +399,6 @@ function App() {
           request={currentPermissionRequest}
           onRespond={handlePermissionResponse}
           session={currentPermissionRequest ? sessions.find(s => s.id === currentPermissionRequest.sessionId) : undefined}
-        />
-        <DiscordPopup 
-          isOpen={isDiscordOpen} 
-          onClose={() => setIsDiscordOpen(false)} 
         />
         <PromptHistoryModal
           isOpen={isPromptHistoryOpen}

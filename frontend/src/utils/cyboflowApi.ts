@@ -13,6 +13,7 @@
  *   cyboflow:mcp-health     — polled by mcpHealthStore (removed from this util in TASK-626)
  */
 import type { WorkflowRow } from '../../../shared/types/workflows';
+import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 import type { IPCResponse } from './api';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,24 @@ export interface StartRunResult {
   runId: string;
   worktreePath: string;
   branchName: string;
+}
+
+/**
+ * Subset of `WorkflowRunRow` (shared/types/cyboflow.ts) returned by cyboflow:listRuns.
+ * Intentionally excludes `policy_json` (not needed by the sidebar list view).
+ */
+export interface WorkflowRunListRow {
+  id: string;
+  workflow_id: string;
+  project_id: number;
+  status: WorkflowRunStatus;
+  worktree_path: string | null;
+  branch_name: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  stuck_reason: string | null;
 }
 
 /**
@@ -146,6 +165,17 @@ export async function approveRun({
   if (!res.success) throw new Error(res.error ?? 'approveRun failed');
 }
 
+/**
+ * List the workflow runs for a project, newest first.
+ * Returns a lightweight row (policy_json excluded).
+ */
+export async function listRuns({ projectId }: { projectId: number }): Promise<WorkflowRunListRow[]> {
+  const electron = requireElectron();
+  const res = await electron.invoke('cyboflow:listRuns', { projectId }) as IPCResponse<WorkflowRunListRow[]>;
+  if (!res.success) throw new Error(res.error ?? 'listRuns failed');
+  return res.data ?? [];
+}
+
 // ---------------------------------------------------------------------------
 // Convenience object — re-exports the named functions for callers that prefer
 // a namespace import (`cyboflowApi.startRun(...)`)
@@ -153,6 +183,7 @@ export async function approveRun({
 
 export const cyboflowApi = {
   listWorkflows,
+  listRuns,
   startRun,
   subscribeToStreamEvents,
   approveRun,

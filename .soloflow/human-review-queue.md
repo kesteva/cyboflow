@@ -1,9 +1,9 @@
 ---
-pending_count: 33
+pending_count: 38
 buckets:
-  decisions: 1
-  actions: 4
-  testing: 23
+  decisions: 2
+  actions: 5
+  testing: 26
   deferred_visual: 5
 items: []
 ---
@@ -20,6 +20,20 @@ items: []
   severity: medium
   level: design
 
+- task: SPRINT-028
+  type: cross_task_regression
+  bucket: decisions
+  ref: REG-SPRINT-028-1
+  plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
+  verdict_notes: "Cross-task regression caught at sprint level (per-task verification missed it). TASK-687 added handleRunClick in frontend/src/components/DraggableProjectTreeView.tsx:849-852 which calls useNavigationStore.getState().navigateToSessions(). navigateToSessions (frontend/src/stores/navigationStore.ts:27-30) sets {activeView: 'sessions', activeProjectId: null}. TASK-688 made CyboflowRoot the only host of RunView in App.tsx:338 and gated it on activeProjectId !== null. Net effect: clicking a workflow-run row in the Sidebar sets activeRunId but unmounts CyboflowRoot, so RunView never renders on this path — the user lands on the legacy SessionView. Per-task tests missed this: DraggableProjectTreeView.runs.test.tsx:352 only asserts setActiveRun was called and mocks navigationStore; CyboflowRoot.test.tsx renders the component directly with an injected projectId and bypasses the App-shell gate."
+  action: "Pick one: (1) replace navigateToSessions() in handleRunClick with setActiveProjectId(run.project_id) or otherwise preserve activeProjectId — run rows already carry project context via ProjectWithRuns; (2) remove the navigation call entirely if CyboflowRoot is the always-on home view when a project is active; (3) widen App.tsx:338 to also render CyboflowRoot when activeRunId !== null (independent of activeProjectId). Whichever route is chosen, extend DraggableProjectTreeView.runs.test.tsx to assert that activeProjectId is non-null after the click OR render the full App shell and assert RunView is in the DOM. Also confirm App.tsx's activeView=='sessions' branch behavior is intentional vs legacy crystal carry-over."
+  severity: high
+  level: cross_task
+  created_at: "2026-05-21T09:00:00.000Z"
+  affected_tasks:
+    - TASK-687
+    - TASK-688
+
 ## Actions
 
 - task: SPRINT-015
@@ -32,14 +46,17 @@ items: []
     - Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling
     - Level 2 visual_web — RunView SDK discriminator branch rendering not exercised in live Electron renderer
     - Level 2 visual_web — TerminalPanel.tsx displayCwd render path (hasCwdString true/false branches) not exercised in live Electron renderer
+    - AC10 — No new console warnings in cyboflow-frontend-debug.log
   level: sprint
-  severity: low
+  severity: medium
   created_at: "2026-05-18T00:00:00.000Z"
   affected_tasks:
     - SPRINT-015
     - TASK-682
     - TASK-677
-  updated_at: "2026-05-21T01:18:22.608Z"
+    - TASK-688
+    - SPRINT-028
+  updated_at: "2026-05-21T09:00:00.000Z"
 
 - task: SPRINT-017
   type: config_gap
@@ -93,6 +110,27 @@ items: []
   affected_tasks:
     - TASK-672
     - TASK-682
+
+- task: SPRINT-028
+  type: config_gap
+  bucket: actions
+  dedup_key: visual_macos_grants_missing
+  plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
+  action: "verification.visual_macos=true but visual_macos verification could not run because: (1) pnpm dev was not running at sprint-verifier time (no Electron/Vite process; port 4521 returned 000); (2) Peekaboo MCP reports Accessibility permission NOT granted (only Screen Recording is granted). Per CLAUDE.md L41 and docs/VISUAL-VERIFICATION-SETUP.md, both grants are required for Peekaboo to drive UI events. Resolution: grant Accessibility to the Peekaboo MCP host (Claude Code) in System Settings > Privacy & Security > Accessibility, AND start pnpm dev before re-running sprint verification. This is closely related to the TASK-672 entry above (dedup_key: visual_macos_unavailable) but separately scoped because TASK-672 was filed against an individual task while this entry is sprint-level and also covers the 'pnpm dev not running' precondition."
+  blocked_checks:
+    - "Pass 1 visual_macos — Discord modal absence (TASK-684 + TASK-685)"
+    - "Pass 1 visual_macos — Sidebar project > runs list rendering + status dots + 'No runs yet' empty state (TASK-687)"
+    - "Pass 1 visual_macos — Run-row click -> CyboflowRoot RunView round trip (TASK-687 x TASK-688; also see REG-SPRINT-028-1)"
+    - "Pass 1 visual_macos — WorkflowPicker modal open/select/start/close round trip (TASK-688)"
+  level: sprint
+  severity: medium
+  created_at: "2026-05-21T09:00:00.000Z"
+  affected_tasks:
+    - SPRINT-028
+    - TASK-684
+    - TASK-685
+    - TASK-687
+    - TASK-688
 
 ## Testing
 
@@ -361,6 +399,41 @@ items: []
   action: "AC#18 Manual smoke 6 — no UX regressions in full user flow. Walk: create panel → prompt → tool approval → resume → workflow run start → workflow run complete. Record any UX deltas (none expected). Checklist: docs/sdk-migration-smoke-results.md §Smoke 6."
   plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
   verdict_notes: Manual UI verification deferred.
+
+- task: TASK-685
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-685-plan.md
+  action: "AC11 manual launch verification: run `pnpm dev` and confirm (a) the renderer bootstraps without crashing, (b) no DiscordPopup modal renders at app start, and (c) `grep -iE \"app:update-discord-shown|updateLastAppOpenDiscordShown|discord_shown\" cyboflow-backend-debug.log` returns 0 matches against entries timestamped AFTER commit 2afbf2e. Verifier ran static gates (typecheck + lint + 8 grep-based ACs all green) but cannot drive a live Electron launch from this autonomous session. Pre-existing cyboflow-backend-debug.log dates from 11:17 (before TASK-685 commit at 21:30) so it must be retruncated by a fresh `pnpm dev` launch before the grep assertion is meaningful."
+  blocked_checks:
+    - "AC11 — manual launch: pnpm dev → no DiscordPopup modal → debug log clean of deleted-symbol mentions"
+  level: visual
+  severity: medium
+
+- task: TASK-687
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/cyboflow-shell-architecture/TASK-687-plan.md
+  action: "Run pnpm dev with a project that has ≥1 workflow_run; expand the project in the sidebar and confirm: (AC1) children render as run rows (not SessionListItems), no Crystal-session rows appear; (AC2) clicking a run row navigates the main pane via setActiveRun — observe cyboflow-frontend-debug.log for a stream-event subscription on the clicked runId."
+  blocked_checks:
+    - "AC1: DraggableProjectTreeView renders run rows under expanded project (visual)"
+    - "AC2: Clicking run row triggers stream subscription via setActiveRun (visual)"
+  level: visual
+  severity: medium
+
+- task: SPRINT-028
+  type: config_gap
+  bucket: testing
+  dedup_key: playwright_full_run_blocked_by_day3_gate_spec
+  plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
+  action: "tests/cyboflow-day3-gate.spec.ts imports from 'vitest' (line 17) but is collected by Playwright when 'pnpm test' is run without a spec filter — Playwright fails with 'Vitest cannot be imported in a CommonJS module using require()'. This blocks running the full Playwright suite; sprint verifiers and CI must filter by spec name to make progress. Spec is unchanged in SPRINT-028 (last touched in TASK-605); pre-existing limitation. Resolution: either (a) move cyboflow-day3-gate.spec.ts out of the Playwright testDir into a vitest config (it already has a dedicated test:gate script that uses vitest.config.gate.ts), (b) add a Playwright testIgnore for *-gate.spec.ts in playwright.config.ts, or (c) rewrite the spec to use Playwright's test runner instead of vitest. Currently noted as low-severity informational because the per-spec workaround works."
+  blocked_checks:
+    - "Full pnpm test (Playwright) run — collection blocked by cyboflow-day3-gate.spec.ts vitest import"
+  level: sprint
+  severity: low
+  created_at: "2026-05-21T09:00:00.000Z"
+  affected_tasks:
+    - SPRINT-028
 
 ## Deferred Visual
 

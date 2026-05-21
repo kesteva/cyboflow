@@ -1,7 +1,7 @@
 ---
 id: TASK-693
 idea: IDEA-020
-status: ready
+status: in-flight
 created: "2026-05-20T23:00:00Z"
 files_owned:
   - frontend/src/hooks/useAddClaudeShortcut.ts
