@@ -9,6 +9,7 @@
  * real principal derived from a session token — that requires only swapping out
  * this single file (or injecting a session resolver at server-init time).
  */
+import type { DatabaseLike } from '../types';
 
 /**
  * Injectable dependencies for the tRPC context.
@@ -26,6 +27,19 @@ export interface ContextDeps {
    * invariant: no 'electron' or 'main/src/services/*' import is needed here.
    */
   setDockBadge?: (count: number) => void;
+
+  /**
+   * Live database handle for the orchestrator's SQLite DB.
+   *
+   * Injected from `main/src/index.ts` via `makeDatabaseLike(databaseService)`.
+   * Keeping this as the narrow `DatabaseLike` interface (rather than importing
+   * the concrete DatabaseService) preserves the standalone-typecheck invariant:
+   * no 'better-sqlite3' or 'main/src/services/*' import is needed here.
+   *
+   * Handlers must explicitly check `ctx.db` before use — `undefined` is the
+   * intentional default so unit tests that do not need DB access can omit it.
+   */
+  db?: DatabaseLike;
 }
 
 /**
@@ -41,8 +55,8 @@ export interface ContextDeps {
  * `userId` as the canonical field name regardless of how it is populated.
  */
 export function createContext(deps: ContextDeps = {}) {
-  const { setDockBadge = (_count: number) => undefined } = deps;
-  return { userId: 'local' as const, setDockBadge };
+  const { setDockBadge = (_count: number) => undefined, db } = deps;
+  return { userId: 'local' as const, setDockBadge, db };
 }
 
 /** Shape of the tRPC context, inferred from `createContext`. */
