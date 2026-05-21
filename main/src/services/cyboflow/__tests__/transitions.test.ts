@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import {
   transitionToAwaitingReview,
   transitionFromAwaitingReview,
+  transitionToRunning,
   TransitionRejectedError,
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
@@ -410,6 +411,45 @@ describe('transitions', () => {
       expect(approval.decided_at).toBeNull();
 
       guardSpy.mockRestore();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cases (i) and (j): transitionToRunning COALESCE semantics
+  // -------------------------------------------------------------------------
+
+  describe('transitionToRunning', () => {
+    it('(i) transitionToRunning sets started_at when previously NULL', () => {
+      // seedRun inserts with default DEFAULT values; started_at is unset → NULL
+      seedRun(db, 'starting');
+
+      const beforeStartedAt = db
+        .prepare('SELECT started_at FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { started_at: string | null };
+      expect(beforeStartedAt.started_at).toBeNull();
+
+      transitionToRunning(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare('SELECT status, started_at FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string; started_at: string | null };
+      expect(after.status).toBe('running');
+      expect(after.started_at).not.toBeNull();
+    });
+
+    it('(j) transitionToRunning preserves existing started_at (COALESCE)', () => {
+      seedRun(db, 'starting');
+      const FIXED_TS = '2026-01-01 00:00:00';
+      db.prepare('UPDATE workflow_runs SET started_at = ? WHERE id = ?')
+        .run(FIXED_TS, RUN_ID);
+
+      transitionToRunning(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare('SELECT status, started_at FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string; started_at: string };
+      expect(after.status).toBe('running');
+      expect(after.started_at).toBe(FIXED_TS);
     });
   });
 });

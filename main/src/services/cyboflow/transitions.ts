@@ -98,7 +98,9 @@ export function transitionToRunning(
   assertTransitionAllowed('starting', 'running', params.runId);
   const result = db.prepare(
     `UPDATE workflow_runs
-        SET status = 'running', updated_at = CURRENT_TIMESTAMP
+        SET status = 'running',
+            started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
       WHERE id = @runId AND status = 'starting'`,
   ).run({ runId: params.runId });
   if (result.changes === 0) {
