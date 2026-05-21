@@ -41,6 +41,13 @@ import type { ApprovalRequest, ApprovalDecision } from '../../../shared/types/ap
 export type { ApprovalRequest, ApprovalDecision };
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** v1 default per ROADMAP-001 §5.7. Adjustable post-MVP via config. */
+export const APPROVAL_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -69,6 +76,8 @@ interface PendingEntry {
   /** Resolves or rejects the Promise returned from requestApproval. */
   resolve: (decision: ApprovalDecision) => void;
   reject: (err: unknown) => void;
+  /** Handle for the 60-minute auto-expiry timer. Cleared by respond() to avoid leaks. */
+  timeoutHandle: NodeJS.Timeout;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,11 +222,17 @@ export class ApprovalRouter extends EventEmitter {
       // Execute the transaction — throws RunNotRunningError on guard failure.
       (txn as () => void)();
 
+      // Schedule the 60-minute auto-expiry timer per ROADMAP-001 §5.7.
+      const timeoutHandle = setTimeout(() => {
+        void this.expireApproval(approvalId);
+      }, APPROVAL_TIMEOUT_MS);
+
       this.pending.set(approvalId, {
         request,
         socketReply,
         resolve: resolveDecision,
         reject: rejectDecision,
+        timeoutHandle,
       });
 
       // Notify renderer subscribers (e.g. the review queue UI).
@@ -251,6 +266,10 @@ export class ApprovalRouter extends EventEmitter {
     if (!peek) {
       throw new ApprovalNotFoundError(approvalId);
     }
+
+    // Cancel the auto-expiry timer before entering the queue so the timer
+    // cannot fire concurrently while respond() is processing.
+    clearTimeout(peek.timeoutHandle);
 
     // The authoritative reservation happens INSIDE the queue so that two
     // concurrent respond() calls for the same approvalId (same runId queue)
@@ -319,6 +338,45 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
+   * Called by the 60-minute auto-expiry timer when a pending approval has not
+   * been resolved by a human or policy decision within the timeout window.
+   *
+   * Submits work through the per-run queue so expiry is serialized with any
+   * concurrent respond() call for the same run.  If respond() beat the timer
+   * to the entry (entry is already gone from this.pending), this is a no-op.
+   *
+   * Sets approvals.status = 'timed_out' and sends a deny decision on the
+   * bridge socket.  Does NOT touch workflow_runs.status — Claude receives the
+   * deny on the socket and the run remains in awaiting_review until Claude
+   * yields (§5.7).
+   */
+  private async expireApproval(approvalId: string): Promise<void> {
+    const entry = this.pending.get(approvalId);
+    if (!entry) return;
+
+    await this.getQueueForRun(entry.request.runId).add(async () => {
+      const entryNow = this.pending.get(approvalId);
+      if (!entryNow) return; // respond() beat the timer inside the queue.
+
+      this.pending.delete(approvalId);
+
+      const now = new Date().toISOString();
+      this.db.prepare(
+        `UPDATE approvals SET status = 'timed_out', decided_at = ?, decided_by = 'timeout'
+         WHERE id = ?`,
+      ).run(now, approvalId);
+
+      const denyDecision: ApprovalDecision = {
+        behavior: 'deny',
+        message: 'Approval timed out after 60 minutes',
+      };
+      entryNow.socketReply(denyDecision);
+      entryNow.resolve(denyDecision);
+      this.emit('approvalExpired', approvalId);
+    });
+  }
+
+  /**
    * Clear all pending approvals for `runId`.
    *
    * Called during run termination (e.g., from claudeCodeManager's runSdkQuery
@@ -351,6 +409,8 @@ export class ApprovalRouter extends EventEmitter {
     }
 
     for (const { approvalId, entry } of toClose) {
+      // Cancel the auto-expiry timer before removing the entry.
+      clearTimeout(entry.timeoutHandle);
       this.pending.delete(approvalId);
 
       try {

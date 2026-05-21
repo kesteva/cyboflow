@@ -22,12 +22,12 @@
  * runId so transaction semantics and queue serialization are exercised
  * end-to-end without spinning up Electron or the MCP bridge.
  */
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import PQueue from 'p-queue';
-import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
+import { ApprovalRouter, RunNotRunningError, APPROVAL_TIMEOUT_MS, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -694,6 +694,179 @@ describe('ApprovalRouter', () => {
     for (const row of approvals) {
       expect(row.status).toBe('rejected');
       expect(row.decided_by).toBe('system');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 14 (TASK-303): expires after 60min with socket deny
+  //
+  //  When the 60-minute timer fires, expireApproval() should:
+  //   - Set approvals.status = 'timed_out' (the schema-valid value for auto-expiry).
+  //   - Invoke socketReply with { behavior: 'deny', ... }.
+  //   - Resolve the requestApproval promise with a deny decision.
+  //   - Leave workflow_runs.status in 'awaiting_review' (Claude yields on its own).
+  //   - Remove the entry from this.pending.
+  // -------------------------------------------------------------------------
+  it('expires after 60min with socket deny — approvals timed_out, workflow_runs stays awaiting_review', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-014';
+      seedRun(db, runId, 'running');
+
+      // Start the approval request.
+      const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, socketReply);
+
+      // Wait for the transaction to commit.
+      await qf.getOrCreate(runId).onIdle();
+
+      // Confirm run is awaiting_review and entry is in-flight.
+      const runMid = db
+        .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+        .get(runId) as { status: string };
+      expect(runMid.status).toBe('awaiting_review');
+      expect(router.getPending()).toHaveLength(1);
+
+      // Advance fake timers past the 60-minute threshold.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+
+      // Wait for expireApproval's queue task to drain.
+      await qf.getOrCreate(runId).onIdle();
+
+      // socketReply must have been called with a deny decision.
+      expect(socketReply).toHaveBeenCalledOnce();
+      expect(socketReply.mock.calls[0][0].behavior).toBe('deny');
+
+      // The requestApproval promise must resolve with deny.
+      const decision = await approvalPromise;
+      expect(decision.behavior).toBe('deny');
+
+      // approvals row must be 'timed_out'.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+      const approval = db
+        .prepare("SELECT status, decided_by FROM approvals WHERE id = ?")
+        .get(approvalId) as { status: string; decided_by: string };
+      expect(approval.status).toBe('timed_out');
+      expect(approval.decided_by).toBe('timeout');
+
+      // workflow_runs.status must remain 'awaiting_review' (not changed by expiry).
+      const runAfter = db
+        .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+        .get(runId) as { status: string };
+      expect(runAfter.status).toBe('awaiting_review');
+
+      // The pending entry must have been removed.
+      expect(router.getPending()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 15 (TASK-303): clears timer on respond
+  //
+  //  Calling respond() before the timeout fires must cancel the timer.
+  //  After a normal respond(deny) call, advancing time by >60 minutes must
+  //  NOT result in a second socketReply invocation.
+  // -------------------------------------------------------------------------
+  it('clears timer on respond — no second socketReply after advancing 60min past expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-015';
+      seedRun(db, runId, 'running');
+
+      const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/x' }, socketReply);
+
+      // Wait for transaction to commit.
+      await qf.getOrCreate(runId).onIdle();
+
+      // Get the approvalId.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+
+      // Respond with deny before the timer fires.
+      await router.respond(approvalId, { behavior: 'deny', message: 'user rejected' });
+      await approvalPromise;
+
+      // socketReply should have been called exactly once (from the respond path).
+      expect(socketReply).toHaveBeenCalledTimes(1);
+      expect(socketReply.mock.calls[0][0].behavior).toBe('deny');
+
+      // Advance time well past the 60-minute threshold.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+
+      // Wait for any lingering queue tasks.
+      await qf.getOrCreate(runId).onIdle();
+
+      // socketReply must STILL have been called only once — the timer was cancelled.
+      expect(socketReply).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 16 (TASK-303): pending entry removed on expiry
+  //
+  //  After the timeout fires, this.pending must no longer contain the entry
+  //  and the approvals row must show 'timed_out'.  This validates the
+  //  database state cleanup path in expireApproval.
+  // -------------------------------------------------------------------------
+  it('pending entry removed on expiry — getPending() empty; approvals row timed_out', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const qf = makeQueueFactory();
+      const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
+
+      const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+      const runId = 'run-016';
+      seedRun(db, runId, 'running');
+
+      const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'pwd' }, socketReply);
+
+      await qf.getOrCreate(runId).onIdle();
+      expect(router.getPending()).toHaveLength(1);
+
+      // Fire the timer.
+      await vi.advanceTimersByTimeAsync(APPROVAL_TIMEOUT_MS + 1000);
+      await qf.getOrCreate(runId).onIdle();
+
+      // Entry must be gone from pending.
+      expect(router.getPending()).toHaveLength(0);
+
+      // The promise must resolve (not hang).
+      const decision = await approvalPromise;
+      expect(decision.behavior).toBe('deny');
+
+      // approvals row must be 'timed_out'.
+      const approvalId = (db
+        .prepare("SELECT id FROM approvals WHERE run_id = ?")
+        .get(runId) as { id: string }).id;
+      const approval = db
+        .prepare("SELECT status FROM approvals WHERE id = ?")
+        .get(approvalId) as { status: string };
+      expect(approval.status).toBe('timed_out');
+    } finally {
+      vi.useRealTimers();
     }
   });
 
