@@ -8,11 +8,12 @@
  *   - At least one project configured so the app renders CyboflowRoot
  *     instead of the welcome / no-project fallback
  *
- * Acceptance criteria covered:
- *   AC1/2 — WorkflowPicker renders with a select element; Start Run button present
- *   AC3   — RunView shows "No active run" placeholder before any run is started
+ * Acceptance criteria covered (updated in TASK-688):
+ *   AC1/2 — WorkflowPicker renders with a select element after opening the picker
+ *            modal via the trigger button; Start Run button present inside the modal
+ *   AC3   — CyboflowRoot shows "Choose a workflow to start" CTA before any run is started
  *   AC4   — CyboflowRoot is mounted in App.tsx (verified by checking for the
- *            aria-label on the workflow select)
+ *            "Choose workflow" trigger button)
  */
 import { type Page, test, expect } from '@playwright/test';
 
@@ -34,29 +35,60 @@ async function navigateAndDismissDialogs(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Check whether CyboflowRoot is present by looking for the "Choose workflow"
+ * header trigger button (visible regardless of project/run state).
+ * Returns false if the trigger is not found (e.g. no active project).
+ */
+async function hasCyboflowRoot(page: Page): Promise<boolean> {
+  const trigger = page.locator(
+    '[data-testid="open-workflow-picker"], button:has-text("Choose workflow")',
+  );
+  return trigger.isVisible({ timeout: 5_000 }).catch(() => false);
+}
+
+/**
+ * Open the WorkflowPicker modal by clicking the header "Choose workflow" button.
+ * Returns the modal locator once it is visible.
+ */
+async function openPicker(page: Page) {
+  const trigger = page.locator(
+    '[data-testid="open-workflow-picker"], button:has-text("Choose workflow")',
+  ).first();
+  await trigger.click();
+  const modal = page.locator('[role="dialog"]');
+  await modal.waitFor({ state: 'visible', timeout: 5_000 });
+  return modal;
+}
+
 test.describe('CyboflowRoot / WorkflowPicker', () => {
   test('workflow select is present when a project is active', async ({ page }) => {
     await navigateAndDismissDialogs(page);
 
-    const select = page.locator('select[aria-label="Select workflow"]');
-    const hasSelect = await select.isVisible({ timeout: 5_000 }).catch(() => false);
-    if (!hasSelect) {
+    const hasRoot = await hasCyboflowRoot(page);
+    if (!hasRoot) {
       test.skip(true, 'No active project found; workflow picker is not rendered in no-project state');
       return;
     }
 
-    await expect(select).toBeVisible();
+    await openPicker(page);
+
+    const select = page.locator('select[aria-label="Select workflow"]');
+    await expect(select).toBeVisible({ timeout: 5_000 });
   });
 
   test('workflow select contains the 5 SoloFlow workflow options', async ({ page }) => {
     await navigateAndDismissDialogs(page);
 
-    const select = page.locator('select[aria-label="Select workflow"]');
-    const hasSelect = await select.isVisible({ timeout: 5_000 }).catch(() => false);
-    if (!hasSelect) {
+    const hasRoot = await hasCyboflowRoot(page);
+    if (!hasRoot) {
       test.skip(true, 'No active project found');
       return;
     }
+
+    await openPicker(page);
+
+    const select = page.locator('select[aria-label="Select workflow"]');
 
     // Wait for options to be populated (IPC round-trip)
     await page.waitForFunction(
@@ -77,36 +109,37 @@ test.describe('CyboflowRoot / WorkflowPicker', () => {
   test('Start Run button is present alongside the workflow select', async ({ page }) => {
     await navigateAndDismissDialogs(page);
 
-    const select = page.locator('select[aria-label="Select workflow"]');
-    const hasSelect = await select.isVisible({ timeout: 5_000 }).catch(() => false);
-    if (!hasSelect) {
+    const hasRoot = await hasCyboflowRoot(page);
+    if (!hasRoot) {
       test.skip(true, 'No active project found');
       return;
     }
+
+    await openPicker(page);
 
     const startBtn = page.locator('button:has-text("Start Run")');
     await expect(startBtn).toBeVisible({ timeout: 5_000 });
   });
 
   /**
-   * AC3 — RunView shows "No active run" placeholder before any run is started.
+   * AC3 — CyboflowRoot shows "Choose a workflow to start" CTA before any run is started.
    *
    * When CyboflowRoot is rendered and cyboflowStore.activeRunId is null (the
-   * initial state), RunView renders a <div> containing the text "No active run".
+   * initial state), the empty-state branch renders a centered CTA with the text
+   * "Choose a workflow to start".
    */
-  test('RunView shows "No active run" placeholder before a run is started', async ({ page }) => {
+  test('CyboflowRoot shows "Choose a workflow to start" CTA before a run is started', async ({ page }) => {
     await navigateAndDismissDialogs(page);
 
-    const select = page.locator('select[aria-label="Select workflow"]');
-    const hasSelect = await select.isVisible({ timeout: 5_000 }).catch(() => false);
-    if (!hasSelect) {
+    const hasRoot = await hasCyboflowRoot(page);
+    if (!hasRoot) {
       test.skip(true, 'No active project found; CyboflowRoot is not rendered');
       return;
     }
 
-    // The RunView placeholder is visible immediately because no run has been
+    // The empty-state CTA is visible immediately because no run has been
     // started (activeRunId is null on fresh load).
-    const placeholder = page.locator('text=No active run');
-    await expect(placeholder).toBeVisible({ timeout: 5_000 });
+    const cta = page.locator('text=Choose a workflow to start');
+    await expect(cta).toBeVisible({ timeout: 5_000 });
   });
 });
