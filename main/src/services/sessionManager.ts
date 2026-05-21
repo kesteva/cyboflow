@@ -8,6 +8,7 @@ import type { Session as DbSession, CreateSessionData, UpdateSessionData, Conver
 import { getShellPath } from '../utils/shellPath';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
+import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 
@@ -450,7 +451,7 @@ export class SessionManager extends EventEmitter {
         worktreePath,
         prompt,
         worktreeName,
-        project.default_permission_mode || 'ignore', // Default to 'ignore' if not set
+        project.default_permission_mode || DEFAULT_PERMISSION_MODE,
         projectId,
         true, // isMainRepo = true
         true, // autoCommit = true (default for main repo sessions)

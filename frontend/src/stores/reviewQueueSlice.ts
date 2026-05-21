@@ -20,11 +20,11 @@
  * this slice's `runStatusMap`.  Cards re-render within one event-loop tick of
  * the event arriving because Zustand notifies all subscribers synchronously.
  *
- * ## Subscription forward-compatibility
+ * ## Subscription
  *
- * `cyboflow.events.onStuckDetected` will be added to the events router by
- * TASK-254 (orchestrator-and-trpc-router epic).  Until that lands, the
- * subscription is accessed via an interface cast through `unknown`.
+ * `cyboflow.events.onStuckDetected` was added to the events router by
+ * TASK-695 (orchestrator-and-trpc-router epic). The typed tRPC proxy is used
+ * directly — the cast-through-unknown workaround has been removed.
  * `useStuckNotifications` consumes slice state rather than its own subscription.
  *
  * TASK-502 — stuck-detection-and-observability epic.
@@ -33,7 +33,7 @@ import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import { trpc } from '../utils/trpcClient';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
-import type { StuckDetectedEvent, StuckEventsClient, StuckReason } from '../../../shared/types/stuckDetection';
+import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // State shape
@@ -181,13 +181,7 @@ export const useReviewQueueSlice = create<ReviewQueueSliceState>((set, get) => (
   subscribeToStuckEvents: () => {
     const { applyStuckEvent } = get();
 
-    // Access the forward-looking `onStuckDetected` subscription via a typed
-    // cast through `unknown`.  The actual procedure is added to
-    // `cyboflow.events` by TASK-254 (orchestrator-and-trpc-router epic).
-    // The cast is safe: the shape is validated at the interface level.
-    const events = trpc.cyboflow.events as unknown as StuckEventsClient;
-
-    const subscription = events.onStuckDetected.subscribe(undefined, {
+    const subscription = trpc.cyboflow.events.onStuckDetected.subscribe(undefined, {
       onData: (event: StuckDetectedEvent) => {
         applyStuckEvent({
           runId: event.runId,

@@ -33,6 +33,9 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
+import { approvalEvents } from './orchestrator/trpc/routers/events';
+import type { ApprovalRequest } from './orchestrator/approvalRouter';
+import type { ApprovalCreatedEvent } from '../../shared/types/approvals';
 import type { DatabaseLike } from './orchestrator/types';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
@@ -48,6 +51,7 @@ import {
 } from './services/cyboflow/transitions';
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
+import { recoverActiveStateOrphans } from './orchestrator/runRecovery';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -684,7 +688,7 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ setDockBadge: (count) => dockBadgeService.setBadgeCount(count) }),
+      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count) }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
@@ -693,7 +697,42 @@ app.whenReady().then(async () => {
     // (claudeCodeManager.makePreToolUseHook), so no per-request socket-reply
     // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    ApprovalRouter.getInstance().on('approvalCreated', (request: ApprovalRequest) => {
+      const payloadJson = JSON.stringify(request.input);
+      const event: ApprovalCreatedEvent = {
+        approval: {
+          id: request.id,
+          runId: request.runId,
+          workflowName: '', // TODO(approval-router): resolve via workflows-table lookup
+          toolName: request.toolName,
+          payloadPreview: payloadJson.length > 512 ? payloadJson.slice(0, 512) : payloadJson,
+          rationale: null,
+          createdAt: new Date(request.timestamp).toISOString(),
+          status: 'pending',
+        },
+      };
+      approvalEvents.emit('created', event);
+      console.log('[Main] Bridged approvalCreated → approvalEvents.emit(created) for approvalId=', request.id);
+    });
+    console.log('[Main] ApprovalRouter → approvalEvents bridge wired');
     console.log('[Main] ApprovalRouter initialized');
+
+    // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
+    const recoveredCount = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
+    if (recoveredCount > 0) {
+      console.log(`[Main] Recovered ${recoveredCount} stale awaiting_review run(s) on boot`);
+    }
+
+    // Boot recovery: any running/starting rows from a previous process have no live
+    // executor — the SDK iterator and PTY are gone. Transition them to failed.
+    const orphanRecovery = recoverActiveStateOrphans(db, runQueues);
+    if (
+      orphanRecovery.runningRecovered > 0 ||
+      orphanRecovery.startingRecovered > 0 ||
+      orphanRecovery.approvalsCanceled > 0
+    ) {
+      console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
+    }
 
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
     // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude

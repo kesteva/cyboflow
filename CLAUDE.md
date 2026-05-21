@@ -30,6 +30,7 @@ pnpm typecheck         # Type-check all workspaces
 pnpm lint              # Lint all workspaces
 pnpm test              # Playwright E2E
 pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron upgrades
+pnpm rebuild better-sqlite3   # Targeted reverse fix: `pnpm dev` postinstall rebuilds for Electron ABI (NMV 136); run this before `pnpm --filter main test` to restore host Node ABI (NMV 127)
 ```
 
 Platform packaging (`pnpm build:mac:arm64`, `pnpm build:linux`, etc.) — see `package.json` `scripts`.
