@@ -4,6 +4,7 @@ import type { Logger } from '../utils/logger';
 import { execSync } from '../utils/commandExecutor';
 import { buildGitCommitCommand } from '../utils/shellEscape';
 import { isCommitFooterEnabled } from '../utils/commitFooter';
+import { runGit } from '../utils/runGit';
 import {
   CommitModeSettings,
   CommitResult,
@@ -194,13 +195,10 @@ export class CommitManager extends EventEmitter {
 
       if (options.squashCommits) {
         // Get the merge base with main
-        const mergeBase = execSync(`git merge-base HEAD ${mainBranch}`, {
-          cwd: worktreePath,
-          encoding: 'utf8',
-        }).trim();
+        const mergeBase = runGit(worktreePath, ['merge-base', 'HEAD', mainBranch]).trim();
 
         // Reset to merge base keeping changes
-        execSync(`git reset --soft ${mergeBase}`, { cwd: worktreePath });
+        runGit(worktreePath, ['reset', '--soft', mergeBase]);
 
         // Commit with final message
         const commitMessage = options.commitMessage || 'Finalized session changes';

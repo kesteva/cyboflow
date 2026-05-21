@@ -620,10 +620,12 @@ describe('lifecycle transitions', () => {
     expect(canceled).toHaveBeenCalledOnce();
     expect(canceled).toHaveBeenCalledWith(run.id);
 
-    // pre_spawn / post_spawn are no-ops — nothing extra called.
+    // pre_spawn also calls running() (it advances starting → running before
+    // the SDK spawns so ApprovalRouter sees the run as 'running' when PreToolUse
+    // fires).  post_spawn is a true no-op.
     await executor.testLifecycleTransition(run.id, 'pre_spawn');
     await executor.testLifecycleTransition(run.id, 'post_spawn');
-    expect(running).toHaveBeenCalledOnce(); // still only once
+    expect(running).toHaveBeenCalledTimes(2); // once for sdk_initialized, once for pre_spawn
     expect(completed).toHaveBeenCalledOnce();
   });
 
@@ -678,7 +680,7 @@ describe('lifecycle transitions', () => {
 // ---------------------------------------------------------------------------
 
 import { EventRouter, RawEventsSink } from '../../services/streamParser';
-import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
+import { makeRawEventsDb, countRawEvents } from '../__test_fixtures__/rawEvents';
 
 /**
  * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
@@ -792,8 +794,11 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     // The bridge must have forwarded the event to the publisher.
     expect(publishedTypes).toContain('system');
 
-    // onFirstMessage must have fired exactly once, driving 'sdk_initialized' → running().
-    expect(running).toHaveBeenCalledOnce();
+    // running() is called twice: once by pre_spawn (before spawnCliProcess) and
+    // once by onFirstMessage → sdk_initialized (when the source emits the output event).
+    // In production both paths call transitionToRunning() which is idempotent; in tests
+    // the mock records both calls.
+    expect(running).toHaveBeenCalledTimes(2);
     expect(running).toHaveBeenCalledWith(run.id);
 
     // execute() completed normally → completed() fires too.
@@ -814,8 +819,10 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
   });
 
   /**
-   * Backward-compat: when source is absent, bridgeEvents() short-circuits and
-   * running() is NOT called (the bridge is not wired).
+   * Backward-compat: when source is absent, bridgeEvents() short-circuits and the
+   * bridge's onFirstMessage path does NOT call running().  However, execute() still
+   * calls onLifecycleTransition('pre_spawn') before spawnCliProcess, so running()
+   * IS called exactly once via the pre_spawn arm.
    */
   it('source absent: bridgeEvents short-circuits; running() is not called', async () => {
     const { mock: lt, running } = makeLifecycleTransitions();
@@ -843,8 +850,11 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 
     await executor.execute(run.id);
 
-    // running() must NOT have been called because bridgeEvents short-circuited.
-    expect(running).not.toHaveBeenCalled();
+    // running() is called once by the pre_spawn arm of onLifecycleTransition
+    // (execute() calls pre_spawn before spawnCliProcess regardless of whether a
+    // source is present).  The bridge's onFirstMessage path is silent because
+    // bridgeEvents() short-circuits when source is absent — so there is no 2nd call.
+    expect(running).toHaveBeenCalledOnce();
   });
 });
 
@@ -1280,8 +1290,11 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
 
     await executor.execute(run.id);
 
-    // Bridge drops mismatched events — running() must NOT be called.
-    expect(running).not.toHaveBeenCalled();
+    // The bridge drops the mismatched event (wrong panelId prefix), so the
+    // sdk_initialized path does NOT call running().  However, execute() calls
+    // onLifecycleTransition('pre_spawn') before spawnCliProcess regardless, so
+    // running() IS called exactly once via the pre_spawn arm.
+    expect(running).toHaveBeenCalledOnce();
 
     // raw_events row must also not exist.
     const cnt = countRawEvents(db, run.id);

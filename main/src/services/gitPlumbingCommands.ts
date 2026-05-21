@@ -105,6 +105,7 @@ export function fastGetAheadBehind(cwd: string, baseBranch: string): { ahead: nu
   }
 
   try {
+    // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
     const result = execSync(`git rev-list --left-right --count ${baseBranch}...HEAD`, { cwd })
       .toString().trim();
 
@@ -171,6 +172,7 @@ export function isPathModified(cwd: string, path: string): boolean {
   }
 
   try {
+    // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
     execSync(`git diff-files --quiet --ignore-submodules -- "${path}"`, { cwd, encoding: 'utf8', silent: true });
     return false;
   } catch {

@@ -30,6 +30,7 @@ import { Download, Upload, Code2 } from 'lucide-react';
 import type { Project } from '../types/project';
 import { devLog, renderLog } from '../utils/console';
 import { useAddTerminalShortcut } from '../hooks/useAddTerminalShortcut';
+import { useAddTerminalPanel } from '../hooks/useAddTerminalPanel';
 
 export const SessionView = memo(() => {
   const { activeView, activeProjectId } = useNavigationStore();
@@ -247,25 +248,10 @@ export const SessionView = memo(() => {
     [activeSession, sessionPanels, removePanel, setActivePanelInStore]
   );
 
-  const handleAddTerminal = useCallback(
-    async () => {
-      if (!activeSession) {
-        console.warn('[SessionView] Cannot add terminal: no active session');
-        return;
-      }
-      const newPanel = await panelApi.createPanel({
-        sessionId: activeSession.id,
-        type: 'terminal',
-        title: 'Terminal',
-        initialState: { cwd: activeSession.worktreePath },
-      });
-      addPanel(newPanel);
-      setActivePanelInStore(activeSession.id, newPanel.id);
-      await panelApi.setActivePanel(activeSession.id, newPanel.id);
-      addToHistory(activeSession.id, newPanel.id);
-    },
-    [activeSession, addPanel, setActivePanelInStore, addToHistory]
-  );
+  const handleAddTerminal = useAddTerminalPanel(activeSession, {
+    onAfterActivate: addToHistory,
+    logTag: 'SessionView',
+  });
 
   useAddTerminalShortcut(handleAddTerminal);
 

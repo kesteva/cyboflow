@@ -1,0 +1,21 @@
+{
+  "sprint": {
+    "id": "SPRINT-027",
+    "status": "complete",
+    "started": "2026-05-20T17:29:41Z",
+    "execution_mode": "serial"
+  },
+  "tasks": {},
+  "playwright_target": {
+    "kind": "electron",
+    "evidence": "electron in package.json",
+    "dev_url_hint": null,
+    "divergence_risk": false
+  },
+  "run": {
+    "branch": "soloflow/run-20260520-172941-SPRINT-027",
+    "base_branch": "main",
+    "base_sha": "8a5c4130b9878c6893bf28bf89a1201ca2339ccc",
+    "created_at": "2026-05-20T17:29:41Z"
+  }
+}
