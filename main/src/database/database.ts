@@ -746,8 +746,6 @@ export class DatabaseService {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           welcome_hidden BOOLEAN DEFAULT 0,
-          -- Orphaned column (IDEA-016): no migration written; cheaper to leave than alter
-          discord_shown BOOLEAN DEFAULT 0,
           app_version TEXT
         )
       `).run();
