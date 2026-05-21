@@ -695,6 +695,12 @@ app.whenReady().then(async () => {
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
     console.log('[Main] ApprovalRouter initialized');
 
+    // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
+    const recoveredCount = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
+    if (recoveredCount > 0) {
+      console.log(`[Main] Recovered ${recoveredCount} stale awaiting_review run(s) on boot`);
+    }
+
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
     // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
     // SDK run and updates DB rows, but does not yet send deny-replies on the
