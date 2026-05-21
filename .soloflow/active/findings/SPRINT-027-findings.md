@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-027
-pending_count: 4
-last_updated: "2026-05-21T01:18:30.028Z"
+pending_count: 5
+last_updated: "2026-05-20T18:50:00.000Z"
 ---
 # Findings Queue
 
@@ -58,3 +58,13 @@ SoloFlow workflow defect: TASK-674 (SPRINT-025-compounder) was a duplicate of TA
 - **severity:** low
 - **status:** open
 - **description:** verification.visual_web=true but the Playwright MCP target (http://localhost:4521) has stale shadows: dev server not running and Electron preload electronTRPC is unreachable. TerminalPanel.tsx displayCwd render path could not be exercised in this verifier run. Already escalated under dedup_key visual_web_electron_unreachable. CLAUDE.md / VISUAL-VERIFICATION-SETUP.md should call out that visual_web with playwright_target.kind=electron requires either (a) a live `pnpm dev` server, (b) a Playwright-Electron CDP attach launcher, or (c) visual_web=false.
+
+## FIND-SPRINT-027-6
+- **source:** TASK-679 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/ipc/git.ts:415,425,505,515,547,557
+- **description:** TASK-679 step 8 instructed adding `// TODO(TASK-680): migrate to runGit(cwd, args[])` markers above every remaining `execSync(\`git ... ${var}\`)` template-literal site in main/src/. Six multi-line forms in main/src/ipc/git.ts were missed because they wrap as `execSync(\n  \`git diff --name-only ${var}\`,\n  { ... })` rather than putting the template literal on the same line as `execSync(`. A single-line-anchored grep pattern would skip these. The migrated code in TASK-679 is correct — this finding only concerns the completeness of the breadcrumb trail for the TASK-680 follow-up. Affected lines: 415 (`git diff ${fromCommit.hash}` via captureCommitDiff helper — possibly intentional skip if helper is non-execSync), 425 (`git diff --name-only ${fromCommit.hash}`), 505 (`git diff ${fromCommitHash}`), 515 (`git diff --name-only ${fromCommitHash}`), 547 (`git diff ${fromCommitHash}`), 557 (`git diff --name-only ${fromCommitHash}`).
+- **suggested_action:** When TASK-680 is planned, broaden the grep target to `grep -rnE 'execSync\([^)]*\\\`git[^\\\`]*\\\$\\{' main/src/` (multi-line) or use a tool like `ast-grep` to catch wrapped forms. Alternatively, add the missing 6 TODO markers in a quick pre-TASK-680 sweep.
+- **resolved_by:** 
