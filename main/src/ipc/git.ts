@@ -412,6 +412,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           if (commitIndex >= 0 && commitIndex < commits.length) {
             const fromCommit = commits[commitIndex];
             // Get diff from commit to working directory (includes uncommitted changes)
+            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
             const diff = execSync(
               `git diff ${fromCommit.hash}`,
               { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
@@ -422,6 +423,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
               execSync(`git diff --stat ${fromCommit.hash}`, { cwd: session.worktreePath, encoding: 'utf8' })
             );
 
+            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
             const changedFiles = execSync(
               `git diff --name-only ${fromCommit.hash}`,
               { cwd: session.worktreePath, encoding: 'utf8' }
@@ -502,6 +504,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           }
 
           // Get diff from parent to working directory (includes the commit and any uncommitted changes)
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           const diff = execSync(
             `git diff ${fromCommitHash}`,
             { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
@@ -512,6 +515,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
             execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
           );
 
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           const changedFiles = execSync(
             `git diff --name-only ${fromCommitHash}`,
             { cwd: session.worktreePath, encoding: 'utf8' }
@@ -544,6 +548,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
 
         // Get diff from the parent of first commit to working directory (includes uncommitted changes)
+        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
         const diff = execSync(
           `git diff ${fromCommitHash}`,
           { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
@@ -554,12 +559,13 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
         );
 
+        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
         const changedFiles = execSync(
           `git diff --name-only ${fromCommitHash}`,
           { cwd: session.worktreePath, encoding: 'utf8' }
         ).trim().split('\n').filter(f => f);
 
-        return { 
+        return {
           success: true, 
           data: {
             diff,
