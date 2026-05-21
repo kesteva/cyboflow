@@ -680,7 +680,7 @@ describe('lifecycle transitions', () => {
 // ---------------------------------------------------------------------------
 
 import { EventRouter, RawEventsSink } from '../../services/streamParser';
-import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
+import { makeRawEventsDb, countRawEvents } from '../__test_fixtures__/rawEvents';
 
 /**
  * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
