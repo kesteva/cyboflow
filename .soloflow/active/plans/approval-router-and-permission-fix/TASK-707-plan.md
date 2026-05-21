@@ -1,7 +1,7 @@
 ---
 id: TASK-707
 idea: IDEA-007
-status: ready
+status: in-flight
 created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/services/cyboflow/transitions.ts
@@ -20,8 +20,8 @@ acceptance_criteria:
     verification: "grep -nE \"it\\(.+sets started_at\" main/src/services/cyboflow/__tests__/transitions.test.ts returns at least 1 match"
   - criterion: "New test case 'transitionToRunning preserves existing started_at (COALESCE)' in transitions.test.ts: seeds a run with started_at='2026-01-01T00:00:00Z' and status='starting', calls transitionToRunning, asserts started_at is unchanged."
     verification: "grep -nE \"it\\(.+preserves existing started_at\" main/src/services/cyboflow/__tests__/transitions.test.ts returns 1 match"
-  - criterion: "All existing transitions.test.ts cases continue to pass."
-    verification: "pnpm --filter @cyboflow/main test transitions exits 0"
+  - criterion: All existing transitions.test.ts cases continue to pass.
+    verification: pnpm --filter @cyboflow/main test transitions exits 0
   - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on: []
@@ -38,7 +38,6 @@ test_strategy:
       test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
 ---
-
 # Backfill workflow_runs.started_at in transitionToRunning
 
 ## Objective

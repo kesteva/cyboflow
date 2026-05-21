@@ -1,8 +1,8 @@
 ---
 id: TASK-695
 idea: IDEA-021
-status: ready
-created: 2026-05-20T17:00:00Z
+status: in-flight
+created: "2026-05-20T17:00:00Z"
 files_owned:
   - patches/trpc-electron@0.1.2.patch
   - package.json
@@ -27,21 +27,21 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Patch file exists targeting trpc-electron@0.1.2's main bundle to neuter the 'Symbol.asyncDispose already exists' throw."
     verification: "test -f patches/trpc-electron@0.1.2.patch && grep -q 'Symbol.asyncDispose already exists' patches/trpc-electron@0.1.2.patch"
-  - criterion: "package.json declares the patch under pnpm.patchedDependencies."
+  - criterion: package.json declares the patch under pnpm.patchedDependencies.
     verification: "node -e 'const p=require(\"./package.json\");process.exit(p.pnpm && p.pnpm.patchedDependencies && p.pnpm.patchedDependencies[\"trpc-electron@0.1.2\"] ? 0 : 1)'"
   - criterion: "After pnpm install, node_modules/trpc-electron/dist/main.cjs no longer contains 'Symbol.asyncDispose already exists'."
     verification: "pnpm install && ! grep -q 'Symbol.asyncDispose already exists' node_modules/trpc-electron/dist/main.cjs"
-  - criterion: "events.ts declares onStuckDetected subscription procedure and exports stuckEvents EventEmitter."
+  - criterion: events.ts declares onStuckDetected subscription procedure and exports stuckEvents EventEmitter.
     verification: "grep -nE 'onStuckDetected:[[:space:]]*protectedProcedure' main/src/orchestrator/trpc/routers/events.ts && grep -nE 'export const stuckEvents = new EventEmitter' main/src/orchestrator/trpc/routers/events.ts"
-  - criterion: "reviewQueueSlice.ts no longer casts trpc.cyboflow.events through unknown."
+  - criterion: reviewQueueSlice.ts no longer casts trpc.cyboflow.events through unknown.
     verification: "! grep -nE 'as unknown as StuckEventsClient' frontend/src/stores/reviewQueueSlice.ts"
-  - criterion: "reviewQueueSlice.ts no longer imports StuckEventsClient."
+  - criterion: reviewQueueSlice.ts no longer imports StuckEventsClient.
     verification: "! grep -nE 'StuckEventsClient' frontend/src/stores/reviewQueueSlice.ts"
-  - criterion: "Router tests include onStuckDetected subscription placeholder test."
+  - criterion: Router tests include onStuckDetected subscription placeholder test.
     verification: "grep -nE 'cyboflow.events.onStuckDetected' main/src/orchestrator/trpc/__tests__/router.test.ts"
-  - criterion: "reviewQueueSlice test passes after cast-through-unknown removal."
-    verification: "pnpm --filter frontend test --run reviewQueueSlice"
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: reviewQueueSlice test passes after cast-through-unknown removal.
+    verification: pnpm --filter frontend test --run reviewQueueSlice
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
   - criterion: "pnpm dev launches cleanly — cyboflow-frontend-debug.log contains no 'Symbol.asyncDispose already exists' and no 'No subscription-procedure on path cyboflow.events.onStuckDetected'."
     verification: "pnpm dev for >=10s, then quit; ! grep -q 'Symbol.asyncDispose already exists' cyboflow-frontend-debug.log && ! grep -q 'No subscription-procedure on path cyboflow.events.onStuckDetected' cyboflow-frontend-debug.log"
@@ -53,13 +53,12 @@ test_strategy:
   justification: "Both fixes touch behavior covered by existing test suites: router.test.ts has placeholder subscription tests; reviewQueueSlice.test.ts has a mocked-tRPC test that must pass after the typed proxy access replaces the cast-through-unknown workaround."
   targets:
     - behavior: "onStuckDetected subscription exists, yields zero events before abort, terminates cleanly."
-      test_file: "main/src/orchestrator/trpc/__tests__/router.test.ts"
+      test_file: main/src/orchestrator/trpc/__tests__/router.test.ts
       type: integration
-    - behavior: "reviewQueueSlice.subscribeToStuckEvents wires onData to applyStuckEvent without cast-through-unknown."
-      test_file: "frontend/src/stores/__tests__/reviewQueueSlice.test.ts"
+    - behavior: reviewQueueSlice.subscribeToStuckEvents wires onData to applyStuckEvent without cast-through-unknown.
+      test_file: frontend/src/stores/__tests__/reviewQueueSlice.test.ts
       type: unit
 ---
-
 # Fix tRPC subscription transport: resolve Symbol.asyncDispose polyfill clash and add onStuckDetected procedure
 
 ## Objective

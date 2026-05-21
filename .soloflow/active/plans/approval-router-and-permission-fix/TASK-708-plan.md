@@ -1,7 +1,7 @@
 ---
 id: TASK-708
 idea: IDEA-007
-status: ready
+status: in-flight
 created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/orchestrator/runRecovery.ts
@@ -25,9 +25,9 @@ acceptance_criteria:
     verification: "grep -nE \"status\\s*=\\s*'failed'\" main/src/orchestrator/runRecovery.ts returns at least 1 match; grep -nE \"error_message\\s*=\\s*'app_restart'\" main/src/orchestrator/runRecovery.ts returns 1 match"
   - criterion: "The recovery also cancels (sets to 'timed_out') any approvals with status='pending' whose run_id was just recovered. (Schema CHECK on approvals.status allows only 'pending'|'approved'|'rejected'|'timed_out' — 'canceled' is NOT a valid value despite TASK-305 referencing it. This task uses 'timed_out' which matches schema and conveys 'this approval can no longer be acted on'.)"
     verification: "grep -nE \"UPDATE approvals\" main/src/orchestrator/runRecovery.ts returns at least 1 match; grep -nE \"status\\s*=\\s*'timed_out'\" main/src/orchestrator/runRecovery.ts returns 1 match; grep -nE \"AND status\\s*=\\s*'pending'\" main/src/orchestrator/runRecovery.ts returns 1 match"
-  - criterion: "Rows whose runId IS present in runQueues.has(runId) (live executor entry exists) are SKIPPED — only orphans are recovered."
+  - criterion: Rows whose runId IS present in runQueues.has(runId) (live executor entry exists) are SKIPPED — only orphans are recovered.
     verification: "grep -nE 'runQueues\\.has\\(' main/src/orchestrator/runRecovery.ts returns at least 1 match"
-  - criterion: "The entire recovery runs inside a single db.transaction(...) so a crash mid-recovery leaves a clean state."
+  - criterion: The entire recovery runs inside a single db.transaction(...) so a crash mid-recovery leaves a clean state.
     verification: "grep -nE 'db\\.transaction\\(' main/src/orchestrator/runRecovery.ts returns 1 match"
   - criterion: "main/src/index.ts initializeServices (or the post-init block) calls recoverActiveStateOrphans AFTER both databaseService.initialize() and TASK-305's ApprovalRouter.getInstance().recoverStaleAwaitingReview() AND BEFORE cyboflowPermissionIpcServer.start()."
     verification: "grep -nE 'recoverActiveStateOrphans' main/src/index.ts returns 1 match"
@@ -39,7 +39,7 @@ acceptance_criteria:
     verification: "grep -nE \"it\\(.+skips live runs\" main/src/orchestrator/__tests__/runRecovery.test.ts returns 1 match"
   - criterion: "Integration test 'cancels pending approvals for recovered runs': seed an orphan running run + a pending approval; call recovery; assert approvals.status='timed_out'."
     verification: "grep -nE \"it\\(.+cancels pending approvals\" main/src/orchestrator/__tests__/runRecovery.test.ts returns 1 match"
-  - criterion: "Recovery returns separated counts by source state so the log line is informative."
+  - criterion: Recovery returns separated counts by source state so the log line is informative.
     verification: "grep -nE 'runningRecovered|startingRecovered' main/src/orchestrator/runRecovery.ts returns at least 2 matches; grep -nE 'console\\.log.*Recovered.*starting.*running|console\\.log.*\\(running:|console\\.log.*\\(starting:' main/src/index.ts returns at least 1 match"
   - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
@@ -67,7 +67,6 @@ test_strategy:
       test_file: main/src/orchestrator/__tests__/runRecovery.test.ts
       type: integration
 ---
-
 # Recover running/starting orphans on app boot
 
 ## Objective
