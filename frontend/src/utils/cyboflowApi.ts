@@ -27,8 +27,8 @@ export interface StartRunResult {
 }
 
 /**
- * Subset of WorkflowRunListRow returned by cyboflow:listRuns.
- * Excludes the heavy policy_json column intentionally.
+ * Subset of `WorkflowRunRow` (shared/types/cyboflow.ts) returned by cyboflow:listRuns.
+ * Intentionally excludes `policy_json` (not needed by the sidebar list view).
  */
 export interface WorkflowRunListRow {
   id: string;
