@@ -618,7 +618,7 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     finalDb.close();
   });
 
-  it('rebuilds the table when worktree_path is NOT NULL (canonical is nullable) or stuck_detected_at orphan column exists', () => {
+  it('rebuilds the table when worktree_path is NOT NULL (canonical is nullable); preserves stuck_detected_at (added by migration 007)', () => {
     tmpDbDir = mkdtempSync(join(tmpdir(), 'cyboflow-schema-runs-tier2-'));
     const dbPath = join(tmpDbDir, 'test.db');
     const realMigrationsDir = join(__dirname, '..', 'migrations');
@@ -663,7 +663,7 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     rawDb.close();
 
     // Step 2: re-initialize. Tier 1 adds permission_mode_snapshot/branch_name/error_message,
-    // Tier 2 rebuilds to drop the NOT NULL on worktree_path and remove stuck_detected_at.
+    // Tier 2 rebuilds to drop the NOT NULL on worktree_path; Tier 1 then re-adds stuck_detected_at (migration 007 column).
     const svc2 = new DatabaseService(dbPath);
     svc2.setMigrationsDirForTesting(realMigrationsDir);
     svc2.initialize();
@@ -676,8 +676,10 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     // worktree_path must now be nullable.
     expect(colByName('worktree_path')?.notnull).toBe(0);
 
-    // stuck_detected_at orphan column must be gone.
-    expect(cols.some((c) => c.name === 'stuck_detected_at')).toBe(false);
+    // stuck_detected_at is added by migration 007 and re-added by Tier 1 of
+    // reconcileWorkflowRunsSchema (database.ts:1360-1363) even after a Tier 2
+    // rebuild — StuckDetector.prepare() requires it on boot.
+    expect(cols.some((c) => c.name === 'stuck_detected_at')).toBe(true);
 
     // permission_mode_snapshot must default to 'default' per canonical 006.
     const pms = colByName('permission_mode_snapshot');

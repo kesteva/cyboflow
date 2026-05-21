@@ -25,6 +25,7 @@ import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { ClaudeCodeManager } from '../claudeCodeManager';
+import { CliManagerFactory } from '../../../cliManagerFactory';
 import type { SessionManager } from '../../../sessionManager';
 import type { Logger } from '../../../../utils/logger';
 
@@ -298,5 +299,68 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     // fail-soft message; matches the sibling assertion in
     // streamParser/__tests__/rawEventsSink.test.ts.
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[rawEventsSink]'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// duck-type guard tests — cliManagerFactory validates additionalOptions.db
+// ---------------------------------------------------------------------------
+
+describe('CliManagerFactory claude tool — duck-type guard on additionalOptions.db', () => {
+  // Share a single CliManagerFactory singleton across all tests.  The
+  // CliToolRegistry singleton is NOT torn down between tests; creating a fresh
+  // CliManagerFactory per test would re-register 'claude' and throw.  All four
+  // test cases exercise guard failure paths (before any manager is cached), so
+  // the registry manager cache stays empty and the factory closure fires fresh
+  // on every call — no inter-test interference.
+  const factory = CliManagerFactory.getInstance();
+  const mockSessionManager = { id: 'mock-session-manager' } as unknown as SessionManager;
+
+  afterEach(async () => {
+    // Shut down to clear the registry's manager cache (guards throw before
+    // caching, but be explicit).  CliManagerFactory.instance is set to null;
+    // subsequent CliManagerFactory.getInstance() calls within this describe
+    // block re-use the same object reference held in `factory` const.
+    await factory.shutdown();
+  });
+
+  it('throws TypeError containing "requires `db`" when additionalOptions is empty ({})', async () => {
+    await expect(
+      factory.createManager('claude', {
+        sessionManager: mockSessionManager,
+        additionalOptions: {},
+        skipValidation: true,
+      }),
+    ).rejects.toThrow(/requires `db`/);
+  });
+
+  it('throws TypeError containing "requires `db`" when additionalOptions is undefined', async () => {
+    await expect(
+      factory.createManager('claude', {
+        sessionManager: mockSessionManager,
+        additionalOptions: undefined,
+        skipValidation: true,
+      }),
+    ).rejects.toThrow(/requires `db`/);
+  });
+
+  it('wrong-shape db: throws TypeError naming .prepare() when db is an object lacking .prepare', async () => {
+    await expect(
+      factory.createManager('claude', {
+        sessionManager: mockSessionManager,
+        additionalOptions: { db: { foo: 'bar' } },
+        skipValidation: true,
+      }),
+    ).rejects.toThrow(/\.prepare\(\)/);
+  });
+
+  it('wrong-shape db: throws TypeError naming .prepare() when db is a primitive string ("not-a-db")', async () => {
+    await expect(
+      factory.createManager('claude', {
+        sessionManager: mockSessionManager,
+        additionalOptions: { db: 'not-a-db' },
+        skipValidation: true,
+      }),
+    ).rejects.toThrow(/\.prepare\(\)/);
   });
 });

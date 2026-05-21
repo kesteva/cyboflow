@@ -9,6 +9,7 @@ import { panelApi } from '../services/panelApi';
 import { ToolPanel } from '../../../shared/types/panels';
 import { SessionProvider } from '../contexts/SessionContext';
 import { useAddTerminalShortcut } from '../hooks/useAddTerminalShortcut';
+import { useAddTerminalPanel } from '../hooks/useAddTerminalPanel';
 
 interface ProjectViewProps {
   projectId: number;
@@ -173,24 +174,9 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     [mainRepoSessionId, addPanel, setActivePanelInStore]
   );
 
-  const handleAddTerminal = useCallback(
-    async () => {
-      if (!mainRepoSessionId || !mainRepoSession) {
-        console.warn('[ProjectView] Cannot add terminal: missing session', { mainRepoSessionId, mainRepoSession });
-        return;
-      }
-      const newPanel = await panelApi.createPanel({
-        sessionId: mainRepoSessionId,
-        type: 'terminal',
-        title: 'Terminal',
-        initialState: { cwd: mainRepoSession.worktreePath },
-      });
-      addPanel(newPanel);
-      setActivePanelInStore(mainRepoSessionId, newPanel.id);
-      await panelApi.setActivePanel(mainRepoSessionId, newPanel.id);
-    },
-    [mainRepoSessionId, mainRepoSession, addPanel, setActivePanelInStore]
-  );
+  const handleAddTerminal = useAddTerminalPanel(mainRepoSession, {
+    logTag: 'ProjectView',
+  });
 
   useAddTerminalShortcut(handleAddTerminal);
 

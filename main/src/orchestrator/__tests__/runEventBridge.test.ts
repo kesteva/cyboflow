@@ -23,7 +23,7 @@ import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-import { makeRawEventsDb, countRawEvents } from './__fixtures__/rawEvents';
+import { makeRawEventsDb, countRawEvents } from '../__test_fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant

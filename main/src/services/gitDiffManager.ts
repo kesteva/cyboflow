@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { execSync } from '../utils/commandExecutor';
 import type { Logger } from '../utils/logger';
 import type { AnalyticsManager } from './analyticsManager';
@@ -225,6 +226,7 @@ export class GitDiffManager {
    */
   getCommitDiff(worktreePath: string, commitHash: string): GitDiffResult {
     try {
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const diff = execSync(`git show --format= ${commitHash}`, {
         cwd: worktreePath,
         encoding: 'utf8',
@@ -346,18 +348,21 @@ export class GitDiffManager {
     try {
 
       // Get diff between current branch and main
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const diff = execSync(`git diff origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
       });
 
       // Get changed files
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const changedFiles = execSync(`git diff --name-only origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
       }).trim().split('\n').filter((f: string) => f.length > 0);
 
       // Get stats
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const statsOutput = execSync(`git diff --stat origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
@@ -422,7 +427,8 @@ export class GitDiffManager {
 
   private getGitCommitDiff(worktreePath: string, fromCommit: string, toCommit: string): string {
     try {
-      return execSync(`git diff ${fromCommit}..${toCommit}`, { 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      return execSync(`git diff ${fromCommit}..${toCommit}`, {
         cwd: worktreePath, 
         encoding: 'utf8' 
       });
@@ -454,9 +460,10 @@ export class GitDiffManager {
 
   private getChangedFilesBetweenCommits(worktreePath: string, fromCommit: string, toCommit: string): string[] {
     try {
-      const output = execSync(`git diff --name-only ${fromCommit}..${toCommit}`, { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      const output = execSync(`git diff --name-only ${fromCommit}..${toCommit}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       return output.trim().split('\n').filter((f: string) => f.length > 0);
     } catch (error) {
@@ -487,13 +494,15 @@ export class GitDiffManager {
           try {
             const cleanFile = file.trim();
             const filePath = `${worktreePath}/${cleanFile}`;
-            const lines = execSync(`wc -l < "${filePath}"`, { 
-              encoding: 'utf8',
-              cwd: worktreePath
-            });
-            untrackedAdditions += parseInt(lines.trim()) || 0;
+            // Read the file directly — no shell involved, so filenames with $(...) /
+            // backticks / ${...} cannot inject commands. Use 'utf8' to mirror the
+            // semantics of `wc -l`, which counts newline characters in text mode.
+            const content = fs.readFileSync(filePath, 'utf8');
+            // `wc -l` counts \n occurrences; match that exactly.
+            const lineCount = (content.match(/\n/g) || []).length;
+            untrackedAdditions += lineCount;
           } catch {
-            // Skip files that can't be counted
+            // Skip files that can't be read (binary, permission denied, missing, etc.)
           }
         }
         
@@ -513,9 +522,10 @@ export class GitDiffManager {
 
   private getCommitDiffStats(worktreePath: string, fromCommit: string, toCommit: string): GitDiffStats {
     try {
-      const output = execSync(`git diff --stat ${fromCommit}..${toCommit}`, { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      const output = execSync(`git diff --stat ${fromCommit}..${toCommit}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       
       return this.parseDiffStats(output);
@@ -594,18 +604,21 @@ export class GitDiffManager {
       try {
         const cleanFile = file.trim();
         const filePath = `${worktreePath}/${cleanFile}`;
-        const fileContent = execSync(`cat "${filePath}"`, { 
-          encoding: 'utf8',
-          maxBuffer: 1024 * 1024 // 1MB max per file
-        });
-        
+        // Pre-flight size check matches the previous `maxBuffer: 1MB` bound from
+        // execSync — large files are skipped (caught below) to avoid OOM.
+        const stat = fs.statSync(filePath);
+        if (stat.size > 1024 * 1024) {
+          throw new Error(`File too large: ${stat.size} bytes`);
+        }
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+
         // Create a diff-like format for the new file
         diffOutput += `diff --git a/${cleanFile} b/${cleanFile}\n`;
         diffOutput += `new file mode 100644\n`;
         diffOutput += `index 0000000..0000000\n`;
         diffOutput += `--- /dev/null\n`;
         diffOutput += `+++ b/${cleanFile}\n`;
-        
+
         // Add the file content with '+' prefix for each line
         const lines = fileContent.split('\n');
         if (lines.length > 0) {
@@ -615,7 +628,7 @@ export class GitDiffManager {
           }
         }
       } catch (error) {
-        // Skip files that can't be read (binary files, etc.)
+        // Skip files that can't be read (binary, oversize, permission denied, missing, etc.)
         const cleanFile = file.trim();
         this.logger?.verbose(`Could not read untracked file ${cleanFile}: ${error}`);
       }

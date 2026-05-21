@@ -12,7 +12,7 @@ to a canonical example — read those for the actual implementation.
   are top-level in `tests/`.
 - **Shared test fixtures:** Live in sibling `__test_fixtures__/` directories (NOT under
   `__tests__/__fixtures__/`). See `main/src/orchestrator/__test_fixtures__/` for canonical
-  examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and pending `rawEvents.ts` via TASK-676).
+  examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and `rawEvents.ts`).
 - **Barrels:** No barrel `index.ts` re-exports used; import paths are explicit.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
   (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`.
@@ -120,9 +120,9 @@ to a canonical example — read those for the actual implementation.
 - **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
 - **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
 
-### `main/src/orchestrator/__tests__/__fixtures__/rawEvents`
+### `main/src/orchestrator/__test_fixtures__/rawEvents`
 
-- **Path:** `main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts` (will move to `__test_fixtures__/rawEvents.ts` via TASK-676)
+- **Path:** `main/src/orchestrator/__test_fixtures__/rawEvents.ts`
 - **Use it for:** Any test that needs a `raw_events` table — persistence (`bridgeEvents`, `RawEventsSink`), consumption (`runExecutor`), or schema reconciliation. Exports `RAW_EVENTS_DDL`, `makeRawEventsDb()` (in-memory `better-sqlite3` with the table created and FKs off), and `countRawEvents(db, runId)`. Do NOT inline `CREATE TABLE ... raw_events` locally — a migration 006 schema change must propagate via this single source.
 - **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
 - **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.

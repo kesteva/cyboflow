@@ -283,6 +283,7 @@ function getMainBranchStatus(projectPath: string, mainBranch: string): MainBranc
     
     // Check if remote branch exists
     try {
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       execSync(`git rev-parse --verify ${remoteBranch}`, { cwd: projectPath });
     } catch {
       // No remote branch
