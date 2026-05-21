@@ -210,6 +210,26 @@ not in IPC handlers — handlers should be thin: validate input, delegate to ser
 
 - **Canonical example:** `main/src/ipc/session.ts`
 
+**Runtime input validation:** Every handler that reads from `args` MUST type-guard the
+expected fields before use. A bare `const { projectId } = args as { projectId: number }`
+cast is insufficient — if the renderer passes `undefined`, better-sqlite3 throws or
+returns wrong rows silently. Required pattern:
+
+```typescript
+ipcMain.handle('cyboflow:listRuns', (_event, args: unknown) => {
+  if (typeof (args as Record<string, unknown>)?.projectId !== 'number') {
+    return { success: false, error: 'listRuns: projectId must be a number' };
+  }
+  const { projectId } = args as { projectId: number };
+  // ... delegate to service
+});
+```
+
+For domains with multiple handlers sharing the same arg shapes, extract a `validateArg`
+helper in the domain's IPC file (see `main/src/ipc/cyboflow.ts` after B3 lands). This
+keeps the guard co-located with the handler and easy to audit during handler additions.
+Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards.
+
 ### Per-session mutation serialization
 
 Any state mutation for a workflow run passes through a per-run `SimpleQueue({concurrency: 1})`.

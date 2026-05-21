@@ -1,8 +1,8 @@
 ---
 id: TASK-690
 idea: IDEA-017
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/App.tsx
 files_readonly:
@@ -10,32 +10,33 @@ files_readonly:
   - frontend/src/components/SessionView.tsx
   - frontend/src/stores/navigationStore.ts
 acceptance_criteria:
-  - criterion: "The string `useLegacyCrystalView` appears zero times anywhere under `frontend/src/`."
+  - criterion: The string `useLegacyCrystalView` appears zero times anywhere under `frontend/src/`.
     verification: "git grep -n 'useLegacyCrystalView' frontend/src/ exits 1 with no matches"
-  - criterion: "The string `setUseLegacyCrystalView` appears zero times anywhere under `frontend/src/`."
+  - criterion: The string `setUseLegacyCrystalView` appears zero times anywhere under `frontend/src/`.
     verification: "git grep -n 'setUseLegacyCrystalView' frontend/src/ exits 1 with no matches"
-  - criterion: "App.tsx no longer imports `SessionView`."
+  - criterion: App.tsx no longer imports `SessionView`.
     verification: "grep -n \"from './components/SessionView'\" frontend/src/App.tsx exits 1 with no matches"
-  - criterion: "App.tsx no longer references the identifier `SessionView`."
+  - criterion: App.tsx no longer references the identifier `SessionView`.
     verification: "grep -n 'SessionView' frontend/src/App.tsx exits 1 with no matches"
-  - criterion: "App.tsx no longer renders any `Legacy view` or `Cyboflow view` toggle button text."
+  - criterion: App.tsx no longer renders any `Legacy view` or `Cyboflow view` toggle button text.
     verification: "grep -nE 'Legacy view|Cyboflow view' frontend/src/App.tsx exits 1 with no matches"
   - criterion: "App.tsx renders `<CyboflowRoot projectId={activeProjectId} />` as the sole primary content (no SessionView fallback branch)."
     verification: "grep -n '<CyboflowRoot' frontend/src/App.tsx returns exactly one match; grep -nE '<SessionView' frontend/src/App.tsx returns zero matches"
   - criterion: "`pnpm typecheck` passes."
-    verification: "pnpm typecheck exits 0"
+    verification: pnpm typecheck exits 0
   - criterion: "`pnpm lint` passes."
-    verification: "pnpm lint exits 0"
+    verification: pnpm lint exits 0
   - criterion: "Manual visual check: launching `pnpm dev` shows no `Legacy view` or `Cyboflow view` toggle button; every project view shows CyboflowRoot content."
     verification: "Run pnpm dev, click each project, inspect header. Confirm no toggle button, CyboflowRoot renders everywhere, no path leads to SessionView."
-depends_on: [TASK-688, TASK-689]
+depends_on:
+  - TASK-688
+  - TASK-689
 estimated_complexity: medium
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: false
   justification: "No sibling test exists for App.tsx. Pure deletion of a transitional UI toggle with no business logic, no testID surfaces, no exported behavior. Equivalent confidence is provided by pnpm typecheck (catches dangling references), pnpm lint (catches unused symbols), and the manual visual check in ACs. The integration surface — that CyboflowRoot now mounts for every project — is already covered by RunView.test.tsx and cyboflowStore.test.ts."
 ---
-
 # Retire useLegacyCrystalView toggle and the SessionView render branch in App.tsx
 
 ## Objective

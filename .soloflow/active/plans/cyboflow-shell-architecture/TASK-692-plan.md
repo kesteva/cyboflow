@@ -1,8 +1,8 @@
 ---
 id: TASK-692
 idea: IDEA-017
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/database/migrations/008_drop_legacy_crystal_tables.sql
   - main/src/database/database.ts
@@ -21,29 +21,30 @@ files_readonly:
   - shared/types/panels.ts
   - main/src/types/session.ts
 acceptance_criteria:
-  - criterion: "Migration 008_drop_legacy_crystal_tables.sql exists and uses idempotent DROP ... IF EXISTS only."
+  - criterion: Migration 008_drop_legacy_crystal_tables.sql exists and uses idempotent DROP ... IF EXISTS only.
     verification: "test -f main/src/database/migrations/008_drop_legacy_crystal_tables.sql && grep -c 'DROP TABLE IF EXISTS' main/src/database/migrations/008_drop_legacy_crystal_tables.sql returns >= 5; grep -nE '^(DROP TABLE [^I]|DROP INDEX [^I])' returns 0 matches"
   - criterion: "Migration drops the agreed table set per escalation resolution (default option C: sessions, session_outputs, conversation_messages, prompt_markers, execution_diffs)."
     verification: "grep -oE 'DROP TABLE IF EXISTS [a-z_]+' main/src/database/migrations/008_drop_legacy_crystal_tables.sql | sort -u matches the user-resolved drop set"
-  - criterion: "Migration does NOT touch any cyboflow-schema table or preserved table."
+  - criterion: Migration does NOT touch any cyboflow-schema table or preserved table.
     verification: "grep -nE '\\b(workflows|workflow_runs|raw_events|messages|approvals|projects|user_preferences|app_opens|ui_state|folders|project_run_commands|git_credentials)\\b' main/src/database/migrations/008_drop_legacy_crystal_tables.sql returns 0 matches"
-  - criterion: "pnpm typecheck exits 0."
-    verification: "pnpm typecheck"
-  - criterion: "pnpm test (vitest) exits 0; cyboflowSchema.test.ts and fileMigrationRunner.test.ts green."
-    verification: "pnpm test exits 0"
+  - criterion: pnpm typecheck exits 0.
+    verification: pnpm typecheck
+  - criterion: pnpm test (vitest) exits 0; cyboflowSchema.test.ts and fileMigrationRunner.test.ts green.
+    verification: pnpm test exits 0
   - criterion: "After fresh-init via DatabaseService, dropped tables are absent; all 5 cyboflow tables still exist."
-    verification: "New vitest case in cyboflowSchema.test.ts asserts dropped tables absent + 5 cyboflow tables present"
-  - criterion: "Migration runs idempotently — second initialize() does not re-apply 008."
+    verification: New vitest case in cyboflowSchema.test.ts asserts dropped tables absent + 5 cyboflow tables present
+  - criterion: Migration runs idempotently — second initialize() does not re-apply 008.
     verification: "New vitest case asserts ledger marker prevents re-execution, no console.error calls"
-  - criterion: "Migration runs cleanly against an upgraded DB simulating existing user install."
+  - criterion: Migration runs cleanly against an upgraded DB simulating existing user install.
     verification: "New vitest case: svc1 simulates pre-008 state, svc2 applies 008, dropped tables absent after svc2"
-  - criterion: "database.ts no longer contains methods issuing SQL against dropped tables."
+  - criterion: database.ts no longer contains methods issuing SQL against dropped tables.
     verification: "grep -nE 'FROM\\s+(sessions|session_outputs|conversation_messages|prompt_markers|execution_diffs)\\b' main/src/database/database.ts returns 0 matches"
   - criterion: "models.ts no longer exports Crystal-session types (Session, SessionOutput, ConversationMessage, etc.) — provided TASK-691 resolved consumers."
     verification: "grep -nE '^export interface (Session|SessionOutput|ConversationMessage|CreateSessionData|UpdateSessionData|PromptMarker|ExecutionDiff)\\b' main/src/database/models.ts returns 0 matches"
   - criterion: "App boot smoke: dev launch produces no SQLite errors against dropped tables."
     verification: "pnpm dev for 30s; grep 'no such table' cyboflow-backend-debug.log returns 0 matches"
-depends_on: [TASK-691]
+depends_on:
+  - TASK-691
 estimated_complexity: high
 epic: cyboflow-shell-architecture
 escalations:
@@ -52,38 +53,37 @@ escalations:
     decision_owner: user
     summary: "Dropping `tool_panels` is incompatible with the `crystal-cuts-and-rebrand` epic's standing rule that `panelManager` be preserved. As of 2026-05-20 the main process has 22 files consuming `panelManager`/panel APIs and 21 files consuming session APIs (claudeCodeManager, terminalPanelManager, logsManager, executionTracker, gitStatusManager, taskQueue, AbstractCliManager, IPC handlers). None of these are touched by TASK-691 (which is a frontend-only retirement per IDEA-017 slice 3). If 008 drops the tables while these consumers remain, the next dev launch will throw `SqliteError: no such table: tool_panels` at `PanelManager.loadPanelsFromDatabase()`. This was flagged by the decomposer."
     options:
-      - id: A
-        label: "Expand TASK-692 to retire panelManager + sessionManager + all 22+ IPC/service consumers."
-        cost: "~2-3 day execution; touches IPC contract surface. Risk: cascades into orchestrator surface. Sprint-scale rip-out."
-      - id: B
-        label: "Insert new sibling task TASK-692a before this one that retires backend consumers; keep TASK-692 as table-drop only."
-        cost: "Re-runs the decomposer; pushes 008 out by one task slot. Cleaner ownership boundary."
-      - id: C
-        label: "Drop only the Crystal-session subgraph (sessions, session_outputs, conversation_messages, prompt_markers, execution_diffs). Keep tool_panels + claude_panel_settings because panelManager still consumes them."
-        cost: "Lowest. Aligns with crystal-cuts-and-rebrand 'preserve panelManager' rule. Leaves disposition open for future epic."
-      - id: D
-        label: "Defer TASK-692 entirely; @cyboflow-hidden-mark schema.sql section and revisit after SDK-migration stabilizes."
-        cost: "Keeps schema drift; matches IDEA-017 candidate 2 ('kept as orphan tables for v2')."
-    refiner_default_if_unresolved: "C — drop only the Crystal-session subgraph"
+    - id: A
+      label: Expand TASK-692 to retire panelManager + sessionManager + all 22+ IPC/service consumers.
+      cost: "~2-3 day execution; touches IPC contract surface. Risk: cascades into orchestrator surface. Sprint-scale rip-out."
+    - id: B
+      label: Insert new sibling task TASK-692a before this one that retires backend consumers; keep TASK-692 as table-drop only.
+      cost: Re-runs the decomposer; pushes 008 out by one task slot. Cleaner ownership boundary.
+    - id: C
+      label: "Drop only the Crystal-session subgraph (sessions, session_outputs, conversation_messages, prompt_markers, execution_diffs). Keep tool_panels + claude_panel_settings because panelManager still consumes them."
+      cost: "Lowest. Aligns with crystal-cuts-and-rebrand 'preserve panelManager' rule. Leaves disposition open for future epic."
+    - id: D
+      label: Defer TASK-692 entirely; @cyboflow-hidden-mark schema.sql section and revisit after SDK-migration stabilizes.
+      cost: "Keeps schema drift; matches IDEA-017 candidate 2 ('kept as orphan tables for v2')."
+    refiner_default_if_unresolved: C — drop only the Crystal-session subgraph
     blocking: true
 test_strategy:
   needed: true
-  justification: "Destructive migration with irreversible production consequences. Existing cyboflowSchema.test.ts and fileMigrationRunner.test.ts are sibling tests; post-006 reconciler test pattern is the canonical template."
+  justification: Destructive migration with irreversible production consequences. Existing cyboflowSchema.test.ts and fileMigrationRunner.test.ts are sibling tests; post-006 reconciler test pattern is the canonical template.
   targets:
     - behavior: "After fresh DatabaseService.initialize(), dropped tables are absent and cyboflow tables remain."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
     - behavior: "After simulated upgrade (svc1 creates legacy tables, svc2 applies 008), dropped tables are gone, no console.error."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
-    - behavior: "Re-initializing twice with 008 applied is idempotent."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+    - behavior: Re-initializing twice with 008 applied is idempotent.
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
-    - behavior: "File-based migration runner picks up 008 by numeric prefix and applies it after 007."
-      test_file: "main/src/database/__tests__/fileMigrationRunner.test.ts"
+    - behavior: File-based migration runner picks up 008 by numeric prefix and applies it after 007.
+      test_file: main/src/database/__tests__/fileMigrationRunner.test.ts
       type: integration
 ---
-
 # Drop legacy Crystal DB tables via a reconcile-style migration
 
 ## Objective

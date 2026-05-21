@@ -1,8 +1,8 @@
 ---
 id: TASK-689
 idea: IDEA-017
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/components/CreateSessionDialog.tsx
   - frontend/src/components/CreateSessionButton.tsx
@@ -17,32 +17,32 @@ files_readonly:
   - frontend/src/components/__tests__/Sidebar.mcpHealth.test.tsx
   - docs/crystal-legacy/FEATURE_USAGE_TRACKING_INTEGRATION.md
 acceptance_criteria:
-  - criterion: "frontend/src/components/CreateSessionDialog.tsx no longer exists on disk."
+  - criterion: frontend/src/components/CreateSessionDialog.tsx no longer exists on disk.
     verification: "test ! -f frontend/src/components/CreateSessionDialog.tsx"
-  - criterion: "frontend/src/components/CreateSessionButton.tsx no longer exists on disk."
+  - criterion: frontend/src/components/CreateSessionButton.tsx no longer exists on disk.
     verification: "test ! -f frontend/src/components/CreateSessionButton.tsx"
-  - criterion: "frontend/src/components/ProjectTreeView.tsx no longer exists on disk (legacy unused duplicate)."
+  - criterion: frontend/src/components/ProjectTreeView.tsx no longer exists on disk (legacy unused duplicate).
     verification: "test ! -f frontend/src/components/ProjectTreeView.tsx"
-  - criterion: "No source file under frontend/src/ references the identifier CreateSessionDialog."
+  - criterion: No source file under frontend/src/ references the identifier CreateSessionDialog.
     verification: "grep -rn --include='*.ts' --include='*.tsx' 'CreateSessionDialog' frontend/src/ ; expect 0 matches"
-  - criterion: "No source file under frontend/src/ references the identifier CreateSessionButton."
+  - criterion: No source file under frontend/src/ references the identifier CreateSessionButton.
     verification: "grep -rn --include='*.ts' --include='*.tsx' 'CreateSessionButton' frontend/src/ ; expect 0 matches"
   - criterion: "DraggableProjectTreeView no longer carries the play-button JSX, handleCreateSession/handleQuickAddSession handlers, showCreateDialog state, selectedProjectForCreate state, retrySessionData state, discard-and-retry listener, or Cmd/Ctrl+Shift+N quick-session keyboard listener."
     verification: "grep -nE 'handleCreateSession|handleQuickAddSession|showCreateDialog|setShowCreateDialog|selectedProjectForCreate|retrySessionData|setRetrySessionData|discard-and-retry|Cmd/Ctrl \\+ Shift \\+ N' frontend/src/components/DraggableProjectTreeView.tsx returns 0 matches"
-  - criterion: "SetupTasksPanel no longer imports or mounts CreateSessionDialog."
+  - criterion: SetupTasksPanel no longer imports or mounts CreateSessionDialog.
     verification: "grep -nE 'CreateSessionDialog|showSessionDialog|setShowSessionDialog' frontend/src/components/panels/SetupTasksPanel.tsx returns 0 matches"
-  - criterion: "Repository-wide typecheck passes."
-    verification: "pnpm typecheck exits 0"
-  - criterion: "Repository-wide lint passes."
-    verification: "pnpm lint exits 0"
-depends_on: [TASK-687]
+  - criterion: Repository-wide typecheck passes.
+    verification: pnpm typecheck exits 0
+  - criterion: Repository-wide lint passes.
+    verification: pnpm lint exits 0
+depends_on:
+  - TASK-687
 estimated_complexity: medium
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: false
-  justification: "No sibling tests reference CreateSessionDialog / CreateSessionButton / the play-button affordance. Sidebar.mcpHealth.test.tsx mocks DraggableProjectTreeView via vi.mock so its rendered surface is irrelevant. No new test is needed — change is a deletion sweep verified by grep ACs plus existing pnpm typecheck/lint gates."
+  justification: No sibling tests reference CreateSessionDialog / CreateSessionButton / the play-button affordance. Sidebar.mcpHealth.test.tsx mocks DraggableProjectTreeView via vi.mock so its rendered surface is irrelevant. No new test is needed — change is a deletion sweep verified by grep ACs plus existing pnpm typecheck/lint gates.
 ---
-
 # Cut CreateSessionDialog, CreateSessionButton, and Crystal session-creation triggers from the sidebar
 
 ## Objective

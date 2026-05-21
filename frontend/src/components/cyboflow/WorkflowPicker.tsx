@@ -12,9 +12,10 @@ import type { WorkflowRow } from '../../../../shared/types/workflows';
 
 interface WorkflowPickerProps {
   projectId: number;
+  onWorkflowStarted?: (runId: string) => void;
 }
 
-export function WorkflowPicker({ projectId }: WorkflowPickerProps) {
+export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerProps) {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -56,6 +57,7 @@ export function WorkflowPicker({ projectId }: WorkflowPickerProps) {
     try {
       const result = await cyboflowApi.startRun({ workflowId: selectedId, projectId });
       useCyboflowStore.getState().setActiveRun(result.runId);
+      onWorkflowStarted?.(result.runId);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to start run');
     }
