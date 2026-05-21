@@ -1,7 +1,7 @@
 ---
 id: TASK-303
 idea_id: IDEA-007
-status: in-flight
+status: ready
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
