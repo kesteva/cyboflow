@@ -1,8 +1,8 @@
 ---
 id: TASK-698
 idea: SPRINT-027-compound
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/utils/runGit.ts
 files_readonly:
@@ -18,24 +18,23 @@ files_readonly:
 acceptance_criteria:
   - criterion: "encoding field removed from RunGitOptions; no 'buffer' literal in runGit.ts"
     verification: "grep -n 'encoding' main/src/utils/runGit.ts returns 0 in the interface block; grep -nE \"'buffer'|\\\"buffer\\\"\" main/src/utils/runGit.ts returns 0."
-  - criterion: "runGit and runGitAsync no longer reference options.encoding or the dead Buffer-to-string coercion"
+  - criterion: runGit and runGitAsync no longer reference options.encoding or the dead Buffer-to-string coercion
     verification: "grep -nE \"options\\.encoding|toString\\('utf8'\\)\" main/src/utils/runGit.ts returns 0."
   - criterion: "No caller passes encoding: 'buffer' anywhere"
     verification: "grep -rniE \"encoding\\s*:\\s*['\\\"]buffer['\\\"]\" main/src/ --include='*.ts' returns 0."
-  - criterion: "TypeScript compilation succeeds"
+  - criterion: TypeScript compilation succeeds
     verification: "cd main && npx tsc --noEmit -> exit 0."
-  - criterion: "runGit unit tests pass unchanged"
+  - criterion: runGit unit tests pass unchanged
     verification: "cd main && npx vitest run src/utils/__tests__/runGit.test.ts -> exit 0."
-  - criterion: "Full main suite passes"
+  - criterion: Full main suite passes
     verification: "cd main && npx vitest run -> exit 0."
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: false
-  justification: "Pure type-narrowing + dead-code removal. Existing runGit.test.ts asserts no buffer path. Full-suite vitest + tsc --noEmit are sufficient regression coverage; no caller passes buffer."
+  justification: Pure type-narrowing + dead-code removal. Existing runGit.test.ts asserts no buffer path. Full-suite vitest + tsc --noEmit are sufficient regression coverage; no caller passes buffer.
 ---
-
 # Narrow RunGitOptions: remove dead 'buffer' encoding option
 
 ## Objective

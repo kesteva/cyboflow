@@ -1,8 +1,8 @@
 ---
 id: TASK-704
 idea: SPRINT-028-compounder
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/preload.ts
   - main/src/ipc/uiState.ts
@@ -16,26 +16,25 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Zero references to sessionSortAscending|saveSessionSortAscending|getSessionSortAscending|save-session-sort-ascending in main/src/ and frontend/src/"
     verification: "grep -rnE 'sessionSortAscending|saveSessionSortAscending|getSessionSortAscending|save-session-sort-ascending' main/src/ frontend/src/ returns 0 matches"
-  - criterion: "preload no longer exposes saveSessionSortAscending"
+  - criterion: preload no longer exposes saveSessionSortAscending
     verification: "grep -n 'saveSessionSortAscending' main/src/preload.ts returns 0"
   - criterion: "ui-state:save-session-sort-ascending handler removed"
     verification: "grep -n 'ui-state:save-session-sort-ascending' main/src/ipc/uiState.ts returns 0"
-  - criterion: "uiStateManager has neither saveSessionSortAscending nor getSessionSortAscending method"
+  - criterion: uiStateManager has neither saveSessionSortAscending nor getSessionSortAscending method
     verification: "grep -nE 'saveSessionSortAscending|getSessionSortAscending' main/src/services/uiStateManager.ts returns 0"
-  - criterion: "electron.d.ts has no saveSessionSortAscending channel"
+  - criterion: electron.d.ts has no saveSessionSortAscending channel
     verification: "grep -n 'saveSessionSortAscending' frontend/src/types/electron.d.ts returns 0"
-  - criterion: "test mock no longer references sessionSortAscending in the getExpanded payload"
+  - criterion: test mock no longer references sessionSortAscending in the getExpanded payload
     verification: "grep -n 'sessionSortAscending' frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx returns 0"
-  - criterion: "pnpm typecheck + main + frontend tests all exit 0"
+  - criterion: pnpm typecheck + main + frontend tests all exit 0
     verification: "pnpm typecheck && pnpm --filter main test && pnpm --filter frontend test all exit 0"
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: false
-  justification: "Pure dead-code cut following TASK-687. No new behavior; the existing DraggableProjectTreeView.runs.test.tsx mock entry for sessionSortAscending must be cleaned up but no new test cases are needed."
+  justification: Pure dead-code cut following TASK-687. No new behavior; the existing DraggableProjectTreeView.runs.test.tsx mock entry for sessionSortAscending must be cleaned up but no new test cases are needed.
 ---
-
 # B2 — Remove dead sessionSortAscending backend plumbing
 
 ## Objective

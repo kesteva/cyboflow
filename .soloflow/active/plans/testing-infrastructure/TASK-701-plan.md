@@ -1,8 +1,8 @@
 ---
 id: TASK-701
 idea: SPRINT-026-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - tests/cyboflow-day3-gate.spec.ts
   - main/src/orchestrator/__tests__/cyboflowDayGate.test.ts
@@ -19,20 +19,20 @@ files_readonly:
 acceptance_criteria:
   - criterion: "tests/cyboflow-day3-gate.spec.ts no longer exists (file deleted, not just renamed in place)"
     verification: "test ! -e tests/cyboflow-day3-gate.spec.ts"
-  - criterion: "The day-3 gate test exists at main/src/orchestrator/__tests__/cyboflowDayGate.test.ts and imports from vitest"
+  - criterion: The day-3 gate test exists at main/src/orchestrator/__tests__/cyboflowDayGate.test.ts and imports from vitest
     verification: "test -e main/src/orchestrator/__tests__/cyboflowDayGate.test.ts AND grep -nE \"from 'vitest'\" main/src/orchestrator/__tests__/cyboflowDayGate.test.ts returns ≥1 match"
-  - criterion: "vitest.config.gate.ts include glob targets the relocated file"
+  - criterion: vitest.config.gate.ts include glob targets the relocated file
     verification: "grep -nE \"cyboflowDayGate.test\" vitest.config.gate.ts returns ≥1 match"
-  - criterion: "Playwright no longer attempts to collect the day-3 gate file"
+  - criterion: Playwright no longer attempts to collect the day-3 gate file
     verification: "pnpm test --list 2>&1 | grep -E 'cyboflow-day3-gate|cyboflowDayGate' returns 0 lines"
-  - criterion: "pnpm test exits 0 (Playwright suite collection no longer breaks on vitest import)"
-    verification: "pnpm test exits 0"
+  - criterion: pnpm test exits 0 (Playwright suite collection no longer breaks on vitest import)
+    verification: pnpm test exits 0
   - criterion: "pnpm test:gate still works (the relocated test is still runnable as the canonical day-3 gate)"
     verification: "pnpm test:gate exits 0 when claude is in PATH; exits 0 (skip path) when claude is not in PATH"
   - criterion: "Test file's imports of helpers and fixtures are updated to the new relative-path depths"
     verification: "grep -nE \"__dirname.*fixtures|createHarness|findExecutableInPath\" main/src/orchestrator/__tests__/cyboflowDayGate.test.ts returns matches with paths that resolve from the new location"
-  - criterion: "pnpm typecheck exits 0"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm typecheck exits 0
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -40,15 +40,14 @@ test_strategy:
   needed: true
   justification: "The relocated test file IS the test artifact. The only behavioral requirement is that it still runs as a vitest test under pnpm test:gate, and that Playwright no longer attempts to collect it. The existing test logic (gate semantics, Claude availability guard, beforeAll/afterAll harness setup) must remain functionally identical — only the file path and the relative imports change."
   targets:
-    - behavior: "The relocated cyboflowDayGate.test.ts skips cleanly when Claude is not in PATH (existing claudeAvailable guard preserved)"
-      test_file: "main/src/orchestrator/__tests__/cyboflowDayGate.test.ts"
+    - behavior: The relocated cyboflowDayGate.test.ts skips cleanly when Claude is not in PATH (existing claudeAvailable guard preserved)
+      test_file: main/src/orchestrator/__tests__/cyboflowDayGate.test.ts
       type: integration
-    - behavior: "pnpm test (Playwright) exits 0 — does not pick up cyboflowDayGate.test.ts because it lives outside tests/"
-      test_file: "playwright.config.ts"
+    - behavior: pnpm test (Playwright) exits 0 — does not pick up cyboflowDayGate.test.ts because it lives outside tests/
+      test_file: playwright.config.ts
       type: integration
 prerequisites: []
 ---
-
 # B3 — Fix Playwright/vitest spec-file conflict for cyboflow-day3-gate.spec.ts
 
 ## Objective

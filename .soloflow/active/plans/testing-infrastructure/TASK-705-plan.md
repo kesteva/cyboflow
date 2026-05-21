@@ -1,8 +1,8 @@
 ---
 id: TASK-705
 idea: SPRINT-028-compounder
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/ipc/cyboflow.ts
   - main/src/ipc/__tests__/cyboflow.test.ts
@@ -13,19 +13,19 @@ files_readonly:
   - frontend/src/utils/cyboflowApi.ts
 acceptance_criteria:
   - criterion: "cyboflow:listRuns rejects calls where args.projectId is not a number with { success: false, error mentions projectId }"
-    verification: "new unit test asserts result.success === false AND result.error matches /projectId/"
+    verification: new unit test asserts result.success === false AND result.error matches /projectId/
   - criterion: "cyboflow:listWorkflows applies the same runtime guard for args.projectId"
-    verification: "inspect main/src/ipc/cyboflow.ts; the listWorkflows handler uses the shared validateNumberArg helper"
+    verification: inspect main/src/ipc/cyboflow.ts; the listWorkflows handler uses the shared validateNumberArg helper
   - criterion: "cyboflow:startRun applies runtime guards for args.workflowId (string) and args.projectId (number)"
     verification: "new unit tests assert both invalid-arg cases return success: false"
-  - criterion: "A shared validator helper (validateNumberArg / validateStringArg) is defined in main/src/ipc/cyboflow.ts and used by all three guarded handlers"
+  - criterion: A shared validator helper (validateNumberArg / validateStringArg) is defined in main/src/ipc/cyboflow.ts and used by all three guarded handlers
     verification: "grep -nE 'function validate(Number|String)Arg|const validate(Number|String)Arg' main/src/ipc/cyboflow.ts returns >=1 match"
   - criterion: "main/src/ipc/__tests__/cyboflow.test.ts has at least one new case asserting cyboflow:listRuns returns { success: false } on bad projectId"
-    verification: "pnpm --filter main exec vitest run main/src/ipc/__tests__/cyboflow.test.ts passes including new cases"
-  - criterion: "pnpm --filter main test exits 0; existing cases continue to pass"
-    verification: "pnpm --filter main test exits 0"
-  - criterion: "pnpm typecheck exits 0"
-    verification: "pnpm typecheck exits 0"
+    verification: pnpm --filter main exec vitest run main/src/ipc/__tests__/cyboflow.test.ts passes including new cases
+  - criterion: pnpm --filter main test exits 0; existing cases continue to pass
+    verification: pnpm --filter main test exits 0
+  - criterion: pnpm typecheck exits 0
+    verification: pnpm typecheck exits 0
   - criterion: "bare cast pattern is replaced (no `args as { projectId: number }` style)"
     verification: "grep -nE 'args as \\{' main/src/ipc/cyboflow.ts returns 0 matches"
 depends_on: []
@@ -36,16 +36,15 @@ test_strategy:
   justification: "FIND-SPRINT-028-11 explicitly requests a unit test covering the invalid-arg path for at least cyboflow:listRuns. The existing cyboflow.test.ts has the makeHandlerCapture pattern; we extend with invalid-arg cases."
   targets:
     - behavior: "cyboflow:listRuns returns { success: false } with error matching /projectId/ when args.projectId is undefined or a string"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
     - behavior: "cyboflow:listWorkflows returns { success: false } when args.projectId is missing"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
     - behavior: "cyboflow:startRun returns { success: false } when args.workflowId is missing OR args.projectId is a string"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
 ---
-
 # B3 — Runtime input validation for cyboflow:* IPC handlers
 
 ## Objective

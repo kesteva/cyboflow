@@ -1,8 +1,8 @@
 ---
 id: TASK-702
 idea: SPRINT-026-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/runExecutor.test.ts
   - main/src/orchestrator/runExecutor.ts
@@ -15,18 +15,18 @@ files_readonly:
   - .soloflow/active/findings/SPRINT-026-findings.md
   - .soloflow/archive/done/orchestrator-and-trpc-router/TASK-640-done.md
 acceptance_criteria:
-  - criterion: "pnpm --filter main test exits 0 for runExecutor.test.ts specifically (all describe blocks pass)"
-    verification: "pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runExecutor.test.ts exits 0"
+  - criterion: pnpm --filter main test exits 0 for runExecutor.test.ts specifically (all describe blocks pass)
+    verification: pnpm --filter main exec vitest run main/src/orchestrator/__tests__/runExecutor.test.ts exits 0
   - criterion: "The four originally-failing test cases (per FIND-SPRINT-026-10) are present and passing — lifecycle transitions, bridgeEvents source arg, panelId/runId alignment"
     verification: "grep -nE 'lifecycle transitions|source arg|panelId/runId alignment|bridge drops output event when panelId has run- prefix' main/src/orchestrator/__tests__/runExecutor.test.ts returns ≥4 matches AND a verbose vitest run shows each as PASS"
   - criterion: "If production code in runExecutor.ts was changed, the change is documented in a code comment naming the FIND identifier (FIND-SPRINT-026-10)"
     verification: "If `git diff main main/src/orchestrator/runExecutor.ts` shows changes, then `grep -nE 'FIND-SPRINT-026-10' main/src/orchestrator/runExecutor.ts` returns ≥1 match; vacuous if production code is untouched"
-  - criterion: "A root-cause summary is appended to the done report classifying each of the 4 failures as test-assertion drift OR production regression"
+  - criterion: A root-cause summary is appended to the done report classifying each of the 4 failures as test-assertion drift OR production regression
     verification: "After execution, the done report contains a section 'Root-cause classification' listing each of the 4 failures with verdict"
   - criterion: "pnpm test:unit exits 0 (excluding the separately-tracked cyboflowSchema.test.ts failure)"
     verification: "pnpm test:unit exits 0, OR exits non-0 only because of cyboflowSchema.test.ts"
-  - criterion: "pnpm typecheck exits 0"
-    verification: "pnpm typecheck exits 0"
+  - criterion: pnpm typecheck exits 0
+    verification: pnpm typecheck exits 0
 depends_on: []
 estimated_complexity: medium
 epic: testing-infrastructure
@@ -35,21 +35,20 @@ test_strategy:
   justification: "This task IS the test fix. The test file itself is the primary artifact. Beyond making the existing 4 failing cases pass, no new test cases are required — but the executor must avoid the common failure mode of 'making the test pass by mutating the assertion to match wrong behavior'. The root-cause classification in the done report is the safeguard."
   targets:
     - behavior: "lifecycle transitions: onLifecycleTransition routes each ExecutionPhase to the right transition helper (sdk_initialized → running, completed → completed, canceled → canceled, pre_spawn/post_spawn → no-op)"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
     - behavior: "bridgeEvents source arg integration: lifecycleTransitions.running() fires when source emits output event with matching panelId; exactly 1 raw_events row inserted (skipPersistence=true on bridge, single-INSERT guarantee)"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
     - behavior: "panelId/runId alignment: bridge drops output events when panelId has the old 'run-<runId>' prefix (negative test locking in the post-TASK-663 invariant)"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
 prerequisites:
   - check: "node -e \"require('better-sqlite3')\" 2>&1 | grep -qE 'NODE_MODULE_VERSION' && echo MISMATCH || echo OK"
     fix: "pnpm electron:rebuild"
-    description: "FIND-SPRINT-026-4 confirms rawEventsSink.test.ts hit NODE_MODULE_VERSION mismatch in SPRINT-026. Probe before reproducing to avoid mis-attributing a binary mismatch as a logic regression."
+    description: FIND-SPRINT-026-4 confirms rawEventsSink.test.ts hit NODE_MODULE_VERSION mismatch in SPRINT-026. Probe before reproducing to avoid mis-attributing a binary mismatch as a logic regression.
     blocking: true
 ---
-
 # B4 — Investigate and fix pre-existing runExecutor.test.ts failures
 
 ## Objective
