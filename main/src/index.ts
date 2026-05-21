@@ -33,6 +33,9 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
+import { approvalEvents } from './orchestrator/trpc/routers/events';
+import type { ApprovalRequest } from './orchestrator/approvalRouter';
+import type { ApprovalCreatedEvent } from '../../shared/types/approvals';
 import type { DatabaseLike } from './orchestrator/types';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
@@ -693,6 +696,24 @@ app.whenReady().then(async () => {
     // (claudeCodeManager.makePreToolUseHook), so no per-request socket-reply
     // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    ApprovalRouter.getInstance().on('approvalCreated', (request: ApprovalRequest) => {
+      const payloadJson = JSON.stringify(request.input);
+      const event: ApprovalCreatedEvent = {
+        approval: {
+          id: request.id,
+          runId: request.runId,
+          workflowName: '', // TODO(approval-router): resolve via workflows-table lookup
+          toolName: request.toolName,
+          payloadPreview: payloadJson.length > 512 ? payloadJson.slice(0, 512) : payloadJson,
+          rationale: null,
+          createdAt: new Date(request.timestamp).toISOString(),
+          status: 'pending',
+        },
+      };
+      approvalEvents.emit('created', event);
+      console.log('[Main] Bridged approvalCreated → approvalEvents.emit(created) for approvalId=', request.id);
+    });
+    console.log('[Main] ApprovalRouter → approvalEvents bridge wired');
     console.log('[Main] ApprovalRouter initialized');
 
     // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
