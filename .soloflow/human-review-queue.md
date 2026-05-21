@@ -31,13 +31,15 @@ items: []
   blocked_checks:
     - Pass 1 visual_web — TASK-630 cascading IPCResponse type-narrowing across 22 UI component files cannot be exercised end-to-end by the sprint verifier under the current tooling
     - Level 2 visual_web — RunView SDK discriminator branch rendering not exercised in live Electron renderer
+    - Level 2 visual_web — TerminalPanel.tsx displayCwd render path (hasCwdString true/false branches) not exercised in live Electron renderer
   level: sprint
   severity: low
   created_at: "2026-05-18T00:00:00.000Z"
   affected_tasks:
     - SPRINT-015
     - TASK-682
-  updated_at: "2026-05-20T19:21:45.409Z"
+    - TASK-677
+  updated_at: "2026-05-21T01:18:22.608Z"
 
 - task: SPRINT-017
   type: config_gap
