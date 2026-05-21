@@ -22,8 +22,7 @@ describe('hasCwdString', () => {
   });
 
   it('returns false for null', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(hasCwdString(null as any)).toBe(false);
+    expect(hasCwdString(null as unknown as Parameters<typeof hasCwdString>[0])).toBe(false);
   });
 
   it('returns false for undefined', () => {
@@ -39,8 +38,7 @@ describe('hasCwdString', () => {
   });
 
   it('returns false for an object with a non-string cwd (number)', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(hasCwdString({ cwd: 123 as any })).toBe(false);
+    expect(hasCwdString({ cwd: 123 } as unknown as Parameters<typeof hasCwdString>[0])).toBe(false);
   });
 
   it('returns true for an object with extra properties alongside a valid cwd', () => {
