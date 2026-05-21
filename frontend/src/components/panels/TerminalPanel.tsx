@@ -7,7 +7,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { TerminalPanelProps } from '../../types/panelComponents';
 import { renderLog, devLog } from '../../utils/console';
 import { getTerminalTheme } from '../../utils/terminalTheme';
-import type { TerminalPanelState } from '../../../../shared/types/panels';
+import { hasCwdString } from '../../../../shared/types/panels';
 import '@xterm/xterm/css/xterm.css';
 
 // Type for terminal state restoration
@@ -267,10 +267,9 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
 
   // Derive the cwd to display in the header.
   // Priority: panel.state.customState.cwd → SessionContext.workingDirectory → ''
-  const displayCwd =
-    (panel.state?.customState as TerminalPanelState | undefined)?.cwd ??
-    workingDirectory ??
-    '';
+  const displayCwd = hasCwdString(panel.state?.customState)
+    ? panel.state.customState.cwd
+    : workingDirectory ?? '';
 
   // Always render the terminal div to keep XTerm instance alive
   return (
