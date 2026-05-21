@@ -6,9 +6,6 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-694": {
-      "status": "pending"
-    },
     "TASK-706": {
       "status": "pending"
     },
