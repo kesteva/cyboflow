@@ -13,13 +13,13 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
-import type { WorkflowRunRow } from '../../utils/cyboflowApi';
+import type { WorkflowRunListRow } from '../../utils/cyboflowApi';
 
 // ---------------------------------------------------------------------------
 // Shared mutable state for mocks
 // ---------------------------------------------------------------------------
 
-let mockRuns: WorkflowRunRow[] = [];
+let mockRuns: WorkflowRunListRow[] = [];
 const mockSetActiveRun = vi.fn();
 const mockNavigateToSessions = vi.fn();
 
@@ -223,7 +223,7 @@ import { DraggableProjectTreeView } from '../DraggableProjectTreeView';
 // ---------------------------------------------------------------------------
 
 let runCounter = 0;
-function makeRun(overrides: Partial<WorkflowRunRow> = {}): WorkflowRunRow {
+function makeRun(overrides: Partial<WorkflowRunListRow> = {}): WorkflowRunListRow {
   runCounter += 1;
   return {
     id: `run-${runCounter}`,
