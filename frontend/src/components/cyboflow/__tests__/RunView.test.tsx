@@ -385,6 +385,145 @@ describe('RunView', () => {
     expect(screen.queryByText(/"type": "stream_event"/)).not.toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // New typed event branch tests (TASK-696)
+  // -------------------------------------------------------------------------
+
+  it('routes a session_info event to the typed SessionInfoEventRow (shows "Run started" header and key fields)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'session_info' as StreamEvent['type'],
+      payload: {
+        type: 'session_info',
+        initial_prompt: 'Refactor the parser module.',
+        claude_command: 'sdk-in-process',
+        worktree_path: '/tmp/cyboflow-wt-test',
+        model: 'claude-sonnet-4-5',
+        permission_mode: 'approve',
+        timestamp: '2026-05-21T00:00:00.000Z',
+      },
+      timestamp: '2026-05-21T00:00:00.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // "Run started" header card must be visible
+    expect(screen.getByText(/Run started/)).toBeInTheDocument();
+    // Worktree path must be visible
+    expect(screen.getByText(/\/tmp\/cyboflow-wt-test/)).toBeInTheDocument();
+    // Model must be visible
+    expect(screen.getByText(/claude-sonnet-4-5/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('routes a rate_limit_event to the typed RateLimitEventRow (shows status text)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'rate_limit_event' as StreamEvent['type'],
+      payload: {
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'allowed_warning',
+          resetsAt: 1747776000,
+          rateLimitType: 'five_hour',
+          utilization: 0.85,
+        },
+        uuid: 'b2c3d4e5-0000-0000-0000-000000000001',
+        session_id: 'sess-rl-test',
+      },
+      timestamp: '2026-05-21T00:00:01.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Rate limit status must be visible
+    expect(screen.getByText(/allowed_warning/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('routes a system/hook_started event to the typed SystemEventRow (shows hook_name)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'hook_started',
+        hook_id: 'hook-001',
+        hook_name: 'pre-tool-use',
+        hook_event: 'PreToolUse',
+        uuid: 'c3d4e5f6-0000-0000-0000-000000000002',
+        session_id: 'sess-hs-test',
+      },
+      timestamp: '2026-05-21T00:00:02.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Type label must be visible
+    expect(screen.getByText(/system\/hook_started/)).toBeInTheDocument();
+    // Hook name must be visible
+    expect(screen.getByText(/pre-tool-use/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('routes a system/hook_response event to the typed SystemEventRow (shows outcome)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'hook_response',
+        hook_id: 'hook-001',
+        hook_name: 'pre-tool-use',
+        hook_event: 'PreToolUse',
+        output: 'ok',
+        stdout: '',
+        stderr: '',
+        exit_code: 0,
+        outcome: 'success',
+        uuid: 'd4e5f6a7-0000-0000-0000-000000000003',
+        session_id: 'sess-hr-test',
+      },
+      timestamp: '2026-05-21T00:00:03.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Type label must be visible
+    expect(screen.getByText(/system\/hook_response/)).toBeInTheDocument();
+    // Outcome must be visible
+    expect(screen.getByText(/success/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('routes a system/status event to the typed SystemEventRow (shows status value)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'status',
+        status: 'requesting',
+        uuid: 'e5f6a7b8-0000-0000-0000-000000000004',
+        session_id: 'sess-st-test',
+      },
+      timestamp: '2026-05-21T00:00:04.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Type label must be visible
+    expect(screen.getByText(/system\/status/)).toBeInTheDocument();
+    // Status value must be visible
+    expect(screen.getByText(/requesting/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
     // Get the mocked subscribeToStreamEvents from the module-level mock.
     const mockSubFn = vi.mocked(subscribeToStreamEvents);
