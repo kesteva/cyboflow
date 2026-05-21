@@ -421,15 +421,14 @@ export const BaseCliPanel: React.FC<BaseCliPanelProps> = ({
                   <label className="block text-xs font-medium text-text-secondary mb-1">
                     Permission Mode
                   </label>
-                  <select 
+                  <select
                     value={settings.defaultPermissionMode || 'approve'}
-                    onChange={(e) => onSettingsChange({ 
-                      ...settings, 
-                      defaultPermissionMode: e.target.value as 'approve' | 'ignore' 
+                    onChange={(e) => onSettingsChange({
+                      ...settings,
+                      defaultPermissionMode: e.target.value as 'approve'
                     })}
                     className="w-full px-2 py-1 text-xs border border-border-primary rounded bg-bg-primary"
                   >
-                    <option value="ignore">Skip permissions</option>
                     <option value="approve">Approve permissions</option>
                   </select>
                 </div>
