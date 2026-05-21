@@ -659,6 +659,7 @@ export class GitStatusManager extends EventEmitter {
       if (ahead > 0) {
         // Use git diff --shortstat for commit statistics
         try {
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           const statLine = execSync(`git diff --shortstat ${mainBranch}...HEAD`, { cwd: session.worktreePath }).toString().trim();
           if (statLine) {
             const filesMatch = statLine.match(/(\d+) files? changed/);
@@ -715,6 +716,7 @@ export class GitStatusManager extends EventEmitter {
       // Get total number of commits in the branch
       let totalCommits = ahead;
       try {
+        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
         const countStr = execSync(`git rev-list --count ${mainBranch}..HEAD`, { cwd: session.worktreePath }).toString().trim();
         totalCommits = parseInt(countStr, 10) || ahead;
       } catch {

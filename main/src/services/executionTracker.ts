@@ -185,6 +185,7 @@ export class ExecutionTracker extends EventEmitter {
       if (afterCommitHash !== context.beforeCommitHash && afterCommitHash !== 'UNCOMMITTED') {
         try {
           // Get the commit message from git log
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           commitMessage = execSync(`git log -1 --format=%s ${afterCommitHash}`, {
             cwd: context.worktreePath,
             encoding: 'utf8'

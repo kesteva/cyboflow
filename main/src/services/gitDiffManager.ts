@@ -226,6 +226,7 @@ export class GitDiffManager {
    */
   getCommitDiff(worktreePath: string, commitHash: string): GitDiffResult {
     try {
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const diff = execSync(`git show --format= ${commitHash}`, {
         cwd: worktreePath,
         encoding: 'utf8',
@@ -347,18 +348,21 @@ export class GitDiffManager {
     try {
 
       // Get diff between current branch and main
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const diff = execSync(`git diff origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
       });
 
       // Get changed files
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const changedFiles = execSync(`git diff --name-only origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
       }).trim().split('\n').filter((f: string) => f.length > 0);
 
       // Get stats
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const statsOutput = execSync(`git diff --stat origin/${mainBranch}...HEAD`, {
         cwd: worktreePath,
         encoding: 'utf8'
@@ -423,7 +427,8 @@ export class GitDiffManager {
 
   private getGitCommitDiff(worktreePath: string, fromCommit: string, toCommit: string): string {
     try {
-      return execSync(`git diff ${fromCommit}..${toCommit}`, { 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      return execSync(`git diff ${fromCommit}..${toCommit}`, {
         cwd: worktreePath, 
         encoding: 'utf8' 
       });
@@ -455,9 +460,10 @@ export class GitDiffManager {
 
   private getChangedFilesBetweenCommits(worktreePath: string, fromCommit: string, toCommit: string): string[] {
     try {
-      const output = execSync(`git diff --name-only ${fromCommit}..${toCommit}`, { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      const output = execSync(`git diff --name-only ${fromCommit}..${toCommit}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       return output.trim().split('\n').filter((f: string) => f.length > 0);
     } catch (error) {
@@ -516,9 +522,10 @@ export class GitDiffManager {
 
   private getCommitDiffStats(worktreePath: string, fromCommit: string, toCommit: string): GitDiffStats {
     try {
-      const output = execSync(`git diff --stat ${fromCommit}..${toCommit}`, { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
+      const output = execSync(`git diff --stat ${fromCommit}..${toCommit}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       
       return this.parseDiffStats(output);

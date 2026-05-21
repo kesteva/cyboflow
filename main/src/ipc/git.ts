@@ -418,6 +418,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
             );
 
             const stats = gitDiffManager.parseDiffStats(
+              // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
               execSync(`git diff --stat ${fromCommit.hash}`, { cwd: session.worktreePath, encoding: 'utf8' })
             );
 
@@ -456,6 +457,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
           try {
             // Try to get the parent of the older commit
+            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
             const parentHash = execSync(`git rev-parse ${olderCommit.hash}^`, {
               cwd: session.worktreePath,
               encoding: 'utf8'
@@ -489,6 +491,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           let fromCommitHash: string;
           try {
             // Try to get the parent of the commit
+            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
             fromCommitHash = execSync(`git rev-parse ${commits[0].hash}^`, {
               cwd: session.worktreePath,
               encoding: 'utf8'
@@ -505,16 +508,17 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           );
           
           const stats = gitDiffManager.parseDiffStats(
+            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
             execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
           );
-          
+
           const changedFiles = execSync(
             `git diff --name-only ${fromCommitHash}`,
             { cwd: session.worktreePath, encoding: 'utf8' }
           ).trim().split('\n').filter(f => f);
 
-          return { 
-            success: true, 
+          return {
+            success: true,
             data: {
               diff,
               stats,
@@ -529,6 +533,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
         try {
           // Try to get the parent of the first commit
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           fromCommitHash = execSync(`git rev-parse ${firstCommit.hash}^`, {
             cwd: session.worktreePath,
             encoding: 'utf8'
@@ -545,9 +550,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         );
         
         const stats = gitDiffManager.parseDiffStats(
+          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
           execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
         );
-        
+
         const changedFiles = execSync(
           `git diff --name-only ${fromCommitHash}`,
           { cwd: session.worktreePath, encoding: 'utf8' }

@@ -5,6 +5,7 @@ import * as os from 'os';
 import { glob } from 'glob';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { escapeShellArgs } from '../utils/shellEscape';
+import { runGitAsync } from '../utils/runGit';
 import type { AppServices } from './types';
 import type { Session } from '../types/session';
 
@@ -227,13 +228,9 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         throw new Error('Commit message is required');
       }
 
-      const { exec } = require('child_process');
-      const { promisify } = require('util');
-      const execAsync = promisify(exec);
-
       try {
         // Stage all changes
-        await execAsync('git add -A', { cwd: session.worktreePath });
+        await runGitAsync(session.worktreePath, ['add', '-A']);
 
         // Create the commit with Cyboflow signature if enabled
         const commitMessage = appendCommitFooter(request.message, configManager);
@@ -242,7 +239,7 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-${Date.now()}.txt`);
         try {
           await fs.writeFile(tmpFile, commitMessage, 'utf-8');
-          await execAsync(`git commit -F ${tmpFile}`, { cwd: session.worktreePath });
+          await runGitAsync(session.worktreePath, ['commit', '-F', tmpFile]);
         } finally {
           // Clean up the temporary file
           await fs.unlink(tmpFile).catch(() => {
@@ -264,7 +261,7 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         if (error instanceof Error && error.message.includes('pre-commit hook')) {
           // Try to commit again in case the pre-commit hook made changes
           try {
-            await execAsync('git add -A', { cwd: session.worktreePath });
+            await runGitAsync(session.worktreePath, ['add', '-A']);
 
             const retryMessage = appendCommitFooter(request.message, configManager);
 
@@ -272,7 +269,7 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
             const tmpFile = path.join(os.tmpdir(), `cyboflow-commit-retry-${Date.now()}.txt`);
             try {
               await fs.writeFile(tmpFile, retryMessage, 'utf-8');
-              await execAsync(`git commit -F ${tmpFile}`, { cwd: session.worktreePath });
+              await runGitAsync(session.worktreePath, ['commit', '-F', tmpFile]);
             } finally {
               // Clean up the temporary file
               await fs.unlink(tmpFile).catch(() => {
@@ -810,6 +807,7 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
       
       // Execute git command — use escapeShellArgs to safely quote every argument
       // and prevent shell injection from user-supplied request.args values.
+      // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
       const result = execSync(`git ${escapeShellArgs(request.args)}`, {
         cwd: project.path,
         encoding: 'utf-8',
