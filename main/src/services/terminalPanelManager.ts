@@ -1,5 +1,5 @@
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
-import { ToolPanel, TerminalPanelState, PanelEventType } from '../../../shared/types/panels';
+import { ToolPanel, TerminalPanelState, PanelEventType, hasCwdString } from '../../../shared/types/panels';
 import { panelManager } from './panelManager';
 import { mainWindow } from '../index';
 import * as os from 'os';
@@ -246,8 +246,7 @@ export class TerminalPanelManager {
     if (!panel) return;
     
     // Get current working directory (if possible)
-    let cwd = (panel.state.customState && 'cwd' in panel.state.customState) ? panel.state.customState.cwd : undefined;
-    cwd = cwd || process.cwd();
+    let cwd = hasCwdString(panel.state.customState) ? panel.state.customState.cwd : process.cwd();
     try {
       const pid = terminal.pty.pid;
       if (pid) {
@@ -283,7 +282,11 @@ export class TerminalPanelManager {
     }
     
     // Initialize terminal first
-    await this.initializeTerminal(panel, state.cwd || process.cwd());
+    // Mirrors hasCwdString's non-empty-string check (shared/types/panels.ts) — state.cwd is already
+    // typed as string|undefined so the guard is structural here, but the empty-string handling matches.
+    const restoreCwd =
+      typeof state.cwd === 'string' && state.cwd.length > 0 ? state.cwd : process.cwd();
+    await this.initializeTerminal(panel, restoreCwd);
     
     const terminal = this.terminals.get(panel.id);
     if (!terminal) return;
