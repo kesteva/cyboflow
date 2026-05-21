@@ -17,6 +17,8 @@
  *      signal abort and terminates cleanly when the signal is aborted.
  *   8. cyboflow.events.onApprovalCreated is a placeholder: yields zero events
  *      before signal abort and terminates cleanly when the signal is aborted.
+ *   9. cyboflow.events.onStuckDetected is a placeholder: yields zero events
+ *      before signal abort and terminates cleanly when the signal is aborted.
  */
 import { describe, it, expect } from 'vitest';
 import { TRPCError, callProcedure, isAsyncIterable } from '@trpc/server/unstable-core-do-not-import';
@@ -206,6 +208,29 @@ describe('appRouter subscription placeholders', () => {
 
     const result = await callSubscription(
       'cyboflow.events.onApprovalCreated',
+      undefined,
+      controller.signal,
+    );
+
+    expect(isAsyncIterable(result)).toBe(true);
+
+    const iterable = result as AsyncIterable<unknown>;
+    const collected: unknown[] = [];
+
+    controller.abort();
+
+    for await (const ev of iterable) {
+      collected.push(ev);
+    }
+
+    expect(collected).toHaveLength(0);
+  });
+
+  it('cyboflow.events.onStuckDetected yields zero events and terminates on abort', async () => {
+    const controller = new AbortController();
+
+    const result = await callSubscription(
+      'cyboflow.events.onStuckDetected',
       undefined,
       controller.signal,
     );

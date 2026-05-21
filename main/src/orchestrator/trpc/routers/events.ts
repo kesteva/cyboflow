@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { throttleAsyncIterator } from '../throttle';
 import type { ApprovalCreatedEvent, ApprovalDecidedEvent } from '../../../../../shared/types/approvals';
+import type { StuckDetectedEvent } from '../../../../../shared/types/stuckDetection';
 
 // ---------------------------------------------------------------------------
 // Placeholder event types — swapped out in stream-parser-to-main epic.
@@ -40,6 +41,16 @@ export interface StreamEvent {
  * share the same instance without circular imports.
  */
 export const approvalEvents = new EventEmitter();
+
+/**
+ * Main-process EventEmitter for stuck-run lifecycle events.
+ * The emit-source bridge (StuckDetector → stuckEvents) belongs in
+ * stuck-detection-and-observability's instantiation step in main/src/index.ts.
+ * Until that wiring lands, the subscription procedure exists and is
+ * type-safe but yields no events — sufficient to eliminate the
+ * "No subscription-procedure on path" runtime error.
+ */
+export const stuckEvents = new EventEmitter();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -191,6 +202,29 @@ export const eventsRouter = router({
       const source = eventToAsyncIterable<ApprovalDecidedEvent>(
         approvalEvents,
         'decided',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    }),
+
+  /**
+   * Subscribe to stuck-run detection notifications (all runs).
+   *
+   * Emitted when StuckDetector transitions a workflow_run to status='stuck'.
+   * The emit-source bridge (StuckDetector → stuckEvents) is wired in
+   * main/src/index.ts by the stuck-detection-and-observability epic.
+   * Until that wiring lands, the subscription yields no events but tears
+   * down cleanly — eliminating the "No subscription-procedure on path
+   * cyboflow.events.onStuckDetected" runtime error from reviewQueueSlice.
+   */
+  onStuckDetected: protectedProcedure
+    .subscription(async function* ({ signal }): AsyncGenerator<StuckDetectedEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<StuckDetectedEvent>(
+        stuckEvents,
+        'detected',
         abortSignal,
       );
       for await (const ev of source) {

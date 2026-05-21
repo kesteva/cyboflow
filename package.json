@@ -20,7 +20,10 @@
       "@homebridge/node-pty-prebuilt-multiarch",
       "esbuild",
       "msgpackr-extract"
-    ]
+    ],
+    "patchedDependencies": {
+      "trpc-electron@0.1.2": "patches/trpc-electron@0.1.2.patch"
+    }
   },
   "scripts": {
     "dev": "pnpm run electron-dev",
