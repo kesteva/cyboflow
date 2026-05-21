@@ -54,7 +54,11 @@ export interface ContextDeps {
  * The shape of this return value is what `protectedProcedure` asserts on — keep
  * `userId` as the canonical field name regardless of how it is populated.
  */
-export function createContext(deps: ContextDeps = {}) {
+export function createContext(deps: ContextDeps = {}): {
+  userId: 'local';
+  setDockBadge: (count: number) => void;
+  db?: DatabaseLike;
+} {
   const { setDockBadge = (_count: number) => undefined, db } = deps;
   return { userId: 'local' as const, setDockBadge, db };
 }

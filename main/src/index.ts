@@ -687,7 +687,7 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ setDockBadge: (count) => dockBadgeService.setBadgeCount(count), db }),
+      createContext: () => createContext({ db: db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count) }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
