@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-028
-pending_count: 4
-last_updated: 2026-05-21T00:00:00Z
+pending_count: 5
+last_updated: 2026-05-21T22:10:00Z
 ---
 
 # Findings Queue
@@ -26,6 +26,16 @@ last_updated: 2026-05-21T00:00:00Z
 - **location:** main/src/ipc/app.ts:46-54 + main/src/database/database.ts:2834-2849
 - **description:** After TASK-685, `app:record-open` and `app:get-last-open` IPC handlers (and the matching `recordAppOpen` / `getLastAppOpen` / `getLastAppVersion` database methods) have no preload-typed surface and zero frontend callers — grep across `frontend/src/` and `main/src/preload.ts` finds nothing. The only live caller is the internal `databaseService.recordAppOpen(false, currentVersion)` from `main/src/index.ts:741`. The IPC channels themselves are dead. Discovered while verifying signature-narrow propagation; out of TASK-685 scope but worth a follow-up.
 - **suggested_action:** Consider deleting the two IPC handlers in `main/src/ipc/app.ts` and inlining `recordAppOpen` as a private DB call from `index.ts` (or keeping the DB methods and dropping just the IPC handlers). If retained for future analytics/diagnostics, document the rationale in `docs/ARCHITECTURE.md` so the next review pass doesn't flag it again.
+- **resolved_by:**
+
+## FIND-SPRINT-028-5
+- **source:** TASK-687 (verifier)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/utils/cyboflowApi.ts:33-45 + shared/types/cyboflow.ts:41-54
+- **description:** TASK-687 introduces a local `WorkflowRunRow` interface in `frontend/src/utils/cyboflowApi.ts` (the listRuns return shape, intentionally excluding `policy_json`) while a heavier `WorkflowRunRow` already exists in `shared/types/cyboflow.ts` (includes `policy_json` and `stuck_at`). The two shapes have identical names but different members, which creates an ambient ambiguity risk: a future caller importing `WorkflowRunRow` from `shared/types/cyboflow` and passing it to `listRuns({})` (or vice versa) would type-check but mismatch at runtime. The CLAUDE.md "IPC handler ↔ declared T parity" rule warns about this class of bug (FIND-SPRINT-024-4 / TASK-637).
+- **suggested_action:** Rename the listRuns return shape to something distinguishing (e.g. `WorkflowRunListRow` or `WorkflowRunRowLite`) so the two co-exist without collision; or alternatively move the lite shape into `shared/types/cyboflow.ts` as a typed `Omit<WorkflowRunRow, 'policy_json'>` derivation. The current duplication is benign today (no caller imports both) but is the kind of latent shape-drift the IPC parity rule is meant to catch.
 - **resolved_by:**
 
 ## FIND-SPRINT-028-4
