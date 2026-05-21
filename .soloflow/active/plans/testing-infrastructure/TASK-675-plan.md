@@ -1,8 +1,8 @@
 ---
 id: TASK-675
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/database/__tests__/cyboflowSchema.test.ts
 files_readonly:
@@ -12,13 +12,13 @@ files_readonly:
   - main/src/orchestrator/stuckDetector.ts
 acceptance_criteria:
   - criterion: "The test case 'rebuilds the table when worktree_path is NOT NULL (canonical is nullable) or stuck_detected_at orphan column exists' passes on `main`."
-    verification: "Run `pnpm --filter @cyboflow/main test -- cyboflowSchema.test.ts` from the repo root; exit code 0 and the named case appears in the passing list."
+    verification: Run `pnpm --filter @cyboflow/main test -- cyboflowSchema.test.ts` from the repo root; exit code 0 and the named case appears in the passing list.
   - criterion: "The test reflects the actual production contract: `stuck_detected_at` is NOT an orphan column — it is added by migration 007 and re-added by `reconcileWorkflowRunsSchema()` at `main/src/database/database.ts:1360-1363`. After reconciliation, `stuck_detected_at` MUST be present on `workflow_runs`."
     verification: "grep -n 'stuck_detected_at' main/src/database/__tests__/cyboflowSchema.test.ts confirms the assertion at line 680 has flipped from `toBe(false)` (column gone) to `toBe(true)` or `toContain('stuck_detected_at')` (column present)."
   - criterion: "Other test invariants in the same case remain intact: worktree_path becomes nullable after rebuild; permission_mode_snapshot defaults to 'default'; the seed row 'run-preserve' survives; an INSERT without worktree_path succeeds."
     verification: "Read the updated test body and confirm all five sub-assertions (worktree_path notnull=0, stuck_detected_at present, permission_mode_snapshot default, preserved row data, INSERT without worktree_path) are still present."
   - criterion: "The other 2 reconciler test cases ('adds permission_mode_snapshot...' and 'is a no-op on a fresh install...') continue to pass."
-    verification: "Same vitest invocation as above — all 3 cases in the `workflow_runs reconciler (post-006 in-place edits)` describe block pass."
+    verification: Same vitest invocation as above — all 3 cases in the `workflow_runs reconciler (post-006 in-place edits)` describe block pass.
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -27,10 +27,9 @@ test_strategy:
   justification: "This task IS a test fix. The 'test' being modified is the failing case itself."
   targets:
     - behavior: "After Tier 1 + Tier 2 reconciliation on a pre-edit 006 install, stuck_detected_at column IS present (added back by the post-Tier-2 idempotent ALTER at database.ts:1360)."
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
 ---
-
 # Fix stale cyboflowSchema.test.ts assertion that expected stuck_detected_at to be dropped
 
 ## Objective

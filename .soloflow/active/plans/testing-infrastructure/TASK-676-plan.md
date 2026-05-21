@@ -1,8 +1,8 @@
 ---
 id: TASK-676
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__test_fixtures__/rawEvents.ts
   - main/src/orchestrator/__tests__/__fixtures__/rawEvents.ts
@@ -20,8 +20,8 @@ acceptance_criteria:
     verification: "Run `grep -rn 'CREATE TABLE.*raw_events' main/src/` and confirm the only match is in `main/src/orchestrator/__test_fixtures__/rawEvents.ts` (1 hit) and `main/src/database/migrations/006_cyboflow_schema.sql` (production source of truth). No matches in any `*.test.ts` file."
   - criterion: "Every test file that previously had an inline `RAW_EVENTS_DDL`, `makeDb()`, or `countRows()` helper now imports `RAW_EVENTS_DDL`, `makeRawEventsDb`, and `countRawEvents` from `'../../__test_fixtures__/rawEvents'` (for orchestrator tests) or the appropriate relative path."
     verification: "Run `grep -rn \"from .*__test_fixtures__/rawEvents\" main/src/` and confirm at least 3 matches: runEventBridge.test.ts, runExecutor.test.ts, rawEventsSink.test.ts (the last imports via a deeper relative path)."
-  - criterion: "All affected test files continue to pass after the refactor — no behavioral change introduced."
-    verification: "Run `pnpm --filter @cyboflow/main test -- runEventBridge.test.ts runExecutor.test.ts rawEventsSink.test.ts` from the repo root; exit code 0."
+  - criterion: All affected test files continue to pass after the refactor — no behavioral change introduced.
+    verification: Run `pnpm --filter @cyboflow/main test -- runEventBridge.test.ts runExecutor.test.ts rawEventsSink.test.ts` from the repo root; exit code 0.
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -29,17 +29,16 @@ test_strategy:
   needed: true
   justification: "This refactor moves shared test fixtures and updates 3 importing test files. The 3 test files themselves serve as the regression test — they must continue to pass with identical behavior. Existing sibling tests in the same directories (e.g. dbAdapter.ts, loggerLikeSpy.ts) are already imported via the canonical __test_fixtures__/ path, so the move aligns with the established convention."
   targets:
-    - behavior: "runEventBridge.test.ts continues to pass with the imported shared fixture."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+    - behavior: runEventBridge.test.ts continues to pass with the imported shared fixture.
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: integration
-    - behavior: "runExecutor.test.ts continues to pass with the imported shared fixture."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+    - behavior: runExecutor.test.ts continues to pass with the imported shared fixture.
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
-    - behavior: "rawEventsSink.test.ts continues to pass after replacing its inline DDL/makeDb/countRows with shared fixture imports."
-      test_file: "main/src/services/streamParser/__tests__/rawEventsSink.test.ts"
+    - behavior: rawEventsSink.test.ts continues to pass after replacing its inline DDL/makeDb/countRows with shared fixture imports.
+      test_file: main/src/services/streamParser/__tests__/rawEventsSink.test.ts
       type: integration
 ---
-
 # Complete raw_events DDL deduplication: align fixture path with __test_fixtures__/ convention and remove the fourth inline copy
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-678
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/services/gitDiffManager.ts
   - main/src/services/__tests__/gitDiffManager.test.ts
@@ -16,8 +16,8 @@ acceptance_criteria:
     verification: "grep -n 'pwned\\|adversarial\\|injection' main/src/services/__tests__/gitDiffManager.test.ts returns at least 2 hits, AND running `pnpm --filter @cyboflow/main test -- gitDiffManager.test.ts` exits 0."
   - criterion: "All other behavior of `getDiffStats` and `createDiffForUntrackedFiles` is preserved: untracked file line counts still contribute to additions; untracked-file diff blocks still include the `diff --git a/<file> b/<file>` header, the `new file mode 100644` line, the `+++ b/<file>` line, the `@@ -0,0 +1,N @@` hunk header, and each file line prefixed with `+`."
     verification: "Run `pnpm --filter @cyboflow/main test -- gitDiffManager.test.ts` and confirm any existing tests that exercise these output shapes continue to pass. If no such test exists today, add at least one happy-path test alongside the adversarial test to lock in the diff output shape."
-  - criterion: "Typecheck passes."
-    verification: "Run `pnpm typecheck`; exit code 0."
+  - criterion: Typecheck passes.
+    verification: Run `pnpm typecheck`; exit code 0.
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
@@ -25,17 +25,16 @@ test_strategy:
   needed: true
   justification: "Security regression test is mandatory. The bug class (shell injection via untracked filename) must be locked in with an adversarial-filename test so a future regression to the unsafe interpolation pattern is caught immediately. No existing `gitDiffManager.test.ts` file exists today (`Glob: main/src/services/__tests__/gitDiffManager*` returned 0 files), so this task creates one. Sibling tests already use this pattern via `main/src/utils/__tests__/shellEscape.test.ts` (already added by TASK-670)."
   targets:
-    - behavior: "A filename containing $(touch /tmp/cyboflow-pwned) does NOT create /tmp/cyboflow-pwned when getDiffStats() iterates untracked files."
-      test_file: "main/src/services/__tests__/gitDiffManager.test.ts"
+    - behavior: A filename containing $(touch /tmp/cyboflow-pwned) does NOT create /tmp/cyboflow-pwned when getDiffStats() iterates untracked files.
+      test_file: main/src/services/__tests__/gitDiffManager.test.ts
       type: integration
-    - behavior: "A filename containing backticks does NOT execute the backticked command when createDiffForUntrackedFiles() reads file contents."
-      test_file: "main/src/services/__tests__/gitDiffManager.test.ts"
+    - behavior: A filename containing backticks does NOT execute the backticked command when createDiffForUntrackedFiles() reads file contents.
+      test_file: main/src/services/__tests__/gitDiffManager.test.ts
       type: integration
     - behavior: "Happy path: a normal filename's untracked-file line count is correctly added to the diff stats; the produced diff block matches the canonical shape."
-      test_file: "main/src/services/__tests__/gitDiffManager.test.ts"
+      test_file: main/src/services/__tests__/gitDiffManager.test.ts
       type: integration
 ---
-
 # Eliminate shell injection in gitDiffManager.ts (lines 490 + 597)
 
 ## Objective

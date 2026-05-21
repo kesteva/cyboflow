@@ -1,8 +1,8 @@
 ---
 id: TASK-677
 idea: SPRINT-025-compounder
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - shared/types/panels.ts
   - main/src/ipc/panels.ts
@@ -15,10 +15,10 @@ acceptance_criteria:
     verification: "grep -n 'export function hasCwdString' shared/types/panels.ts returns exactly 1 hit, and the function signature matches `state is { cwd: string }`."
   - criterion: "All 4 cwd-narrowing call sites are migrated to the shared guard. The local copy at `main/src/ipc/panels.ts:13-21` is deleted; the ad-hoc narrowings at `main/src/services/terminalPanelManager.ts:249` (saveTerminalState) and `main/src/services/terminalPanelManager.ts:286` (restoreTerminalState `state.cwd || process.cwd()`) use the guard; the unsafe `as TerminalPanelState | undefined` cast at `frontend/src/components/panels/TerminalPanel.tsx:271` is replaced with a guard-based narrowing."
     verification: "Run all 4 greps and confirm: (a) `grep -n 'function hasCwdString' main/src/ipc/panels.ts` returns 0 hits (local copy deleted); (b) `grep -n \"'cwd' in panel.state.customState\" main/src/services/terminalPanelManager.ts` returns 0 hits; (c) `grep -n 'as TerminalPanelState | undefined' frontend/src/components/panels/TerminalPanel.tsx` returns 0 hits; (d) `grep -rn 'hasCwdString' main/src frontend/src shared/` returns at least 4 hits (1 declaration + 3+ imports/usages)."
-  - criterion: "TypeScript typecheck passes across all workspaces with the migrated code."
-    verification: "Run `pnpm typecheck` from the repo root; exit code 0."
+  - criterion: TypeScript typecheck passes across all workspaces with the migrated code.
+    verification: Run `pnpm typecheck` from the repo root; exit code 0.
   - criterion: "Existing tests (terminal panel tests, panel IPC tests) continue to pass."
-    verification: "Run `pnpm --filter @cyboflow/main test` and `pnpm --filter @cyboflow/frontend test`; both exit 0."
+    verification: Run `pnpm --filter @cyboflow/main test` and `pnpm --filter @cyboflow/frontend test`; both exit 0.
 depends_on: []
 estimated_complexity: medium
 epic: standalone-terminal-panels
@@ -27,16 +27,15 @@ test_strategy:
   justification: "The shared guard touches 4 production sites including a frontend display path. New unit tests on the guard catch malformed customState shapes (null, missing cwd, non-string cwd, empty string) that any of the call sites might encounter. Sibling-test scan: `main/src/ipc/__tests__/` and `main/src/services/__tests__/` contain panel-IPC and terminal-manager tests; `frontend/src/components/panels/__tests__/` (if present) covers TerminalPanel."
   targets:
     - behavior: "hasCwdString returns true for `{ cwd: '/some/path' }`, false for `null`, undefined, `{}`, `{ cwd: '' }`, `{ cwd: 123 }`."
-      test_file: "shared/types/__tests__/panels.test.ts"
+      test_file: shared/types/__tests__/panels.test.ts
       type: unit
-    - behavior: "Existing terminal panel IPC handler tests (cwd resolution path) still pass after migration."
-      test_file: "main/src/ipc/__tests__/panels.test.ts"
+    - behavior: Existing terminal panel IPC handler tests (cwd resolution path) still pass after migration.
+      test_file: main/src/ipc/__tests__/panels.test.ts
       type: integration
-    - behavior: "TerminalPanel frontend still renders displayCwd from customState.cwd correctly after replacing the cast with a guard."
-      test_file: "frontend/src/components/panels/__tests__/TerminalPanel.test.tsx"
+    - behavior: TerminalPanel frontend still renders displayCwd from customState.cwd correctly after replacing the cast with a guard.
+      test_file: frontend/src/components/panels/__tests__/TerminalPanel.test.tsx
       type: component
 ---
-
 # Promote hasCwdString to shared/types/panels.ts and consolidate the 4 cwd-narrowing sites
 
 ## Objective

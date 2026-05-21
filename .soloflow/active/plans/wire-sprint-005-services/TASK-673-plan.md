@@ -1,8 +1,8 @@
 ---
 id: TASK-673
 idea: IDEA-SPRINT-024-compound
-status: ready
-created: 2026-05-20T00:00:00Z
+status: in-flight
+created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/services/cliManagerFactory.ts
   - main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts
@@ -14,16 +14,16 @@ files_readonly:
 acceptance_criteria:
   - criterion: "In main/src/services/cliManagerFactory.ts, the `claudeManagerFactory` closure performs a structural duck-type check on `additionalOptions.db` BEFORE the cast to `Database.Database`. The check verifies (a) the value is truthy AND (b) `typeof value.prepare === 'function'`. A failure of either check throws a TypeError naming the specific failure mode."
     verification: "grep -nE 'typeof.*prepare.*function' main/src/services/cliManagerFactory.ts returns at least 1 hit inside registerClaudeTool; the surrounding code shows the check fires before `new ClaudeCodeManager(...)`."
-  - criterion: "The thrown TypeError messages are distinct between missing-db and wrong-shape-db so logs reveal which precondition failed."
+  - criterion: The thrown TypeError messages are distinct between missing-db and wrong-shape-db so logs reveal which precondition failed.
     verification: "Missing-db path throws message containing 'requires `db`'; wrong-shape path throws message containing '.prepare' or 'Database instance'."
   - criterion: "The existing 'constructor throws TypeError when db is undefined' test in claudeCodeManagerWiring.test.ts continues to pass unchanged."
     verification: "Run `cd main && pnpm exec vitest run src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` and confirm exit 0 with that test still green."
   - criterion: "New tests assert the cliManagerFactory duck-type guard fires for wrong-shape db (object lacking .prepare, primitive)."
     verification: "grep -nE 'duck-type guard|prepare.*not a function|wrong-shape db' main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts returns at least 1 hit. The new tests pass."
-  - criterion: "Full main vitest suite remains green."
+  - criterion: Full main vitest suite remains green.
     verification: "Run `cd main && pnpm exec vitest run` and confirm exit 0."
-  - criterion: "main typecheck passes."
-    verification: "Run `pnpm --filter main typecheck` and confirm exit 0."
+  - criterion: main typecheck passes.
+    verification: Run `pnpm --filter main typecheck` and confirm exit 0.
   - criterion: "Out-of-scope: option (b) per the FIND-SPRINT-024-13 skeptic — typed `ClaudeAdditionalOptions` interface — is NOT introduced. The factory signature continues to accept `additionalOptions?: unknown`."
     verification: "grep -n 'additionalOptions?: unknown' main/src/services/cliManagerFactory.ts still returns at least 1 hit."
 depends_on: []
@@ -34,13 +34,12 @@ test_strategy:
   justification: "This task adds a runtime guard whose failure mode is silent (without the guard, a wrong-shape db propagates downstream and surfaces as a cryptic `db.prepare is not a function` at the first RawEventsSink write). The guard MUST be tested with wrong-shape inputs to prove it fires. The canonical home for ClaudeCodeManager wiring tests is claudeCodeManagerWiring.test.ts, which already hosts the sibling missing-db test."
   targets:
     - behavior: "cliManagerFactory's claude tool factory throws TypeError when additionalOptions.db is a plain object lacking .prepare."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts
       type: unit
     - behavior: "cliManagerFactory's claude tool factory continues to throw TypeError when additionalOptions.db is undefined OR additionalOptions itself is undefined."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts
       type: unit
 ---
-
 # Add structural duck-type guard for additionalOptions.db cast in cliManagerFactory
 
 ## Objective
