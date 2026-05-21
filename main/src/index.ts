@@ -51,6 +51,7 @@ import {
 } from './services/cyboflow/transitions';
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
+import { recoverActiveStateOrphans } from './orchestrator/runRecovery';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -720,6 +721,17 @@ app.whenReady().then(async () => {
     const recoveredCount = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
     if (recoveredCount > 0) {
       console.log(`[Main] Recovered ${recoveredCount} stale awaiting_review run(s) on boot`);
+    }
+
+    // Boot recovery: any running/starting rows from a previous process have no live
+    // executor — the SDK iterator and PTY are gone. Transition them to failed.
+    const orphanRecovery = recoverActiveStateOrphans(db, runQueues);
+    if (
+      orphanRecovery.runningRecovered > 0 ||
+      orphanRecovery.startingRecovered > 0 ||
+      orphanRecovery.approvalsCanceled > 0
+    ) {
+      console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
     }
 
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
