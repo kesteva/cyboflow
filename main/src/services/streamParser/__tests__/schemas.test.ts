@@ -27,6 +27,11 @@ import {
   resultErrorDuringExecution,
   resultErrorMaxStructuredOutputRetries,
   streamEvent,
+  sessionInfo,
+  rateLimitEvent,
+  systemHookStarted,
+  systemHookResponse,
+  systemStatus,
 } from './sdkMockFactories';
 
 // Shared narrower — no logger (silent narrow, same never-throw contract)
@@ -262,6 +267,116 @@ describe('StreamEvent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// SessionInfoEvent (orchestrator-synthetic, TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('SessionInfoEvent', () => {
+  it('parses session_info factory and narrows to session_info (not __unknown__)', () => {
+    const raw = sessionInfo();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('session_info');
+    if (event.type !== 'session_info') {
+      throw new Error('Expected SessionInfoEvent');
+    }
+    expect(event.worktree_path).toBe('/tmp/cyboflow-worktree-abc123');
+    expect(event.model).toBe('claude-sonnet-4-5');
+    expect(event.permission_mode).toBe('approve');
+    expect(typeof event.initial_prompt).toBe('string');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RateLimitEvent (TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('RateLimitEvent', () => {
+  it('parses rate_limit_event factory and narrows to rate_limit_event (not __unknown__)', () => {
+    const raw = rateLimitEvent();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('rate_limit_event');
+    if (event.type !== 'rate_limit_event') {
+      throw new Error('Expected RateLimitEvent');
+    }
+    expect(event.rate_limit_info.status).toBe('allowed_warning');
+    expect(event.rate_limit_info.resetsAt).toBe(1747776000);
+    expect(event.rate_limit_info.rateLimitType).toBe('five_hour');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SystemHookStartedEvent (TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('SystemHookStartedEvent', () => {
+  it('parses system/hook_started factory and narrows to system/hook_started (not __unknown__)', () => {
+    const raw = systemHookStarted();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('system');
+    if (event.type !== 'system' || event.subtype !== 'hook_started') {
+      throw new Error('Expected SystemHookStartedEvent');
+    }
+    expect(event.hook_name).toBe('pre-tool-use');
+    expect(event.hook_event).toBe('PreToolUse');
+    expect(typeof event.hook_id).toBe('string');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SystemHookResponseEvent (TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('SystemHookResponseEvent', () => {
+  it('parses system/hook_response factory and narrows to system/hook_response (not __unknown__)', () => {
+    const raw = systemHookResponse();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('system');
+    if (event.type !== 'system' || event.subtype !== 'hook_response') {
+      throw new Error('Expected SystemHookResponseEvent');
+    }
+    expect(event.outcome).toBe('success');
+    expect(event.hook_name).toBe('pre-tool-use');
+    expect(event.exit_code).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SystemStatusEvent (TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('SystemStatusEvent', () => {
+  it('parses system/status factory and narrows to system/status (not __unknown__)', () => {
+    const raw = systemStatus();
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('system');
+    if (event.type !== 'system' || event.subtype !== 'status') {
+      throw new Error('Expected SystemStatusEvent');
+    }
+    expect(event.status).toBe('requesting');
+    expect(typeof event.session_id).toBe('string');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // UnknownStreamEvent fallback — catch-all behavior on malformed input
 // ---------------------------------------------------------------------------
 
@@ -348,6 +463,8 @@ describe('exhaustive union coverage', () => {
         case 'user': return 'user';
         case 'result': return `result/${event.subtype}`;
         case 'stream_event': return 'stream_event';
+        case 'session_info': return 'session_info';
+        case 'rate_limit_event': return 'rate_limit_event';
         default:
           // If a new variant is added to ClaudeStreamEvent without being handled here,
           // tsc --noEmit will fail to compile this line — the assertNever tripwire.
@@ -361,6 +478,11 @@ describe('exhaustive union coverage', () => {
     const fixtures: Array<[ClaudeStreamEvent, string]> = [
       [systemInit(), 'system/init'],
       [systemCompactBoundary(), 'system/compact_boundary'],
+      [systemHookStarted(), 'system/hook_started'],
+      [systemHookResponse(), 'system/hook_response'],
+      [systemStatus(), 'system/status'],
+      [sessionInfo(), 'session_info'],
+      [rateLimitEvent(), 'rate_limit_event'],
       [assistant(), 'assistant'],
       [userStringContent(), 'user'],
       [userArrayContent(), 'user'],
