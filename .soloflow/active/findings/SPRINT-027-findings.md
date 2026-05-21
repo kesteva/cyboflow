@@ -27,3 +27,4 @@ SPRINT-027 started with missing infra: playwright (stale shadows), peekaboo (CLI
 - **description:** Pre-existing test failure: killProcess mid-stream test times out at 5000ms. Test: killProcess mid-stream clears pipelines, sdkRuns, and processes maps. Unrelated to TASK-673 changes.
 - **suggested_action:** Investigate ClaudeCodeManager.killProcess test — likely needs a longer timeout or a mock that resolves faster.
 - **resolved_by:** 
+SoloFlow workflow defect: TASK-674 (SPRINT-025-compounder) was a duplicate of TASK-671 (SPRINT-024-compound) — both targeted the same 4 stale assertions in runExecutor.test.ts. Acceptance met by a5f0a83. Compound's task-extraction step should deduplicate against open backlog tasks targeting the same files/symbols.
