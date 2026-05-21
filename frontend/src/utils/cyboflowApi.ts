@@ -27,10 +27,10 @@ export interface StartRunResult {
 }
 
 /**
- * Subset of WorkflowRunRow returned by cyboflow:listRuns.
+ * Subset of WorkflowRunListRow returned by cyboflow:listRuns.
  * Excludes the heavy policy_json column intentionally.
  */
-export interface WorkflowRunRow {
+export interface WorkflowRunListRow {
   id: string;
   workflow_id: string;
   project_id: number;
@@ -169,9 +169,9 @@ export async function approveRun({
  * List the workflow runs for a project, newest first.
  * Returns a lightweight row (policy_json excluded).
  */
-export async function listRuns({ projectId }: { projectId: number }): Promise<WorkflowRunRow[]> {
+export async function listRuns({ projectId }: { projectId: number }): Promise<WorkflowRunListRow[]> {
   const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:listRuns', { projectId }) as IPCResponse<WorkflowRunRow[]>;
+  const res = await electron.invoke('cyboflow:listRuns', { projectId }) as IPCResponse<WorkflowRunListRow[]>;
   if (!res.success) throw new Error(res.error ?? 'listRuns failed');
   return res.data ?? [];
 }

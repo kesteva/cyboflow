@@ -11,7 +11,7 @@ import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
 import { listRuns } from '../utils/cyboflowApi';
-import type { WorkflowRunRow } from '../utils/cyboflowApi';
+import type { WorkflowRunListRow } from '../utils/cyboflowApi';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
 import type { Project, CreateProjectRequest } from '../types/project';
@@ -32,7 +32,7 @@ interface ProjectWithRuns extends Project {
   /** Always-empty placeholder; kept so existing folder/drag logic compiles. */
   sessions: never[];
   folders: Folder[];
-  runs: WorkflowRunRow[];
+  runs: WorkflowRunListRow[];
 }
 
 interface DragState {
@@ -180,7 +180,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
       // Fetch runs for every project in parallel (newest first — server sorts DESC)
       const runsPerProject = await Promise.all(
-        projects.map(p => listRuns({ projectId: p.id }).catch(() => [] as WorkflowRunRow[])),
+        projects.map(p => listRuns({ projectId: p.id }).catch(() => [] as WorkflowRunListRow[])),
       );
 
       const projectsWithRunsData: ProjectWithRuns[] = projects.map((p, i) => ({
@@ -846,7 +846,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // Run row click
   // ---------------------------------------------------------------------------
 
-  const handleRunClick = (run: WorkflowRunRow) => {
+  const handleRunClick = (run: WorkflowRunListRow) => {
     useCyboflowStore.getState().setActiveRun(run.id);
     useNavigationStore.getState().navigateToSessions();
   };
