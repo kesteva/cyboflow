@@ -128,7 +128,11 @@ Four buckets describe the current state:
   the heavy `policy_json` column).
 - `cyboflow:mcp-health` — point-in-time MCP server health snapshot.
 
-Note: `cyboflow:mcp-health` has no v2 tRPC counterpart on the AppRouter shape.
+Note: `cyboflow:mcp-health` has a typed counterpart at `cyboflow.health.mcpServer`
+(implemented in `main/src/orchestrator/trpc/routers/health.ts`) but `setHealthProvider()`
+is never called from `main/src/index.ts`, so the tRPC procedure always returns the
+`{status:'starting'}` fallback. The raw-IPC channel is the live data path until that
+wiring lands (see "Planned / Not Yet Built").
 
 **Raw-IPC stub** — handler present in `main/src/ipc/cyboflow.ts` but returns NOT_IMPLEMENTED:
 - `cyboflow:approveRun` — approve / deny a day-3 gate approval. Full implementation
@@ -300,9 +304,15 @@ injection points) but have no live implementation today. They are concentrated i
 ### Workflow-runs epic — separate gap
 
 - **`cyboflow.runs.getStuckInspection`** — throws `NOT_IMPLEMENTED` until `ctx.db` is wired
-  (`runs.ts:236–251`). Called by `StuckInspectorModal`.
-- **`cyboflow.runs.list`** and **`cyboflow.workflows.list`** — both throw `NOT_IMPLEMENTED`;
+  (`runs.ts:236–251`). Called by `StuckInspectorModal`. Scoped under TASK-709.
+- **`cyboflow.runs.list`** and **`cyboflow.workflows.list/.get`** — all throw `NOT_IMPLEMENTED`;
   the typed replacements for the raw-IPC `cyboflow:listRuns` / `cyboflow:listWorkflows` channels.
+  Scoped under TASK-710 and TASK-711.
+- **`cyboflow.health.mcpServer`** — fully implemented in
+  `main/src/orchestrator/trpc/routers/health.ts`, but `setHealthProvider()` is never called
+  from `main/src/index.ts`, so the procedure always returns the `{status:'starting'}`
+  fallback. The raw-IPC channel `cyboflow:mcp-health` is the live data path until that
+  wiring lands. Scoped under TASK-713 (in EPIC-trpc-cutover-and-legacy-tree-cleanup).
 
 ### Transport migration — `TBD-tRPC-cutover`
 
