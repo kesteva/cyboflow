@@ -30,6 +30,8 @@ import PQueue from 'p-queue';
 import { ApprovalRouter, RunNotRunningError, APPROVAL_TIMEOUT_MS, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
+import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -964,6 +966,9 @@ describe('ApprovalRouter', () => {
   //  console.warn instead of re-throwing.  This invariant is critical:
   //  termination must not propagate a DB error up into the runSdkQuery
   //  finally block and corrupt the cleanup chain.
+  //
+  // NOTE: keep this test BEFORE the PreToolUse end-to-end block — it is the
+  // last test in the main describe, numbered 13.
   // -------------------------------------------------------------------------
   it('clearPendingForRun swallows a DB error and still resolves the pending promise with deny', async () => {
     const db = createTestDb();
@@ -1012,5 +1017,130 @@ describe('ApprovalRouter', () => {
 
     // socketReply must NOT have been called.
     expect(socketReply.mock.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PreToolUse end-to-end: real ApprovalRouter + real SQLite
+// ---------------------------------------------------------------------------
+// Helpers (re-declared locally so this describe is self-contained and
+// co-located test helpers from the parent describe are not exported)
+
+function createE2ETestDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  db.exec(readFileSync(join(process.cwd(), 'src/database/migrations/006_cyboflow_schema.sql'), 'utf8'));
+  return db;
+}
+
+function makePreToolInput(toolName: string, input: Record<string, unknown> = {}): PreToolUseHookInput {
+  return {
+    hook_event_name: 'PreToolUse',
+    tool_name: toolName,
+    tool_input: input,
+    tool_use_id: 'e2e-tool-use-id',
+    session_id: 'e2e-session',
+    transcript_path: '/tmp/e2e.jsonl',
+    cwd: '/tmp',
+  } as unknown as PreToolUseHookInput;
+}
+
+describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real SQLite)", () => {
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // E2E Test 1: routePreToolUseThroughApprovalRouter inserts approvals row,
+  //             flips workflow_runs.status, and returns allow on respond(allow)
+  // -------------------------------------------------------------------------
+  it("routePreToolUseThroughApprovalRouter inserts approvals row, flips workflow_runs.status, and returns allow on respond(allow)", async () => {
+    const db = createE2ETestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'e2e-run-001';
+    seedRun(db, runId, 'running');
+
+    // Fire the helper without a logger — verifies no-logger path works.
+    const helperPromise = routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Bash', { command: 'ls' }),
+      runId,
+      'E2ETest',
+      // no logger argument
+    );
+
+    // Wait for the queue task to complete (transaction committed).
+    await qf.getOrCreate(runId).onIdle();
+
+    // (a) approvals row must exist with status='pending'.
+    const approval = db
+      .prepare("SELECT id, tool_name, status FROM approvals WHERE run_id = ?")
+      .get(runId) as { id: string; tool_name: string; status: string } | undefined;
+    expect(approval).toBeDefined();
+    expect(approval?.tool_name).toBe('Bash');
+    expect(approval?.status).toBe('pending');
+
+    // (b) workflow_runs.status must be 'awaiting_review'.
+    const run = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get(runId) as { status: string };
+    expect(run.status).toBe('awaiting_review');
+
+    // (c) After respond(allow), helper must resolve to permissionDecision:'allow'.
+    await router.respond(approval!.id, { behavior: 'allow' });
+    const result = await helperPromise;
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+      },
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // E2E Test 2: 'approvalCreated' emitted exactly once with correct payload
+  //             (bridge contract regression)
+  // -------------------------------------------------------------------------
+  it("emits 'approvalCreated' exactly once with the inserted ApprovalRequest payload (bridge contract)", async () => {
+    const db = createE2ETestDb();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+
+    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+
+    const runId = 'e2e-run-002';
+    seedRun(db, runId, 'running');
+
+    // Listen for the approvalCreated event.
+    const emitted: unknown[] = [];
+    router.on('approvalCreated', (request) => { emitted.push(request); });
+
+    const helperPromise = routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Bash', { command: 'echo hello' }),
+      runId,
+      'E2EBridgeTest',
+    );
+
+    // Wait for the queue task to commit.
+    await qf.getOrCreate(runId).onIdle();
+
+    // Exactly one event must have been emitted.
+    expect(emitted).toHaveLength(1);
+
+    // Payload must satisfy ApprovalRequest shape.
+    const req = emitted[0] as { id: string; runId: string; toolName: string; input: unknown; timestamp: number };
+    expect(typeof req.id).toBe('string');
+    expect(req.runId).toBe(runId);
+    expect(req.toolName).toBe('Bash');
+    expect(req.input).toEqual({ command: 'echo hello' });
+    expect(typeof req.timestamp).toBe('number');
+
+    // Clean up: respond to avoid dangling promises.
+    await router.respond(req.id, { behavior: 'deny' });
+    await helperPromise;
   });
 });
