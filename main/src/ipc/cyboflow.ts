@@ -133,6 +133,40 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
   );
 
   /**
+   * cyboflow:listRuns
+   *
+   * Args: { projectId: number }
+   * Returns: { success: true, data: WorkflowRunRow[] } | { success: false, error: string }
+   *
+   * Returns workflow_runs for the given project, ordered by created_at DESC
+   * (newest run first).  Excludes the heavy policy_json column.
+   */
+  ipcMain.handle(
+    'cyboflow:listRuns',
+    (_event, args: { projectId: number }) => {
+      try {
+        const { projectId } = args;
+        const rows = services.databaseService.getDb()
+          .prepare(
+            `SELECT id, workflow_id, project_id, status, worktree_path, branch_name,
+                    created_at, updated_at, started_at, ended_at, stuck_reason
+             FROM workflow_runs
+             WHERE project_id = ?
+             ORDER BY created_at DESC`,
+          )
+          .all(projectId);
+        return { success: true, data: rows };
+      } catch (error) {
+        console.error('[cyboflow:listRuns] error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'listRuns failed',
+        };
+      }
+    },
+  );
+
+  /**
    * cyboflow:approveRun  (NOT_IMPLEMENTED stub)
    *
    * Epic 7 wires the real approval flow.  The day-3 gate test (TASK-355)
