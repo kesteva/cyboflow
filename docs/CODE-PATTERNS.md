@@ -203,6 +203,15 @@ exhaustively auto-narrowed. A bare `payload: unknown` on a typed envelope is the
 tripwire — grep for it before merging.
 Canonical drift: FIND-SPRINT-026-20 — five surviving casts at `RunView.tsx:38,98,138,167,186`.
 
+**StreamEvent must be a derived alias, not a re-declaration.** Express the
+renderer type as `StreamEvent = StreamEnvelope & { runId: string }` in
+`frontend/src/utils/cyboflowApi.ts` — never re-declare the
+`StreamEnvelopePayload` arms locally. A parallel union forces synchronised
+edits across `StreamEventType`, `StreamEnvelopePayload`, and the renderer
+type; omission silently routes new variants to `UnknownEventRow` instead of
+failing typecheck. Canonical drift: FIND-SPRINT-031-4 — resolved as A4 in
+the SPRINT-031 compound.
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with
