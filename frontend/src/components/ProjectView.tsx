@@ -10,6 +10,8 @@ import { ToolPanel } from '../../../shared/types/panels';
 import { SessionProvider } from '../contexts/SessionContext';
 import { useAddTerminalShortcut } from '../hooks/useAddTerminalShortcut';
 import { useAddTerminalPanel } from '../hooks/useAddTerminalPanel';
+import { useEnsureClaudePanel } from '../hooks/useEnsureClaudePanel';
+import { useAddClaudeShortcut } from '../hooks/useAddClaudeShortcut';
 
 interface ProjectViewProps {
   projectId: number;
@@ -157,28 +159,14 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     [mainRepoSessionId, sessionPanels, removePanel, setActivePanelInStore]
   );
 
-  const ensureClaudePanel = useCallback(
-    async () => {
-      if (!mainRepoSessionId) return;
-
-      const newPanel = await panelApi.createPanel({
-        sessionId: mainRepoSessionId,
-        type: 'claude'
-      });
-
-      // Immediately add the panel and set it as active
-      // The panel:created event will also fire, but addPanel checks for duplicates
-      addPanel(newPanel);
-      setActivePanelInStore(mainRepoSessionId, newPanel.id);
-    },
-    [mainRepoSessionId, addPanel, setActivePanelInStore]
-  );
+  const ensureClaudePanel = useEnsureClaudePanel(mainRepoSession, { logTag: 'ProjectView' });
 
   const handleAddTerminal = useAddTerminalPanel(mainRepoSession, {
     logTag: 'ProjectView',
   });
 
   useAddTerminalShortcut(handleAddTerminal);
+  useAddClaudeShortcut(ensureClaudePanel);
 
   // Wrapped git operations
   const handleGitPull = useCallback(() => {
@@ -352,6 +340,7 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
             onPanelClose={handlePanelClose}
             context="project"
             onAddTerminal={handleAddTerminal}
+            onAddClaude={ensureClaudePanel}
           />
         </SessionProvider>
       )}

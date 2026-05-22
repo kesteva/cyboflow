@@ -13,6 +13,8 @@ import {
   systemInit,
   assistant,
   resultSuccess,
+  streamEventSignatureDelta,
+  streamEventThinkingDelta,
 } from './sdkMockFactories';
 
 describe('TypedEventNarrowing', () => {
@@ -130,5 +132,25 @@ describe('TypedEventNarrowing', () => {
     const e1 = narrower.narrow(raw);
     const e2 = narrower.narrow(raw);
     expect(e1).toEqual(e2);
+  });
+
+  // -------------------------------------------------------------------------
+  // signature_delta / thinking_delta — regression test for 2026-05-22 live finding
+  // -------------------------------------------------------------------------
+
+  it('narrows content_block_delta with delta.type signature_delta or thinking_delta to stream_event (not __unknown__) — regression test for live-testing finding 2026-05-22', () => {
+    const signatureEvent = narrower.narrow(streamEventSignatureDelta());
+    expect('kind' in signatureEvent).toBe(false);
+    if ('kind' in signatureEvent) throw new Error('signature_delta narrowed to __unknown__');
+    expect(signatureEvent.type).toBe('stream_event');
+    if (signatureEvent.type !== 'stream_event') throw new Error('Expected StreamEvent');
+    expect(signatureEvent.event.delta?.type).toBe('signature_delta');
+
+    const thinkingEvent = narrower.narrow(streamEventThinkingDelta());
+    expect('kind' in thinkingEvent).toBe(false);
+    if ('kind' in thinkingEvent) throw new Error('thinking_delta narrowed to __unknown__');
+    expect(thinkingEvent.type).toBe('stream_event');
+    if (thinkingEvent.type !== 'stream_event') throw new Error('Expected StreamEvent');
+    expect(thinkingEvent.event.delta?.type).toBe('thinking_delta');
   });
 });

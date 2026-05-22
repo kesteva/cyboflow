@@ -220,6 +220,16 @@ _No items._
   affected_tasks:
     - TASK-695
 
+- task: TASK-693
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/standalone-terminal-panels/TASK-693-plan.md
+  action: "Run `pnpm dev` and manually verify TASK-693 visual contract: thin header + Choose workflow CTA still render, empty-state when no run, PanelTabBar with `+ Terminal` and `+ Claude` buttons appears below the run/empty-state region once a project is selected, clicking `+ Terminal` creates a terminal tab and `PanelContainer` mounts beneath the bar, clicking `+ Claude` creates a Claude tab, clicking `+ Claude` again does NOT duplicate the tab, Cmd+Shift+Backquote and Cmd+Shift+C shortcuts both fire from CyboflowRoot. Also confirm ProjectView legacy escape hatch still works (`+ Terminal`, Cmd+Shift+Backquote, plus newly-shared `+ Claude` via useEnsureClaudePanel)."
+  blocked_checks:
+    - "Level 2 visual verification — Electron renderer (Option B layout: header / RunView-or-empty-state / PanelTabBar+PanelContainer / Modal)"
+  level: visual
+  severity: medium
+
 ## Deferred Visual
 
 - sprint: SPRINT-010
