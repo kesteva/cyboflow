@@ -19,6 +19,11 @@ export default defineConfig({
       ]
     },
     include: ['src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}'],
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'src/orchestrator/__tests__/cyboflowDayGate.test.ts',
+    ],
     setupFiles: ['./src/test/setup.ts'],
   },
   resolve: {

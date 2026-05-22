@@ -93,10 +93,62 @@ const systemCompactBoundarySchema = z.object({
   }).passthrough(),
 }).passthrough();
 
+/**
+ * system/hook_started: emitted when a registered hook begins executing.
+ * Source: sdk.d.ts:SDKHookStartedMessage.
+ */
+const systemHookStartedSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('hook_started'),
+  hook_id: z.string(),
+  hook_name: z.string(),
+  hook_event: z.string(),
+  uuid: z.string(),
+  session_id: z.string(),
+}).passthrough();
+
+/**
+ * system/hook_response: emitted when a registered hook finishes.
+ * Source: sdk.d.ts:SDKHookResponseMessage.
+ * NOTE: outcome is `success | error | cancelled` per SDK (NOT `allow | deny | defer`).
+ */
+const systemHookResponseSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('hook_response'),
+  hook_id: z.string(),
+  hook_name: z.string(),
+  hook_event: z.string(),
+  output: z.string(),
+  stdout: z.string(),
+  stderr: z.string(),
+  exit_code: z.number().optional(),
+  outcome: z.union([z.literal('success'), z.literal('error'), z.literal('cancelled')]),
+  uuid: z.string(),
+  session_id: z.string(),
+}).passthrough();
+
+/**
+ * system/status: SDK internal status changes (compacting, requesting).
+ * Source: sdk.d.ts:SDKStatusMessage.
+ */
+const systemStatusSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('status'),
+  status: z.union([z.literal('compacting'), z.literal('requesting'), z.null()]),
+  permissionMode: z.string().optional(),
+  compact_result: z.union([z.literal('success'), z.literal('failed')]).optional(),
+  compact_error: z.string().optional(),
+  uuid: z.string(),
+  session_id: z.string(),
+}).passthrough();
+
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
   systemInitSchema,
   systemCompactBoundarySchema,
+  systemHookStartedSchema,
+  systemHookResponseSchema,
+  systemStatusSchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -245,6 +297,55 @@ const streamEventSchema = z.object({
 }).passthrough();
 
 // ---------------------------------------------------------------------------
+// Session info schema (orchestrator-synthetic, top-level discriminant)
+// ---------------------------------------------------------------------------
+
+/**
+ * Orchestrator-synthetic session_info event emitted by claudeCodeManager.ts:251-260.
+ * Not a wire SDK event — synthesized before the SDK iterator starts.
+ */
+const sessionInfoSchema = z.object({
+  type: z.literal('session_info'),
+  initial_prompt: z.string(),
+  claude_command: z.string(),
+  worktree_path: z.string(),
+  model: z.string(),
+  permission_mode: z.string(),
+  timestamp: z.string(),
+}).passthrough();
+
+// ---------------------------------------------------------------------------
+// Rate limit event schema (top-level discriminant)
+// ---------------------------------------------------------------------------
+
+/**
+ * SDK rate_limit_event — rate-limit gate for claude.ai subscription users.
+ * Source: sdk.d.ts:SDKRateLimitEvent. Fields are nested under rate_limit_info (NOT flat).
+ */
+const rateLimitEventSchema = z.object({
+  type: z.literal('rate_limit_event'),
+  rate_limit_info: z.object({
+    status: z.union([z.literal('allowed'), z.literal('allowed_warning'), z.literal('rejected')]),
+    resetsAt: z.number().optional(),
+    rateLimitType: z.union([
+      z.literal('five_hour'),
+      z.literal('seven_day'),
+      z.literal('seven_day_opus'),
+      z.literal('seven_day_sonnet'),
+      z.literal('overage'),
+    ]).optional(),
+    utilization: z.number().optional(),
+    overageStatus: z.union([z.literal('allowed'), z.literal('allowed_warning'), z.literal('rejected')]).optional(),
+    overageResetsAt: z.number().optional(),
+    overageDisabledReason: z.string().optional(),
+    isUsingOverage: z.boolean().optional(),
+    surpassedThreshold: z.number().optional(),
+  }).passthrough(),
+  uuid: z.string(),
+  session_id: z.string(),
+}).passthrough();
+
+// ---------------------------------------------------------------------------
 // Top-level union
 //
 // Note: z.discriminatedUnion('type', [...]) does not accept nested
@@ -259,6 +360,8 @@ const streamEventSchema = z.object({
 
 export const claudeStreamEventSchema = z.union([
   systemUnionSchema,
+  sessionInfoSchema,
+  rateLimitEventSchema,
   assistantEventSchema,
   userEventSchema,
   resultUnionSchema,

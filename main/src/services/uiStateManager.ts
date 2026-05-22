@@ -4,7 +4,6 @@ interface UIState {
   treeView: {
     expandedProjects: number[];
     expandedFolders: string[];
-    sessionSortAscending: boolean;
   };
 }
 
@@ -35,16 +34,6 @@ class UIStateManager {
     }
   }
 
-  getSessionSortAscending(): boolean {
-    const value = this.db.getUIState('treeView.sessionSortAscending');
-    if (!value) return false; // Default to descending (newest first)
-    try {
-      return JSON.parse(value);
-    } catch {
-      return false;
-    }
-  }
-
   saveExpandedProjects(projectIds: number[]): void {
     this.db.setUIState('treeView.expandedProjects', JSON.stringify(projectIds));
   }
@@ -53,27 +42,21 @@ class UIStateManager {
     this.db.setUIState('treeView.expandedFolders', JSON.stringify(folderIds));
   }
 
-  saveSessionSortAscending(ascending: boolean): void {
-    this.db.setUIState('treeView.sessionSortAscending', JSON.stringify(ascending));
-  }
-
   saveExpandedState(projectIds: number[], folderIds: string[]): void {
     this.saveExpandedProjects(projectIds);
     this.saveExpandedFolders(folderIds);
   }
 
-  getExpandedState(): { expandedProjects: number[]; expandedFolders: string[]; sessionSortAscending: boolean } {
+  getExpandedState(): { expandedProjects: number[]; expandedFolders: string[] } {
     return {
       expandedProjects: this.getExpandedProjects(),
-      expandedFolders: this.getExpandedFolders(),
-      sessionSortAscending: this.getSessionSortAscending()
+      expandedFolders: this.getExpandedFolders()
     };
   }
 
   clear(): void {
     this.db.deleteUIState('treeView.expandedProjects');
     this.db.deleteUIState('treeView.expandedFolders');
-    this.db.deleteUIState('treeView.sessionSortAscending');
   }
 }
 

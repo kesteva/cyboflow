@@ -16,6 +16,11 @@
 import type {
   SystemInitEvent,
   SystemCompactBoundaryEvent,
+  SystemHookStartedEvent,
+  SystemHookResponseEvent,
+  SystemStatusEvent,
+  SessionInfoEvent,
+  RateLimitEvent,
   AssistantEvent,
   UserEvent,
   ResultEvent,
@@ -269,6 +274,80 @@ export function resultErrorMaxStructuredOutputRetries(
     is_error: true,
     duration_ms: 4321,
     num_turns: 1,
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// New SDK variants (TASK-696)
+// ---------------------------------------------------------------------------
+
+export function sessionInfo(overrides: Partial<SessionInfoEvent> = {}): SessionInfoEvent {
+  return {
+    type: 'session_info',
+    initial_prompt: 'Refactor parser to use the typed event helper.',
+    claude_command: 'sdk-in-process',
+    worktree_path: '/tmp/cyboflow-worktree-abc123',
+    model: 'claude-sonnet-4-5',
+    permission_mode: 'approve',
+    timestamp: '2026-05-21T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+export function rateLimitEvent(overrides: Partial<RateLimitEvent> = {}): RateLimitEvent {
+  return {
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'allowed_warning',
+      resetsAt: 1747776000,
+      rateLimitType: 'five_hour',
+      utilization: 0.85,
+    },
+    uuid: 'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
+export function systemHookStarted(overrides: Partial<SystemHookStartedEvent> = {}): SystemHookStartedEvent {
+  return {
+    type: 'system',
+    subtype: 'hook_started',
+    hook_id: 'hook-001',
+    hook_name: 'pre-tool-use',
+    hook_event: 'PreToolUse',
+    uuid: 'c3d4e5f6-a7b8-9012-cdef-123456789012',
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
+export function systemHookResponse(overrides: Partial<SystemHookResponseEvent> = {}): SystemHookResponseEvent {
+  return {
+    type: 'system',
+    subtype: 'hook_response',
+    hook_id: 'hook-001',
+    hook_name: 'pre-tool-use',
+    hook_event: 'PreToolUse',
+    output: 'Hook completed successfully.',
+    stdout: '',
+    stderr: '',
+    exit_code: 0,
+    outcome: 'success',
+    uuid: 'd4e5f6a7-b8c9-0123-defa-234567890123',
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
+export function systemStatus(overrides: Partial<SystemStatusEvent> = {}): SystemStatusEvent {
+  return {
+    type: 'system',
+    subtype: 'status',
+    status: 'requesting',
+    uuid: 'e5f6a7b8-c9d0-1234-efab-345678901234',
     session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     ...overrides,
   };

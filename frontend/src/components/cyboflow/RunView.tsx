@@ -19,30 +19,16 @@
 import { useEffect, useRef, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { StreamEvent } from '../../utils/cyboflowApi';
-import type {
-  SystemInitEvent,
-  SystemApiRetryEvent,
-  SystemCompactEvent,
-  SystemCompactBoundaryEvent,
-  AssistantEvent,
-  UserEvent,
-  ResultEvent,
-  StreamEvent as ClaudeStreamEventVariant,
-} from '../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Row components — one per SDK discriminator
 // ---------------------------------------------------------------------------
 
-function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
-  const payload = event.payload as
-    | SystemInitEvent
-    | SystemApiRetryEvent
-    | SystemCompactEvent
-    | SystemCompactBoundaryEvent;
+function SystemEventRow({ event }: { event: Extract<StreamEvent, { type: 'system' }> }): ReactElement {
+  const payload = event.payload;
 
   if (payload.subtype === 'init') {
-    const init = payload as SystemInitEvent;
+    const init = payload;
     return (
       <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs">
         <span className="font-semibold text-text-primary">system/init</span>
@@ -55,32 +41,52 @@ function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
     );
   }
 
-  if (payload.subtype === 'api_retry') {
-    const retry = payload as SystemApiRetryEvent;
-    return (
-      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
-        <span className="font-semibold text-text-primary">system/api_retry</span>
-        {' '}attempt {retry.attempt}/{retry.max_retries}
-      </div>
-    );
-  }
-
-  if (payload.subtype === 'compact') {
-    const compact = payload as SystemCompactEvent;
-    return (
-      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
-        <span className="font-semibold text-text-primary">system/compact</span>
-        {compact.summary ? <span> — {compact.summary}</span> : null}
-      </div>
-    );
-  }
-
   if (payload.subtype === 'compact_boundary') {
-    const cb = payload as SystemCompactBoundaryEvent;
+    const cb = payload;
     return (
       <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
         <span className="font-semibold text-text-primary">system/compact_boundary</span>
         {' '}trigger={cb.compact_metadata.trigger} pre-compaction tokens={cb.compact_metadata.pre_tokens}
+      </div>
+    );
+  }
+
+  if (payload.subtype === 'hook_started') {
+    const hs = payload;
+    return (
+      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
+        <span className="font-semibold text-text-primary">system/hook_started</span>
+        {' '}<span className="text-text-primary">{hs.hook_name}</span>
+        {' '}({hs.hook_event})
+      </div>
+    );
+  }
+
+  if (payload.subtype === 'hook_response') {
+    const hr = payload;
+    const outcomeColor = hr.outcome === 'success'
+      ? 'text-green-500'
+      : hr.outcome === 'error'
+        ? 'text-red-500'
+        : 'text-text-secondary';
+    return (
+      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
+        <span className="font-semibold text-text-primary">system/hook_response</span>
+        {' '}<span className="text-text-primary">{hr.hook_name}</span>
+        {' '}outcome=<span className={outcomeColor}>{hr.outcome}</span>
+        {hr.exit_code !== undefined ? ` exit=${hr.exit_code}` : ''}
+      </div>
+    );
+  }
+
+  if (payload.subtype === 'status') {
+    const st = payload;
+    return (
+      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
+        <span className="font-semibold text-text-primary">system/status</span>
+        {' '}status={st.status ?? 'null'}
+        {st.permissionMode ? ` mode=${st.permissionMode}` : ''}
+        {st.compact_result ? ` compact=${st.compact_result}` : ''}
       </div>
     );
   }
@@ -94,8 +100,8 @@ function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
   );
 }
 
-function AssistantEventRow({ event }: { event: StreamEvent }): ReactElement {
-  const payload = event.payload as AssistantEvent;
+function AssistantEventRow({ event }: { event: Extract<StreamEvent, { type: 'assistant' }> }): ReactElement {
+  const payload = event.payload;
   const content = payload.message?.content ?? [];
 
   return (
@@ -134,8 +140,8 @@ function AssistantEventRow({ event }: { event: StreamEvent }): ReactElement {
   );
 }
 
-function UserEventRow({ event }: { event: StreamEvent }): ReactElement {
-  const payload = event.payload as UserEvent;
+function UserEventRow({ event }: { event: Extract<StreamEvent, { type: 'user' }> }): ReactElement {
+  const payload = event.payload;
   const content = payload.message?.content ?? [];
 
   return (
@@ -163,8 +169,8 @@ function UserEventRow({ event }: { event: StreamEvent }): ReactElement {
   );
 }
 
-function ResultEventRow({ event }: { event: StreamEvent }): ReactElement {
-  const payload = event.payload as ResultEvent;
+function ResultEventRow({ event }: { event: Extract<StreamEvent, { type: 'result' }> }): ReactElement {
+  const payload = event.payload;
   const costStr = payload.total_cost_usd !== undefined
     ? `$${payload.total_cost_usd.toFixed(4)}`
     : 'n/a';
@@ -182,8 +188,8 @@ function ResultEventRow({ event }: { event: StreamEvent }): ReactElement {
   );
 }
 
-function StreamEventRow({ event }: { event: StreamEvent }): ReactElement {
-  const payload = event.payload as ClaudeStreamEventVariant;
+function StreamEventRow({ event }: { event: Extract<StreamEvent, { type: 'stream_event' }> }): ReactElement {
+  const payload = event.payload;
   const inner = payload.event;
   const deltaText =
     inner.delta?.type === 'text_delta' && inner.delta.text
@@ -200,7 +206,62 @@ function StreamEventRow({ event }: { event: StreamEvent }): ReactElement {
   );
 }
 
-function UnknownEventRow({ event }: { event: StreamEvent }): ReactElement {
+function SessionInfoEventRow({ event }: { event: Extract<StreamEvent, { type: 'session_info' }> }): ReactElement {
+  const payload = event.payload;
+  const truncatedPrompt = payload.initial_prompt.length > 120
+    ? `${payload.initial_prompt.slice(0, 120)}…`
+    : payload.initial_prompt;
+
+  return (
+    <div className="mb-1 rounded border-l-4 border-emerald-500 bg-bg-secondary p-2 text-xs">
+      <span className="font-semibold text-emerald-500">Run started</span>
+      <div className="mt-1 flex flex-wrap gap-3 text-text-secondary">
+        <span><span className="text-text-primary">worktree:</span> {payload.worktree_path}</span>
+        <span><span className="text-text-primary">model:</span> {payload.model}</span>
+        <span><span className="text-text-primary">mode:</span> {payload.permission_mode}</span>
+      </div>
+      {truncatedPrompt && (
+        <p className="mt-1 text-text-secondary italic">{truncatedPrompt}</p>
+      )}
+    </div>
+  );
+}
+
+function RateLimitEventRow({ event }: { event: Extract<StreamEvent, { type: 'rate_limit_event' }> }): ReactElement {
+  const payload = event.payload;
+  const info = payload.rate_limit_info;
+  const resetsAtStr = info.resetsAt !== undefined
+    ? new Date(info.resetsAt * 1000).toLocaleTimeString()
+    : 'n/a';
+
+  return (
+    <div className="mb-1 rounded border border-yellow-500 bg-bg-secondary p-2 text-xs">
+      <span className="font-semibold text-yellow-500">rate_limit_event</span>
+      <div className="mt-1 flex flex-wrap gap-3 text-text-secondary">
+        <span><span className="text-text-primary">status:</span> {info.status}</span>
+        <span><span className="text-text-primary">resets:</span> {resetsAtStr}</span>
+        {info.overageStatus && (
+          <span><span className="text-text-primary">overage:</span> {info.overageStatus}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RunStartedEventRow({ event }: { event: Extract<StreamEvent, { type: 'run_started' }> }): ReactElement {
+  const payload = event.payload;
+  return (
+    <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
+      <span className="font-semibold text-text-primary">Starting</span>
+      {' '}run{' '}
+      <span className="font-mono">{payload.runId.slice(0, 8)}…</span>
+      {' '}on branch{' '}
+      <span className="font-mono">{payload.branchName}</span>
+    </div>
+  );
+}
+
+function UnknownEventRow({ event }: { event: Extract<StreamEvent, { type: 'unknown' }> }): ReactElement {
   const rawPayload = event.payload;
   return (
     <div className="mb-1 rounded border border-amber-500 bg-bg-secondary p-2 text-xs">
@@ -223,12 +284,15 @@ function UnknownEventRow({ event }: { event: StreamEvent }): ReactElement {
 
 function renderEvent(event: StreamEvent): ReactElement {
   switch (event.type) {
-    case 'system':       return <SystemEventRow event={event} />;
-    case 'assistant':    return <AssistantEventRow event={event} />;
-    case 'user':         return <UserEventRow event={event} />;
-    case 'result':       return <ResultEventRow event={event} />;
-    case 'stream_event': return <StreamEventRow event={event} />;
-    case 'unknown':      return <UnknownEventRow event={event} />;
+    case 'system':           return <SystemEventRow event={event} />;
+    case 'assistant':        return <AssistantEventRow event={event} />;
+    case 'user':             return <UserEventRow event={event} />;
+    case 'result':           return <ResultEventRow event={event} />;
+    case 'stream_event':     return <StreamEventRow event={event} />;
+    case 'session_info':     return <SessionInfoEventRow event={event} />;
+    case 'rate_limit_event': return <RateLimitEventRow event={event} />;
+    case 'run_started':      return <RunStartedEventRow event={event} />;
+    case 'unknown':          return <UnknownEventRow event={event} />;
   }
 }
 
