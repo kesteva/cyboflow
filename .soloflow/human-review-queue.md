@@ -1,9 +1,9 @@
 ---
-pending_count: 33
+pending_count: 28
 buckets:
   decisions: 0
   actions: 0
-  testing: 28
+  testing: 23
   deferred_visual: 5
 items: []
 ---
@@ -39,36 +39,6 @@ _No items._
   level: requirements
   severity: medium
 
-- task: TASK-205
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/stream-parser-to-main/TASK-205-plan.md
-  action: "Manually open Cyboflow, start a Claude session, and confirm the Claude panel renders messages without throwing TypeError. The renderer-side parser was removed in TASK-205 (replaced with an identity passthrough) but the main-side MessageProjection is NOT wired into the data path that feeds the renderer (`panels:get-json-messages` still returns raw stream-json — see FIND-SPRINT-005-9). The epic explicitly puts orchestrator integration in a future epic. Without the wiring, the Claude panel will throw `Cannot read properties of undefined (reading 'some')` at line 440 of RichOutputView.tsx because raw stream-json objects lack the `.segments` property the rendering code accesses. Either confirm the panel is broken (and accept the cross-epic gap until the next epic wires `MessageProjection`), or verify by running through the UI that messages still render."
-  blocked_checks:
-    - End-to-end Claude panel rendering after TASK-205 stub reduction
-  level: goal_backward
-  severity: high
-
-- task: TASK-255
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-255-plan.md
-  action: "Run pnpm dev to launch Electron, open DevTools console, and run trpcClient.cyboflow.runs.list.query({}). Confirm the returned error contains NOT_IMPLEMENTED (proves end-to-end IPC link is alive). Plan Implementation Step 7 documents this manual smoke as the e2e gate; the smoke-test global was correctly never committed."
-  blocked_checks:
-    - "AC6: renderer can call trpcClient.cyboflow.runs.list.query() and receive NOT_IMPLEMENTED through the IPC bridge"
-  level: requirements
-  severity: medium
-
-- task: TASK-568
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-568-plan.md
-  action: "Manual smoke test for AC-2: run `pnpm dev`, create a session with a prompt, wait for output, open the Claude panel. Verify `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/. This task fixes FIND-SPRINT-005-9; final confirmation requires a live Electron run that the verifier cannot perform."
-  blocked_checks:
-    - AC-2 manual Claude-panel smoke test (no renderer TypeError after MessageProjection wiring)
-  level: requirements
-  severity: high
-
 - task: TASK-572
   type: action_required
   bucket: testing
@@ -78,18 +48,6 @@ _No items._
     - "AC#7 — sqlite raw_events smoke after fresh session"
   level: requirements
   severity: medium
-
-- task: TASK-595
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-595-plan.md
-  action: "Run human smoke per TASK-596 spec in docs/sdk-migration-smoke-results.md §Follow-up: launch app under filtered PATH, drive Claude panel through Signals 1+2+3+9, capture 4 screenshots under docs/screenshots/sdk-migration/, grep backend log for [ClaudeCodeManager] SDK query started and Using resume for panel, then update the results document to flip Signals 1/2/3/9 from FAIL to PASS."
-  blocked_checks:
-    - "AC#5 file existence (panel-stream + review-queue screenshots actually present on disk)"
-    - "AC#6 resume screenshot file present on disk"
-    - "EPIC success Signals 1, 2, 3, 9 (UI-driven verification)"
-  level: requirements
-  severity: high
 
 - task: TASK-354
   type: action_required
@@ -112,17 +70,6 @@ _No items._
     - TASK-404
     - TASK-455
     - TASK-672
-
-- task: TASK-455
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-455-plan.md
-  action: "AC6 manual smoke: run `pnpm dev` and observe the Sidebar bottom — confirm an MCP status dot appears with label 'MCP'. The dot will currently show YELLOW (status: starting) because the OrchestratorHealth and McpServerLifecycle singletons are not yet instantiated in main/src/index.ts (deferred to a later orchestrator wire-up task). After the lifecycle wire-up lands, re-run this smoke to confirm yellow→green transition within 5s. To simulate failure path (red dot + tooltip error): temporarily edit the lifecycle init to point CYBOFLOW_ORCH_SOCKET at a nonexistent path; expect dot=red and `title` tooltip to read 'MCP server: failed — <error>'."
-  blocked_checks:
-    - AC6 end-to-end visible yellow→green transition
-    - AC6 failure-path tooltip surfacing
-  level: visual
-  severity: medium
 
 - task: SPRINT-017
   type: action_required
