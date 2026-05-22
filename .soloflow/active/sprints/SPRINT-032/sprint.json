@@ -6,8 +6,10 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-693": { "status": "pending", "depends_on": [] },
-    "TASK-729": { "status": "pending", "depends_on": [] }
+    "TASK-729": {
+      "status": "pending",
+      "depends_on": []
+    }
   },
   "playwright_target": {
     "kind": "electron",
