@@ -64,19 +64,4 @@ export function registerUIStateHandlers(services: AppServices) {
       };
     }
   });
-
-  ipcMain.handle('ui-state:save-session-sort-ascending', async (_, ascending: boolean) => {
-    try {
-      uiStateManager.saveSessionSortAscending(ascending);
-      return {
-        success: true
-      };
-    } catch (error) {
-      console.error('Error saving session sort order:', error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
-    }
-  });
 }
