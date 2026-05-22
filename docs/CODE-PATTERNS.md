@@ -210,27 +210,30 @@ not in IPC handlers — handlers should be thin: validate input, delegate to ser
 
 - **Canonical example:** `main/src/ipc/session.ts`
 
-**Runtime input validation:** Every handler that reads from `args` MUST type-guard the
-expected fields before use. A bare `const { projectId } = args as { projectId: number }`
-cast is insufficient — if the renderer passes `undefined`, better-sqlite3 throws or
-returns wrong rows silently. Required pattern:
+**Runtime input validation:** Every handler that reads from `args` MUST validate args via
+`validateInput` from `main/src/ipc/validateInput.ts`. A bare `const { projectId } = args as
+{ projectId: number }` cast is insufficient — if the renderer passes `undefined`,
+better-sqlite3 throws or returns wrong rows silently. Hand-rolled type guards are forbidden
+— they fork the error-shape and make the in-progress tRPC ipcLink migration harder.
 
-```typescript
-ipcMain.handle('cyboflow:listRuns', (_event, args: unknown) => {
-  if (typeof (args as Record<string, unknown>)?.projectId !== 'number') {
-    return { success: false, error: 'listRuns: projectId must be a number' };
-  }
-  const { projectId } = args as { projectId: number };
-  // ... delegate to service
-});
+## IPC handler input validation
+
+All `ipcMain.handle` handlers in `main/src/ipc/*.ts` MUST validate args via
+`validateInput` from `main/src/ipc/validateInput.ts`. Hand-rolled type guards
+are forbidden — they fork the error-shape and make the in-progress tRPC ipcLink
+migration harder.
+
+Canonical usage:
+
+```ts
+const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:listRuns');
+if (!v.ok) return { success: false, error: v.error };
+const { projectId } = v.value;
 ```
 
-For domains with multiple handlers sharing the same arg shapes, extract a `validateArg`
-helper in the domain's IPC file (canonical example: `validateNumberArg` / `validateStringArg`
-in `main/src/ipc/cyboflow.ts`, landed in TASK-705). Hand-rolled today; a Zod-based
-`validateInput<T>(schema, args, channel)` upgrade is tracked under FIND-SPRINT-030-9 to
-align with the tRPC router pattern and ease the forthcoming ipcLink migration.
-Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards.
+See `main/src/ipc/cyboflow.ts` for the canonical caller.
+
+Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards (resolved by TASK-726 via the `validateInput` helper).
 
 ### Per-session mutation serialization
 
