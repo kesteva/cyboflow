@@ -242,11 +242,11 @@ describe('RunView', () => {
   // Additional edge-case tests (added post-executor review)
   // -------------------------------------------------------------------------
 
-  it('routes a system/api_retry event to the typed system branch (non-init subtype)', () => {
+  it('routes a retired api_retry payload to UnknownEventRow — Unrecognized event (post-TASK-681)', () => {
     act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
     const event: StreamEvent = {
       runId: 'run-1',
-      type: 'system',
+      type: 'unknown',
       payload: {
         type: 'system',
         subtype: 'api_retry',
@@ -258,16 +258,15 @@ describe('RunView', () => {
     };
     act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
     render(<RunView />);
-    expect(screen.getByText(/system\/api_retry/)).toBeInTheDocument();
-    expect(screen.getByText(/2\/5/)).toBeInTheDocument();
-    expect(screen.queryByText(/"attempt"/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
+    expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);
   });
 
-  it('routes a system/compact event to the typed system branch (non-init subtype)', () => {
+  it('routes a retired compact payload to UnknownEventRow — Unrecognized event (post-TASK-681)', () => {
     act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
     const event: StreamEvent = {
       runId: 'run-1',
-      type: 'system',
+      type: 'unknown',
       payload: {
         type: 'system',
         subtype: 'compact',
@@ -277,9 +276,8 @@ describe('RunView', () => {
     };
     act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
     render(<RunView />);
-    expect(screen.getByText(/system\/compact/)).toBeInTheDocument();
-    expect(screen.getByText(/Context compacted after 50k tokens/)).toBeInTheDocument();
-    expect(screen.queryByText(/"summary"/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
+    expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);
   });
 
   it('routes a system/compact_boundary event to the typed system branch (non-init subtype)', () => {
