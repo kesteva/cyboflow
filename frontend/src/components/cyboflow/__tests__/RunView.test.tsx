@@ -524,6 +524,91 @@ describe('RunView', () => {
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // Conditional-branch tests for TASK-696 new rows (test-writer additions)
+  // -------------------------------------------------------------------------
+
+  it('renders system/status with status=null as the literal "null" string (null-coalesce branch)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        uuid: 'f6a7b8c9-0000-0000-0000-000000000005',
+        session_id: 'sess-st-null',
+      },
+      timestamp: '2026-05-21T00:00:05.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The null-coalesce branch renders "null" as a fallback string
+    expect(screen.getByText(/status=null/)).toBeInTheDocument();
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('renders system/hook_response with outcome=error (error color branch, not UnknownEventRow)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'system',
+      payload: {
+        type: 'system',
+        subtype: 'hook_response',
+        hook_id: 'hook-002',
+        hook_name: 'post-tool-use',
+        hook_event: 'PostToolUse',
+        output: '',
+        stdout: '',
+        stderr: 'hook script exited with code 1',
+        exit_code: 1,
+        outcome: 'error',
+        uuid: 'a7b8c9d0-0000-0000-0000-000000000006',
+        session_id: 'sess-hr-error',
+      },
+      timestamp: '2026-05-21T00:00:06.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    expect(screen.getByText(/system\/hook_response/)).toBeInTheDocument();
+    // "outcome=" and "error" are in separate DOM nodes (span for color-coding).
+    // Assert both are visible independently.
+    expect(screen.getByText(/post-tool-use/)).toBeInTheDocument();
+    // The outcome value "error" is in a colored child span — use getAllByText to
+    // avoid collisions with the type label "system/hook_response" which also renders.
+    const errorElements = screen.getAllByText(/^error$/);
+    expect(errorElements.length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  it('truncates session_info initial_prompt longer than 120 chars with an ellipsis', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+    const longPrompt = 'A'.repeat(130);
+    const event: StreamEvent = {
+      runId: 'run-1',
+      type: 'session_info' as StreamEvent['type'],
+      payload: {
+        type: 'session_info',
+        initial_prompt: longPrompt,
+        claude_command: 'sdk-in-process',
+        worktree_path: '/tmp/cyboflow-wt-trunc',
+        model: 'claude-sonnet-4-5',
+        permission_mode: 'approve',
+        timestamp: '2026-05-21T00:00:07.000Z',
+      },
+      timestamp: '2026-05-21T00:00:07.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // Full 130-char prompt must NOT appear verbatim
+    expect(screen.queryByText(longPrompt)).not.toBeInTheDocument();
+    // Truncated 120-char prefix + ellipsis character must appear
+    expect(screen.getByText(`${'A'.repeat(120)}…`)).toBeInTheDocument();
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
     // Get the mocked subscribeToStreamEvents from the module-level mock.
     const mockSubFn = vi.mocked(subscribeToStreamEvents);
