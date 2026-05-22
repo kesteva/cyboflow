@@ -1,7 +1,7 @@
 ---
 id: TASK-693
 idea: IDEA-020
-status: approved
+status: in-flight
 created: "2026-05-22T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx
@@ -33,13 +33,13 @@ files_readonly:
   - .soloflow/active/plans/cyboflow-shell-architecture/TASK-690-plan.md
   - .soloflow/active/plans/cyboflow-shell-architecture/TASK-691-plan.md
 acceptance_criteria:
-  - criterion: "A new shared hook `frontend/src/hooks/useEnsureClaudePanel.ts` exists and exports a function named `useEnsureClaudePanel`."
+  - criterion: A new shared hook `frontend/src/hooks/useEnsureClaudePanel.ts` exists and exports a function named `useEnsureClaudePanel`.
     verification: "test -f frontend/src/hooks/useEnsureClaudePanel.ts && grep -q 'export function useEnsureClaudePanel' frontend/src/hooks/useEnsureClaudePanel.ts"
   - criterion: "`useEnsureClaudePanel` activates an existing Claude panel for the given session if one is present, otherwise creates a new one via `panelApi.createPanel({ type: 'claude' })` and marks it active."
     verification: "grep -nE \"type:\\s*['\\\"]claude['\\\"]\" frontend/src/hooks/useEnsureClaudePanel.ts returns at least one match, AND `cd frontend && pnpm exec vitest run src/hooks/__tests__/useEnsureClaudePanel.test.tsx` exits 0."
-  - criterion: "ProjectView no longer defines its own inline `ensureClaudePanel` useCallback — it calls the shared `useEnsureClaudePanel` hook instead."
+  - criterion: ProjectView no longer defines its own inline `ensureClaudePanel` useCallback — it calls the shared `useEnsureClaudePanel` hook instead.
     verification: "grep -nE 'const ensureClaudePanel = useCallback' frontend/src/components/ProjectView.tsx returns 0 matches AND grep -n 'useEnsureClaudePanel' frontend/src/components/ProjectView.tsx returns at least one match."
-  - criterion: "A new file `frontend/src/hooks/useAddClaudeShortcut.ts` exists and exports a function named `useAddClaudeShortcut`."
+  - criterion: A new file `frontend/src/hooks/useAddClaudeShortcut.ts` exists and exports a function named `useAddClaudeShortcut`.
     verification: "test -f frontend/src/hooks/useAddClaudeShortcut.ts && grep -q 'export function useAddClaudeShortcut' frontend/src/hooks/useAddClaudeShortcut.ts"
   - criterion: "`useAddClaudeShortcut` matches event.key === 'C' OR event.code === 'KeyC' with shiftKey AND (metaKey OR ctrlKey) and applies the same focus guards as `useAddTerminalShortcut` (HTMLInputElement, HTMLTextAreaElement, isContentEditable)."
     verification: "grep -Eq \"event\\.key !== 'C'.*event\\.code !== 'KeyC'\" frontend/src/hooks/useAddClaudeShortcut.ts && grep -q 'shiftKey' frontend/src/hooks/useAddClaudeShortcut.ts && grep -qE '(metaKey \\|\\| event\\.ctrlKey|event\\.metaKey \\|\\| event\\.ctrlKey)' frontend/src/hooks/useAddClaudeShortcut.ts && grep -q 'isContentEditable' frontend/src/hooks/useAddClaudeShortcut.ts"
@@ -49,9 +49,9 @@ acceptance_criteria:
     verification: "grep -q 'aria-label=\"Add Claude panel\"' frontend/src/components/panels/PanelTabBar.tsx && grep -q 'handleAddClaude' frontend/src/components/panels/PanelTabBar.tsx"
   - criterion: "CyboflowRoot resolves the project's main-repo session via `API.sessions.getOrCreateMainRepoSession(projectId)` and renders a `<PanelTabBar />` with both `onAddTerminal` (wired through `useAddTerminalPanel`) and `onAddClaude` (wired through `useEnsureClaudePanel`) props supplied."
     verification: "grep -q 'getOrCreateMainRepoSession' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'useAddTerminalPanel' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'useEnsureClaudePanel' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q '<PanelTabBar' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'onAddTerminal=' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'onAddClaude=' frontend/src/components/cyboflow/CyboflowRoot.tsx"
-  - criterion: "CyboflowRoot registers both keyboard shortcuts — `useAddTerminalShortcut` and `useAddClaudeShortcut`."
+  - criterion: CyboflowRoot registers both keyboard shortcuts — `useAddTerminalShortcut` and `useAddClaudeShortcut`.
     verification: "grep -q 'useAddTerminalShortcut' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'useAddClaudeShortcut' frontend/src/components/cyboflow/CyboflowRoot.tsx"
-  - criterion: "CyboflowRoot still renders RunView when activeRunId is set and the empty-state CTA when activeRunId is null (no run-watching regression from Option B layout)."
+  - criterion: CyboflowRoot still renders RunView when activeRunId is set and the empty-state CTA when activeRunId is null (no run-watching regression from Option B layout).
     verification: "grep -q 'activeRunId !== null' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q '<RunView' frontend/src/components/cyboflow/CyboflowRoot.tsx && grep -q 'Choose a workflow to start' frontend/src/components/cyboflow/CyboflowRoot.tsx"
   - criterion: "ProjectView's existing `+ Terminal` wiring continues to call `useAddTerminalPanel` and `useAddTerminalShortcut` (regression guard for the legacy escape hatch until TASK-690/TASK-691 ship)."
     verification: "grep -n 'useAddTerminalPanel' frontend/src/components/ProjectView.tsx returns at least one match AND grep -n 'useAddTerminalShortcut(handleAddTerminal)' frontend/src/components/ProjectView.tsx returns at least one match."
@@ -62,9 +62,9 @@ acceptance_criteria:
   - criterion: "Playwright spec `tests/standalone-terminal-panels.spec.ts` includes a new `test.describe('CyboflowRoot — Add Terminal + Add Claude', ...)` block whose case bodies reference both 'Add terminal panel' and 'Add Claude panel' aria-labels."
     verification: "grep -nE \"test\\.describe\\(['\\\"]CyboflowRoot\" tests/standalone-terminal-panels.spec.ts returns at least one match AND grep -q 'Add Claude panel' tests/standalone-terminal-panels.spec.ts AND grep -q 'Add terminal panel' tests/standalone-terminal-panels.spec.ts"
   - criterion: "`pnpm typecheck` exits 0."
-    verification: "pnpm typecheck"
+    verification: pnpm typecheck
   - criterion: "`pnpm lint` exits 0."
-    verification: "pnpm lint"
+    verification: pnpm lint
 depends_on: []
 estimated_complexity: medium
 epic: standalone-terminal-panels
@@ -81,10 +81,10 @@ test_strategy:
     - behavior: "useEnsureClaudePanel — when sessionId is null/undefined, logs a console.warn (with the configured logTag) and does NOT call panelApi.createPanel (mirrors useAddTerminalPanel no-session guard)."
       test_file: frontend/src/hooks/__tests__/useEnsureClaudePanel.test.tsx
       type: unit
-    - behavior: "useAddClaudeShortcut — Mac (metaKey) path invokes callback exactly once on Cmd+Shift+C."
+    - behavior: useAddClaudeShortcut — Mac (metaKey) path invokes callback exactly once on Cmd+Shift+C.
       test_file: frontend/src/hooks/__tests__/useAddClaudeShortcut.test.ts
       type: unit
-    - behavior: "useAddClaudeShortcut — Win/Linux (ctrlKey) path invokes callback exactly once on Ctrl+Shift+C."
+    - behavior: useAddClaudeShortcut — Win/Linux (ctrlKey) path invokes callback exactly once on Ctrl+Shift+C.
       test_file: frontend/src/hooks/__tests__/useAddClaudeShortcut.test.ts
       type: unit
     - behavior: "useAddClaudeShortcut — modifier-and-key guards: plain C, Cmd+Shift+T, Cmd+C-without-shift do NOT fire."
@@ -93,7 +93,7 @@ test_strategy:
     - behavior: "useAddClaudeShortcut — focus guards: input, textarea, contentEditable suppress the shortcut."
       test_file: frontend/src/hooks/__tests__/useAddClaudeShortcut.test.ts
       type: unit
-    - behavior: "useAddClaudeShortcut — opts.enabled gating + unmount cleanup."
+    - behavior: useAddClaudeShortcut — opts.enabled gating + unmount cleanup.
       test_file: frontend/src/hooks/__tests__/useAddClaudeShortcut.test.ts
       type: unit
     - behavior: "CyboflowRoot — existing four cases stay green: empty-state CTA when activeRunId is null, RunView when activeRunId is set, modal open/close, modal auto-close on run start. The mock surface is extended to silence `API.sessions.getOrCreateMainRepoSession` and `panelApi.loadPanelsForSession` so the new main-repo-session resolution path does not break existing assertions."
@@ -106,7 +106,6 @@ test_strategy:
       test_file: tests/standalone-terminal-panels.spec.ts
       type: integration
 ---
-
 # Add PanelTabBar surface to CyboflowRoot — wire Terminal + Claude affordances against the new shell
 
 ## Objective
