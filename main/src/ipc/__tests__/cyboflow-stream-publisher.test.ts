@@ -112,7 +112,12 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => fakeWin);
 
     const runId = 'unique-run-xyz';
-    publisher.publish(runId, { type: 'run_started' as StreamEventType, payload: {}, timestamp: '' });
+    const event: { type: StreamEventType; payload: unknown; timestamp: string } = {
+      type: 'run_started',
+      payload: {},
+      timestamp: '',
+    };
+    publisher.publish(runId, event);
 
     const [channel] = fakeWin.webContents.send.mock.calls[0] as [string, unknown];
     expect(channel).toBe(`cyboflow:stream:${runId}`);
