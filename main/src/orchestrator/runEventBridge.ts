@@ -26,7 +26,7 @@ import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../services/streamParser';
 import { deriveEventType } from '../services/streamParser/derivers';
-import type { ClaudeStreamEvent, StreamEventType } from '../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, StreamEnvelope, StreamEventType } from '../../../shared/types/claudeStream';
 import type { StreamEventPublisher } from './runLauncher';
 import type { LoggerLike } from './types';
 
@@ -110,16 +110,6 @@ interface OutputPayload {
   type: string;
   data: unknown;
   timestamp: Date | string;
-}
-
-// ---------------------------------------------------------------------------
-// Envelope published to the renderer
-// ---------------------------------------------------------------------------
-
-interface StreamEnvelope {
-  type: StreamEventType;
-  payload: ClaudeStreamEvent;
-  timestamp: string;
 }
 
 // Re-exported as deriveEnvelopeType for local readability — same mapping as
