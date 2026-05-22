@@ -283,10 +283,18 @@ const streamEventSchema = z.object({
       z.literal('message_stop'),
     ]),
     index: z.number().optional(),
+    /** Four content_block_delta delta types. text/input_json appear on text+tool_use blocks; signature/thinking appear on thinking blocks (extended-thinking mode). */
     delta: z.object({
-      type: z.union([z.literal('text_delta'), z.literal('input_json_delta')]).optional(),
+      type: z.union([
+        z.literal('text_delta'),
+        z.literal('input_json_delta'),
+        z.literal('signature_delta'),
+        z.literal('thinking_delta'),
+      ]).optional(),
       text: z.string().optional(),
       partial_json: z.string().optional(),
+      signature: z.string().optional(),
+      thinking: z.string().optional(),
     }).passthrough().optional(),
     content_block: z.object({ type: z.string() }).passthrough().optional(),
     message: z.record(z.unknown()).optional(),
