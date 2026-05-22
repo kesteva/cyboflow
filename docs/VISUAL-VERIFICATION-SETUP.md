@@ -1,46 +1,61 @@
 # Visual Verification Setup (cyboflow)
 
 This project is an Electron app. The Vite renderer at `http://localhost:4521`
-depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone, so
-the `visual_web` / Playwright MCP path returns an empty page (HTTP 200, DOM empty).
-Use `visual_macos` via Peekaboo MCP with `pnpm dev` running and the Electron
-window visible.
+depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone,
+so a Playwright MCP that spawns its own Chromium would return an empty page
+(HTTP 200, DOM empty). cyboflow works around this by having Playwright MCP
+**attach to the real Electron renderer over CDP** instead of launching its own
+browser.
 
-## When `verification.visual_web=true` is set (Electron project)
+## How the Playwright path works
 
-`visual_web=true` combined with `playwright_target.kind=electron` always
-produces `skipped_unable` verdicts — Playwright MCP drives a standalone
-Chromium browser and cannot attach to the Electron renderer, which requires
-the `electronTRPC` preload global. Three resolution paths exist:
+1. `pnpm dev` (alias for `pnpm electron-dev`) launches Electron with
+   `--remote-debugging-port=9223` — see `package.json` `electron-dev` script.
+   The renderer is exposed as a Chrome DevTools Protocol target on
+   `http://localhost:9223` with `electronTRPC` already attached via preload.
+2. Project-scoped `.mcp.json` overrides the user-global Playwright MCP
+   registration to launch with `--cdp-endpoint http://localhost:9223`. The MCP
+   server's `browser_navigate` / `browser_snapshot` etc. then drive the real
+   renderer instead of a standalone Chromium.
+3. SoloFlow's `shadow-verifier` honors `verification.visual_web=true` (in
+   `.soloflow/config.json`) and routes Electron flows through
+   `mcp__playwright__*` automatically.
 
-1. **Set `verification.visual_web=false`** in `.soloflow/config.json` — visual
-   verification then uses `visual_macos` (Peekaboo) only.
-2. **Add a CDP-attach launcher** — expose the Electron renderer over Chrome
-   DevTools Protocol so Playwright can `page.goto(cdpUrl)` against it; no
-   such launcher exists in this repo yet.
-3. **Run Playwright E2E manually** — `pnpm dev` in one shell, `pnpm test` in
-   another. The `tests/*.spec.ts` suite drives the full Electron app and is
-   not subject to the preload constraint.
+**Required precondition:** `pnpm dev` must be running before any
+`mcp__playwright__*` call. If port 9223 isn't listening, the MCP server
+fails the `connectOverCDP` and returns navigation errors. The verifier
+classifies this as `skipped_unable` — not a code regression; just start the
+dev server.
 
-If `visual_web=true` is being kept deliberately (it currently is — see
-`.soloflow/config.json`), `skipped_unable` is the expected verdict for the
-Playwright MCP path; `visual_macos` via Peekaboo with `pnpm dev` running is
-the supported capture path in the meantime.
+## Peekaboo (visual_macos) — fallback path
 
-## macOS Permissions Required for Peekaboo MCP
+When `pnpm dev` isn't running, or when capturing system UI outside the
+Electron window, `visual_macos` via Peekaboo MCP captures the Cyboflow
+window directly. `verification.visual_macos=true` is set in
+`.soloflow/config.json`, so this path is also active.
 
-Two separate macOS grants must be enabled for the Claude Code host process:
+### macOS Permissions Required for Peekaboo
+
+Two separate macOS grants must be enabled for the Claude Code host process
+(typically Warp on this machine):
 
 1. **Screen Recording** — enables window screenshots.
-   System Settings > Privacy & Security > Screen Recording > Claude Code.
+   System Settings > Privacy & Security > Screen Recording.
 2. **Accessibility** — enables UI events (click, type, key press, menu).
-   System Settings > Privacy & Security > Accessibility > Claude Code.
+   System Settings > Privacy & Security > Accessibility.
 
 Screen Recording alone is NOT sufficient: capture works but interaction is
-silently blocked. If `visual_macos` returns screenshots but clicks/keystrokes do
-nothing, check Accessibility first. After granting either permission, quit and
-relaunch Claude Code.
+silently blocked. If `visual_macos` returns screenshots but clicks/keystrokes
+do nothing, check Accessibility first. After granting either permission, quit
+and relaunch the host process.
 
-Recurrence evidence: `human-review-queue.md` dedup_keys
-`visual_web_electron_unreachable` and `visual_macos_unavailable` (affected
-sprints 015, 017, 020, 023, 024, 025, 026).
+## Mobile (visual_mobile) — not applicable
+
+cyboflow is desktop-only. `verification.visual_mobile=false`.
+
+## Manual Playwright E2E (independent of MCP)
+
+`pnpm test` drives the full Electron app via `playwright._electron.launch()`.
+This path is independent of the CDP attach and does not require `pnpm dev`
+to be running; the test runner manages the Electron lifecycle itself. Useful
+for headless CI flows where MCP isn't available.
