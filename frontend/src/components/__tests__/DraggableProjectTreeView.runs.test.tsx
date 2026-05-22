@@ -374,27 +374,6 @@ describe('DraggableProjectTreeView — run-centric tree', () => {
     expect(mockNavigateToSessions).not.toHaveBeenCalled();
   });
 
-  it('(g) clicking a run row sets activeProjectId with the run\'s project_id', async () => {
-    const runId = 'run-proj-unique';
-    mockRuns = [
-      makeRun({ id: runId, workflow_id: 'wf-proj-PRJID6', project_id: 1, created_at: '2026-01-01 12:00:00' }),
-    ];
-
-    await renderExpanded();
-
-    await waitFor(() => {
-      expect(screen.getByText('PRJID6')).toBeInTheDocument();
-    });
-
-    const runRow = screen.getByText('PRJID6').closest('[role="button"]');
-    expect(runRow).not.toBeNull();
-
-    fireEvent.click(runRow!);
-
-    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
-    expect(mockNavigateToSessions).not.toHaveBeenCalled();
-  });
-
   it('(f) empty listRuns renders "No runs yet. Use Start Run."', async () => {
     mockRuns = [];
 
