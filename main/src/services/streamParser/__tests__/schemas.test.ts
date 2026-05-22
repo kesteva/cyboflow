@@ -377,6 +377,27 @@ describe('SystemStatusEvent', () => {
 });
 
 // ---------------------------------------------------------------------------
+// RateLimitEvent — rejected status variant (test-writer addition, TASK-696)
+// ---------------------------------------------------------------------------
+
+describe('RateLimitEvent — rejected status', () => {
+  it('narrows rate_limit_event with status=rejected to rate_limit_event (not __unknown__)', () => {
+    const raw = rateLimitEvent({ rate_limit_info: { status: 'rejected', resetsAt: 1747800000 } });
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('rate_limit_event');
+    if (event.type !== 'rate_limit_event') {
+      throw new Error('Expected RateLimitEvent');
+    }
+    expect(event.rate_limit_info.status).toBe('rejected');
+    expect(event.rate_limit_info.resetsAt).toBe(1747800000);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // UnknownStreamEvent fallback — catch-all behavior on malformed input
 // ---------------------------------------------------------------------------
 
