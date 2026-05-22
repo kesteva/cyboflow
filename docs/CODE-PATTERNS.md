@@ -127,14 +127,23 @@ to a canonical example — read those for the actual implementation.
 - **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
 - **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.
 
-### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
+### Database seed helpers
 
-The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
+Shared helpers live in `main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts`:
 
-1. Reuse the local `seedRun(db, runId, status)` helper at the top of `runLifecycle.test.ts` (will be hoisted into `__test_fixtures__/seed.ts` by a follow-up task), OR
-2. If you are writing a new test file before the shared fixture lands, copy the `seedRun` helper verbatim and add a TODO comment pointing at FIND-SPRINT-018-12 so the cleanup task can find it.
+- `createTestDb()` — in-memory `better-sqlite3` with the full cyboflow schema
+  applied via `GATE_SCHEMA` (column-parity-pinned to `006_cyboflow_schema.sql`
+  by `__tests__/orchestratorTestDb.test.ts`).
+- `seedRun(db, overrides?)` — inserts a `workflows` + `workflow_runs` pair;
+  `overrides` accepts any column subset (e.g. `{ id, status, workflowName }`).
 
-A `workflow_runs` schema change (e.g. adding a NOT NULL column without a default) must currently touch every inline INSERT — keep the surface small until the shared `seedWorkflowRun` fixture lands.
+Do NOT inline `INSERT INTO workflow_runs` in new test files — use `seedRun`.
+Do NOT inline `INSERT INTO approvals` either — a `seedApproval` helper is
+pending in the same fixture file (FIND-SPRINT-031-7); until it lands, prefer
+extending `orchestratorTestDb.ts` over copying an inline INSERT.
+
+**Canonical examples:** `main/src/orchestrator/__tests__/approvalRouter.test.ts`,
+`main/src/orchestrator/__tests__/runRecovery.test.ts`.
 
 ## Recurring Patterns
 
