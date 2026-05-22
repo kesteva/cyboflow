@@ -128,7 +128,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     const testEvent: StreamEvent = {
       runId: 'run-001',
       type: 'unknown',
-      payload: { type: 'system' },
+      payload: { unrecognized_field: 'xyz' },
       timestamp: '2026-05-20T00:00:00Z',
     };
     capturedOnEvent!(testEvent);
@@ -180,7 +180,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     const eventForB: StreamEvent = {
       runId: 'run-B',
       type: 'unknown',
-      payload: { source: 'run-B' },
+      payload: { unrecognized_field: 'run-B' },
       timestamp: '2026-05-20T00:00:00Z',
     };
     capturedOnEvents[1](eventForB);
