@@ -6,11 +6,6 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-723": {
-      "status": "in_progress",
-      "depends_on": [],
-      "started": "2026-05-22T14:40:42.635Z"
-    },
     "TASK-724": {
       "status": "pending",
       "depends_on": []
