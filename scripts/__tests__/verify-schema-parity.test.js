@@ -7,10 +7,11 @@
  * Run: node scripts/__tests__/verify-schema-parity.test.js
  * Exit 0 on all pass, non-zero if any test fails.
  *
- * Three cases:
+ * Four cases:
  *   1. Happy path — real schema.sql + migrations, expect exit 0.
  *   2. Extra column in schema.sql only — drift detected, expect exit non-0 + stderr names column.
  *   3. Extra table only in a migration — drift detected, expect exit non-0.
+ *   4. Migration-008-style "no such column" error — tolerated, exit 0 (no real drift).
  */
 'use strict';
 
@@ -76,6 +77,8 @@ function setupFixtureDirs(options = {}) {
 
 // ---------------------------------------------------------------------------
 // Test 1: Happy path — real schema + real migrations → exit 0
+// Asserts that migration 008's "no such column: permission_mode" error is
+// tolerated and does NOT appear in stderr (FIND-SPRINT-030-4 regression gate).
 // ---------------------------------------------------------------------------
 test('happy path: real schema.sql + migrations exits 0', () => {
   const result = runScript();
@@ -83,6 +86,10 @@ test('happy path: real schema.sql + migrations exits 0', () => {
     result.status,
     0,
     `Expected exit 0 but got ${result.status}.\nstderr: ${result.stderr}\nstdout: ${result.stdout}`
+  );
+  assert.ok(
+    !result.stderr.includes('no such column: permission_mode'),
+    `Expected stderr NOT to contain 'no such column: permission_mode' (migration 008 should be tolerated).\nstderr: ${result.stderr}`
   );
 });
 
@@ -166,6 +173,42 @@ test('drift: schema.sql missing a column present in migration causes exit non-0'
     assert.ok(
       result.stderr.includes('stuck_reason') || result.stderr.includes('workflow_runs'),
       `Expected stderr to mention 'stuck_reason' or 'workflow_runs'.\nstderr: ${result.stderr}`
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: "no such column" in a migration is tolerated — exit 0 when no real
+// drift exists (mirrors migration-008's UPDATE sessions SET permission_mode).
+//
+// Fixture: schema.sql declares only sessions(id TEXT PRIMARY KEY).
+// A single migration 099_test_column_tolerance.sql runs:
+//   UPDATE sessions SET missing_col = 'x' WHERE missing_col IS NULL;
+// Both path-1 and path-2 get the same SqliteError (no such column: missing_col)
+// which the widened regex tolerates. Neither path adds missing_col to the schema,
+// so diffSignatures sees identical column sets and the script exits 0.
+// ---------------------------------------------------------------------------
+test('tolerance: "no such column" in migration is tolerated, exit 0 when no real drift', () => {
+  const { tmpDir, schemaPath, migrationsDir } = setupFixtureDirs({
+    schemaContent: 'CREATE TABLE sessions (id TEXT PRIMARY KEY);',
+    migrations: {
+      '099_test_column_tolerance.sql':
+        "UPDATE sessions SET missing_col = 'x' WHERE missing_col IS NULL;\n",
+    },
+  });
+
+  try {
+    const result = runScript({
+      SCHEMA_PATH: schemaPath,
+      MIGRATIONS_DIR: migrationsDir,
+    });
+
+    assert.strictEqual(
+      result.status,
+      0,
+      `Expected exit 0 (no real drift despite "no such column" error) but got ${result.status}.\nstderr: ${result.stderr}\nstdout: ${result.stdout}`
     );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

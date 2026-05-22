@@ -23,57 +23,13 @@
  * end-to-end without spinning up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import PQueue from 'p-queue';
 import { ApprovalRouter, RunNotRunningError, APPROVAL_TIMEOUT_MS, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
 import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-
-// ---------------------------------------------------------------------------
-// Test-database helpers
-// ---------------------------------------------------------------------------
-
-// Vitest transforms TS via Vite; in CJS mode __dirname resolves to the
-// vitest runner's working directory (project root), not the source file
-// directory.  Resolve the schema relative to process.cwd() which is
-// always the main/ workspace root.
-const SCHEMA_PATH = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-/** Creates a fresh in-memory SQLite database with the cyboflow schema applied. */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  // The schema creates several tables; run it as-is.
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
-
-/** Seed a workflow_runs row so requestApproval has something to UPDATE. */
-function seedRun(
-  db: Database.Database,
-  id: string,
-  status: 'running' | 'awaiting_review' | 'canceled' | 'completed' | 'failed',
-): void {
-  // Insert a placeholder workflow first (FK constraint).
-  const workflowId = `workflow-${id}`;
-  db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, 'test-workflow', '{}')`,
-  ).run(workflowId);
-
-  db.prepare(
-    `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json)
-     VALUES (?, ?, 1, '/tmp/test', ?, '{}')`,
-  ).run(id, workflowId, status);
-}
 
 // ---------------------------------------------------------------------------
 // Per-run queue registry (real PQueue — no mocks)
@@ -117,7 +73,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-001';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Fire requestApproval — do NOT await the full decision; we just want the
     // transaction to have committed so we can inspect DB state.
@@ -163,7 +119,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-002';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Start the approval request (does not block on decision — the returned
     // promise resolves only when respond() is called).
@@ -229,7 +185,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-003'; // Same runId for both requests.
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Collect socket reply calls to track call order.
     const replyOrder: number[] = [];
@@ -277,7 +233,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-004';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const approvalPromise = router.requestApproval(runId, 'dangerous_tool', { force: true }, socketReply);
 
@@ -330,7 +286,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-005';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Start the approval request.
     const approvalPromise = router.requestApproval(runId, 'shell', { cmd: 'rm -rf /' }, socketReply);
@@ -389,7 +345,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-006';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const approvalPromise = router.requestApproval(runId, 'read_file', { path: '/etc/hosts' }, socketReply);
     await qf.getOrCreate(runId).onIdle();
@@ -440,7 +396,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-007';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Before any request, pending list is empty.
     expect(router.getPending()).toHaveLength(0);
@@ -474,7 +430,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-008';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const emittedRequests: unknown[] = [];
     router.on('approvalCreated', (req) => { emittedRequests.push(req); });
@@ -509,7 +465,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-009';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Start an approval request — do not await the decision yet.
     const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo hi' }, socketReply);
@@ -577,8 +533,8 @@ describe('ApprovalRouter', () => {
 
     const runIdA = 'run-101A';
     const runIdB = 'run-101B';
-    seedRun(db, runIdA, 'running');
-    seedRun(db, runIdB, 'running');
+    seedRun(db, { id: runIdA, status: 'running' });
+    seedRun(db, { id: runIdB, status: 'running' });
 
     // Register two approval requests for two DIFFERENT runs.
     const promiseA = router.requestApproval(runIdA, 'tool_a', {}, socketReplyA);
@@ -652,7 +608,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-012';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // First requestApproval — moves run to 'awaiting_review'.
     const promise1 = router.requestApproval(runId, 'tool_x', {}, socketReply1);
@@ -720,7 +676,7 @@ describe('ApprovalRouter', () => {
       const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
       const runId = 'run-014';
-      seedRun(db, runId, 'running');
+      seedRun(db, { id: runId, status: 'running' });
 
       // Start the approval request.
       const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'ls' }, socketReply);
@@ -790,7 +746,7 @@ describe('ApprovalRouter', () => {
       const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
       const runId = 'run-015';
-      seedRun(db, runId, 'running');
+      seedRun(db, { id: runId, status: 'running' });
 
       const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/x' }, socketReply);
 
@@ -841,7 +797,7 @@ describe('ApprovalRouter', () => {
       const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
       const runId = 'run-016';
-      seedRun(db, runId, 'running');
+      seedRun(db, { id: runId, status: 'running' });
 
       const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'pwd' }, socketReply);
 
@@ -889,9 +845,9 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
-    seedRun(db, 'run-G1', 'awaiting_review');
-    seedRun(db, 'run-G2', 'awaiting_review');
-    seedRun(db, 'run-G3', 'running');
+    seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
+    seedRun(db, { id: 'run-G2', status: 'awaiting_review' });
+    seedRun(db, { id: 'run-G3', status: 'running' });
 
     const count = router.recoverStaleAwaitingReview();
 
@@ -934,7 +890,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-H1';
-    seedRun(db, runId, 'awaiting_review');
+    seedRun(db, { id: runId, status: 'awaiting_review' });
 
     // Manually insert a pending approvals row for this run.
     const approvalId = 'approval-H1';
@@ -997,7 +953,7 @@ describe('ApprovalRouter', () => {
     const router = ApprovalRouter.initialize(faultyAdapter, qf.getOrCreate.bind(qf));
 
     const runId = 'run-013';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo test' }, socketReply);
     await qf.getOrCreate(runId).onIdle();
@@ -1026,13 +982,6 @@ describe('ApprovalRouter', () => {
 // Helpers (re-declared locally so this describe is self-contained and
 // co-located test helpers from the parent describe are not exported)
 
-function createE2ETestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(join(process.cwd(), 'src/database/migrations/006_cyboflow_schema.sql'), 'utf8'));
-  return db;
-}
-
 function makePreToolInput(toolName: string, input: Record<string, unknown> = {}): PreToolUseHookInput {
   return {
     hook_event_name: 'PreToolUse',
@@ -1056,14 +1005,14 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
   //             flips workflow_runs.status, and returns allow on respond(allow)
   // -------------------------------------------------------------------------
   it("routePreToolUseThroughApprovalRouter inserts approvals row, flips workflow_runs.status, and returns allow on respond(allow)", async () => {
-    const db = createE2ETestDb();
+    const db = createTestDb();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'e2e-run-001';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Fire the helper without a logger — verifies no-logger path works.
     const helperPromise = routePreToolUseThroughApprovalRouter(
@@ -1106,14 +1055,14 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
   //             (bridge contract regression)
   // -------------------------------------------------------------------------
   it("emits 'approvalCreated' exactly once with the inserted ApprovalRequest payload (bridge contract)", async () => {
-    const db = createE2ETestDb();
+    const db = createTestDb();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
     const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
 
     const runId = 'e2e-run-002';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Listen for the approvalCreated event.
     const emitted: unknown[] = [];

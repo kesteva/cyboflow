@@ -580,6 +580,9 @@ describe('RunLauncher.launch publisher', () => {
       // The event must have type 'run_started'
       expect(firstCall[1].type).toBe('run_started');
 
+      // The payload must include the inner type discriminant (RunStartedEvent contract).
+      expect(firstCall[1].payload.type).toBe('run_started');
+
       // The payload must include the run coordinates so the renderer can
       // identify the run without a separate query.
       expect(firstCall[1].payload.runId).toBe(result.runId);

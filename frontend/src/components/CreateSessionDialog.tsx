@@ -7,6 +7,7 @@ import { Sparkles, GitBranch, ChevronRight, ChevronDown, Brain, X, FileText, Pap
 import FilePathAutocomplete from './FilePathAutocomplete';
 import { CommitModeSettings } from './CommitModeSettings';
 import type { CommitModeSettings as CommitModeSettingsType } from '../../../shared/types';
+import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
@@ -88,7 +89,7 @@ export function CreateSessionDialog({
   const [claudeConfig, setClaudeConfig] = useState<ClaudeCodeConfig>({
     prompt: initialPrompt || '',
     model: initialClaudeConfig?.model || 'auto',
-    permissionMode: initialClaudeConfig?.permissionMode || 'approve',
+    permissionMode: initialClaudeConfig?.permissionMode || DEFAULT_PERMISSION_MODE,
     ultrathink: initialClaudeConfig?.ultrathink || false,
     attachedImages: [],
     attachedTexts: []
@@ -630,7 +631,7 @@ export function CreateSessionDialog({
           toolPermissionMode = claudeConfig.permissionMode;
         } else if (toolType === 'none') {
           // For sessions with no agent, use default permission mode
-          toolPermissionMode = formData.permissionMode || 'approve';
+          toolPermissionMode = formData.permissionMode || DEFAULT_PERMISSION_MODE;
         }
 
         // Determine session name
