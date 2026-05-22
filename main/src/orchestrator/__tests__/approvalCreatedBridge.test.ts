@@ -25,6 +25,7 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import type { ApprovalRequest } from '../../../../shared/types/approval';
 import type { Approval } from '../../../../shared/types/approvals';
+import { truncatePayloadPreview } from '../../../../shared/utils/approvals';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -101,10 +102,7 @@ function listPending(db: Database.Database): Approval[] {
     runId: row.runId,
     workflowName: row.workflowName,
     toolName: row.toolName,
-    payloadPreview:
-      row.payloadPreviewRaw.length > 512
-        ? row.payloadPreviewRaw.slice(0, 512)
-        : row.payloadPreviewRaw,
+    payloadPreview: truncatePayloadPreview(row.payloadPreviewRaw),
     rationale: row.rationale,
     createdAt: new Date(row.createdAt).toISOString(),
     status: row.status as Approval['status'],
