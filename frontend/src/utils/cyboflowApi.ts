@@ -26,10 +26,10 @@ import type {
   AssistantEvent,
   UserEvent,
   ResultEvent,
-  StreamEvent as ClaudeStreamEventVariant,
   SessionInfoEvent,
   RateLimitEvent,
   RunStartedEvent,
+  StreamEnvelope,
 } from '../../../shared/types/claudeStream';
 
 // Re-export StreamEventType from shared so consumers get the canonical union.
@@ -83,23 +83,13 @@ export interface WorkflowRunListRow {
 /**
  * Discriminated union over all IPC envelope `type` values the renderer can receive.
  *
- * Each arm narrows `payload` to the correct SDK / orchestrator shape so callers
- * never need to cast `event.payload` manually. Discriminate on `event.type`.
- *
- * The `run_started` arm carries the synthetic RunStartedEvent emitted by RunLauncher
- * before the first SDK event arrives.
- * The `unknown` arm carries the raw payload when deriveEventType returns 'unknown'.
+ * Derived from the shared `StreamEnvelope` discriminant in
+ * shared/types/claudeStream.ts by intersecting with the renderer-only `runId`
+ * field. Discriminate on `event.type`. Never re-declare the
+ * `StreamEnvelopePayload` arms here — a parallel union silently routes new
+ * SDK variants to `UnknownEventRow` if any arm is forgotten (FIND-SPRINT-031-4).
  */
-export type StreamEvent =
-  | { runId: string; type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent; timestamp: string }
-  | { runId: string; type: 'assistant';          payload: AssistantEvent;           timestamp: string }
-  | { runId: string; type: 'user';               payload: UserEvent;                timestamp: string }
-  | { runId: string; type: 'result';             payload: ResultEvent;              timestamp: string }
-  | { runId: string; type: 'stream_event';       payload: ClaudeStreamEventVariant; timestamp: string }
-  | { runId: string; type: 'session_info';       payload: SessionInfoEvent;         timestamp: string }
-  | { runId: string; type: 'rate_limit_event';   payload: RateLimitEvent;           timestamp: string }
-  | { runId: string; type: 'run_started';        payload: RunStartedEvent;          timestamp: string }
-  | { runId: string; type: 'unknown';            payload: unknown;                  timestamp: string };
+export type StreamEvent = StreamEnvelope & { runId: string };
 
 // ---------------------------------------------------------------------------
 // Guard: ensure window.electron is present before every IPC call
