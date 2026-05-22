@@ -373,11 +373,12 @@ export class RunExecutor {
    * logged at warn level and NOT escalated — the race is expected.
    *
    * Phase routing:
-   *   'sdk_initialized' → lifecycleTransitions.running(runId)
+   *   'pre_spawn'       → lifecycleTransitions.running(runId)  // primary path (see FIND-SPRINT-026-10)
+   *   'sdk_initialized' → lifecycleTransitions.running(runId)  // defensive idempotency fallback
    *   'completed'       → lifecycleTransitions.completed(runId, 'running')
    *   'failed'          → lifecycleTransitions.failed(runId, fromStatus, errorMessage)
    *   'canceled'        → lifecycleTransitions.canceled(runId)
-   *   'pre_spawn' / 'post_spawn' → no-op
+   *   'post_spawn'      → no-op
    *
    * @param runId  The workflow run ID.
    * @param phase  The lifecycle phase label.
@@ -386,11 +387,13 @@ export class RunExecutor {
     if (!this.lifecycleTransitions) return;
     try {
       switch (phase) {
-        // Transition `starting → running` BEFORE the SDK spawns so ApprovalRouter
-        // sees the run as 'running' when the SDK's PreToolUse hook fires. The SDK
-        // can invoke PreToolUse before its first stream event is dispatched to the
-        // bridge's onFirstMessage callback, so transitioning on `sdk_initialized`
-        // would race: tool calls would arrive at the router while status='starting'
+        // FIND-SPRINT-026-10 regression fix: 'pre_spawn' was previously a no-op
+        // (fell through to 'post_spawn' return). Tests were failing because the
+        // production contract changed: running() must fire BEFORE spawnCliProcess so
+        // ApprovalRouter sees 'running' status when the SDK's PreToolUse hook fires.
+        // The SDK can invoke PreToolUse before its first stream event is dispatched to
+        // the bridge's onFirstMessage callback, so the prior 'sdk_initialized'-only
+        // path would race: tool calls would arrive at the router while status='starting'
         // and be rejected with RunNotRunningError.
         case 'pre_spawn':
           await this.lifecycleTransitions.running(runId);
