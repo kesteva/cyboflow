@@ -372,3 +372,37 @@ export function streamEvent(overrides: Partial<StreamEvent> = {}): StreamEvent {
     ...overrides,
   };
 }
+
+export function streamEventSignatureDelta(overrides: Partial<StreamEvent> = {}): StreamEvent {
+  return {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'signature_delta',
+        // Synthetic base64-shaped signature. Matches the wire-observed shape from raw_events.id=1125
+        // (run b0f26c005183400898559a3d78b790bc) without persisting the real signature.
+        signature: 'EvcDCmMIDRgCEXAMPLE_SIGNATURE_SHAPE_BASE64_PADDING==',
+      },
+    },
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}
+
+export function streamEventThinkingDelta(overrides: Partial<StreamEvent> = {}): StreamEvent {
+  return {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'thinking_delta',
+        thinking: 'Let me think about this step by step.',
+      },
+    },
+    session_id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    ...overrides,
+  };
+}

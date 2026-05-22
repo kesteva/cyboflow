@@ -245,9 +245,11 @@ export interface StreamEvent {
       | 'message_stop';
     index?: number;
     delta?: {
-      type?: 'text_delta' | 'input_json_delta';
+      type?: 'text_delta' | 'input_json_delta' | 'signature_delta' | 'thinking_delta';
       text?: string;
       partial_json?: string;
+      signature?: string;
+      thinking?: string;
     };
     content_block?: { type: string; [k: string]: unknown };
     message?: Record<string, unknown>;
