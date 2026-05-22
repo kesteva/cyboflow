@@ -523,7 +523,7 @@ describe('registerCyboflowHandlers — runtime input validation', () => {
     expect(result.error).toMatch(/projectId/);
   });
 
-  // validateNumberArg — !Number.isFinite branch (NaN / Infinity)
+  // validateInput — z.number().finite() rejects NaN/Infinity
   it('listRuns: NaN projectId → success: false, error mentions projectId', async () => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(
@@ -540,7 +540,7 @@ describe('registerCyboflowHandlers — runtime input validation', () => {
     expect(result.error).toMatch(/projectId/);
   });
 
-  // validateStringArg — v.length === 0 branch
+  // validateInput — z.string().min(1) rejects empty string
   it('startRun: empty string workflowId → success: false, error mentions workflowId', async () => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerCyboflowHandlers(

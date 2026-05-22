@@ -22,6 +22,7 @@ import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { Approval, ApproveRestOfRunResult, RejectRestOfRunResult } from '../../../../../shared/types/approvals';
+import { truncatePayloadPreview } from '../../../../../shared/utils/approvals';
 import { ApprovalRouter, ApprovalNotFoundError } from '../../approvalRouter';
 import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../../../trpc/routers/approvals';
 
@@ -82,9 +83,7 @@ export const approvalsRouter = router({
         runId: row.runId,
         workflowName: row.workflowName,
         toolName: row.toolName,
-        payloadPreview: row.payloadPreviewRaw.length > 512
-          ? row.payloadPreviewRaw.slice(0, 512)
-          : row.payloadPreviewRaw,
+        payloadPreview: truncatePayloadPreview(row.payloadPreviewRaw),
         rationale: row.rationale,
         createdAt: new Date(row.createdAt).toISOString(),
         status: row.status as Approval['status'],

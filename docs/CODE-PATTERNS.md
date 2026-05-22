@@ -127,14 +127,23 @@ to a canonical example — read those for the actual implementation.
 - **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
 - **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.
 
-### Database seed helpers (pending — see compounded FIND-SPRINT-018-12)
+### Database seed helpers
 
-The `INSERT INTO workflow_runs (...)` literal currently appears 9+ times across `runExecutor.test.ts`, `runLauncher.test.ts`, `runLifecycle.test.ts`, and `cancelAndRestart.test.ts`. Do NOT add a 10th inline insert in new test files. Either:
+Shared helpers live in `main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts`:
 
-1. Reuse the local `seedRun(db, runId, status)` helper at the top of `runLifecycle.test.ts` (will be hoisted into `__test_fixtures__/seed.ts` by a follow-up task), OR
-2. If you are writing a new test file before the shared fixture lands, copy the `seedRun` helper verbatim and add a TODO comment pointing at FIND-SPRINT-018-12 so the cleanup task can find it.
+- `createTestDb()` — in-memory `better-sqlite3` with the full cyboflow schema
+  applied via `GATE_SCHEMA` (column-parity-pinned to `006_cyboflow_schema.sql`
+  by `__tests__/orchestratorTestDb.test.ts`).
+- `seedRun(db, overrides?)` — inserts a `workflows` + `workflow_runs` pair;
+  `overrides` accepts any column subset (e.g. `{ id, status, workflowName }`).
 
-A `workflow_runs` schema change (e.g. adding a NOT NULL column without a default) must currently touch every inline INSERT — keep the surface small until the shared `seedWorkflowRun` fixture lands.
+Do NOT inline `INSERT INTO workflow_runs` in new test files — use `seedRun`.
+Do NOT inline `INSERT INTO approvals` either — a `seedApproval` helper is
+pending in the same fixture file (FIND-SPRINT-031-7); until it lands, prefer
+extending `orchestratorTestDb.ts` over copying an inline INSERT.
+
+**Canonical examples:** `main/src/orchestrator/__tests__/approvalRouter.test.ts`,
+`main/src/orchestrator/__tests__/runRecovery.test.ts`.
 
 ## Recurring Patterns
 
@@ -194,6 +203,15 @@ exhaustively auto-narrowed. A bare `payload: unknown` on a typed envelope is the
 tripwire — grep for it before merging.
 Canonical drift: FIND-SPRINT-026-20 — five surviving casts at `RunView.tsx:38,98,138,167,186`.
 
+**StreamEvent must be a derived alias, not a re-declaration.** Express the
+renderer type as `StreamEvent = StreamEnvelope & { runId: string }` in
+`frontend/src/utils/cyboflowApi.ts` — never re-declare the
+`StreamEnvelopePayload` arms locally. A parallel union forces synchronised
+edits across `StreamEventType`, `StreamEnvelopePayload`, and the renderer
+type; omission silently routes new variants to `UnknownEventRow` instead of
+failing typecheck. Canonical drift: FIND-SPRINT-031-4 — resolved as A4 in
+the SPRINT-031 compound.
+
 ### Zustand store structure (renderer)
 
 One store file per domain in `frontend/src/stores/`. Each store uses Zustand's `create` with
@@ -210,27 +228,30 @@ not in IPC handlers — handlers should be thin: validate input, delegate to ser
 
 - **Canonical example:** `main/src/ipc/session.ts`
 
-**Runtime input validation:** Every handler that reads from `args` MUST type-guard the
-expected fields before use. A bare `const { projectId } = args as { projectId: number }`
-cast is insufficient — if the renderer passes `undefined`, better-sqlite3 throws or
-returns wrong rows silently. Required pattern:
+**Runtime input validation:** Every handler that reads from `args` MUST validate args via
+`validateInput` from `main/src/ipc/validateInput.ts`. A bare `const { projectId } = args as
+{ projectId: number }` cast is insufficient — if the renderer passes `undefined`,
+better-sqlite3 throws or returns wrong rows silently. Hand-rolled type guards are forbidden
+— they fork the error-shape and make the in-progress tRPC ipcLink migration harder.
 
-```typescript
-ipcMain.handle('cyboflow:listRuns', (_event, args: unknown) => {
-  if (typeof (args as Record<string, unknown>)?.projectId !== 'number') {
-    return { success: false, error: 'listRuns: projectId must be a number' };
-  }
-  const { projectId } = args as { projectId: number };
-  // ... delegate to service
-});
+## IPC handler input validation
+
+All `ipcMain.handle` handlers in `main/src/ipc/*.ts` MUST validate args via
+`validateInput` from `main/src/ipc/validateInput.ts`. Hand-rolled type guards
+are forbidden — they fork the error-shape and make the in-progress tRPC ipcLink
+migration harder.
+
+Canonical usage:
+
+```ts
+const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:listRuns');
+if (!v.ok) return { success: false, error: v.error };
+const { projectId } = v.value;
 ```
 
-For domains with multiple handlers sharing the same arg shapes, extract a `validateArg`
-helper in the domain's IPC file (canonical example: `validateNumberArg` / `validateStringArg`
-in `main/src/ipc/cyboflow.ts`, landed in TASK-705). Hand-rolled today; a Zod-based
-`validateInput<T>(schema, args, channel)` upgrade is tracked under FIND-SPRINT-030-9 to
-align with the tRPC router pattern and ease the forthcoming ipcLink migration.
-Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards.
+See `main/src/ipc/cyboflow.ts` for the canonical caller.
+
+Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards (resolved by TASK-726 via the `validateInput` helper).
 
 ### Per-session mutation serialization
 
@@ -378,6 +399,6 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
 
 4. **DB CHECK constraint is `IN ('approve', 'ignore')`** — both values are persisted. Migration 008 (`main/src/database/migrations/008_permission_mode_approve_default.sql`) backfills NULL rows to `'approve'` on legacy installs. The DEFAULT clause on new columns uses `'approve'`.
 
-5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts.
+5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts. Verification: `grep -rnE "\|\| 'approve'" main/src/ frontend/src/ shared/ --include='*.ts' --include='*.tsx'` must return 0 matches in non-comment lines.
 
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.

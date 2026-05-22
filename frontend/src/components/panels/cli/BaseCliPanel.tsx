@@ -9,6 +9,7 @@ import {
   getCliPanelConfig,
   CliProcessStatus 
 } from '../../../../../shared/types/cliPanels';
+import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 
 /**
  * Props for the base CLI panel component
@@ -422,7 +423,7 @@ export const BaseCliPanel: React.FC<BaseCliPanelProps> = ({
                     Permission Mode
                   </label>
                   <select
-                    value={settings.defaultPermissionMode || 'approve'}
+                    value={settings.defaultPermissionMode || DEFAULT_PERMISSION_MODE}
                     onChange={(e) => onSettingsChange({
                       ...settings,
                       defaultPermissionMode: e.target.value as 'approve'

@@ -438,6 +438,38 @@ export type StreamEventType =
   | 'run_started'
   | 'unknown';
 
+/**
+ * Discriminated payload union for StreamEnvelope. Each arm pairs a StreamEventType
+ * value with the corresponding payload shape. `unknown` is the catch-all for the
+ * 'unknown' arm (deriveEventType emits 'unknown' when classification fails).
+ *
+ * Updated alongside StreamEventType — keep the two unions in sync.
+ */
+export type StreamEnvelopePayload =
+  | { type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent }
+  | { type: 'assistant';         payload: AssistantEvent }
+  | { type: 'user';              payload: UserEvent }
+  | { type: 'result';            payload: ResultEvent }
+  | { type: 'stream_event';      payload: StreamEvent }
+  | { type: 'session_info';      payload: SessionInfoEvent }
+  | { type: 'rate_limit_event';  payload: RateLimitEvent }
+  | { type: 'run_started';       payload: RunStartedEvent }
+  | { type: 'unknown';           payload: unknown };
+
+/**
+ * IPC envelope wrapping every ClaudeStreamEvent emitted from the main process to
+ * the renderer's `cyboflow:stream:<runId>` channel.
+ *
+ * Discriminate on `type`. The renderer-side `StreamEvent` discriminated union
+ * in `frontend/src/utils/cyboflowApi.ts` narrows `payload` per `type`.
+ *
+ * TASK-725: `payload` is now the discriminated `StreamEnvelopePayload` union (not
+ * `unknown`) so TypeScript catches contract drift at the publish site. The bridge
+ * construction at `runEventBridge.ts:237` uses a single `as StreamEnvelope` cast
+ * at the audited boundary — see the Hardest Decision note in TASK-725-plan.md.
+ */
+export type StreamEnvelope = StreamEnvelopePayload & { timestamp: string };
+
 // ---------------------------------------------------------------------------
 // Exhaustive-check helper
 // ---------------------------------------------------------------------------

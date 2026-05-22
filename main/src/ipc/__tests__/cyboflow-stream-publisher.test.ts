@@ -25,7 +25,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { StreamEventPublisher } from '../../orchestrator/runLauncher';
-import type { StreamEventType } from '../../../../shared/types/claudeStream';
+import type { StreamEnvelope } from '../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,9 +64,9 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => fakeWin);
 
     const runId = 'test-run-id-abc123';
-    const event: { type: StreamEventType; payload: unknown; timestamp: string } = {
+    const event: StreamEnvelope = {
       type: 'run_started',
-      payload: { runId, worktreePath: '/tmp/wt', branchName: 'cyboflow/sprint/abc123' },
+      payload: { type: 'run_started', runId, worktreePath: '/tmp/wt', branchName: 'cyboflow/sprint/abc123' },
       timestamp: new Date().toISOString(),
     };
 
@@ -83,9 +83,9 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => null);
 
     // Should not throw, and send should never be called
-    const nullWinEvent: { type: StreamEventType; payload: unknown; timestamp: string } = {
+    const nullWinEvent: StreamEnvelope = {
       type: 'run_started',
-      payload: {},
+      payload: { type: 'run_started', runId: 'x', worktreePath: '', branchName: '' },
       timestamp: new Date().toISOString(),
     };
     expect(() => {
@@ -97,9 +97,9 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const fakeWin = makeFakeWindow(true /* isDestroyed */);
     const publisher = buildPublisher(() => fakeWin);
 
-    const destroyedWinEvent: { type: StreamEventType; payload: unknown; timestamp: string } = {
+    const destroyedWinEvent: StreamEnvelope = {
       type: 'run_started',
-      payload: {},
+      payload: { type: 'run_started', runId: 'x', worktreePath: '', branchName: '' },
       timestamp: new Date().toISOString(),
     };
     publisher.publish('run-2', destroyedWinEvent);
@@ -112,9 +112,9 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => fakeWin);
 
     const runId = 'unique-run-xyz';
-    const event: { type: StreamEventType; payload: unknown; timestamp: string } = {
+    const event: StreamEnvelope = {
       type: 'run_started',
-      payload: {},
+      payload: { type: 'run_started', runId, worktreePath: '', branchName: '' },
       timestamp: '',
     };
     publisher.publish(runId, event);

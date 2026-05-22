@@ -21,10 +21,12 @@
  */
 import { IpcMain } from 'electron';
 import * as os from 'os';
+import { z } from 'zod';
 import type { AppServices } from './types';
 import { resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows } from '../orchestrator/workflowRegistry';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import { validateInput } from './validateInput';
 
 // ---------------------------------------------------------------------------
 // OrchestratorHealth singleton (injected after McpServerLifecycle is wired)
@@ -56,34 +58,6 @@ export function setCyboflowHealth(health: OrchestratorHealth): void {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime argument validators
-// ---------------------------------------------------------------------------
-
-function validateNumberArg(
-  args: unknown,
-  key: string,
-  channel: string,
-): { ok: true; value: number } | { ok: false; error: string } {
-  const v = (args as Record<string, unknown> | null | undefined)?.[key];
-  if (typeof v !== 'number' || !Number.isFinite(v)) {
-    return { ok: false, error: `${channel}: ${key} must be a finite number` };
-  }
-  return { ok: true, value: v };
-}
-
-function validateStringArg(
-  args: unknown,
-  key: string,
-  channel: string,
-): { ok: true; value: string } | { ok: false; error: string } {
-  const v = (args as Record<string, unknown> | null | undefined)?.[key];
-  if (typeof v !== 'string' || v.length === 0) {
-    return { ok: false, error: `${channel}: ${key} must be a non-empty string` };
-  }
-  return { ok: true, value: v };
-}
-
-// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -101,9 +75,9 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
     'cyboflow:listWorkflows',
     async (_event, args: unknown) => {
       try {
-        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:listWorkflows');
-        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
-        const { value: projectId } = vProjectId;
+        const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:listWorkflows');
+        if (!v.ok) return { success: false, error: v.error };
+        const { projectId } = v.value;
 
         let workflows = services.cyboflow.workflowRegistry.listByProject(projectId);
 
@@ -138,12 +112,13 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
     'cyboflow:startRun',
     async (_event, args: unknown) => {
       try {
-        const vWorkflowId = validateStringArg(args, 'workflowId', 'cyboflow:startRun');
-        if (!vWorkflowId.ok) return { success: false, error: vWorkflowId.error };
-        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:startRun');
-        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
-        const workflowId = vWorkflowId.value;
-        const projectId = vProjectId.value;
+        const v = validateInput(
+          z.object({ workflowId: z.string().min(1), projectId: z.number().finite() }),
+          args,
+          'cyboflow:startRun',
+        );
+        if (!v.ok) return { success: false, error: v.error };
+        const { workflowId, projectId } = v.value;
 
         // Resolve project path via sessionManager (the canonical project store).
         const project = services.sessionManager.getProjectById(projectId);
@@ -180,9 +155,9 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
     'cyboflow:listRuns',
     (_event, args: unknown) => {
       try {
-        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:listRuns');
-        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
-        const { value: projectId } = vProjectId;
+        const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:listRuns');
+        if (!v.ok) return { success: false, error: v.error };
+        const { projectId } = v.value;
         const rows = services.databaseService.getDb()
           .prepare(
             `SELECT id, workflow_id, project_id, status, worktree_path, branch_name,
