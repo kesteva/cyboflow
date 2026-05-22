@@ -1,8 +1,8 @@
 ---
 id: TASK-719
 idea: SPRINT-029-compound
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - frontend/src/components/CreateSessionDialog.tsx
   - frontend/src/components/panels/cli/BaseCliPanel.tsx
@@ -18,14 +18,14 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Zero `|| 'approve'` string-literal fallbacks remain in product code under main/src/ and frontend/src/."
     verification: "grep -rnE \"\\|\\| 'approve'\" main/src/ frontend/src/ shared/ --include='*.ts' --include='*.tsx' returns 0 matches (excluding comment lines)."
-  - criterion: "Each of the 5 cited product files imports DEFAULT_PERMISSION_MODE."
+  - criterion: Each of the 5 cited product files imports DEFAULT_PERMISSION_MODE.
     verification: "grep -n 'DEFAULT_PERMISSION_MODE' on each of CreateSessionDialog.tsx, BaseCliPanel.tsx, events.ts, claudeCodeManager.ts returns at least one import and one usage line."
-  - criterion: "CODE-PATTERNS.md Rule 5 carries an enforcement grep matching the style of Rules 1 and 2."
+  - criterion: CODE-PATTERNS.md Rule 5 carries an enforcement grep matching the style of Rules 1 and 2.
     verification: "grep -n 'grep -rnE' docs/CODE-PATTERNS.md returns at least 3 matches, with the new Rule 5 entry referencing the `\\|\\| 'approve'` pattern."
   - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
-  - criterion: "configManager.permissionMode regression test continues to pass."
-    verification: "pnpm --filter @cyboflow/main run test -- configManager.permissionMode exits 0."
+  - criterion: configManager.permissionMode regression test continues to pass.
+    verification: pnpm --filter @cyboflow/main run test -- configManager.permissionMode exits 0.
 depends_on: []
 estimated_complexity: low
 epic: approval-router-and-permission-fix
@@ -33,7 +33,6 @@ test_strategy:
   needed: false
   justification: "Pure source-representation refactor — substitutes the re-exported DEFAULT_PERMISSION_MODE constant for the inline literal 'approve'. Runtime value is byte-identical. Existing configManager.permissionMode.test.ts already covers the contract."
 ---
-
 # Replace residual `|| 'approve'` literals with DEFAULT_PERMISSION_MODE constant
 
 ## Objective

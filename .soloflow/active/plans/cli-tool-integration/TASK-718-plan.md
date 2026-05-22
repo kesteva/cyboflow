@@ -1,8 +1,8 @@
 ---
 id: TASK-718
 idea: SPRINT-029-compound-B1
-status: ready
-created: 2026-05-21T00:00:00.000Z
+status: in-flight
+created: "2026-05-21T00:00:00.000Z"
 files_owned:
   - main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
 files_readonly:
@@ -14,15 +14,15 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-029-proposal.md
   - .soloflow/active/findings/SPRINT-029-findings.md
 acceptance_criteria:
-  - criterion: "Both it blocks in claudeCodeManager.killProcess.test.ts pass without timeout."
+  - criterion: Both it blocks in claudeCodeManager.killProcess.test.ts pass without timeout.
     verification: "pnpm --filter main exec vitest run src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts --reporter=verbose 2>&1 | grep -E '2 passed|Tests\\s+2 passed'"
-  - criterion: "The mid-stream test does not hit the 5s vitest timeout — it completes in under 1 second."
+  - criterion: The mid-stream test does not hit the 5s vitest timeout — it completes in under 1 second.
     verification: "pnpm --filter main exec vitest run src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts --reporter=verbose 2>&1 | grep 'killProcess mid-stream' | grep -vE 'timed out|5000ms'"
   - criterion: "No `TypeError: Cannot read properties of undefined (reading 'close')` in the test output."
     verification: "pnpm --filter main exec vitest run src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts 2>&1 | grep -E \"Cannot read properties of undefined.*close\" | wc -l | tr -d ' ' | grep -qx 0"
   - criterion: "The invariants the original tests assert remain intact: after killProcess the pipelines, sdkRuns, and processes maps are empty, and clearPendingForRun was called exactly once from runSdkQuery's finally block."
     verification: "grep -nE \"\\.has\\(panelId\\)\\)\\.toBe\\(false\\)|clearPendingForRunSpy\\)\\.toHaveBeenCalledOnce\\(\\)\" main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts | wc -l | tr -d ' ' | awk '{ if ($1 >= 4) print \"ok\"; else exit 1 }'"
-  - criterion: "Full main-workspace unit suite passes (no new regressions)."
+  - criterion: Full main-workspace unit suite passes (no new regressions).
     verification: "pnpm --filter main test 2>&1 | tail -50 | grep -E 'Tests.*failed' | grep -vE 'Tests\\s+0 failed' | wc -l | tr -d ' ' | grep -qx 0"
 depends_on: []
 estimated_complexity: low
@@ -32,13 +32,12 @@ test_strategy:
   justification: "This task IS the test fix. The owned file IS the test file. Rewrite the failing test cases so they exercise the same invariants without deadlocking on spawnCliProcess's `await iteratorDone`."
   targets:
     - behavior: "killProcess mid-stream aborts the SDK run and clears pipelines/sdkRuns/processes maps; clearPendingForRun fires exactly once from runSdkQuery's finally."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
     - behavior: "killProcess on a panel with no active run is idempotent: no throw, maps stay empty, clearPendingForRun is never called."
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
 ---
-
 # Fix pre-existing 5s timeout in claudeCodeManager.killProcess.test.ts
 
 ## Objective

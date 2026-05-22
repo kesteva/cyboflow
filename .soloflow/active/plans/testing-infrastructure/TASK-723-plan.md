@@ -1,8 +1,8 @@
 ---
 id: TASK-723
 idea: SPRINT-030
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - scripts/verify-schema-parity.js
   - scripts/__tests__/verify-schema-parity.test.js
@@ -20,12 +20,12 @@ acceptance_criteria:
   - criterion: "`pnpm run verify:schema` exits 0 against the real schema.sql + real migrations set (including 008)."
     verification: "Run `pnpm run verify:schema` from repo root; exit status 0."
   - criterion: "`node scripts/__tests__/verify-schema-parity.test.js` exits 0 with all three pre-existing cases passing plus a new fourth case asserting that migration-008-style `no such column` errors are tolerated in path-1."
-    verification: "Run `node scripts/__tests__/verify-schema-parity.test.js`; exit status 0; stdout/stderr indicates 4 tests passed."
+    verification: Run `node scripts/__tests__/verify-schema-parity.test.js`; exit status 0; stdout/stderr indicates 4 tests passed.
   - criterion: "`pnpm test:unit` advances past the `verify:schema` step without `SqliteError: no such column: permission_mode`."
     verification: "Run `pnpm test:unit`; the `verify:schema` chain step (between the workspace tests and the parity self-test) exits 0; any subsequent failures must not contain the string `no such column: permission_mode`."
   - criterion: "`scripts/verify-schema-parity.js` still surfaces real drift: when a migration references a column that genuinely doesn't exist in any table the migration set declares, the script exits non-0 with a diagnostic in stderr."
-    verification: "The new test case in `scripts/__tests__/verify-schema-parity.test.js` constructs a synthetic migration set where path-1 succeeds (column tolerated) but path-2 still produces a column-set diff that diffSignatures detects; the test asserts exit non-0. The existing two drift tests (cases 2 and 3) also continue to pass."
-  - criterion: "The widened tolerance in `verify-schema-parity.js` carries an inline comment naming `migrations/008_permission_mode_approve_default.sql` and the legacy `projects` / `sessions.permission_mode` columns as the canonical trigger so a future reader can locate the root cause."
+    verification: The new test case in `scripts/__tests__/verify-schema-parity.test.js` constructs a synthetic migration set where path-1 succeeds (column tolerated) but path-2 still produces a column-set diff that diffSignatures detects; the test asserts exit non-0. The existing two drift tests (cases 2 and 3) also continue to pass.
+  - criterion: The widened tolerance in `verify-schema-parity.js` carries an inline comment naming `migrations/008_permission_mode_approve_default.sql` and the legacy `projects` / `sessions.permission_mode` columns as the canonical trigger so a future reader can locate the root cause.
     verification: "`grep -n '008_permission_mode_approve_default\\|permission_mode' scripts/verify-schema-parity.js` returns at least one hit inside the catch block that handles the `no such column` case."
 depends_on: []
 estimated_complexity: low
@@ -35,16 +35,15 @@ test_strategy:
   justification: "The existing parity self-test suite is the canonical regression gate. We must (a) prove the happy path now passes with real migrations, and (b) lock the tolerance widening to the specific failure class without weakening drift detection for genuine column-level deviation."
   targets:
     - behavior: "happy-path: real schema.sql + real migrations set (including 008) exits 0 — replaces the previously-passing-only-against-curated-fixture happy-path with an assertion against the full migrations dir."
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
     - behavior: "new case: a migration that references a column not declared anywhere (mimicking 008's `UPDATE sessions SET permission_mode = 'approve'` shape) is tolerated in path-1 and the script still exits 0 when no genuine drift exists."
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
     - behavior: "regression: genuine column-set drift (existing test 2's `bogus_test_column` and test 3's missing `stuck_reason`) still produces exit non-0 with stderr naming the offending column."
-      test_file: "scripts/__tests__/verify-schema-parity.test.js"
+      test_file: scripts/__tests__/verify-schema-parity.test.js
       type: integration
 ---
-
 # Widen verify-schema-parity.js tolerated-error set to include `no such column`
 
 ## Objective

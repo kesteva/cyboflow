@@ -1,9 +1,9 @@
 ---
 id: TASK-720
 idea: SPRINT-029-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-029
-created: 2026-05-21T00:00:00.000Z
+created: "2026-05-21T00:00:00.000Z"
 files_owned:
   - main/src/index.ts
   - main/src/orchestrator/approvalCreatedBridge.ts
@@ -23,7 +23,7 @@ acceptance_criteria:
     verification: "grep -nE \"workflowName:\\s*''\" main/src/index.ts returns 0 matches AND grep -n 'TODO(approval-router): resolve via workflows-table lookup' main/src/index.ts returns 0 matches"
   - criterion: "New helper file main/src/orchestrator/approvalCreatedBridge.ts exports buildApprovalCreatedEvent(request, db): ApprovalCreatedEvent that resolves workflowName via a SELECT JOIN."
     verification: "test -f main/src/orchestrator/approvalCreatedBridge.ts AND grep -nE 'export (function|const) buildApprovalCreatedEvent' main/src/orchestrator/approvalCreatedBridge.ts returns at least 1 match"
-  - criterion: "The approvalCreated listener in index.ts delegates to buildApprovalCreatedEvent."
+  - criterion: The approvalCreated listener in index.ts delegates to buildApprovalCreatedEvent.
     verification: "grep -nE 'buildApprovalCreatedEvent\\(' main/src/index.ts returns at least 1 match inside the approvalCreated callback."
   - criterion: "Missing-row fallback: bridge degrades to workflowName='' with console.warn rather than throwing."
     verification: "grep -nE 'console\\.warn' main/src/orchestrator/approvalCreatedBridge.ts returns at least 1 match."
@@ -36,7 +36,7 @@ estimated_complexity: low
 epic: approval-router-and-permission-fix
 test_strategy:
   needed: true
-  justification: "FIND-SPRINT-029-8 is a cross-task data-drift bug that only the sprint-code-reviewer caught. The fix sticks only if a single test exercises both the SSE bridge AND listPending against the same seeded DB row and asserts workflowName is byte-identical. Without it the same per-task review blindspot re-emerges."
+  justification: FIND-SPRINT-029-8 is a cross-task data-drift bug that only the sprint-code-reviewer caught. The fix sticks only if a single test exercises both the SSE bridge AND listPending against the same seeded DB row and asserts workflowName is byte-identical. Without it the same per-task review blindspot re-emerges.
   targets:
     - behavior: "Round-trip parity: bridge.workflowName === listPending.workflowName for same approval"
       test_file: main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts
@@ -48,7 +48,6 @@ test_strategy:
       test_file: main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts
       type: unit
 ---
-
 # Fix workflowName data drift between SSE bridge and listPending
 
 ## Objective
