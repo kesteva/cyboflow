@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
+  // Ignore vitest-only test files (e.g. any .spec.ts inside __tests__/ dirs)
+  testIgnore: ['**/__tests__/**'],
   // Maximum time one test can run for
   timeout: 60 * 1000,
   expect: {
