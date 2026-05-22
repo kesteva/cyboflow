@@ -178,14 +178,15 @@ export class ApprovalRouter extends EventEmitter {
     if (!this.db) throw new Error('ApprovalRouter db handle undefined');
 
     const approvalId = randomUUID();
-    const now = new Date().toISOString();
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
 
     const request: ApprovalRequest = {
       id: approvalId,
       runId,
       toolName,
       input,
-      timestamp: Date.now(),
+      timestamp: nowMs,
     };
 
     // Wire up the decision Promise before enqueueing — the resolve/reject refs
