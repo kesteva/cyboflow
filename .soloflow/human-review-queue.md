@@ -1,8 +1,8 @@
 ---
-pending_count: 40
+pending_count: 43
 buckets:
   decisions: 2
-  actions: 5
+  actions: 8
   testing: 28
   deferred_visual: 5
 items: []
@@ -131,6 +131,58 @@ items: []
     - TASK-685
     - TASK-687
     - TASK-688
+
+- task: SPRINT-030
+  type: config_issue
+  bucket: actions
+  dedup_key: sprint030_electron_better_sqlite3_abi_mismatch
+  plan_ref: .soloflow/active/sprints/SPRINT-030/sprint.json
+  action: "Run `pnpm electron:rebuild` from the repo root to rebuild better-sqlite3 against Electron's NODE_MODULE_VERSION 136 (currently NMV 127 because of a prior `pnpm --filter main test` run). Then `pnpm dev` launches the full Electron app and the sprint-level visual flows below can be re-driven through Peekaboo MCP. Without this, `node_modules/.bin/electron .` fails on better_sqlite3 dlopen and the renderer cannot bootstrap (visual_web is also non-functional per CLAUDE.md L40-41, so macOS is the only path). Peekaboo MCP itself is healthy: both Screen Recording AND Accessibility grants are present (improved since SPRINT-028 entry `visual_macos_grants_missing`)."
+  blocked_checks:
+    - "Pass 1 visual_macos — Sprint-level run-row click round trip (TASK-703 fix for REG-SPRINT-028-1: handleRunClick now sets activeProjectId; verify clicking a workflow run row mounts CyboflowRoot and RunView renders)"
+    - "Pass 1 visual_macos — Sprint-level RunView event-row rendering (TASK-696 added SessionInfoEventRow/RateLimitEventRow/SystemHookStartedEventRow/SystemHookResponseEventRow/SystemStatusEventRow; TASK-699 removed dead api_retry/compact branches; TASK-700 added RunStartedEventRow 'Starting' placeholder card with truncated runId+branch — verify no orange 'Unrecognized event' cards for any of the 9 wire-shape discriminants during a live run)"
+    - "Pass 1 visual_web — Non-functional per CLAUDE.md (renderer cannot bootstrap standalone via Vite on :4521 without Electron preload injecting electronTRPC)"
+  level: sprint
+  severity: medium
+  affected_tasks:
+    - TASK-696
+    - TASK-699
+    - TASK-700
+    - TASK-703
+    - TASK-704
+  created_at: "2026-05-22T01:23:04.204Z"
+  updated_at: "2026-05-22T01:23:04.204Z"
+
+- task: TASK-701
+  type: action_required
+  bucket: actions
+  dedup_key: sprint030_day3_gate_same_millisecond_flake
+  plan_ref: .soloflow/active/plans/testing-infrastructure/TASK-701-plan.md
+  action: "Fix the pre-existing same-millisecond flake in `main/src/orchestrator/__tests__/cyboflowDayGate.test.ts:124` — change `toBeGreaterThan` to `toBeGreaterThanOrEqual` on the timing assertion. Confirmed flaky during SPRINT-030 verification: 1st run passed (13.5s), 2nd run failed (10.9s) with the same-millisecond comparison. Documented as FIND-SPRINT-030-3 in TASK-701's done report; flake pre-dates the sprint per the original spec, but the executor moved the file (tests/cyboflow-day3-gate.spec.ts -> main/src/orchestrator/__tests__/cyboflowDayGate.test.ts) without fixing the timing assertion per scope. One-line change unblocks `pnpm test:gate` running reliably in CI."
+  blocked_checks:
+    - "pnpm test:gate reliability (Day-3 gate same-millisecond flake at cyboflowDayGate.test.ts:124)"
+  level: test
+  severity: low
+  affected_tasks:
+    - TASK-701
+  created_at: "2026-05-22T01:27:48.495Z"
+  updated_at: "2026-05-22T01:27:48.495Z"
+
+- task: SPRINT-030
+  type: action_required
+  bucket: actions
+  dedup_key: sprint030_verify_schema_parity_permission_mode
+  plan_ref: .soloflow/active/sprints/SPRINT-030/sprint.json
+  action: "Fix pre-existing FIND-SPRINT-030-4: `pnpm run verify:schema` (and node scripts/__tests__/verify-schema-parity.test.js subtest 1) fails with `SqliteError: no such column: permission_mode`. The schema-parity script `scripts/verify-schema-parity.js:48` (applySql) is replaying historical migrations in order and the failure indicates the migration ordering or the schema.sql snapshot has drifted — likely the `add_permission_mode` migration applies an UPDATE/ALTER targeting a column the prior step did not create. SPRINT-030 did NOT touch `scripts/verify-schema-parity.js` or any `main/src/database/migrations/` file (verified via `git log c8f07cf..HEAD -- scripts/verify-schema-parity.js main/src/database/`). The failure was noted in TASK-702's done report as out-of-scope but is still wedging `pnpm test:unit` chain (returns exit 1 at the verify:schema step even though main + frontend vitest both pass cleanly). Pick: (a) repair migration ordering, (b) regenerate the canonical `schema.sql` snapshot, or (c) make the script skip the broken historical migration set with a documented rationale."
+  blocked_checks:
+    - "pnpm test:unit (returns non-zero at the verify:schema step)"
+    - node scripts/__tests__/verify-schema-parity.test.js subtest 1
+  level: test
+  severity: medium
+  affected_tasks:
+    - TASK-702
+  created_at: "2026-05-22T01:28:07.967Z"
+  updated_at: "2026-05-22T01:28:07.967Z"
 
 ## Testing
 
