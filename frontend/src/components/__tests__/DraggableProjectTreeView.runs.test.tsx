@@ -181,7 +181,6 @@ function makeElectronAPI(expandedProjects: number[] = []) {
               data: {
                 expandedProjects,
                 expandedFolders: [],
-                sessionSortAscending: false,
               },
             }
           : { success: false },
