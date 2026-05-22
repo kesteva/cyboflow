@@ -1,8 +1,8 @@
 ---
 id: TASK-729
 idea: BATCH-2026-05-22-streamparser-thinking-deltas
-status: approved
-created: 2026-05-22T00:00:00Z
+status: in-flight
+created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/schemas.ts
   - shared/types/claudeStream.ts
@@ -21,18 +21,18 @@ acceptance_criteria:
     verification: "grep -nE \"z\\.literal\\('(text_delta|input_json_delta|signature_delta|thinking_delta)'\\)\" main/src/services/streamParser/schemas.ts returns exactly 4 matches inside the delta object literal (lines ~286-295)."
   - criterion: "streamEventSchema's inner delta object declares optional signature: z.string() and thinking: z.string() fields alongside the existing text and partial_json fields."
     verification: "grep -nE 'signature: z\\.string\\(\\)\\.optional\\(\\)' main/src/services/streamParser/schemas.ts returns ≥ 1 match AND grep -nE 'thinking: z\\.string\\(\\)\\.optional\\(\\)' main/src/services/streamParser/schemas.ts returns ≥ 1 match, both inside the streamEventSchema delta object (between the `delta: z.object({` opening at ~line 286 and its closing `}).passthrough().optional()`)."
-  - criterion: "shared/types/claudeStream.ts StreamEvent.event.delta.type union mirrors the schema with all four literals."
+  - criterion: shared/types/claudeStream.ts StreamEvent.event.delta.type union mirrors the schema with all four literals.
     verification: "grep -nE \"'text_delta' \\| 'input_json_delta' \\| 'signature_delta' \\| 'thinking_delta'\" shared/types/claudeStream.ts returns exactly 1 match (the StreamEvent interface delta.type field)."
   - criterion: "shared/types/claudeStream.ts StreamEvent.event.delta declares optional signature?: string and thinking?: string fields."
     verification: "grep -nE 'signature\\?: string' shared/types/claudeStream.ts returns ≥ 1 match AND grep -nE 'thinking\\?: string' shared/types/claudeStream.ts returns ≥ 1 match in the StreamEvent block."
   - criterion: "Schema tests cover the new delta types by round-tripping signature_delta and thinking_delta payloads through TypedEventNarrowing and asserting they narrow to type === 'stream_event' (not kind === '__unknown__')."
     verification: "grep -nE \"'signature_delta'\" main/src/services/streamParser/__tests__/schemas.test.ts returns ≥ 1 match AND grep -nE \"'thinking_delta'\" main/src/services/streamParser/__tests__/schemas.test.ts returns ≥ 1 match. The matching describe/it blocks assert event.type === 'stream_event' on the narrowed event."
-  - criterion: "TypedEventNarrowing test asserts signature_delta and thinking_delta payloads do NOT fall through to the __unknown__ branch."
+  - criterion: TypedEventNarrowing test asserts signature_delta and thinking_delta payloads do NOT fall through to the __unknown__ branch.
     verification: "grep -nE \"'(signature_delta|thinking_delta)'\" main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts returns ≥ 2 matches across at least one new it() block that runs narrower.narrow(...) and asserts 'kind' in result is false."
   - criterion: "Compile-time bridge in schemas.ts (_typeCheck) still passes — the TS StreamEvent interface and the schema's z.infer agree on the extended delta.type union."
-    verification: "pnpm typecheck exits 0."
-  - criterion: "Stream-parser unit tests are green."
-    verification: "pnpm --filter main exec vitest run src/services/streamParser exits 0."
+    verification: pnpm typecheck exits 0.
+  - criterion: Stream-parser unit tests are green.
+    verification: pnpm --filter main exec vitest run src/services/streamParser exits 0.
 depends_on: []
 estimated_complexity: low
 epic: typed-stream-event-schema
@@ -41,19 +41,18 @@ test_strategy:
   justification: "Direct schema-coverage extension. The fix lives in two assertions (round-trip in schemas.test.ts; narrowing in typedEventNarrowing.test.ts) plus two factory variants (signature_delta, thinking_delta) so the existing assertion style can express them. Sibling-test scan of main/src/services/streamParser/__tests__/ surfaced 5 sibling test files; schemas.test.ts and typedEventNarrowing.test.ts both directly exercise this code path and are both modified. eventRouter.test.ts / messageProjection.test.ts / rawEventsSink.test.ts consume the narrowed event but do not exercise the delta-type union, so they are not modified."
   targets:
     - behavior: "signature_delta payload narrows to a typed stream_event (not __unknown__), preserves the signature field via .passthrough(), and reports event.event.delta.type === 'signature_delta'."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
     - behavior: "thinking_delta payload narrows to a typed stream_event (not __unknown__), preserves the thinking field, and reports event.event.delta.type === 'thinking_delta'."
-      test_file: "main/src/services/streamParser/__tests__/schemas.test.ts"
+      test_file: main/src/services/streamParser/__tests__/schemas.test.ts
       type: unit
     - behavior: "Direct narrower.narrow() call on signature_delta and thinking_delta inputs returns the typed variant ('kind' in result is false), proving the live production code path matches the schema."
-      test_file: "main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts"
+      test_file: main/src/services/streamParser/__tests__/typedEventNarrowing.test.ts
       type: unit
-    - behavior: "New factory functions streamEventSignatureDelta() and streamEventThinkingDelta() produce StreamEvent values that conform to the extended TS interface (compile-time check) and parse cleanly through the schema (round-trip check)."
-      test_file: "main/src/services/streamParser/__tests__/sdkMockFactories.ts"
+    - behavior: New factory functions streamEventSignatureDelta() and streamEventThinkingDelta() produce StreamEvent values that conform to the extended TS interface (compile-time check) and parse cleanly through the schema (round-trip check).
+      test_file: main/src/services/streamParser/__tests__/sdkMockFactories.ts
       type: unit
 ---
-
 # Extend streamEventSchema.delta.type to accept Claude SDK signature_delta + thinking_delta
 
 ## Objective
