@@ -847,7 +847,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
   const handleRunClick = (run: WorkflowRunListRow) => {
     useCyboflowStore.getState().setActiveRun(run.id);
-    useNavigationStore.getState().navigateToSessions();
+    useNavigationStore.getState().setActiveProjectId(run.project_id);
   };
 
   // ---------------------------------------------------------------------------
