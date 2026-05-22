@@ -522,6 +522,63 @@ describe('registerCyboflowHandlers — runtime input validation', () => {
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/projectId/);
   });
+
+  // validateNumberArg — !Number.isFinite branch (NaN / Infinity)
+  it('listRuns: NaN projectId → success: false, error mentions projectId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:listRuns', { projectId: NaN }) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/projectId/);
+  });
+
+  // validateStringArg — v.length === 0 branch
+  it('startRun: empty string workflowId → success: false, error mentions workflowId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:startRun', {
+      workflowId: '',
+      projectId: 1,
+    }) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/workflowId/);
+  });
+
+  // listRuns happy path: valid projectId, no rows → success: true, data: []
+  it('listRuns: valid number projectId → success: true, data is an array', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:listRuns', { projectId: 42 }) as {
+      success: boolean;
+      data?: unknown[];
+      error?: string;
+    };
+
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.data)).toBe(true);
+    // No runs seeded — expect empty list.
+    expect(result.data).toHaveLength(0);
+  });
 });
 
 describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
