@@ -1,8 +1,8 @@
 ---
 id: TASK-726
 idea: SPRINT-030
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - main/src/ipc/validateInput.ts
   - main/src/ipc/cyboflow.ts
@@ -21,30 +21,29 @@ acceptance_criteria:
   - criterion: "The hand-rolled `validateNumberArg` and `validateStringArg` helpers at `main/src/ipc/cyboflow.ts:62-84` are removed. The three call sites (`cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:listRuns`) now use `validateInput(z.object({...}), args, '<channel>')`."
     verification: "`grep -n 'validateNumberArg\\|validateStringArg' main/src/ipc/cyboflow.ts` returns 0 matches; `grep -n 'validateInput(' main/src/ipc/cyboflow.ts` returns at least 3 matches; the file imports `z` from `zod` and `validateInput` from `./validateInput`."
   - criterion: "The `{ success: false, error }` IPC envelope contract is preserved. Error messages still name the offending field (e.g. `'cyboflow:listRuns: projectId must be a finite number'` or an equivalent Zod-flattened form that contains both the channel and the field name)."
-    verification: "Run the existing tests at `main/src/ipc/__tests__/cyboflow.test.ts` (the four error-path tests at lines 480-561) and confirm exit 0. The pre-existing `expect(result.error).toMatch(/projectId/)` and `/workflowId/` assertions continue to pass against the new error messages."
+    verification: Run the existing tests at `main/src/ipc/__tests__/cyboflow.test.ts` (the four error-path tests at lines 480-561) and confirm exit 0. The pre-existing `expect(result.error).toMatch(/projectId/)` and `/workflowId/` assertions continue to pass against the new error messages.
   - criterion: "`validateInput` itself has unit-test coverage for the four error classes the IPC handlers exercise: wrong-type (`'bad'` passed for `z.number()`), non-finite (`NaN` / `Infinity`), missing key, and empty string (`''` for `z.string().min(1)`). Each test asserts `ok: false` and a non-empty `error` string containing the channel name."
     verification: "`grep -n 'describe.*validateInput\\|it(' main/src/ipc/__tests__/validateInput.test.ts` returns at least 5 entries (1 describe + 4 it). Running `pnpm --filter main test main/src/ipc/__tests__/validateInput.test.ts` exits 0."
   - criterion: "`docs/CODE-PATTERNS.md` is updated with a `validateInput` section under the IPC-validation heading, citing `main/src/ipc/cyboflow.ts` as the canonical caller and noting that hand-rolled validators are forbidden in `main/src/ipc/*.ts` going forward."
     verification: "`grep -n 'validateInput' docs/CODE-PATTERNS.md` returns at least 1 match; the surrounding section names `main/src/ipc/validateInput.ts` and references Zod."
   - criterion: "`pnpm --filter main test` exits 0 with all pre-existing tests in `cyboflow.test.ts` passing against the new validator (no test changes needed beyond what AC#3 covers — the `expect(result.error).toMatch(/projectId/)` style assertions are agnostic to whether the helper is hand-rolled or Zod-backed)."
-    verification: "Run `pnpm --filter main test`; exit status 0."
+    verification: Run `pnpm --filter main test`; exit status 0.
   - criterion: "`pnpm typecheck` exits 0."
-    verification: "Run `pnpm typecheck`; exit status 0."
+    verification: Run `pnpm typecheck`; exit status 0.
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "A new shared helper `validateInput` is introduced and needs its own unit-test coverage. The pre-existing `cyboflow.test.ts` error-path cases (lines 480-561) are the integration-level lock; the new `validateInput.test.ts` provides the unit-level lock so future IPC handler additions can rely on the helper without re-deriving the error contract."
+  justification: A new shared helper `validateInput` is introduced and needs its own unit-test coverage. The pre-existing `cyboflow.test.ts` error-path cases (lines 480-561) are the integration-level lock; the new `validateInput.test.ts` provides the unit-level lock so future IPC handler additions can rely on the helper without re-deriving the error contract.
   targets:
     - behavior: "validateInput returns { ok: true, value } on schema match; { ok: false, error: '<channel>: …' } on each failure class (wrong type, NaN/Infinity, missing key, empty string)."
-      test_file: "main/src/ipc/__tests__/validateInput.test.ts"
+      test_file: main/src/ipc/__tests__/validateInput.test.ts
       type: unit
     - behavior: "cyboflow:listWorkflows / startRun / listRuns continue to return { success: false, error } envelopes naming the offending field when args are invalid."
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: integration
 ---
-
 # Replace hand-rolled IPC validators with a Zod-based shared helper
 
 ## Objective

@@ -1,9 +1,9 @@
 ---
 id: TASK-721
 idea: SPRINT-029-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-029
-created: 2026-05-21T00:00:00Z
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - shared/utils/approvals.ts
   - main/src/index.ts
@@ -20,12 +20,12 @@ acceptance_criteria:
     verification: "test -f shared/utils/approvals.ts AND grep -nE 'export (const|function) (PAYLOAD_PREVIEW_MAX_LEN|truncatePayloadPreview)' shared/utils/approvals.ts | wc -l outputs at least 2 AND grep -n 'PAYLOAD_PREVIEW_MAX_LEN = 512' shared/utils/approvals.ts returns exactly 1 match."
   - criterion: "Bridge in main/src/index.ts calls truncatePayloadPreview, no more inline `512` literal in the truncation context."
     verification: "grep -n 'truncatePayloadPreview' main/src/index.ts returns at least 1 match AND grep -nE 'payloadJson\\.length > 512' main/src/index.ts returns 0 matches"
-  - criterion: "listPending in main/src/orchestrator/trpc/routers/approvals.ts calls truncatePayloadPreview."
+  - criterion: listPending in main/src/orchestrator/trpc/routers/approvals.ts calls truncatePayloadPreview.
     verification: "grep -n 'truncatePayloadPreview' main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match AND grep -nE 'payloadPreviewRaw\\.length > 512' main/src/orchestrator/trpc/routers/approvals.ts returns 0 matches"
   - criterion: "Repo-wide: no production file outside shared/utils/approvals.ts references the bare 512 literal in a payloadPreview context."
     verification: "grep -rnE '(payloadJson|payloadPreviewRaw|payloadPreview)[^=]*\\b512\\b' main/src frontend/src shared --exclude-dir=__tests__ --exclude-dir=dist returns 0 matches"
-  - criterion: "New vitest suite main/src/__tests__/sharedApprovalsUtils.test.ts pins 4 cases (constant=512; 512 passes through; 513 truncates to 512; empty string passes)."
-    verification: "test -f main/src/__tests__/sharedApprovalsUtils.test.ts AND pnpm --filter main test sharedApprovalsUtils exits 0"
+  - criterion: New vitest suite main/src/__tests__/sharedApprovalsUtils.test.ts pins 4 cases (constant=512; 512 passes through; 513 truncates to 512; empty string passes).
+    verification: test -f main/src/__tests__/sharedApprovalsUtils.test.ts AND pnpm --filter main test sharedApprovalsUtils exits 0
   - criterion: pnpm typecheck (main + frontend) + pnpm lint + pnpm --filter main test all exit 0.
     verification: "pnpm --filter main typecheck && pnpm --filter frontend typecheck && pnpm --filter main lint && pnpm --filter main test"
 depends_on: []
@@ -35,20 +35,19 @@ test_strategy:
   needed: true
   justification: "The point of the refactor is to lock the 512-char invariant in one place. Without a pinned unit test, a future change to the literal can silently re-introduce drift — exactly the FIND-SPRINT-029-9 class of bug. Boundary cases (512 vs 513) cannot be caught by typecheck."
   targets:
-    - behavior: "PAYLOAD_PREVIEW_MAX_LEN is exactly 512"
+    - behavior: PAYLOAD_PREVIEW_MAX_LEN is exactly 512
       test_file: main/src/__tests__/sharedApprovalsUtils.test.ts
       type: unit
-    - behavior: "truncatePayloadPreview returns input unchanged when length === 512"
+    - behavior: truncatePayloadPreview returns input unchanged when length === 512
       test_file: main/src/__tests__/sharedApprovalsUtils.test.ts
       type: unit
-    - behavior: "truncatePayloadPreview truncates to 512 chars when length === 513"
+    - behavior: truncatePayloadPreview truncates to 512 chars when length === 513
       test_file: main/src/__tests__/sharedApprovalsUtils.test.ts
       type: unit
-    - behavior: "truncatePayloadPreview returns empty string unchanged"
+    - behavior: truncatePayloadPreview returns empty string unchanged
       test_file: main/src/__tests__/sharedApprovalsUtils.test.ts
       type: unit
 ---
-
 # Extract shared truncatePayloadPreview helper + PAYLOAD_PREVIEW_MAX_LEN constant
 
 ## Objective

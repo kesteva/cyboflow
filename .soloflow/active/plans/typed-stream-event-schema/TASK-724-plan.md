@@ -1,8 +1,8 @@
 ---
 id: TASK-724
 idea: SPRINT-030
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - shared/types/claudeStream.ts
   - main/src/orchestrator/runLauncher.ts
@@ -26,9 +26,9 @@ acceptance_criteria:
   - criterion: "The three inline event-literal annotations in `main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts` (lines 67, 86, 100) reference the shared `StreamEnvelope` type. The fourth site at line 115 also uses the shared type — eliminating the cast-vs-annotation inconsistency flagged in FIND-SPRINT-030-10."
     verification: "`grep -rn '{ type: StreamEventType; payload: unknown; timestamp: string }' main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts` returns 0 matches; `grep -n 'StreamEnvelope' main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts` returns at least 4 matches (one per test case)."
   - criterion: "`pnpm typecheck` exits 0 end-to-end."
-    verification: "Run `pnpm typecheck`; exit status 0."
+    verification: Run `pnpm typecheck`; exit status 0.
   - criterion: "`pnpm --filter main test` exits 0 with no new failures in `cyboflow-stream-publisher.test.ts`, `runLauncher.test.ts`, or `runEventBridge.test.ts`."
-    verification: "Run `pnpm --filter main test`; exit status 0."
+    verification: Run `pnpm --filter main test`; exit status 0.
 depends_on: []
 estimated_complexity: low
 epic: typed-stream-event-schema
@@ -36,17 +36,16 @@ test_strategy:
   needed: true
   justification: "`cyboflow-stream-publisher.test.ts` is the canonical contract test for the publisher type signature; it must be updated in lockstep with the type rename. The pre-existing `runLauncher.test.ts` and `runEventBridge.test.ts` exercise the same publisher path and act as the behavioral lock for non-test consumers. No new test cases are introduced — the existing ones simply consume the shared name."
   targets:
-    - behavior: "publisher.publish is called with a StreamEnvelope-shaped argument and forwards to win.webContents.send unchanged."
-      test_file: "main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts"
+    - behavior: publisher.publish is called with a StreamEnvelope-shaped argument and forwards to win.webContents.send unchanged.
+      test_file: main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts
       type: integration
-    - behavior: "RunLauncher.launch emits a run_started envelope via the publisher with all required envelope fields."
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: RunLauncher.launch emits a run_started envelope via the publisher with all required envelope fields.
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: integration
-    - behavior: "runEventBridge forwards typed events through the publisher with deriveEventType(typed) as the envelope type."
-      test_file: "main/src/orchestrator/__tests__/runEventBridge.test.ts"
+    - behavior: runEventBridge forwards typed events through the publisher with deriveEventType(typed) as the envelope type.
+      test_file: main/src/orchestrator/__tests__/runEventBridge.test.ts
       type: integration
 ---
-
 # Export shared StreamEnvelope type and consolidate the four duplicate literals
 
 ## Objective

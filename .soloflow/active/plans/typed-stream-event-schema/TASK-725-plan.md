@@ -1,8 +1,8 @@
 ---
 id: TASK-725
 idea: SPRINT-030
-status: ready
-created: 2026-05-21T00:00:00Z
+status: in-flight
+created: "2026-05-21T00:00:00Z"
 files_owned:
   - shared/types/claudeStream.ts
   - main/src/orchestrator/runLauncher.ts
@@ -26,12 +26,13 @@ acceptance_criteria:
   - criterion: "TypeScript catches a regression at the publish site: if a future contributor swaps the `run_started` payload to omit `type`, `pnpm typecheck` exits non-0 with a structural assignability error pointing at `runLauncher.ts`."
     verification: "Manual verification documented in commit body — flip the producer to the pre-fix shape (`payload: { runId, worktreePath, branchName }` without `type`), run `pnpm typecheck`, observe non-0 exit naming `runLauncher.ts`, then revert."
   - criterion: "`pnpm typecheck` exits 0 end-to-end after the producer fix and signature tightening."
-    verification: "Run `pnpm typecheck`; exit status 0."
+    verification: Run `pnpm typecheck`; exit status 0.
   - criterion: "`pnpm --filter main test` exits 0 with `runLauncher.test.ts` updated to assert the new inner `type: 'run_started'` field on the payload alongside the existing `runId/worktreePath/branchName` checks."
     verification: "Run `pnpm --filter main test`; exit status 0. `grep -n \"payload\\.type\" main/src/orchestrator/__tests__/runLauncher.test.ts` returns at least 1 match inside the publisher-spy assertion block."
   - criterion: "`pnpm --filter frontend test` exits 0 — the renderer-side `RunStartedEventRow` (which reads `payload.runId` and `payload.branchName`) continues to work because the new producer payload is a superset of the old one."
-    verification: "Run `pnpm --filter frontend test`; exit status 0."
-depends_on: [TASK-724]
+    verification: Run `pnpm --filter frontend test`; exit status 0.
+depends_on:
+  - TASK-724
 estimated_complexity: low
 epic: typed-stream-event-schema
 test_strategy:
@@ -39,13 +40,12 @@ test_strategy:
   justification: "The publisher contract changes in two ways (producer payload shape + envelope signature tightening); both have existing tests that act as the regression gate but require an updated assertion to lock in the new inner `type` field. The renderer-side test file (`RunView.test.tsx`) already exercises the row component against a payload that includes `type: 'run_started'` (TASK-700 design), so no new renderer tests are added."
   targets:
     - behavior: "RunLauncher.launch emits a run_started envelope whose payload now carries the inner `type: 'run_started'` field, satisfying the declared RunStartedEvent contract."
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: integration
-    - behavior: "publisher.publish accepts a typed envelope whose payload narrows by envelope `type` — the four call sites in the test file continue to compile against the tightened signature."
-      test_file: "main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts"
+    - behavior: publisher.publish accepts a typed envelope whose payload narrows by envelope `type` — the four call sites in the test file continue to compile against the tightened signature.
+      test_file: main/src/ipc/__tests__/cyboflow-stream-publisher.test.ts
       type: integration
 ---
-
 # Resolve RunStartedEvent payload contract mismatch and tighten publisher signature
 
 ## Objective
