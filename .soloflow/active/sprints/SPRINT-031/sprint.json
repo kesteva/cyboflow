@@ -6,10 +6,6 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-724": {
-      "status": "pending",
-      "depends_on": []
-    },
     "TASK-725": {
       "status": "pending",
       "depends_on": [
@@ -17,8 +13,9 @@
       ]
     },
     "TASK-726": {
-      "status": "pending",
-      "depends_on": []
+      "status": "in_progress",
+      "depends_on": [],
+      "started": "2026-05-22T14:58:37.375Z"
     }
   },
   "playwright_target": {
