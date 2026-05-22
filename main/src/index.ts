@@ -35,8 +35,8 @@ import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
 import { approvalEvents } from './orchestrator/trpc/routers/events';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
-import type { ApprovalCreatedEvent } from '../../shared/types/approvals';
 import type { DatabaseLike } from './orchestrator/types';
+import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
@@ -698,19 +698,7 @@ app.whenReady().then(async () => {
     // factory is needed here.
     ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
     ApprovalRouter.getInstance().on('approvalCreated', (request: ApprovalRequest) => {
-      const payloadJson = JSON.stringify(request.input);
-      const event: ApprovalCreatedEvent = {
-        approval: {
-          id: request.id,
-          runId: request.runId,
-          workflowName: '', // TODO(approval-router): resolve via workflows-table lookup
-          toolName: request.toolName,
-          payloadPreview: payloadJson.length > 512 ? payloadJson.slice(0, 512) : payloadJson,
-          rationale: null,
-          createdAt: new Date(request.timestamp).toISOString(),
-          status: 'pending',
-        },
-      };
+      const event = buildApprovalCreatedEvent(request, db);
       approvalEvents.emit('created', event);
       console.log('[Main] Bridged approvalCreated → approvalEvents.emit(created) for approvalId=', request.id);
     });
