@@ -27,6 +27,8 @@ import {
   resultErrorDuringExecution,
   resultErrorMaxStructuredOutputRetries,
   streamEvent,
+  streamEventSignatureDelta,
+  streamEventThinkingDelta,
   sessionInfo,
   rateLimitEvent,
   systemHookStarted,
@@ -263,6 +265,26 @@ describe('StreamEvent', () => {
     expect(typeof event.event.type).toBe('string');
     // Factory uses content_block_delta — confirm it's a real stream event type
     expect(event.event.type).toBe('content_block_delta');
+  });
+
+  it('narrows signature_delta to stream_event with delta.type === signature_delta and signature field preserved', () => {
+    const raw = streamEventSignatureDelta();
+    const event = narrower.narrow(raw);
+    if ('kind' in event) throw new Error('Expected typed variant, got UnknownStreamEvent');
+    if (event.type !== 'stream_event') throw new Error('Expected StreamEvent');
+    expect(event.event.type).toBe('content_block_delta');
+    expect(event.event.delta?.type).toBe('signature_delta');
+    expect(event.event.delta?.signature).toBe('EvcDCmMIDRgCEXAMPLE_SIGNATURE_SHAPE_BASE64_PADDING==');
+  });
+
+  it('narrows thinking_delta to stream_event with delta.type === thinking_delta and thinking field preserved', () => {
+    const raw = streamEventThinkingDelta();
+    const event = narrower.narrow(raw);
+    if ('kind' in event) throw new Error('Expected typed variant, got UnknownStreamEvent');
+    if (event.type !== 'stream_event') throw new Error('Expected StreamEvent');
+    expect(event.event.type).toBe('content_block_delta');
+    expect(event.event.delta?.type).toBe('thinking_delta');
+    expect(event.event.delta?.thinking).toBe('Let me think about this step by step.');
   });
 });
 
