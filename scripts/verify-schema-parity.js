@@ -73,9 +73,18 @@ function buildPath1Db() {
     catch (err) {
       // Migrations 003/004/005 may reference inherited Crystal tables
       // (prompt_markers, execution_diffs) not declared in schema.sql.
-      // Tolerate only "no such table" errors.
+      // Tolerate "no such table" AND "no such column" errors.
+      //
+      // "no such column" is triggered by migration
+      // 008_permission_mode_approve_default.sql, which runs
+      //   UPDATE sessions SET permission_mode = 'approve' ...
+      //   UPDATE projects SET default_permission_mode = 'approve' ...
+      // The `sessions.permission_mode` column is materialized at runtime by
+      // database.ts (ALTER TABLE … ADD COLUMN, ~line 281) and the `projects`
+      // table itself is created imperatively (~lines 285-307) — neither is
+      // replayed by path-1. See FIND-SPRINT-030-4 for the root-cause analysis.
       const msg = String(err.message || err);
-      if (/no such table/i.test(msg)) {
+      if (/no such (table|column)/i.test(msg)) {
         if (verbose) console.warn(`[skip] migration ${f} (path-1): ${msg}`);
         continue;
       }
@@ -92,9 +101,12 @@ function buildPath2Db() {
     catch (err) {
       // Migrations 003/004/005 may reference inherited Crystal tables
       // (sessions, tool_panels) not declared by themselves. We tolerate
-      // these errors only if the message names a missing inherited table.
+      // "no such table" AND "no such column" errors for symmetry with
+      // buildPath1Db — divergent error policies between the two paths would
+      // allow path-1 to silently skip a migration that path-2 throws on,
+      // producing a confusing diff. See FIND-SPRINT-030-4.
       const msg = String(err.message || err);
-      if (/no such table/i.test(msg)) {
+      if (/no such (table|column)/i.test(msg)) {
         if (verbose) console.warn(`[skip] migration ${f}: ${msg}`);
         continue;
       }
