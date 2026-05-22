@@ -56,6 +56,34 @@ export function setCyboflowHealth(health: OrchestratorHealth): void {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime argument validators
+// ---------------------------------------------------------------------------
+
+function validateNumberArg(
+  args: unknown,
+  key: string,
+  channel: string,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const v = (args as Record<string, unknown> | null | undefined)?.[key];
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    return { ok: false, error: `${channel}: ${key} must be a finite number` };
+  }
+  return { ok: true, value: v };
+}
+
+function validateStringArg(
+  args: unknown,
+  key: string,
+  channel: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const v = (args as Record<string, unknown> | null | undefined)?.[key];
+  if (typeof v !== 'string' || v.length === 0) {
+    return { ok: false, error: `${channel}: ${key} must be a non-empty string` };
+  }
+  return { ok: true, value: v };
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -71,9 +99,11 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
    */
   ipcMain.handle(
     'cyboflow:listWorkflows',
-    async (_event, args: { projectId: number }) => {
+    async (_event, args: unknown) => {
       try {
-        const { projectId } = args;
+        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:listWorkflows');
+        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
+        const { value: projectId } = vProjectId;
 
         let workflows = services.cyboflow.workflowRegistry.listByProject(projectId);
 
@@ -106,9 +136,14 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
    */
   ipcMain.handle(
     'cyboflow:startRun',
-    async (_event, args: { workflowId: string; projectId: number }) => {
+    async (_event, args: unknown) => {
       try {
-        const { workflowId, projectId } = args;
+        const vWorkflowId = validateStringArg(args, 'workflowId', 'cyboflow:startRun');
+        if (!vWorkflowId.ok) return { success: false, error: vWorkflowId.error };
+        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:startRun');
+        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
+        const workflowId = vWorkflowId.value;
+        const projectId = vProjectId.value;
 
         // Resolve project path via sessionManager (the canonical project store).
         const project = services.sessionManager.getProjectById(projectId);
@@ -143,9 +178,11 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
    */
   ipcMain.handle(
     'cyboflow:listRuns',
-    (_event, args: { projectId: number }) => {
+    (_event, args: unknown) => {
       try {
-        const { projectId } = args;
+        const vProjectId = validateNumberArg(args, 'projectId', 'cyboflow:listRuns');
+        if (!vProjectId.ok) return { success: false, error: vProjectId.error };
+        const { value: projectId } = vProjectId;
         const rows = services.databaseService.getDb()
           .prepare(
             `SELECT id, workflow_id, project_id, status, worktree_path, branch_name,
