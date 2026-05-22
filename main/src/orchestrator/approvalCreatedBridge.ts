@@ -12,18 +12,16 @@
  *  - Missing-row fallback: emit with workflowName='' and log a console.warn
  *    rather than throwing, because silent-drop creates an invisible discard
  *    mode that is harder to debug than a warn.
- *  - Inlines the 512-char truncation literal; TASK-721 (B4) will extract this
- *    constant into shared/utils/approvals.ts and update the import here.
+ *  - Uses truncatePayloadPreview from shared/utils/approvals.ts so the 512-char
+ *    cap stays in one place alongside the listPending path.
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*.
  */
 import type { ApprovalRequest } from '../../../shared/types/approval';
 import type { ApprovalCreatedEvent } from '../../../shared/types/approvals';
+import { truncatePayloadPreview } from '../../../shared/utils/approvals';
 import type { DatabaseLike } from './types';
-
-/** Maximum payload preview length in characters (matches listPending). */
-const PAYLOAD_PREVIEW_MAX_LEN = 512;
 
 /**
  * Build an ApprovalCreatedEvent from an in-memory ApprovalRequest by
@@ -63,10 +61,7 @@ export function buildApprovalCreatedEvent(
   }
 
   const payloadJson = JSON.stringify(request.input);
-  const payloadPreview =
-    payloadJson.length > PAYLOAD_PREVIEW_MAX_LEN
-      ? payloadJson.slice(0, PAYLOAD_PREVIEW_MAX_LEN)
-      : payloadJson;
+  const payloadPreview = truncatePayloadPreview(payloadJson);
 
   return {
     approval: {
