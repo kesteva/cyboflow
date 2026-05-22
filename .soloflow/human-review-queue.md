@@ -1,7 +1,7 @@
 ---
-pending_count: 43
+pending_count: 41
 buckets:
-  decisions: 2
+  decisions: 0
   actions: 8
   testing: 28
   deferred_visual: 5
@@ -11,28 +11,7 @@ items: []
 
 ## Decisions
 
-- task: TASK-571
-  type: HUMAN_NEEDED
-  bucket: decisions
-  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-571-plan.md
-  verdict_notes: "Verifier confirmed AC1 verbatim _reverseCheck form (bare z.infer<typeof claudeStreamEventSchema>) is unimplementable: .passthrough() schemas add [k: string]: unknown to inferred types, and concrete TS interfaces in shared/types/claudeStream.ts (files_readonly) lack index signatures, producing TS2322. The executor workaround DeepKnownFields<z.infer<...>> compiles but FAILS to catch optional-field TS->Zod drift — the primary scenario the plan was written to solve. Empirically: adding bogus_optional_drift?: string to SystemCompactEvent produces ZERO typecheck errors. _reverseCheck as implemented adds essentially zero net drift-detection vs _typeCheck alone for the optional-field case. Required-field drift IS caught."
-  action: "Pick one path forward before merge: (1) accept gap, update plan to AC the DeepKnownFields form and update the bridge comment to admit the optional-field gap; (2) adopt option B from plan (export type ClaudeStreamEvent = z.infer<typeof schema>) which eliminates drift surface but requires touching 50+ consumer sites; (3) drop .passthrough() in non-leaf schemas (requires relaxing files_readonly to allow editing schemas.test.ts assertion of passthrough preservation). The executor logged FIND-SPRINT-020-2; verifier added FIND-SPRINT-020-3."
-  severity: medium
-  level: design
-
-- task: SPRINT-028
-  type: cross_task_regression
-  bucket: decisions
-  ref: REG-SPRINT-028-1
-  plan_ref: .soloflow/active/sprints/SPRINT-028/sprint.json
-  verdict_notes: "Cross-task regression caught at sprint level (per-task verification missed it). TASK-687 added handleRunClick in frontend/src/components/DraggableProjectTreeView.tsx:849-852 which calls useNavigationStore.getState().navigateToSessions(). navigateToSessions (frontend/src/stores/navigationStore.ts:27-30) sets {activeView: 'sessions', activeProjectId: null}. TASK-688 made CyboflowRoot the only host of RunView in App.tsx:338 and gated it on activeProjectId !== null. Net effect: clicking a workflow-run row in the Sidebar sets activeRunId but unmounts CyboflowRoot, so RunView never renders on this path — the user lands on the legacy SessionView. Per-task tests missed this: DraggableProjectTreeView.runs.test.tsx:352 only asserts setActiveRun was called and mocks navigationStore; CyboflowRoot.test.tsx renders the component directly with an injected projectId and bypasses the App-shell gate."
-  action: "Pick one: (1) replace navigateToSessions() in handleRunClick with setActiveProjectId(run.project_id) or otherwise preserve activeProjectId — run rows already carry project context via ProjectWithRuns; (2) remove the navigation call entirely if CyboflowRoot is the always-on home view when a project is active; (3) widen App.tsx:338 to also render CyboflowRoot when activeRunId !== null (independent of activeProjectId). Whichever route is chosen, extend DraggableProjectTreeView.runs.test.tsx to assert that activeProjectId is non-null after the click OR render the full App shell and assert RunView is in the DOM. Also confirm App.tsx's activeView=='sessions' branch behavior is intentional vs legacy crystal carry-over."
-  severity: high
-  level: cross_task
-  created_at: "2026-05-21T09:00:00.000Z"
-  affected_tasks:
-    - TASK-687
-    - TASK-688
+_No items._
 
 ## Actions
 
