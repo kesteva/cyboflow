@@ -26,7 +26,7 @@ import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../services/streamParser';
 import { deriveEventType } from '../services/streamParser/derivers';
-import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, StreamEventType } from '../../../shared/types/claudeStream';
 import type { StreamEventPublisher } from './runLauncher';
 import type { LoggerLike } from './types';
 
@@ -117,7 +117,7 @@ interface OutputPayload {
 // ---------------------------------------------------------------------------
 
 interface StreamEnvelope {
-  type: string;
+  type: StreamEventType;
   payload: ClaudeStreamEvent;
   timestamp: string;
 }
@@ -242,8 +242,10 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
 
     // Step 3: Build the renderer envelope and publish — always fires regardless
     // of whether the INSERT succeeded (fail-soft contract).
+    // deriveEnvelopeType returns string; cast to StreamEventType (canonical union)
+    // is safe because every value the deriver emits is a member of StreamEventType.
     const envelope: StreamEnvelope = {
-      type: deriveEnvelopeType(typed),
+      type: deriveEnvelopeType(typed) as StreamEventType,
       payload: typed,
       timestamp: new Date().toISOString(),
     };
