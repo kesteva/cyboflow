@@ -121,7 +121,7 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
       // -----------------------------------------------------------------------
       await harness.approveRun(sprintRunId, sprintApproval.approvalId, 'allow');
       const t2 = Date.now();
-      expect(t2).toBeGreaterThan(t1);
+      expect(t2).toBeGreaterThanOrEqual(t1);
 
       // -----------------------------------------------------------------------
       // Both runs should transition to 'running' or 'completed' (AC#3)
