@@ -19,11 +19,10 @@
  * are exercised end-to-end without spinning up Electron or the MCP bridge.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import { buildApprovalCreatedEvent } from '../approvalCreatedBridge';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import type { ApprovalRequest } from '../../../../shared/types/approval';
 import type { Approval } from '../../../../shared/types/approvals';
 
@@ -31,41 +30,19 @@ import type { Approval } from '../../../../shared/types/approvals';
 // Test-database helpers
 // ---------------------------------------------------------------------------
 
-const SCHEMA_PATH = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
-
 /**
- * Seed one workflow + one workflow_run into the DB.
+ * Seed one workflow + one workflow_run via the shared fixture.
  * Returns { workflowId, runId }.
  */
 function seedWorkflowAndRun(
   db: Database.Database,
   workflowName: string,
 ): { workflowId: string; runId: string } {
-  const workflowId = `workflow-${workflowName}`;
-  const runId = `run-${workflowName}`;
-
-  db.prepare(
-    `INSERT INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, ?, '{}')`,
-  ).run(workflowId, workflowName);
-
-  db.prepare(
-    `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status)
-     VALUES (?, ?, 1, 'running')`,
-  ).run(runId, workflowId);
-
-  return { workflowId, runId };
+  return seedRun(db, {
+    id: `run-${workflowName}`,
+    workflowId: `workflow-${workflowName}`,
+    workflowName,
+  });
 }
 
 /**
