@@ -21,8 +21,6 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 import type {
   SystemInitEvent,
-  SystemApiRetryEvent,
-  SystemCompactEvent,
   SystemCompactBoundaryEvent,
   SystemHookStartedEvent,
   SystemHookResponseEvent,
@@ -51,8 +49,6 @@ type ExtendedStreamEventType = import('../../utils/cyboflowApi').StreamEventType
 function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
   const payload = event.payload as
     | SystemInitEvent
-    | SystemApiRetryEvent
-    | SystemCompactEvent
     | SystemCompactBoundaryEvent
     | SystemHookStartedEvent
     | SystemHookResponseEvent
@@ -68,26 +64,6 @@ function SystemEventRow({ event }: { event: StreamEvent }): ReactElement {
           <span><span className="text-text-primary">cwd:</span> {init.cwd}</span>
           <span><span className="text-text-primary">session:</span> {init.session_id.slice(0, 8)}…</span>
         </div>
-      </div>
-    );
-  }
-
-  if (payload.subtype === 'api_retry') {
-    const retry = payload as SystemApiRetryEvent;
-    return (
-      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
-        <span className="font-semibold text-text-primary">system/api_retry</span>
-        {' '}attempt {retry.attempt}/{retry.max_retries}
-      </div>
-    );
-  }
-
-  if (payload.subtype === 'compact') {
-    const compact = payload as SystemCompactEvent;
-    return (
-      <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
-        <span className="font-semibold text-text-primary">system/compact</span>
-        {compact.summary ? <span> — {compact.summary}</span> : null}
       </div>
     );
   }
