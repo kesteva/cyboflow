@@ -6,16 +6,46 @@
     "execution_mode": "parallel"
   },
   "tasks": {
-    "TASK-696": { "status": "pending", "depends_on": [] },
-    "TASK-697": { "status": "pending", "depends_on": [] },
-    "TASK-698": { "status": "pending", "depends_on": [] },
-    "TASK-699": { "status": "pending", "depends_on": [] },
-    "TASK-700": { "status": "pending", "depends_on": ["TASK-699"] },
-    "TASK-701": { "status": "pending", "depends_on": [] },
-    "TASK-702": { "status": "pending", "depends_on": [] },
-    "TASK-703": { "status": "pending", "depends_on": [] },
-    "TASK-704": { "status": "pending", "depends_on": [] },
-    "TASK-705": { "status": "pending", "depends_on": [] }
+    "TASK-697": {
+      "status": "in_progress",
+      "depends_on": [],
+      "started": "2026-05-21T23:48:50.822Z"
+    },
+    "TASK-698": {
+      "status": "in_progress",
+      "depends_on": [],
+      "started": "2026-05-21T23:48:50.855Z"
+    },
+    "TASK-699": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-700": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-699"
+      ]
+    },
+    "TASK-701": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-702": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-703": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-704": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-705": {
+      "status": "pending",
+      "depends_on": []
+    }
   },
   "playwright_target": {
     "kind": "electron",
