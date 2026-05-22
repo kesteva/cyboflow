@@ -145,7 +145,7 @@ export class RunLauncher {
       // main/src/index.ts:580-589); real SDK events follow. Retained as UI-bootstrap aid.
       this.publisher?.publish(runId, {
         type: 'run_started',
-        payload: { runId, worktreePath, branchName },
+        payload: { type: 'run_started', runId, worktreePath, branchName },
         timestamp: new Date().toISOString(),
       });
 

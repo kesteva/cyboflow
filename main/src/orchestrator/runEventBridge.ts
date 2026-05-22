@@ -232,13 +232,16 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
 
     // Step 3: Build the renderer envelope and publish — always fires regardless
     // of whether the INSERT succeeded (fail-soft contract).
-    // deriveEnvelopeType returns string; cast to StreamEventType (canonical union)
-    // is safe because every value the deriver emits is a member of StreamEventType.
-    const envelope: StreamEnvelope = {
+    // deriveEnvelopeType returns string; the object is cast to StreamEnvelope at the
+    // bridge boundary — this is the single audited cast for the discriminated union.
+    // deriveEnvelopeType(typed) produces a StreamEventType value whose structural
+    // pairing with `typed` is correct by construction but TS cannot infer the
+    // cross-product without per-arm predicates (see TASK-725 Hardest Decision note).
+    const envelope = {
       type: deriveEnvelopeType(typed) as StreamEventType,
       payload: typed,
       timestamp: new Date().toISOString(),
-    };
+    } as StreamEnvelope;
 
     try {
       publisher.publish(runId, envelope);
