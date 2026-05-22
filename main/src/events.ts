@@ -17,6 +17,7 @@ import {
 import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
+import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
 
 /**
@@ -664,7 +665,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           // Prepare initial custom state for the Claude panel
           const claudeConfig = session.claudeConfig || {};
           const customState: ClaudePanelState = {
-            permissionMode: claudeConfig.permissionMode || 'approve',
+            permissionMode: claudeConfig.permissionMode || DEFAULT_PERMISSION_MODE,
             model: claudeConfig.model || 'auto'
           };
 

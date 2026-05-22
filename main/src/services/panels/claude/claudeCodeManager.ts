@@ -18,6 +18,7 @@ import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer'
 import { EventRouter, RawEventsSink } from '../../streamParser';
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
+import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 
 interface ClaudeSpawnOptions {
@@ -255,7 +256,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         claude_command: 'sdk-in-process',
         worktree_path: options.worktreePath,
         model: options.model || 'default',
-        permission_mode: options.permissionMode || 'approve',
+        permission_mode: options.permissionMode || DEFAULT_PERMISSION_MODE,
         timestamp: new Date().toISOString()
       };
       this.emit('output', {
