@@ -25,6 +25,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { StreamEventPublisher } from '../../orchestrator/runLauncher';
+import type { StreamEventType } from '../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,7 +64,7 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => fakeWin);
 
     const runId = 'test-run-id-abc123';
-    const event = {
+    const event: { type: StreamEventType; payload: unknown; timestamp: string } = {
       type: 'run_started',
       payload: { runId, worktreePath: '/tmp/wt', branchName: 'cyboflow/sprint/abc123' },
       timestamp: new Date().toISOString(),
@@ -82,12 +83,13 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => null);
 
     // Should not throw, and send should never be called
+    const nullWinEvent: { type: StreamEventType; payload: unknown; timestamp: string } = {
+      type: 'run_started',
+      payload: {},
+      timestamp: new Date().toISOString(),
+    };
     expect(() => {
-      publisher.publish('run-1', {
-        type: 'run_started',
-        payload: {},
-        timestamp: new Date().toISOString(),
-      });
+      publisher.publish('run-1', nullWinEvent);
     }).not.toThrow();
   });
 
@@ -95,11 +97,12 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const fakeWin = makeFakeWindow(true /* isDestroyed */);
     const publisher = buildPublisher(() => fakeWin);
 
-    publisher.publish('run-2', {
+    const destroyedWinEvent: { type: StreamEventType; payload: unknown; timestamp: string } = {
       type: 'run_started',
       payload: {},
       timestamp: new Date().toISOString(),
-    });
+    };
+    publisher.publish('run-2', destroyedWinEvent);
 
     expect(fakeWin.webContents.send).not.toHaveBeenCalled();
   });
@@ -109,7 +112,7 @@ describe('cyboflow stream-event publisher (IPC wiring)', () => {
     const publisher = buildPublisher(() => fakeWin);
 
     const runId = 'unique-run-xyz';
-    publisher.publish(runId, { type: 'run_started', payload: {}, timestamp: '' });
+    publisher.publish(runId, { type: 'run_started' as StreamEventType, payload: {}, timestamp: '' });
 
     const [channel] = fakeWin.webContents.send.mock.calls[0] as [string, unknown];
     expect(channel).toBe(`cyboflow:stream:${runId}`);
