@@ -1,10 +1,9 @@
 /**
  * Shared test-database helpers for orchestrator unit tests.
  *
- * All helpers use GATE_SCHEMA (in-memory, no file I/O) — no readFileSync,
- * no dependency on 006_cyboflow_schema.sql at runtime. The parity test in
+ * All helpers use GATE_SCHEMA (in-memory, no file I/O). The parity test in
  * __tests__/orchestratorTestDb.test.ts pins GATE_SCHEMA against the canonical
- * migration to catch any column-level drift.
+ * migration file to catch any column-level drift.
  *
  * NOTE: PRAGMA table_info() used in the parity test does NOT report CHECK
  * constraints, so a CHECK-only drift (e.g. adding a new enum value to a
@@ -18,7 +17,7 @@ import { GATE_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
  * Creates a fresh in-memory SQLite database with the full cyboflow schema
  * (workflows, workflow_runs, approvals, raw_events) and FK enforcement ON.
  *
- * Uses GATE_SCHEMA only — no readFileSync, no file paths.
+ * Uses GATE_SCHEMA only (in-memory, no file paths).
  */
 export function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -55,10 +54,7 @@ export interface SeedRunOverrides {
  *
  * @returns { workflowId, runId } — the IDs of the inserted rows.
  */
-export function seedRun(
-  db: Database.Database,
-  overrides?: SeedRunOverrides,
-): { workflowId: string; runId: string } {
+export function seedRun(db: Database.Database, overrides?: SeedRunOverrides): { workflowId: string; runId: string } {
   const runId = overrides?.id ?? `run-${Math.random().toString(36).slice(2)}`;
   const workflowId = overrides?.workflowId ?? `workflow-${runId}`;
   const status = overrides?.status ?? 'running';
