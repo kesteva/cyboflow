@@ -70,5 +70,5 @@ export function useEnsureClaudePanel(
     // The original ProjectView.ensureClaudePanel relied on the panel:created
     // event for backend activation. This hook preserves that contract so the
     // ProjectView migration (step 8) is behavior-equivalent.
-  }, [session?.id, addPanel, setActivePanelInStore, logTag]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [session, addPanel, setActivePanelInStore, logTag]);
 }
