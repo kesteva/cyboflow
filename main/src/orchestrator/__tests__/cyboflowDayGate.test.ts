@@ -19,8 +19,8 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { createHarness, type CyboflowTestHarness } from './helpers/cyboflowTestHarness';
-import { findExecutableInPath } from '../main/src/utils/shellPath';
+import { createHarness, type CyboflowTestHarness } from '../../../../tests/helpers/cyboflowTestHarness';
+import { findExecutableInPath } from '../../utils/shellPath';
 
 // ---------------------------------------------------------------------------
 // Claude availability guard
@@ -78,11 +78,11 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
     'approves prune first, sprint remains paused, then sprint approves and resumes',
     async () => {
       const sprintPrompt = fs.readFileSync(
-        path.join(__dirname, 'fixtures/cyboflow-day3-gate/sprint-prompt.md'),
+        path.join(__dirname, '../../../../tests/fixtures/cyboflow-day3-gate/sprint-prompt.md'),
         'utf-8',
       );
       const prunePrompt = fs.readFileSync(
-        path.join(__dirname, 'fixtures/cyboflow-day3-gate/prune-prompt.md'),
+        path.join(__dirname, '../../../../tests/fixtures/cyboflow-day3-gate/prune-prompt.md'),
         'utf-8',
       );
 
