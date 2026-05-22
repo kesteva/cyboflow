@@ -1,10 +1,20 @@
 ---
 sprint: SPRINT-031
-pending_count: 3
-last_updated: "2026-05-22T15:30:00.000Z"
+pending_count: 4
+last_updated: "2026-05-22T08:20:00.000Z"
 ---
 
 # Findings Queue
+
+## FIND-SPRINT-031-4
+- **source:** TASK-725 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/utils/cyboflowApi.ts:93-102, shared/types/claudeStream.ts:448-457
+- **description:** TASK-725 introduced `StreamEnvelopePayload` in `shared/types/claudeStream.ts` as a 9-arm discriminated union pairing each `StreamEventType` with its payload shape. The renderer-side `StreamEvent` discriminated union in `frontend/src/utils/cyboflowApi.ts:93-102` re-declares the same 9 arms, only adding `runId: string` and `timestamp: string` to every arm. This is structural duplication: `StreamEvent` could be expressed as `StreamEnvelope & { runId: string }` (because `StreamEnvelope = StreamEnvelopePayload & { timestamp: string }`). Today, adding a new SDK variant to `ClaudeStreamEvent` requires synchronized edits to (a) `StreamEventType`, (b) `StreamEnvelopePayload`, AND (c) renderer `StreamEvent` — three sites in two files. If the renderer arm is forgotten, TypeScript will narrow incorrectly at the consumer (`RunView.renderEvent`) and the renderer will fall through to `UnknownEventRow` for the new variant.
+- **suggested_action:** Refactor `frontend/src/utils/cyboflowApi.ts` to express `StreamEvent` as `StreamEnvelope & { runId: string }` — a one-liner that eliminates the 9-arm duplication and centralizes the discriminated-union source of truth in `shared/types/claudeStream.ts`. Verify by running `pnpm typecheck` and `pnpm --filter frontend test` afterward (the existing 279 frontend tests cover `RunView` rendering for every active arm). Out-of-scope for TASK-725 because `cyboflowApi.ts` is listed in the plan as `files_readonly`; the executor was constrained to a surgical typed-envelope change. This is a natural follow-up cleanup once an unrelated touch lands on that file.
+- **resolved_by:**
 
 ## FIND-SPRINT-031-3
 - **source:** TASK-726 (code-reviewer)
