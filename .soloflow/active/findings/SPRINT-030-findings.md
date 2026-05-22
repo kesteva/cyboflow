@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-030
-pending_count: 1
-last_updated: "2026-05-21T17:10:00.000Z"
+pending_count: 3
+last_updated: "2026-05-22T00:35:00.000Z"
 ---
 # Findings Queue
 
@@ -23,4 +23,23 @@ last_updated: "2026-05-21T17:10:00.000Z"
 - **location:** frontend/src/utils/cyboflowApi.ts:52-58 (StreamEventType union); frontend/src/components/cyboflow/RunView.tsx:39-45 (local widening)
 - **description:** TASK-696 added `session_info` and `rate_limit_event` to the renderer's `switch (event.type)` dispatcher. Because `cyboflowApi.ts` is marked `files_readonly` for the task, the renderer falls back to a local `ExtendedStreamEventType` alias and an inline `event.type as ExtendedStreamEventType` cast at the switch site. The inline `// TODO(IDEA-021 follow-up): widen StreamEventType in cyboflowApi.ts in a sibling task` comment captures the intent but the widening still needs a backlog task to land. Until then, any future RunView contributor adding another typed branch will have to extend the local alias (or perpetuate the cast) instead of relying on the canonical `StreamEventType` union — which is exactly the drift surface this comment warns about.
 - **suggested_action:** Open a follow-up task to widen `StreamEventType` in `frontend/src/utils/cyboflowApi.ts` to include `'session_info' | 'rate_limit_event'` (and audit `main/src/services/streamParser/derivers.ts:deriveEventType` to confirm both strings are actually emitted on the envelope `type` field). On landing, remove the `ExtendedStreamEventType` alias + cast in `RunView.tsx` and the two `as StreamEvent['type']` casts in `RunView.test.tsx:396, :424`.
+- **resolved_by:** 
+
+## FIND-SPRINT-030-3
+- **type:** bug
+- **source:** TASK-701 (verifier)
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/cyboflowDayGate.test.ts:124
+- **description:** The day-3 gate test contains a pre-existing flaky timing assertion: expect(t2).toBeGreaterThan(t1) where t1 = Date.now() before approveRun(prune) and t2 = Date.now() after approveRun(sprint). Both calls land within the same millisecond on a fast Mac (approveRun resolves synchronously enough that the two Date.now() calls return the same value). Observed during TASK-701 verification: first pnpm test:gate run failed (1779409716748 == 1779409716748), second run passed. The relocation in TASK-701 preserved the original logic verbatim — this flake pre-dated TASK-701 (logic unchanged from the original tests/cyboflow-day3-gate.spec.ts at TASK-355 / TASK-605). AC#6 (pnpm test:gate exits 0) only passes intermittently when claude is in PATH, which weakens this test as a sprint-completion gate.
+- **suggested_action:** Replace expect(t2).toBeGreaterThan(t1) with expect(t2).toBeGreaterThanOrEqual(t1). The genuine assertion the test is trying to make is captured elsewhere (the explicit ordering of awaits and the awaiting_review mid-check). The chronological-ordering check is structurally guaranteed by the sequential awaits, so a >= comparison preserves the spirit while eliminating the same-millisecond flake.
+
+## FIND-SPRINT-030-4
+- **source:** TASK-702 (verifier)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** scripts/verify-schema-parity.js:82 (failure surface); main/src/database/schema.sql (root cause — no `projects` table); main/src/database/migrations/008_permission_mode_approve_default.sql:6 (failing UPDATE against missing table)
+- **description:** `pnpm test:unit` fails at the `verify:schema` chain step with `SqliteError: no such column: permission_mode` when migration 008 runs `UPDATE projects SET default_permission_mode = 'approve'`. Root cause: `main/src/database/schema.sql` does NOT declare a `projects` table (only sessions, session_outputs, conversation_messages, workflows, workflow_runs), so path-1 of the parity check (schema.sql + migrations applied in order) errors when migration 008 references it. The script's existing fallback only tolerates `no such table` errors, not `no such column` — SQLite reports the column error first because the prior migration that creates `projects` is missing or quarantined into `migrations/legacy/`. Pre-existing on main (no schema or script edits during SPRINT-030; verified `git diff a1afbf7..HEAD -- main/src/database/`). TASK-702's plan AC#5 carved out only `cyboflowSchema.test.ts` (which now passes 13/13); this is a different and previously-unflagged failure surface.
+- **suggested_action:** Either (a) widen `verify-schema-parity.js`'s tolerated-error pattern from `no such table` to also include `no such column` so legacy `projects`-table migrations don't break path-1, OR (b) add a `projects` table declaration to `schema.sql` (or restore it from `migrations/legacy/`) so the schema is actually self-consistent — this is the underlying drift the script was built to catch (FIND-SPRINT-015-21 class).
 - **resolved_by:**
