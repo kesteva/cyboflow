@@ -258,6 +258,18 @@ export interface StreamEvent {
 }
 
 /**
+ * Orchestrator-synthetic event emitted by RunLauncher immediately before the SDK iterator
+ * begins. This is NOT an SDK wire event. It signals to the renderer that the run has
+ * started, closing the "Waiting for events…" gap before the first real SDK event arrives.
+ */
+export interface RunStartedEvent {
+  type: 'run_started';
+  runId: string;
+  worktreePath: string;
+  branchName: string;
+}
+
+/**
  * Orchestrator-synthetic event emitted once at SDK run start (claudeCodeManager.ts:251-260).
  * This is NOT an SDK wire event — it is synthesized by the main process and emitted before
  * the SDK iterator begins. It carries run metadata the renderer needs to display the
@@ -397,6 +409,34 @@ export type ClaudeStreamEvent =
   | ResultEvent
   | StreamEvent
   | UnknownStreamEvent;
+
+// ---------------------------------------------------------------------------
+// Renderer-facing StreamEventType union
+// ---------------------------------------------------------------------------
+
+/**
+ * The discriminator values used on the IPC envelope's `type` field.
+ *
+ * These mirror the top-level `type` on each `ClaudeStreamEvent` variant, plus:
+ *   - `'run_started'`      — orchestrator-synthetic event emitted by RunLauncher before the
+ *                            SDK iterator begins (not a ClaudeStreamEvent variant).
+ *   - `'session_info'`     — orchestrator-synthetic metadata card (SessionInfoEvent).
+ *   - `'rate_limit_event'` — SDK subscription rate-limit gate (RateLimitEvent).
+ *   - `'unknown'`          — emitted by deriveEventType when no known discriminant matches.
+ *
+ * The renderer's `StreamEvent` discriminated union and `RunView.renderEvent` switch are
+ * keyed on this type. Add new discriminants here before adding new switch arms.
+ */
+export type StreamEventType =
+  | 'system'
+  | 'assistant'
+  | 'user'
+  | 'result'
+  | 'stream_event'
+  | 'session_info'
+  | 'rate_limit_event'
+  | 'run_started'
+  | 'unknown';
 
 // ---------------------------------------------------------------------------
 // Exhaustive-check helper

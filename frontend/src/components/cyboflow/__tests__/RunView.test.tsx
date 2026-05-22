@@ -391,7 +391,7 @@ describe('RunView', () => {
     act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
     const event: StreamEvent = {
       runId: 'run-1',
-      type: 'session_info' as StreamEvent['type'],
+      type: 'session_info',
       payload: {
         type: 'session_info',
         initial_prompt: 'Refactor the parser module.',
@@ -419,7 +419,7 @@ describe('RunView', () => {
     act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
     const event: StreamEvent = {
       runId: 'run-1',
-      type: 'rate_limit_event' as StreamEvent['type'],
+      type: 'rate_limit_event',
       payload: {
         type: 'rate_limit_event',
         rate_limit_info: {
@@ -586,7 +586,7 @@ describe('RunView', () => {
     const longPrompt = 'A'.repeat(130);
     const event: StreamEvent = {
       runId: 'run-1',
-      type: 'session_info' as StreamEvent['type'],
+      type: 'session_info',
       payload: {
         type: 'session_info',
         initial_prompt: longPrompt,
@@ -604,6 +604,33 @@ describe('RunView', () => {
     expect(screen.queryByText(longPrompt)).not.toBeInTheDocument();
     // Truncated 120-char prefix + ellipsis character must appear
     expect(screen.getByText(`${'A'.repeat(120)}…`)).toBeInTheDocument();
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // run_started event branch test (TASK-700)
+  // -------------------------------------------------------------------------
+
+  it('routes a run_started event to RunStartedEventRow (shows "Starting" placeholder)', () => {
+    act(() => { useCyboflowStore.getState().setActiveRun('run-started-test'); });
+    const event: StreamEvent = {
+      runId: 'run-started-test',
+      type: 'run_started',
+      payload: {
+        type: 'run_started',
+        runId: 'run-started-test',
+        worktreePath: '/tmp/cyboflow-wt-starting',
+        branchName: 'cyboflow/my-workflow-abc12345',
+      },
+      timestamp: '2026-05-21T00:00:08.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // "Starting" placeholder text must be visible
+    expect(screen.getByText(/Starting/)).toBeInTheDocument();
+    // Branch name must be visible
+    expect(screen.getByText(/cyboflow\/my-workflow-abc12345/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
