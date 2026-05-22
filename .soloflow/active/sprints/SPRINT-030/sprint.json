@@ -12,11 +12,6 @@
         "TASK-699"
       ]
     },
-    "TASK-701": {
-      "status": "in_progress",
-      "depends_on": [],
-      "started": "2026-05-22T00:14:12.427Z"
-    },
     "TASK-702": {
       "status": "in_progress",
       "depends_on": [],
