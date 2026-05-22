@@ -22,50 +22,11 @@
  * no mocks, exercises real SQL and real registry semantics.
  */
 import { describe, it, expect } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import { recoverActiveStateOrphans } from '../runRecovery';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-
-// ---------------------------------------------------------------------------
-// Test-database helpers
-// ---------------------------------------------------------------------------
-
-// Resolve the schema relative to process.cwd() which is always the main/
-// workspace root when running via vitest.
-const SCHEMA_PATH = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-/** Creates a fresh in-memory SQLite database with the cyboflow schema applied. */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
-
-/** Seed a workflow + workflow_runs row with the given status. */
-function seedRun(
-  db: Database.Database,
-  id: string,
-  status: 'queued' | 'starting' | 'running' | 'awaiting_review' | 'stuck' | 'completed' | 'failed' | 'canceled',
-): void {
-  const workflowId = `workflow-${id}`;
-  db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, 'test-workflow', '{}')`,
-  ).run(workflowId);
-
-  db.prepare(
-    `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status)
-     VALUES (?, ?, 1, '/tmp/test', ?)`,
-  ).run(id, workflowId, status);
-}
+import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 
 /** Seed an approvals row with status='pending' for a given run. */
 function seedPendingApproval(
@@ -95,7 +56,7 @@ describe('recoverActiveStateOrphans', () => {
     const runQueues = new RunQueueRegistry();
 
     const runId = 'run-A1';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
@@ -119,7 +80,7 @@ describe('recoverActiveStateOrphans', () => {
     const runQueues = new RunQueueRegistry();
 
     const runId = 'run-B1';
-    seedRun(db, runId, 'starting');
+    seedRun(db, { id: runId, status: 'starting' });
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
@@ -143,7 +104,7 @@ describe('recoverActiveStateOrphans', () => {
     const runQueues = new RunQueueRegistry();
 
     const runId = 'run-C1';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     // Register a live entry in the registry (simulates an active executor).
     runQueues.getOrCreate(runId);
@@ -170,7 +131,7 @@ describe('recoverActiveStateOrphans', () => {
     const runQueues = new RunQueueRegistry();
 
     const runId = 'run-D1';
-    seedRun(db, runId, 'running');
+    seedRun(db, { id: runId, status: 'running' });
 
     const approvalId = 'approval-D1';
     seedPendingApproval(db, approvalId, runId);
@@ -197,8 +158,8 @@ describe('recoverActiveStateOrphans', () => {
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
-    seedRun(db, 'run-E1', 'completed');
-    seedRun(db, 'run-E2', 'failed');
+    seedRun(db, { id: 'run-E1', status: 'completed' });
+    seedRun(db, { id: 'run-E2', status: 'failed' });
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
