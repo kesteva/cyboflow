@@ -16,48 +16,14 @@
  *  8. rejectRestOfRun(runId): returns { decided: N } for that run; other run untouched
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
-
-// ---------------------------------------------------------------------------
-// Test-database helpers
-// ---------------------------------------------------------------------------
-
-/** Creates a fresh in-memory SQLite database with the full cyboflow schema. */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(GATE_SCHEMA);
-  return db;
-}
-
-/**
- * Seed a workflow + workflow_run in 'running' status.
- * Returns workflowId and runId.
- */
-function seedRun(
-  db: Database.Database,
-  runId: string,
-  status: string = 'running',
-): { workflowId: string; runId: string } {
-  const workflowId = `workflow-${runId}`;
-  db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, 'test-workflow', '{}')`,
-  ).run(workflowId);
-  db.prepare(
-    `INSERT OR IGNORE INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json)
-     VALUES (?, ?, 1, '/tmp/test', ?, '{}')`,
-  ).run(runId, workflowId, status);
-  return { workflowId, runId };
-}
+import { createTestDb, seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
 
 /**
  * Seed a pending approval row directly (bypasses ApprovalRouter for
@@ -99,8 +65,8 @@ describe('cyboflow.approvals.listPending', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
 
-    seedRun(db, 'run-list-1');
-    seedRun(db, 'run-list-2');
+    seedRun(db, { id: 'run-list-1' });
+    seedRun(db, { id: 'run-list-2' });
 
     // Insert newer approval first so ordering by insertion is different from ORDER BY.
     const newerAt = '2026-01-01T00:00:02Z';
@@ -132,7 +98,7 @@ describe('cyboflow.approvals.listPending', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
 
-    seedRun(db, 'run-trunc');
+    seedRun(db, { id: 'run-trunc' });
     const longInput = 'x'.repeat(600);
     db.prepare(
       `INSERT INTO approvals
@@ -155,7 +121,7 @@ describe('cyboflow.approvals.approve', () => {
     ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
     const router = ApprovalRouter.getInstance();
 
-    seedRun(db, 'run-approve');
+    seedRun(db, { id: 'run-approve' });
 
     // Register a pending approval — the promise will resolve when approve() is called.
     const decisionPromise = router.requestApproval(
@@ -221,7 +187,7 @@ describe('cyboflow.approvals.reject', () => {
     ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
     const approvalRouter = ApprovalRouter.getInstance();
 
-    seedRun(db, 'run-reject');
+    seedRun(db, { id: 'run-reject' });
 
     const decisionPromise = approvalRouter.requestApproval(
       'run-reject',
@@ -280,8 +246,8 @@ describe('cyboflow.approvals.approveRestOfRun', () => {
     const adapter = dbAdapter(db);
 
     // Seed two runs with direct DB inserts (no ApprovalRouter needed here).
-    seedRun(db, 'run-arr-a');
-    seedRun(db, 'run-arr-b');
+    seedRun(db, { id: 'run-arr-a' });
+    seedRun(db, { id: 'run-arr-b' });
 
     // Insert 3 pending approvals for run-A and 2 for run-B.
     for (let i = 0; i < 3; i++) {
@@ -318,8 +284,8 @@ describe('cyboflow.approvals.rejectRestOfRun', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
 
-    seedRun(db, 'run-rrr-a');
-    seedRun(db, 'run-rrr-b');
+    seedRun(db, { id: 'run-rrr-a' });
+    seedRun(db, { id: 'run-rrr-b' });
 
     for (let i = 0; i < 2; i++) {
       seedApprovalRow(db, `rrr-a-${i}`, 'run-rrr-a', `2026-01-01T00:0${i}:00Z`);
