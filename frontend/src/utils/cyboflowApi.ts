@@ -15,6 +15,42 @@
 import type { WorkflowRow } from '../../../shared/types/workflows';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 import type { IPCResponse } from './api';
+import type {
+  SystemInitEvent,
+  SystemApiRetryEvent,
+  SystemCompactEvent,
+  SystemCompactBoundaryEvent,
+  SystemHookStartedEvent,
+  SystemHookResponseEvent,
+  SystemStatusEvent,
+  AssistantEvent,
+  UserEvent,
+  ResultEvent,
+  StreamEvent as ClaudeStreamEventVariant,
+  SessionInfoEvent,
+  RateLimitEvent,
+  RunStartedEvent,
+} from '../../../shared/types/claudeStream';
+
+// Re-export StreamEventType from shared so consumers get the canonical union.
+export type { StreamEventType } from '../../../shared/types/claudeStream';
+
+// Re-export individual event shapes for consumers that need them.
+export type {
+  SystemInitEvent,
+  SystemApiRetryEvent,
+  SystemCompactEvent,
+  SystemCompactBoundaryEvent,
+  SystemHookStartedEvent,
+  SystemHookResponseEvent,
+  SystemStatusEvent,
+  AssistantEvent,
+  UserEvent,
+  ResultEvent,
+  SessionInfoEvent,
+  RateLimitEvent,
+  RunStartedEvent,
+};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -45,24 +81,25 @@ export interface WorkflowRunListRow {
 }
 
 /**
- * Discriminator values emitted by main/src/services/streamParser/derivers.ts:deriveEventType.
- * The five SDK-shaped values mirror shared/types/claudeStream.ts ClaudeStreamEvent.type.
- * 'unknown' is the catch-all produced when the main-process narrower cannot classify an event.
+ * Discriminated union over all IPC envelope `type` values the renderer can receive.
+ *
+ * Each arm narrows `payload` to the correct SDK / orchestrator shape so callers
+ * never need to cast `event.payload` manually. Discriminate on `event.type`.
+ *
+ * The `run_started` arm carries the synthetic RunStartedEvent emitted by RunLauncher
+ * before the first SDK event arrives.
+ * The `unknown` arm carries the raw payload when deriveEventType returns 'unknown'.
  */
-export type StreamEventType =
-  | 'system'
-  | 'assistant'
-  | 'user'
-  | 'result'
-  | 'stream_event'
-  | 'unknown';
-
-export interface StreamEvent {
-  runId: string;
-  type: StreamEventType;
-  payload: unknown;
-  timestamp: string;
-}
+export type StreamEvent =
+  | { runId: string; type: 'system';            payload: SystemInitEvent | SystemApiRetryEvent | SystemCompactEvent | SystemCompactBoundaryEvent | SystemHookStartedEvent | SystemHookResponseEvent | SystemStatusEvent; timestamp: string }
+  | { runId: string; type: 'assistant';          payload: AssistantEvent;           timestamp: string }
+  | { runId: string; type: 'user';               payload: UserEvent;                timestamp: string }
+  | { runId: string; type: 'result';             payload: ResultEvent;              timestamp: string }
+  | { runId: string; type: 'stream_event';       payload: ClaudeStreamEventVariant; timestamp: string }
+  | { runId: string; type: 'session_info';       payload: SessionInfoEvent;         timestamp: string }
+  | { runId: string; type: 'rate_limit_event';   payload: RateLimitEvent;           timestamp: string }
+  | { runId: string; type: 'run_started';        payload: RunStartedEvent;          timestamp: string }
+  | { runId: string; type: 'unknown';            payload: unknown;                  timestamp: string };
 
 // ---------------------------------------------------------------------------
 // Guard: ensure window.electron is present before every IPC call

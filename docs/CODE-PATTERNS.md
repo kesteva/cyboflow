@@ -226,8 +226,10 @@ ipcMain.handle('cyboflow:listRuns', (_event, args: unknown) => {
 ```
 
 For domains with multiple handlers sharing the same arg shapes, extract a `validateArg`
-helper in the domain's IPC file (see `main/src/ipc/cyboflow.ts` after B3 lands). This
-keeps the guard co-located with the handler and easy to audit during handler additions.
+helper in the domain's IPC file (canonical example: `validateNumberArg` / `validateStringArg`
+in `main/src/ipc/cyboflow.ts`, landed in TASK-705). Hand-rolled today; a Zod-based
+`validateInput<T>(schema, args, channel)` upgrade is tracked under FIND-SPRINT-030-9 to
+align with the tRPC router pattern and ease the forthcoming ipcLink migration.
 Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards.
 
 ### Per-session mutation serialization

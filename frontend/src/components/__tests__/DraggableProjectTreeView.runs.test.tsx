@@ -22,6 +22,7 @@ import type { WorkflowRunListRow } from '../../utils/cyboflowApi';
 let mockRuns: WorkflowRunListRow[] = [];
 const mockSetActiveRun = vi.fn();
 const mockNavigateToSessions = vi.fn();
+const mockSetActiveProjectId = vi.fn();
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi.listRuns
@@ -101,6 +102,7 @@ vi.mock('../../stores/navigationStore', () => ({
       getState: () => ({
         navigateToSessions: mockNavigateToSessions,
         navigateToProject: vi.fn(),
+        setActiveProjectId: mockSetActiveProjectId,
       }),
     },
   ),
@@ -179,7 +181,6 @@ function makeElectronAPI(expandedProjects: number[] = []) {
               data: {
                 expandedProjects,
                 expandedFolders: [],
-                sessionSortAscending: false,
               },
             }
           : { success: false },
@@ -205,6 +206,7 @@ function makeElectronAPI(expandedProjects: number[] = []) {
 beforeEach(() => {
   mockSetActiveRun.mockReset();
   mockNavigateToSessions.mockReset();
+  mockSetActiveProjectId.mockReset();
   // Default: project 1 pre-expanded
   Object.defineProperty(window, 'electronAPI', {
     writable: true,
@@ -349,10 +351,10 @@ describe('DraggableProjectTreeView — run-centric tree', () => {
     expect(runningDot!.className).not.toEqual(completedDot!.className);
   });
 
-  it('(e) clicking a run row triggers setActiveRun on the cyboflow store', async () => {
+  it('(e) clicking a run row triggers setActiveRun and setActiveProjectId, not navigateToSessions', async () => {
     const runId = 'run-clickme-unique';
     mockRuns = [
-      makeRun({ id: runId, workflow_id: 'wf-click-CLICK6', created_at: '2026-01-01 12:00:00' }),
+      makeRun({ id: runId, workflow_id: 'wf-click-CLICK6', project_id: 1, created_at: '2026-01-01 12:00:00' }),
     ];
 
     await renderExpanded();
@@ -368,6 +370,8 @@ describe('DraggableProjectTreeView — run-centric tree', () => {
     fireEvent.click(runRow!);
 
     expect(mockSetActiveRun).toHaveBeenCalledWith(runId);
+    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
+    expect(mockNavigateToSessions).not.toHaveBeenCalled();
   });
 
   it('(f) empty listRuns renders "No runs yet. Use Start Run."', async () => {

@@ -9,6 +9,16 @@
  * Two cases:
  * 1. killProcess mid-stream: a running query is aborted, all maps cleared.
  * 2. killProcess with no active run: idempotent, no throw, maps still empty.
+ *
+ * IMPORTANT — why spawnPromise must NOT be awaited before killProcess (TASK-697):
+ * spawnCliProcess wraps its body in withLock and then does `await iteratorDone`
+ * at the end (claudeCodeManager.ts:313). The mock query parks the async iterator
+ * until AbortController fires. Awaiting spawnPromise before killProcess therefore
+ * deadlocks: the lock is held waiting for iterator drain, but the only thing that
+ * unblocks the iterator is the abort signal, which is only fired by killProcess.
+ * Fix: fire-and-forget spawnCliProcess, drain maps via microtask polling, then
+ * killProcess (which aborts the run and fires the iterator's finally block), then
+ * await spawnPromise to collect any spawn-time exceptions.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
@@ -124,6 +134,33 @@ function getProcesses(mgr: ClaudeCodeManager): Map<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Microtask polling helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll until all three maps (pipelines, sdkRuns, processes) contain panelId,
+ * draining the microtask queue on each tick. Throws if maps are not populated
+ * within maxTicks microtask yields. This is safe because spawnCliProcess has no
+ * setTimeout in its map-population path — only microtask-yielding async steps
+ * (withLock uses Promises internally).
+ */
+async function waitForMaps(mgr: ClaudeCodeManager, panelId: string, maxTicks = 50): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    if (
+      getPipelines(mgr).has(panelId) &&
+      getSdkRuns(mgr).has(panelId) &&
+      getProcesses(mgr).has(panelId)
+    ) {
+      return;
+    }
+    await Promise.resolve();
+  }
+  throw new Error(
+    `waitForMaps: maps did not populate for panelId=${panelId} after ${maxTicks} microtask ticks`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -160,7 +197,8 @@ describe('ClaudeCodeManager.killProcess', () => {
     const sessionId = 'session-kill-1';
 
     // The mock query parks on the AbortController signal until aborted,
-    // simulating a mid-stream run. Spawn the SDK run (registers entries in all three maps)
+    // simulating a mid-stream run. Fire-and-forget: do NOT await spawnPromise
+    // here — awaiting before killProcess deadlocks (see file-top comment).
     const spawnPromise = mgr.spawnCliProcess({
       panelId,
       sessionId,
@@ -168,7 +206,9 @@ describe('ClaudeCodeManager.killProcess', () => {
       prompt: 'do something',
       permissionMode: 'ignore', // skip PreToolUse hook wiring
     });
-    await spawnPromise;
+
+    // Drain microtasks until maps are populated, then verify.
+    await waitForMaps(mgr, panelId);
 
     // Confirm all three maps are populated after spawn
     expect(getPipelines(mgr).has(panelId)).toBe(true);
@@ -190,6 +230,10 @@ describe('ClaudeCodeManager.killProcess', () => {
     // catch an erroneous double-call.
     expect(clearPendingForRunSpy).toHaveBeenCalledOnce();
     expect(clearPendingForRunSpy).toHaveBeenCalledWith(panelId);
+
+    // Now that killProcess has aborted the run (unlocking spawnPromise),
+    // await to surface any spawn-time exceptions.
+    await spawnPromise;
   });
 
   // -------------------------------------------------------------------------

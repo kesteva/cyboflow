@@ -103,7 +103,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     useCyboflowStore.getState().setActiveRun('run-001');
     useCyboflowStore.getState().appendStreamEvent({
       runId: 'run-001',
-      type: 'system',
+      type: 'unknown',
       payload: {},
       timestamp: new Date().toISOString(),
     });
@@ -127,8 +127,8 @@ describe('cyboflowStore subscription lifecycle', () => {
     // Simulate an event arriving from IPC.
     const testEvent: StreamEvent = {
       runId: 'run-001',
-      type: 'system',
-      payload: { type: 'system' },
+      type: 'unknown',
+      payload: { unrecognized_field: 'xyz' },
       timestamp: '2026-05-20T00:00:00Z',
     };
     capturedOnEvent!(testEvent);
@@ -179,8 +179,8 @@ describe('cyboflowStore subscription lifecycle', () => {
     // Fire an event through run-B's onEvent callback.
     const eventForB: StreamEvent = {
       runId: 'run-B',
-      type: 'system',
-      payload: { source: 'run-B' },
+      type: 'unknown',
+      payload: { unrecognized_field: 'run-B' },
       timestamp: '2026-05-20T00:00:00Z',
     };
     capturedOnEvents[1](eventForB);

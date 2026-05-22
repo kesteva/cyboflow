@@ -1,7 +1,7 @@
 ---
 epic: claude-agent-sdk-migration
 created: 2026-05-14T00:00:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-014]
 ---
 
