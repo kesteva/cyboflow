@@ -294,17 +294,6 @@ _No items._
 
 ## Deferred Visual
 
-- sprint: SPRINT-007
-  type: deferred_visual
-  bucket: deferred_visual
-  source: shadow-sprint-verifier
-  action: "Live Electron end-of-sprint smoke. Prereq: run `pnpm electron:rebuild` (resolves better-sqlite3 NODE_MODULE_VERSION mismatch). Then `pnpm dev`, create a session, run a prompt, open the Claude panel, and confirm `cyboflow-frontend-debug.log` contains no TypeError matching /Cannot read properties of undefined .*'some'/ and the panel renders messages. NOTE (2026-05-19 review-queue run): verification attempted but blocked. There is currently NO UI affordance to add a Claude panel to an existing session — PanelTabBar (frontend/src/components/panels/PanelTabBar.tsx) has no `+`/add button, the legacy session-input bar that lazily created a Claude panel was removed (SessionView.tsx:484 'Legacy session-level prompt bar removed - now handled by panels'), and ProjectView.ensureClaudePanel() only fires from git operations. The Test session in DB has only a Diff panel; clicking it shows just File Changes. This add-panel-UI dead-end is in scope of IDEA-017's slice 'Cut the legacy Create New Session dialog and the play button' / 'Retire useLegacyCrystalView'. Once IDEA-017 settles the new shell, either (a) re-test if a Claude panel surface still exists in cyboflow, or (b) dismiss this entry if Claude panels are cut along with SessionView."
-  blocked_checks:
-    - "End-of-sprint cross-task verification: opening the Claude panel after a Claude run does not throw .some-of-undefined (FIND-SPRINT-005-9 closure)"
-  level: requirements
-  severity: low
-  updated_at: "2026-05-19T19:00:00.000Z"
-
 - sprint: SPRINT-010
   type: deferred_visual
   bucket: deferred_visual
