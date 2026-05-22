@@ -378,6 +378,6 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
 
 4. **DB CHECK constraint is `IN ('approve', 'ignore')`** — both values are persisted. Migration 008 (`main/src/database/migrations/008_permission_mode_approve_default.sql`) backfills NULL rows to `'approve'` on legacy installs. The DEFAULT clause on new columns uses `'approve'`.
 
-5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts.
+5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts. Verification: `grep -rnE "\|\| 'approve'" main/src/ frontend/src/ shared/ --include='*.ts' --include='*.tsx'` must return 0 matches in non-comment lines.
 
 `/soloflow:compound` will append patterns extracted from completed sprints to this file over time.
