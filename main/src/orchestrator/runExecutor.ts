@@ -373,11 +373,12 @@ export class RunExecutor {
    * logged at warn level and NOT escalated — the race is expected.
    *
    * Phase routing:
-   *   'sdk_initialized' → lifecycleTransitions.running(runId)
+   *   'pre_spawn'       → lifecycleTransitions.running(runId)  // primary path (see FIND-SPRINT-026-10)
+   *   'sdk_initialized' → lifecycleTransitions.running(runId)  // defensive idempotency fallback
    *   'completed'       → lifecycleTransitions.completed(runId, 'running')
    *   'failed'          → lifecycleTransitions.failed(runId, fromStatus, errorMessage)
    *   'canceled'        → lifecycleTransitions.canceled(runId)
-   *   'pre_spawn' / 'post_spawn' → no-op
+   *   'post_spawn'      → no-op
    *
    * @param runId  The workflow run ID.
    * @param phase  The lifecycle phase label.
