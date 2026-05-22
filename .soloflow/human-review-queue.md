@@ -1,10 +1,10 @@
 ---
-pending_count: 28
+pending_count: 22
 buckets:
   decisions: 0
   actions: 0
-  testing: 23
-  deferred_visual: 5
+  testing: 18
+  deferred_visual: 4
 items: []
 ---
 # Human Review Queue
@@ -38,38 +38,6 @@ _No items._
     - AC-1 manual fresh-install verification under real Electron __dirname/fs conditions
   level: requirements
   severity: medium
-
-- task: TASK-572
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/wire-sprint-005-services/TASK-572-plan.md
-  action: "Manual smoke test of raw_events population: run pnpm dev, create+run a Claude Code session, then inspect ~/Library/Application Support/cyboflow/cyboflow.db (macOS) with sqlite3 cyboflow.db \"select event_type, count(*) from raw_events group by event_type;\". Confirm at least one row per active stream-json event_type (system, assistant, result, etc.). This validates AC#7 end-to-end (parser feed → router dispatch → sink persistence)"
-  blocked_checks:
-    - "AC#7 — sqlite raw_events smoke after fresh session"
-  level: requirements
-  severity: medium
-
-- task: TASK-354
-  type: action_required
-  bucket: testing
-  dedup_key: visual_web_unavailable
-  plan_ref: .soloflow/active/plans/workflow-runs-and-day3-gate/TASK-354-plan.md
-  action: "Verifier could not run web visual verification despite visual_web=true. The Electron renderer dev server (http://localhost:4521) was not running during verification (connection refused). To verify the WorkflowPicker/RunView/CyboflowRoot UI: run `pnpm dev` in one shell, then `pnpm test` (Playwright spec tests/cyboflow-picker.spec.ts) in another, or open the running renderer and confirm the workflow select with 5 options appears when a project is selected."
-  blocked_checks:
-    - Level 2 visual_web verification of WorkflowPicker rendering 5 options
-    - Level 2 visual_web verification of Start Run + CyboflowRoot mount
-    - Level 2 visual verification for web (review queue keyboard focus ring + scroll-into-view)
-    - "Level 2 visual verification of Sidebar MCP dot rendering, color states, and tooltip"
-    - Level 2 visual verification for web (Electron renderer)
-  level: visual
-  severity: medium
-  created_at: "2026-05-15T06:37:20.926Z"
-  updated_at: "2026-05-20T18:53:05.276Z"
-  affected_tasks:
-    - TASK-354
-    - TASK-404
-    - TASK-455
-    - TASK-672
 
 - task: SPRINT-017
   type: action_required
@@ -126,16 +94,6 @@ _No items._
   created_at: "2026-05-19T15:35:00.000Z"
   affected_tasks:
     - TASK-569
-
-- task: TASK-660
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/orchestrator-and-trpc-router/TASK-660-plan.md
-  action: "Manual smoke: run `pnpm dev`, click Start Run on the seeded prune workflow, then `grep \"orchSocketProvider not yet wired\" cyboflow-backend-debug.log` should return zero matches against entries timestamped AFTER the TASK-660 commits (a3d2c50 / 02fc7df / 596948b). The current log file has stale entries from before the fix landed (lines 151-152, 393-394 dated 18:53Z and 19:15Z — commits land on branch created 19:37Z) so the file must be retruncated by a fresh `pnpm dev` launch before the assertion is meaningful."
-  blocked_checks:
-    - AC5 — no orchSocketProvider sentinel error in cyboflow-backend-debug.log post-fix
-  level: requirements
-  severity: medium
 
 - task: TASK-662
   type: action_required
@@ -217,41 +175,11 @@ _No items._
 - task: TASK-683
   type: manual_smoke
   bucket: testing
-  level: goal_backward
-  severity: high
-  action: "AC#17 Manual smoke 5 — workflow run emits >=2 distinct real SDK event types. Start a workflow run from the cyboflow tab; RunView event log must show >=2 unique 'type' values beyond run_started (system/assistant/user/result/stream_event). If only run_started appears, RunExecutor is not wired — file finding and halt. Programmatic check: SELECT DISTINCT type FROM raw_events WHERE run_id=<id> returns >=2. Checklist: docs/sdk-migration-smoke-results.md §Smoke 5."
-  plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
-  verdict_notes: "HIGH severity — gates 'real SDK events flow' validation for the epic. Manual UI verification deferred."
-
-- task: TASK-683
-  type: manual_smoke
-  bucket: testing
   level: requirements
   severity: medium
   action: "AC#18 Manual smoke 6 — no UX regressions in full user flow. Walk: create panel → prompt → tool approval → resume → workflow run start → workflow run complete. Record any UX deltas (none expected). Checklist: docs/sdk-migration-smoke-results.md §Smoke 6."
   plan_ref: .soloflow/active/plans/claude-agent-sdk-migration/TASK-683-plan.md
   verdict_notes: Manual UI verification deferred.
-
-- task: TASK-685
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-685-plan.md
-  action: "AC11 manual launch verification: run `pnpm dev` and confirm (a) the renderer bootstraps without crashing, (b) no DiscordPopup modal renders at app start, and (c) `grep -iE \"app:update-discord-shown|updateLastAppOpenDiscordShown|discord_shown\" cyboflow-backend-debug.log` returns 0 matches against entries timestamped AFTER commit 2afbf2e. Verifier ran static gates (typecheck + lint + 8 grep-based ACs all green) but cannot drive a live Electron launch from this autonomous session. Pre-existing cyboflow-backend-debug.log dates from 11:17 (before TASK-685 commit at 21:30) so it must be retruncated by a fresh `pnpm dev` launch before the grep assertion is meaningful."
-  blocked_checks:
-    - "AC11 — manual launch: pnpm dev → no DiscordPopup modal → debug log clean of deleted-symbol mentions"
-  level: visual
-  severity: medium
-
-- task: TASK-687
-  type: action_required
-  bucket: testing
-  plan_ref: .soloflow/active/plans/cyboflow-shell-architecture/TASK-687-plan.md
-  action: "Run pnpm dev with a project that has ≥1 workflow_run; expand the project in the sidebar and confirm: (AC1) children render as run rows (not SessionListItems), no Crystal-session rows appear; (AC2) clicking a run row navigates the main pane via setActiveRun — observe cyboflow-frontend-debug.log for a stream-event subscription on the clicked runId."
-  blocked_checks:
-    - "AC1: DraggableProjectTreeView renders run rows under expanded project (visual)"
-    - "AC2: Clicking run row triggers stream subscription via setActiveRun (visual)"
-  level: visual
-  severity: medium
 
 - task: SPRINT-028
   type: config_gap
