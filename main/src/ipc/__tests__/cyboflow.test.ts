@@ -430,6 +430,100 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
   });
 });
 
+describe('registerCyboflowHandlers — runtime input validation', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+
+  // cyboflow:listRuns
+  it('listRuns: undefined args → success: false, error mentions projectId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:listRuns', undefined) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/projectId/);
+  });
+
+  it('listRuns: string projectId → success: false, error mentions projectId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:listRuns', { projectId: 'not-a-number' }) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/projectId/);
+  });
+
+  // cyboflow:listWorkflows
+  it('listWorkflows: missing args.projectId → success: false', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:listWorkflows', {}) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/projectId/);
+  });
+
+  // cyboflow:startRun
+  it('startRun: missing workflowId → success: false, error mentions workflowId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:startRun', { projectId: 1 }) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/workflowId/);
+  });
+
+  it('startRun: string projectId → success: false, error mentions projectId', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const result = await invoke(handlers, 'cyboflow:startRun', {
+      workflowId: 'some-id',
+      projectId: 'bad',
+    }) as {
+      success: boolean;
+      error?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/projectId/);
+  });
+});
+
 describe('registerCyboflowHandlers — cyboflow:approveRun', () => {
   it('registers a handler for the channel', () => {
     const db = createTestDb();
