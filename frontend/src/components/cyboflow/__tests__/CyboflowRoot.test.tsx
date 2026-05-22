@@ -32,6 +32,28 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// Mock API.sessions so getOrCreateMainRepoSession returns data:null, keeping mainRepoSessionId null.
+// This means the new {mainRepoSessionId && …} panel surface block does NOT render, and
+// the four existing assertions about empty-state CTA / RunView / modal toggling pass unchanged.
+vi.mock('../../../utils/api', () => ({
+  API: {
+    sessions: {
+      getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: null }),
+    },
+  },
+}));
+
+// Mock panelApi so the loadPanelsForSession call (gated on mainRepoSessionId) does not
+// cause errors if it somehow fires, and to silence unhandled-promise warnings.
+vi.mock('../../../services/panelApi', () => ({
+  panelApi: {
+    loadPanelsForSession: vi.fn().mockResolvedValue([]),
+    setActivePanel: vi.fn().mockResolvedValue(undefined),
+    createPanel: vi.fn(),
+    deletePanel: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
