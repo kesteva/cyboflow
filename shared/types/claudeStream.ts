@@ -438,6 +438,21 @@ export type StreamEventType =
   | 'run_started'
   | 'unknown';
 
+/**
+ * IPC envelope wrapping every ClaudeStreamEvent emitted from the main process to
+ * the renderer's `cyboflow:stream:<runId>` channel.
+ *
+ * Discriminate on `type`. The renderer-side `StreamEvent` discriminated union
+ * in `frontend/src/utils/cyboflowApi.ts` narrows `payload` per `type`; this
+ * envelope keeps `payload: unknown` because the publish-site producer
+ * (RunLauncher) is decoupled from the SDK union TASK-725 will tighten next.
+ */
+export interface StreamEnvelope {
+  type: StreamEventType;
+  payload: unknown;
+  timestamp: string;
+}
+
 // ---------------------------------------------------------------------------
 // Exhaustive-check helper
 // ---------------------------------------------------------------------------

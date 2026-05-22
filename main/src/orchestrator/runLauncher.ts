@@ -20,7 +20,7 @@ import type { WorkflowRegistry } from './workflowRegistry';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import type { StreamEventType } from '../../../shared/types/claudeStream';
+import type { StreamEnvelope } from '../../../shared/types/claudeStream';
 import type { McpConfigWriter } from './mcpConfigWriter';
 import type { RunExecutor } from './runExecutor';
 import type { RunQueueRegistry } from './RunQueueRegistry';
@@ -63,7 +63,7 @@ export interface NodeResolver {
  * no electron imports inside main/src/orchestrator/.
  */
 export interface StreamEventPublisher {
-  publish(runId: string, event: { type: StreamEventType; payload: unknown; timestamp: string }): void;
+  publish(runId: string, event: StreamEnvelope): void;
 }
 
 export class RunLauncher {
