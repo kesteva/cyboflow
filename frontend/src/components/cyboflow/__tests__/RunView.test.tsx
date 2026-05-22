@@ -634,6 +634,34 @@ describe('RunView', () => {
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
+  it('RunStartedEventRow truncates runId to 8 chars followed by an ellipsis (TASK-700)', () => {
+    // RunStartedEventRow renders payload.runId.slice(0, 8) + '…' in a compact <span>.
+    // This test locks in that truncation so a later refactor cannot silently drop it.
+    // Note: the full runId also appears verbatim in the RunView header (activeRunId label),
+    // so we assert the truncated form is present without asserting the full form is absent.
+    const longRunId = 'abcdef1234567890'; // 16 chars; first 8 = 'abcdef12'
+    act(() => { useCyboflowStore.getState().setActiveRun(longRunId); });
+    const event: StreamEvent = {
+      runId: longRunId,
+      type: 'run_started',
+      payload: {
+        type: 'run_started',
+        runId: longRunId,
+        worktreePath: '/tmp/cyboflow-wt-truncid',
+        branchName: 'cyboflow/trunc-id-branch',
+      },
+      timestamp: '2026-05-21T00:00:09.000Z',
+    };
+    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
+    render(<RunView />);
+    // The truncated form (8 chars + ellipsis) must appear in the event row
+    expect(screen.getByText('abcdef12…')).toBeInTheDocument();
+    // Branch name must be visible
+    expect(screen.getByText(/cyboflow\/trunc-id-branch/)).toBeInTheDocument();
+    // Must NOT route to UnknownEventRow
+    expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
+  });
+
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
     // Get the mocked subscribeToStreamEvents from the module-level mock.
     const mockSubFn = vi.mocked(subscribeToStreamEvents);
