@@ -13,12 +13,6 @@
       ],
       "verdict_at": "2026-05-23T19:29:02.982Z"
     },
-    "TASK-691": {
-      "status": "pending",
-      "depends_on": [
-        "TASK-690"
-      ]
-    },
     "TASK-692": {
       "status": "pending",
       "depends_on": [

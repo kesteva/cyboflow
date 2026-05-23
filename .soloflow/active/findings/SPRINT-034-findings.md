@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-034
-pending_count: 4
-last_updated: "2026-05-23T21:00:00.000Z"
+pending_count: 6
+last_updated: "2026-05-23T22:15:00.000Z"
 ---
 # Findings Queue
 
@@ -71,3 +71,32 @@ TASK-555 gated: failing blocking prereq (notarytool credentials missing).
 - **description:** Stale documentation comment references `ProjectTreeView` as one of the local-type definers for the `ProjectWithSessions[]` shape returned by `getAllWithProjects` / `getArchivedWithProjects`. TASK-689 deleted `frontend/src/components/ProjectTreeView.tsx` entirely (unused legacy duplicate), so the comment now points at a nonexistent file. The runtime contract is unchanged — `DraggableProjectTreeView.tsx` still locally defines its own shape and casts the `unknown[]` payload — but the comment misleads a future reader trying to locate the canonical type definition. Out of TASK-689's diff scope (electron.d.ts is not in files_owned).
 - **suggested_action:** Update line 76 to read `// but that type is locally defined in DraggableProjectTreeView.` (drop the ` / ProjectTreeView` suffix). One-line edit, no behavior change.
 - **resolved_by:** 
+
+## FIND-SPRINT-034-9
+- **source:** TASK-691 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** docs/CODE-PATTERNS.md:319
+- **description:** The canonical-example pointer `main/src/services/worktreeManager.ts:472` is line-stale — the actual `@cyboflow-hidden` method-group comment lives at line 502 in the current file (post-TASK-691). The stale line number predates TASK-691 (also pointed at non-hidden code at line 472 in the pre-commit revision), so this is pre-existing drift the executor had the opportunity to refresh but did not. Future readers grepping by line number will land mid-loop inside `getRebaseInfo`, not on the canonical example. Out of TASK-691's strict diff (executor edited CODE-PATTERNS.md but only to remove the second canonical-example bullet).
+- **suggested_action:** Change `main/src/services/worktreeManager.ts:472` to `main/src/services/worktreeManager.ts:502` in docs/CODE-PATTERNS.md.
+- **resolved_by:** 
+
+## FIND-SPRINT-034-10
+- **source:** TASK-691 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/panels/SetupTasksPanel.tsx
+- **description:** TASK-691 scrubbed the inline TODO `TODO(TASK-691): SetupTasksPanel will be deleted with the SessionView retirement` from SetupTasksPanel.tsx (line ~88 pre-commit), but the panel itself was *not* deleted in this task and is still mounted via `frontend/src/components/panels/PanelContainer.tsx:14,65`. The scrubbed TODO was a forward-looking deletion-candidate signal; removing it without filing a follow-up loses the hint that SetupTasksPanel should be re-examined for deletion now that SessionView is gone. Whether the panel is actually orphaned post-IDEA-017 is unclear without consulting the broader shell-architecture epic — RunView may or may not surface it.
+- **suggested_action:** Audit whether SetupTasksPanel is still reachable from the post-IDEA-017 shell (Run/Setup tab in the cyboflow shell vs. residual Crystal panel-tab plumbing). If unreachable, file a deletion follow-up task. If reachable, drop a one-line comment at the top of the file naming the active consumer so the deletion-candidate concern is resolved on paper.
+- **resolved_by:** 
+
+## FIND-SPRINT-034-8
+- **type:** scope_deviation
+- **source:** TASK-691 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/PromptHistory.tsx:82, frontend/src/components/PromptHistoryModal.tsx:96, frontend/src/hooks/useAddTerminalPanel.ts:15,26, frontend/src/components/panels/SetupTasksPanel.tsx:88
+- **description:** These 4 files outside original files_owned contain stale comment references to SessionView that would cause the acceptance criteria grep-zero check to fail. Claimed to remove comments (no functional impact). Required to meet AC: grep -rn SessionView frontend/src/ returns 0 matches.
+- **resolved_by:** verifier — not actually a scope deviation: all 5 edited files (PromptHistory.tsx, PromptHistoryModal.tsx, useAddTerminalPanel.ts, SetupTasksPanel.tsx, useAddTerminalPanel.test.tsx) ARE listed in TASK-691-plan.md files_owned (lines 19-23). Executor mislabeled in-scope edits as deviations. Also AC-prescribed: AC2 ("No SessionView references remain in frontend/src/") forces these stale-comment removals.
