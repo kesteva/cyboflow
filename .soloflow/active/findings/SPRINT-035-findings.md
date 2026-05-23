@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
 pending_count: 2
-last_updated: "2026-05-23T23:10:00.000Z"
+last_updated: "2026-05-23T23:30:00.000Z"
 ---
 # Findings Queue
 
@@ -29,8 +29,18 @@ last_updated: "2026-05-23T23:10:00.000Z"
 - **source:** TASK-710 (code-reviewer)
 - **type:** improvement
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/orchestrator/trpc/__tests__/router.test.ts:87-90
 - **description:** The router.test.ts comment claims `cyboflow.runs.list`'s tRPC wrapper guards (FORBIDDEN when `ctx.userId !== 'local'`, PRECONDITION_FAILED when `!ctx.db`) "are covered by integration tests that build a real DB context" — but no such integration test currently exists for `runs.list`. The handler is well covered by `listRunsHandler.test.ts` (4 unit tests), but the guard branches are uncovered. The sibling `runs.getStuckInspection` procedure has parallel guard tests in `main/src/orchestrator/trpc/routers/__tests__/runs.test.ts:158-200` (cases c + d) that mirror exactly what `runs.list` needs. Risk is low because the guard code is mechanically identical to the sibling (same import, same TRPCError codes, same `ctx.userId` / `ctx.db` checks), but the comment overstates the current state.
 - **suggested_action:** Add `(c) non-local userId → FORBIDDEN` and `(d) missing ctx.db → PRECONDITION_FAILED` cases to `main/src/orchestrator/trpc/routers/__tests__/runs.test.ts` exercising `caller.cyboflow.runs.list({ projectId: 1 })` — mirroring the existing `getStuckInspection` cases at lines 158-200. Natural pickup for TASK-711 (router.test.ts cleanup task) since it already touches that test directory.
+- **resolved_by:** TASK-711
+
+## FIND-SPRINT-035-4
+- **source:** TASK-711 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/workflows.ts:21,41 and main/src/orchestrator/trpc/routers/approvals.ts (whole file)
+- **description:** Principal-scoping enforcement is inconsistent across the orchestrator tRPC routers. `runs.ts` re-asserts `ctx.userId !== 'local'` → `TRPCError FORBIDDEN` at the top of every procedure (list, cancel, cancelAndRestart, getStuckInspection — 4 sites), but the newly-implemented `workflows.list`/`workflows.get` (TASK-711) and the live `approvals.*` procedures rely only on `protectedProcedure`'s `userId` truthiness check. In v1 this is functionally equivalent because `createContext()` hard-codes `'local'`, but the docblock in `context.ts` explicitly anticipates a v2 team-tier swap that replaces `'local'` with a real session principal — at that point the workflows + approvals procedures would silently lose principal scoping while the runs procedures retain it. The TASK-711 plan ACs did not require this guard, so its omission is consistent with the plan and not a TASK-711 regression — it is a pre-existing project-wide inconsistency that the new procedures inherit.
+- **suggested_action:** When the v2 session-token swap is planned (or sooner — under a small "tRPC principal-scoping hardening" task), choose one canonical pattern (either lift the `userId !== 'local'` check into a `localOnlyProcedure = protectedProcedure.use(...)` middleware reused everywhere, or remove it from `runs.ts` if it is redundant with the v2 plan) and apply it uniformly across `routers/runs.ts`, `routers/workflows.ts`, and `routers/approvals.ts`.
 - **resolved_by:**
