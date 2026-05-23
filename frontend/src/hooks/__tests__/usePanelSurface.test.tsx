@@ -552,4 +552,11 @@ describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', 
 
     expect(mockStoreUnsubscribe).toHaveBeenCalled();
   });
+
+  it('does NOT call getOrCreateMainRepoSession when projectId is null', async () => {
+    renderHook(() => usePanelSurface(null, { autoCreatePermanentPanels: false }));
+    await flushAsync();
+
+    expect(mockGetOrCreateMainRepoSession).not.toHaveBeenCalled();
+  });
 });
