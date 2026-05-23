@@ -135,14 +135,17 @@ describe('seedApproval', () => {
     const db = createTestDb();
     const { runId } = seedRun(db);
 
+    const before = Date.now();
     // returns the inserted approval id (string)
     const approvalId = seedApproval(db, { runId });
+    const after = Date.now();
+
     expect(typeof approvalId).toBe('string');
     expect(approvalId.length).toBeGreaterThan(0);
 
     const row = db
       .prepare(
-        'SELECT id, run_id, tool_name, tool_input_json, tool_use_id, status FROM approvals WHERE id = ?',
+        'SELECT id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at FROM approvals WHERE id = ?',
       )
       .get(approvalId) as {
       id: string;
@@ -151,6 +154,7 @@ describe('seedApproval', () => {
       tool_input_json: string;
       tool_use_id: string;
       status: string;
+      created_at: string;
     } | undefined;
 
     expect(row).toBeDefined();
@@ -161,6 +165,10 @@ describe('seedApproval', () => {
     // tool_use_id defaults to id
     expect(row!.tool_use_id).toBe(approvalId);
     expect(row!.run_id).toBe(runId);
+    // created_at defaults to the current time (within 1 second of now)
+    const rowTs = new Date(row!.created_at).getTime();
+    expect(rowTs).toBeGreaterThanOrEqual(before);
+    expect(rowTs).toBeLessThanOrEqual(after + 1000);
   });
 
   it('honors status override', () => {
