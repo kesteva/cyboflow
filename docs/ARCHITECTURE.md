@@ -258,13 +258,31 @@ pnpm test                 # Playwright E2E (requires a built app)
 
 ### asarUnpack contract
 
-`main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js` is listed in
-`package.json` `build.asarUnpack` because it is spawned as an external `node`
-subprocess (the per-session Cyboflow MCP server) and Node cannot execute files
-from inside an ASAR archive. The runtime fallback in `scriptPath.ts`
-(read-from-asar, write-to-temp at `~/.cyboflow/cyboflowMcpServer.js`) is a
-defensive safety net for dev/edge cases; in a correctly-packaged build, it
-should never fire.
+`cyboflowMcpServer.js` is spawned as an external `node` subprocess (the
+per-session Cyboflow MCP server). Node cannot execute files from inside an ASAR
+archive, so the script must be placed **outside** the archive at package time.
+
+`package.json` `build.asarUnpack` covers it with the glob:
+
+```
+"main/dist/main/src/orchestrator/mcpServer/**/*.js"
+```
+
+In a packaged build, electron-builder places the script at:
+
+```
+<app>.app/Contents/Resources/app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js
+```
+
+`scriptPath.ts` (`resolveMcpServerScriptPath`) resolves the script at runtime:
+
+- **Packaged mode** — `path.join(process.resourcesPath, 'app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js')`.
+  No filesystem writes occur; the file is already asar-unpacked.
+- **Dev mode** — `path.join(__dirname, 'cyboflowMcpServer.js')` (the tsc-compiled
+  sibling in `main/dist/main/src/orchestrator/mcpServer/`).
+
+The result is memoized at module level (`cachedResolvedPath`). The old
+read-from-asar / write-to-`~/.cyboflow/` extraction path has been removed (TASK-618).
 
 The tsc emit layout for the main process is `main/dist/main/src/**` (mirroring
 the source tree under `main/src/`). Any future subprocess script added under

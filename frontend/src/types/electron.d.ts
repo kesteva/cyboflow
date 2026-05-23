@@ -73,7 +73,7 @@ interface ElectronAPI {
   sessions: {
     getAll: () => Promise<IPCResponse<Session[]>>;
     // getAllWithProjects returns ProjectWithSessions[] (Project + sessions + folders),
-    // but that type is locally defined in DraggableProjectTreeView / ProjectTreeView.
+    // but that type is locally defined in DraggableProjectTreeView.
     // Typed as unknown[] here; callers cast to their local interface.
     getAllWithProjects: () => Promise<IPCResponse<unknown[]>>;
     getArchivedWithProjects: () => Promise<IPCResponse<unknown[]>>;

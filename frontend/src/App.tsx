@@ -4,7 +4,6 @@ import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
-import { SessionView } from './components/SessionView';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
 import Help from './components/Help';
@@ -53,9 +52,6 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
-  // Toggle between the new CyboflowRoot view and the legacy SessionView.
-  // Default is the new Cyboflow view; the legacy toggle lets users fall back.
-  const [useLegacyCrystalView, setUseLegacyCrystalView] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
@@ -332,46 +328,12 @@ function App() {
             width={sidebarWidth}
             onResize={startResize}
           />
-          {/* Primary content area: CyboflowRoot when a project is active, else SessionView.
-              The "Legacy Cyboflow view" toggle lets users fall back to the legacy surface.
-              Deeper UI surgery is deferred to the crystal-cuts-and-rebrand epic. */}
-          {activeProjectId !== null && !useLegacyCrystalView ? (
-            <div className="flex flex-col flex-1 overflow-hidden">
-              <div
-                className="flex justify-end px-4 py-1 border-b border-border-primary"
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-              >
-                <button
-                  onClick={() => setUseLegacyCrystalView(true)}
-                  className="text-xs text-text-secondary hover:text-text-primary"
-                  title="Switch back to the legacy session view"
-                >
-                  Legacy view
-                </button>
-              </div>
-              <div className="flex-1 overflow-hidden">
-                <CyboflowRoot projectId={activeProjectId} />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col flex-1 overflow-hidden">
-              {useLegacyCrystalView && (
-                <div
-                  className="flex justify-end px-4 py-1 border-b border-border-primary"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                >
-                  <button
-                    onClick={() => setUseLegacyCrystalView(false)}
-                    className="text-xs text-text-secondary hover:text-text-primary"
-                    title="Switch to the new Cyboflow view"
-                  >
-                    Cyboflow view
-                  </button>
-                </div>
-              )}
-              <SessionView />
-            </div>
-          )}
+          {/* Primary content area: CyboflowRoot is the only mount point for the
+              active-project surface. The legacy session view render branch was retired
+              in TASK-690 (IDEA-017 slice 3). */}
+          <div className="flex flex-col flex-1 overflow-hidden">
+            <CyboflowRoot projectId={activeProjectId} />
+          </div>
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as net from 'net';
 
 // ---------------------------------------------------------------------------
@@ -178,26 +178,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
+async function executeMcpQuery(
+  type: string,
+  params: Record<string, unknown>,
+): Promise<CallToolResult> {
+  try {
+    const queryPromise = sendQuery(type, params);
+    const response = await queryPromise;
+    if (
+      typeof response !== 'object' ||
+      response === null ||
+      !('ok' in response) ||
+      typeof (response as { ok: unknown }).ok !== 'boolean'
+    ) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_orchestrator_response' }) }] };
+    }
+    type OkResponse = { ok: boolean; data?: unknown; error?: string };
+    const resp = response as OkResponse;
+    if (!resp.ok) {
+      const errorText = typeof resp.error === 'string' && resp.error.length > 0
+        ? resp.error
+        : 'orchestrator_error';
+      return { content: [{ type: 'text', text: JSON.stringify({ error: errorText }) }] };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(resp.data) }] };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }] };
+  }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   switch (request.params.name) {
     case 'cyboflow_list_pending_approvals': {
-      try {
-        const response = await sendQuery('mcp-list-pending-approvals', {});
-        const resp = response as { ok: boolean; data?: unknown; error?: string };
-        if (!resp.ok) {
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
-          };
-        }
-        return {
-          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
-        };
-      }
+      return executeMcpQuery('mcp-list-pending-approvals', {});
     }
 
     case 'cyboflow_get_run': {
@@ -213,23 +227,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
-      try {
-        const response = await sendQuery('mcp-get-run', { targetRunId: run_id });
-        const resp = response as { ok: boolean; data?: unknown; error?: string };
-        if (!resp.ok) {
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
-          };
-        }
-        return {
-          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
-        };
-      }
+      return executeMcpQuery('mcp-get-run', { targetRunId: run_id });
     }
 
     case 'cyboflow_submit_checkpoint': {
@@ -255,25 +253,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
-      try {
-        const queryParams: Record<string, unknown> = { label };
-        if (note !== undefined) queryParams['note'] = note;
-        const response = await sendQuery('mcp-submit-checkpoint', queryParams);
-        const resp = response as { ok: boolean; data?: unknown; error?: string };
-        if (!resp.ok) {
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: resp.error }) }],
-          };
-        }
-        return {
-          content: [{ type: 'text', text: JSON.stringify(resp.data) }],
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
-        };
-      }
+      const queryParams: Record<string, unknown> = { label };
+      if (note !== undefined) queryParams['note'] = note;
+      return executeMcpQuery('mcp-submit-checkpoint', queryParams);
     }
 
     default:
