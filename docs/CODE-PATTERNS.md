@@ -316,7 +316,7 @@ Two valid categories:
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical example (Crystal-preserved):** `main/src/services/worktreeManager.ts:472`
+- **Canonical example (Crystal-preserved):** `main/src/services/worktreeManager.ts:502`
   (method-group)
 - **Canonical example (forward-looking placeholder):**
   `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
