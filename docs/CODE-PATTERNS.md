@@ -136,14 +136,21 @@ Shared helpers live in `main/src/orchestrator/__test_fixtures__/orchestratorTest
   by `__tests__/orchestratorTestDb.test.ts`).
 - `seedRun(db, overrides?)` — inserts a `workflows` + `workflow_runs` pair;
   `overrides` accepts any column subset (e.g. `{ id, status, workflowName }`).
+- `seedApproval(db, overrides)` — inserts one `approvals` row; `overrides.runId`
+  is required (no phantom FK rows); all other fields are optional with defaults:
+  `toolName='bash'`, `toolInputJson='{}'`, `toolUseId={id}`, `status='pending'`,
+  `createdAt=now`. Call sites that need SDK-canonical casing pass `toolName:'Bash'`
+  explicitly — self-documenting at the call site.
 
 Do NOT inline `INSERT INTO workflow_runs` in new test files — use `seedRun`.
-Do NOT inline `INSERT INTO approvals` either — a `seedApproval` helper is
-pending in the same fixture file (FIND-SPRINT-031-7); until it lands, prefer
-extending `orchestratorTestDb.ts` over copying an inline INSERT.
+Do NOT inline `INSERT INTO approvals` in new test files — use `seedApproval`.
+The caller must have already seeded the parent run via `seedRun` before calling
+`seedApproval` — a missing parent row will fail the FK constraint and surface
+the bug immediately.
 
-**Canonical examples:** `main/src/orchestrator/__tests__/approvalRouter.test.ts`,
-`main/src/orchestrator/__tests__/runRecovery.test.ts`.
+**Canonical examples:** `main/src/orchestrator/__tests__/runRecovery.test.ts`,
+`main/src/orchestrator/__tests__/stuckDetector.test.ts`,
+`main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts`.
 
 ## Recurring Patterns
 

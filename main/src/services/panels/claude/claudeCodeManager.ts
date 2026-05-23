@@ -15,11 +15,10 @@ import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preT
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
-import { EventRouter, RawEventsSink } from '../../streamParser';
+import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -116,6 +115,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   private cachedNodePath: string | null = null;
 
+  /**
+   * Narrower owned by this manager. Every SDK event flows through
+   * `narrowing.narrow()` before reaching the EventRouter — the single
+   * validated boundary into raw_events. Fail-soft: returns
+   * `{ kind: '__unknown__', raw }` on Zod failure, never throws.
+   *
+   * Constructed in the constructor body after super() so this.logger is
+   * available — passing the logger enables verbose Zod-failure diagnostics
+   * per the CLAUDE.md optional-logger rule.
+   */
+  private readonly narrowing: TypedEventNarrowing;
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
@@ -126,6 +137,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (db == null) {
       throw new TypeError('[ClaudeCodeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
+    this.narrowing = new TypedEventNarrowing(this.logger);
   }
 
   // ---------------------------------------------------------------------------
@@ -334,13 +346,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       for await (const event of q) {
         if (abortController.signal.aborted) break;
 
-        // Forward to EventRouter / RawEventsSink pipeline.
-        // The SDK emits typed SDKMessage objects. We cast to ClaudeStreamEvent
-        // for the router (both share the same wire-format shape for the types
-        // that EventRouter / RawEventsSink consume: system/init, assistant, user,
-        // result, stream_event).
+        // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
+        const typed = this.narrowing.narrow(event);
+
         try {
-          router.emitForRun(runId, event as unknown as ClaudeStreamEvent);
+          router.emitForRun(runId, typed);
         } catch (routerErr) {
           this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
         }
