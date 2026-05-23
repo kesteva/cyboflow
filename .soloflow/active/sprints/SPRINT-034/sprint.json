@@ -6,18 +6,66 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-555": { "status": "pending", "depends_on": ["TASK-554"] },
-    "TASK-617": { "status": "pending", "depends_on": [] },
-    "TASK-618": { "status": "pending", "depends_on": [] },
-    "TASK-619": { "status": "pending", "depends_on": [] },
-    "TASK-620": { "status": "pending", "depends_on": [] },
-    "TASK-621": { "status": "pending", "depends_on": [] },
-    "TASK-655": { "status": "pending", "depends_on": [] },
-    "TASK-656": { "status": "pending", "depends_on": [] },
-    "TASK-689": { "status": "pending", "depends_on": ["TASK-687"] },
-    "TASK-690": { "status": "pending", "depends_on": ["TASK-688", "TASK-689"] },
-    "TASK-691": { "status": "pending", "depends_on": ["TASK-690"] },
-    "TASK-692": { "status": "pending", "depends_on": ["TASK-691"] }
+    "TASK-555": {
+      "status": "blocked",
+      "depends_on": [
+        "TASK-554"
+      ],
+      "verdict_at": "2026-05-23T19:29:02.982Z"
+    },
+    "TASK-617": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-618": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-619": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-620": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-621": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-655": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-656": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-689": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-687"
+      ]
+    },
+    "TASK-690": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-688",
+        "TASK-689"
+      ]
+    },
+    "TASK-691": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-690"
+      ]
+    },
+    "TASK-692": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-691"
+      ]
+    }
   },
   "playwright_target": {
     "kind": "electron",
