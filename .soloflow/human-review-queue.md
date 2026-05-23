@@ -1,9 +1,9 @@
 ---
-pending_count: 23
+pending_count: 24
 buckets:
   decisions: 0
   actions: 0
-  testing: 19
+  testing: 20
   deferred_visual: 4
 items: []
 ---
@@ -240,6 +240,18 @@ _No items._
   level: visual
   severity: medium
 
+- sprint: SPRINT-033
+  type: deferred_visual
+  bucket: testing
+  dedup_key: visual_macos_screencapturekit_-3811_display_asleep
+  action: "Wake the macOS display (or unlock the screen) and re-run visual verification of TASK-731's panel-surface refactor in the Electron app. With `pnpm dev` already running and the post-sprint code HMR-loaded at 04:51:11Z, the panels flow needs human eyes: open a project, switch between Claude/Logs/Diff/Terminal panels, verify panel mount/unmount behavior is unchanged from main, then create a new session and verify it activates correctly. Peekaboo MCP captures the cyboflow window (PID 80782) at 650,264 1260×811 once the display is awake."
+  blocked_checks:
+    - "visual_macos — TASK-731 panel-surface refactor (CyboflowRoot + ProjectView migrated onto usePanelSurface hook) needs UI verification: panel activation/switching, session creation flow, project view rendering"
+  level: deferred
+  severity: medium
+  created_at: "2026-05-22T22:05:00.000Z"
+  updated_at: "2026-05-22T22:05:00.000Z"
+
 ## Deferred Visual
 
 - sprint: SPRINT-010
@@ -399,28 +411,3 @@ _No items._
     - TASK-594
   override: "Deferred ground-truth check requires user to run `pnpm electron:rebuild` (better-sqlite3 NODE_MODULE_VERSION mismatch) — environmental setup outside sprint scope, not blocking the workflow-runs-and-day3-gate epic."
   override_at: "2026-05-15T04:26:22.959Z"
-
-- sprint: SPRINT-033
-  type: deferred_visual
-  bucket: testing
-  dedup_key: visual_macos_screencapturekit_-3811_display_asleep
-  action: "Wake the macOS display (or unlock the screen) and re-run visual verification of TASK-731's panel-surface refactor in the Electron app. With `pnpm dev` already running and the post-sprint code HMR-loaded at 04:51:11Z, the panels flow needs human eyes: open a project, switch between Claude/Logs/Diff/Terminal panels, verify panel mount/unmount behavior is unchanged from main, then create a new session and verify it activates correctly. Peekaboo MCP captures the cyboflow window (PID 80782) at 650,264 1260×811 once the display is awake."
-  blocked_checks:
-    - "visual_macos — TASK-731 panel-surface refactor (CyboflowRoot + ProjectView migrated onto usePanelSurface hook) needs UI verification: panel activation/switching, session creation flow, project view rendering"
-  level: deferred
-  severity: medium
-  created_at: "2026-05-22T22:05:00.000Z"
-  updated_at: "2026-05-22T22:05:00.000Z"
-
-- sprint: SPRINT-033
-  task: TASK-731
-  type: regression
-  bucket: testing
-  dedup_key: TASK-731_usepanelsurface_test_typecheck_mock_subscribe
-  action: "Fix the type error in frontend/src/hooks/__tests__/usePanelSurface.test.tsx:492. The hoisted `mockSessionStoreSubscribe: vi.fn(() => () => undefined)` is inferred as a zero-arg Mock, so `mockImplementation((cb: (state: StoreState) => void) => { ... })` fails with 'Target signature provides too few arguments. Expected 1 or more, but got 0.' Fix: change the vi.hoisted seed to `mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined as void)` (or cast `vi.fn<[(state: StoreState) => void], () => void>()`) so the signature accepts a listener argument. Vitest runtime is fine — all 16 unit tests pass — but `pnpm typecheck` fails, which blocks CI. Introduced by commit c74a815 (test coverage-gap follow-up)."
-  blocked_checks:
-    - "pnpm typecheck — frontend/src/hooks/__tests__/usePanelSurface.test.tsx(492,7): error TS2345: Argument of type '(cb: (state: StoreState) => void) => Mock<Procedure>' is not assignable to parameter of type 'NormalizedPrecedure<() => () => undefined>'. Target signature provides too few arguments. Expected 1 or more, but got 0."
-  level: regression
-  severity: high
-  created_at: "2026-05-22T22:09:00.000Z"
-  updated_at: "2026-05-22T22:09:00.000Z"
