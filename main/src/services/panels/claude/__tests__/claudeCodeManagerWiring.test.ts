@@ -14,6 +14,11 @@
  *   - When neither is present, undefined is returned.
  *   - Logger spy is wired through ClaudeCodeManager → RawEventsSink: warn()
  *     is called when RawEventsSink.handleEvent fails to INSERT (TASK-649).
+ *
+ * TypedEventNarrowing convergence (TASK-730):
+ *   - Malformed SDK event → narrower returns { kind: '__unknown__', raw }
+ *     which lands in raw_events.payload_json as { "kind": "__unknown__" }.
+ *   - Well-formed SDK event → narrower returns the typed variant (not __unknown__).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -31,6 +36,23 @@ import type { Logger } from '../../../../utils/logger';
 
 type LoggerSpy = ReturnType<typeof makeProdLoggerSpy>;
 
+// ---------------------------------------------------------------------------
+// Hoisted SDK yield factory — allows per-test override of the yielded sequence.
+// ---------------------------------------------------------------------------
+
+const { sdkYields } = vi.hoisted(() => {
+  /**
+   * sdkYields: a vi.fn() that returns an AsyncGenerator of SDK events.
+   *
+   * Default implementation yields one happy-path result event.
+   * Tests that need a different sequence call
+   * `sdkYields.mockImplementationOnce(async function* () { ... })`.
+   */
+  const sdkYields = vi.fn(async function* () {
+    yield { type: 'result', subtype: 'success' } as unknown;
+  });
+  return { sdkYields };
+});
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -46,10 +68,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
   const queryFn = vi.fn(
     (params: { prompt: string; options?: { systemPrompt?: { append?: string | null }; abortController?: AbortController } }) => {
       capturedQueryOptions = params.options ?? null;
-      return (async function* () {
-        // Yield one result event and finish immediately.
-        yield { type: 'result', subtype: 'success' } as unknown;
-      })();
+      // Delegate to the hoisted sdkYields factory so tests can override the
+      // yielded event sequence without replacing the whole query mock.
+      return sdkYields();
     },
   );
   return { query: queryFn };
@@ -78,6 +99,19 @@ const SCHEMA_PATH = join(process.cwd(), 'src/database/migrations/006_cyboflow_sc
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
+  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
+  return db;
+}
+
+/**
+ * Create an in-memory DB seeded with the full cyboflow schema but with FK
+ * enforcement disabled. Used by the TypedEventNarrowing convergence tests so
+ * they can insert raw_events rows without seeding the full FK chain
+ * (workflows → workflow_runs → raw_events).
+ */
+function createTestDbNoFk(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = OFF');
   db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
   return db;
 }
@@ -362,5 +396,130 @@ describe('CliManagerFactory claude tool — duck-type guard on additionalOptions
         skipValidation: true,
       }),
     ).rejects.toThrow(/\.prepare\(\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TypedEventNarrowing convergence (TASK-730)
+// ---------------------------------------------------------------------------
+
+describe('TypedEventNarrowing convergence (TASK-730)', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+
+  beforeEach(() => {
+    capturedQueryOptions = null;
+    // FK enforcement off: raw_events rows can reference a panelId run_id
+    // without seeding the workflows → workflow_runs FK chain.
+    db = createTestDbNoFk();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  it('malformed SDK event → narrow() produces __unknown__ variant stored in raw_events', async () => {
+    // Override sdkYields for this test: yield a completely unknown event variant
+    // that the Zod schema cannot parse. TypedEventNarrowing.narrow() must
+    // return { kind: '__unknown__', raw: { type: 'completely_unknown_variant_xyz', ... } }
+    // and RawEventsSink must persist that object as payload_json.
+    sdkYields.mockImplementationOnce(async function* () {
+      yield { type: 'completely_unknown_variant_xyz', timestamp: '2026-05-22T00:00:00Z' } as unknown;
+    });
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-narrow-unknown',
+      sessionId: 'session-narrow-unknown',
+      worktreePath: '/tmp/test',
+      prompt: 'trigger narrowing with unknown event',
+      permissionMode: 'ignore',
+    });
+
+    // Let the async SDK iterator and RawEventsSink dispatch settle.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // Verify that raw_events has at least one row whose payload_json contains
+    // the __unknown__ kind discriminant — proving the narrower intercepted the
+    // malformed event instead of passing the raw cast through.
+    const rows = db.prepare('SELECT payload_json FROM raw_events WHERE run_id = ?').all('panel-narrow-unknown') as Array<{ payload_json: string }>;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+
+    const unknownRow = rows.find((r) => {
+      try {
+        const parsed = JSON.parse(r.payload_json) as Record<string, unknown>;
+        return parsed['kind'] === '__unknown__';
+      } catch {
+        return false;
+      }
+    });
+    expect(unknownRow).toBeDefined();
+    // Confirm the raw payload is preserved inside the __unknown__ wrapper.
+    const parsedUnknown = JSON.parse(unknownRow!.payload_json) as Record<string, unknown>;
+    expect(parsedUnknown['kind']).toBe('__unknown__');
+  });
+
+  it('well-formed SDK event → narrow() produces typed variant (not __unknown__) in raw_events', async () => {
+    // Override sdkYields to emit a fully-valid result event (all required fields
+    // per resultSuccessSchema: is_error, duration_ms, num_turns). The minimal
+    // { type: 'result', subtype: 'success' } shape fails Zod validation because
+    // resultBaseFields requires these numeric fields.
+    sdkYields.mockImplementationOnce(async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        duration_ms: 100,
+        num_turns: 1,
+      } as unknown;
+    });
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-narrow-typed',
+      sessionId: 'session-narrow-typed',
+      worktreePath: '/tmp/test',
+      prompt: 'trigger narrowing with well-formed event',
+      permissionMode: 'ignore',
+    });
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const rows = db.prepare('SELECT payload_json FROM raw_events WHERE run_id = ?').all('panel-narrow-typed') as Array<{ payload_json: string }>;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+
+    // Every row must be a known typed variant — none should be __unknown__.
+    for (const row of rows) {
+      const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+      expect(parsed['kind']).not.toBe('__unknown__');
+      // The result event must carry the 'type' field directly.
+      expect(parsed['type']).toBe('result');
+    }
   });
 });
