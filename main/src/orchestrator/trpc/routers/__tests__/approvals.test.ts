@@ -16,31 +16,13 @@
  *  8. rejectRestOfRun(runId): returns { decided: N } for that run; other run untouched
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { createTestDb, seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
-
-/**
- * Seed a pending approval row directly (bypasses ApprovalRouter for
- * listPending ordering tests that don't need a live decisionPromise).
- */
-function seedApprovalRow(
-  db: Database.Database,
-  approvalId: string,
-  runId: string,
-  createdAt: string,
-): void {
-  db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-     VALUES (?, ?, 'Bash', '{"cmd":"echo hi"}', ?, 'pending', ?)`,
-  ).run(approvalId, runId, approvalId, createdAt);
-}
+import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -71,8 +53,8 @@ describe('cyboflow.approvals.listPending', () => {
     // Insert newer approval first so ordering by insertion is different from ORDER BY.
     const newerAt = '2026-01-01T00:00:02Z';
     const olderAt = '2026-01-01T00:00:01Z';
-    seedApprovalRow(db, 'approval-newer', 'run-list-1', newerAt);
-    seedApprovalRow(db, 'approval-older', 'run-list-2', olderAt);
+    seedApproval(db, { id: 'approval-newer', runId: 'run-list-1', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: newerAt });
+    seedApproval(db, { id: 'approval-older', runId: 'run-list-2', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: olderAt });
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
     const result = await caller.cyboflow.approvals.listPending();
@@ -100,11 +82,7 @@ describe('cyboflow.approvals.listPending', () => {
 
     seedRun(db, { id: 'run-trunc' });
     const longInput = 'x'.repeat(600);
-    db.prepare(
-      `INSERT INTO approvals
-         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-       VALUES (?, ?, 'Bash', ?, ?, 'pending', '2026-01-01T00:00:00Z')`,
-    ).run('approval-trunc', 'run-trunc', longInput, 'approval-trunc');
+    seedApproval(db, { id: 'approval-trunc', runId: 'run-trunc', toolName: 'Bash', toolInputJson: longInput, createdAt: '2026-01-01T00:00:00Z' });
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
     const [row] = await caller.cyboflow.approvals.listPending();
@@ -251,10 +229,10 @@ describe('cyboflow.approvals.approveRestOfRun', () => {
 
     // Insert 3 pending approvals for run-A and 2 for run-B.
     for (let i = 0; i < 3; i++) {
-      seedApprovalRow(db, `arr-a-${i}`, 'run-arr-a', `2026-01-01T00:0${i}:00Z`);
+      seedApproval(db, { id: `arr-a-${i}`, runId: 'run-arr-a', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: `2026-01-01T00:0${i}:00Z` });
     }
     for (let i = 0; i < 2; i++) {
-      seedApprovalRow(db, `arr-b-${i}`, 'run-arr-b', `2026-01-01T00:0${i}:00Z`);
+      seedApproval(db, { id: `arr-b-${i}`, runId: 'run-arr-b', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: `2026-01-01T00:0${i}:00Z` });
     }
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -288,10 +266,10 @@ describe('cyboflow.approvals.rejectRestOfRun', () => {
     seedRun(db, { id: 'run-rrr-b' });
 
     for (let i = 0; i < 2; i++) {
-      seedApprovalRow(db, `rrr-a-${i}`, 'run-rrr-a', `2026-01-01T00:0${i}:00Z`);
+      seedApproval(db, { id: `rrr-a-${i}`, runId: 'run-rrr-a', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: `2026-01-01T00:0${i}:00Z` });
     }
     for (let i = 0; i < 3; i++) {
-      seedApprovalRow(db, `rrr-b-${i}`, 'run-rrr-b', `2026-01-01T00:0${i}:00Z`);
+      seedApproval(db, { id: `rrr-b-${i}`, runId: 'run-rrr-b', toolName: 'Bash', toolInputJson: '{"cmd":"echo hi"}', createdAt: `2026-01-01T00:0${i}:00Z` });
     }
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));

@@ -22,25 +22,10 @@
  * no mocks, exercises real SQL and real registry semantics.
  */
 import { describe, it, expect } from 'vitest';
-import type Database from 'better-sqlite3';
 import { recoverActiveStateOrphans } from '../runRecovery';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
-
-/** Seed an approvals row with status='pending' for a given run. */
-function seedPendingApproval(
-  db: Database.Database,
-  approvalId: string,
-  runId: string,
-): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-  ).run(approvalId, runId, 'bash', '{}', approvalId, now);
-}
+import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -134,7 +119,7 @@ describe('recoverActiveStateOrphans', () => {
     seedRun(db, { id: runId, status: 'running' });
 
     const approvalId = 'approval-D1';
-    seedPendingApproval(db, approvalId, runId);
+    seedApproval(db, { id: approvalId, runId });
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
 

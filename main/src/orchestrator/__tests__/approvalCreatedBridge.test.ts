@@ -22,7 +22,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
 import { buildApprovalCreatedEvent } from '../approvalCreatedBridge';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
+import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 import type { ApprovalRequest } from '../../../../shared/types/approval';
 import type { Approval } from '../../../../shared/types/approvals';
 import { truncatePayloadPreview } from '../../../../shared/utils/approvals';
@@ -44,24 +44,6 @@ function seedWorkflowAndRun(
     workflowId: `workflow-${workflowName}`,
     workflowName,
   });
-}
-
-/**
- * Seed an approvals row for the given runId.
- * Returns the approval id.
- */
-function seedApproval(
-  db: Database.Database,
-  runId: string,
-  toolName: string,
-  toolInputJson: string,
-): string {
-  const approvalId = `approval-${runId}`;
-  db.prepare(
-    `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id)
-     VALUES (?, ?, ?, ?, 'tool-use-id-test')`,
-  ).run(approvalId, runId, toolName, toolInputJson);
-  return approvalId;
 }
 
 /**
@@ -180,7 +162,7 @@ describe('buildApprovalCreatedEvent', () => {
     const adapter = dbAdapter(db);
     const toolInput = JSON.stringify({ cmd: 'make test' });
     const { runId } = seedWorkflowAndRun(db, 'parity-workflow');
-    const approvalId = seedApproval(db, runId, 'Bash', toolInput);
+    const approvalId = seedApproval(db, { id: `approval-${runId}`, runId, toolName: 'Bash', toolInputJson: toolInput });
 
     const request: ApprovalRequest = {
       id: approvalId,
