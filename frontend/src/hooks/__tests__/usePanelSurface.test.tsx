@@ -54,7 +54,7 @@ const {
   mockSetActiveSessionStore: vi.fn(),
   // Mutable subscribe spy — tests that need to capture the subscriber can
   // configure this via mockSessionStoreSubscribe.mockImplementation(...).
-  mockSessionStoreSubscribe: vi.fn(() => () => undefined),
+  mockSessionStoreSubscribe: vi.fn((_cb: (state: unknown) => void) => () => undefined),
 }));
 
 // Mock usePanelStore — needs both hook form and .getState static on the export.
