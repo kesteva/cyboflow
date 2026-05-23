@@ -22,11 +22,22 @@ let _health: OrchestratorHealth | null = null;
 
 /**
  * Inject the OrchestratorHealth instance.
- * Call this from the IPC wiring layer (main/src/ipc/cyboflow.ts or index.ts)
+ * Call this from the IPC wiring layer (main/src/index.ts)
  * before the tRPC server starts handling requests.
  */
 export function setHealthProvider(health: OrchestratorHealth): void {
   _health = health;
+}
+
+/**
+ * Read the currently-injected OrchestratorHealth instance.
+ *
+ * Used by the raw-IPC `cyboflow:mcp-health` handler in main/src/ipc/cyboflow.ts
+ * so that both the IPC and tRPC surfaces read from the SAME singleton instead of
+ * maintaining parallel state.  Returns null until setHealthProvider() is called.
+ */
+export function getHealthProvider(): OrchestratorHealth | null {
+  return _health;
 }
 
 // ---------------------------------------------------------------------------
