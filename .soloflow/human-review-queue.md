@@ -1,9 +1,9 @@
 ---
-pending_count: 22
+pending_count: 24
 buckets:
   decisions: 0
   actions: 0
-  testing: 18
+  testing: 20
   deferred_visual: 4
 items: []
 ---
@@ -229,6 +229,28 @@ _No items._
     - "Level 2 visual verification — Electron renderer (Option B layout: header / RunView-or-empty-state / PanelTabBar+PanelContainer / Modal)"
   level: visual
   severity: medium
+
+- task: TASK-731
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/standalone-terminal-panels/TASK-731-plan.md
+  action: "Manual visual check: launch pnpm dev, open a project (ProjectView path) — confirm Dashboard + Setup tabs auto-create with close x hidden/disabled; switch into the active-run shell (CyboflowRoot path) — confirm panels load on-demand only and every tab close x works. Both surfaces in one session."
+  blocked_checks:
+    - "AC #11 (manual visual): dashboard/setup-tasks auto-create + permanence in ProjectView; no-auto-create + closable in CyboflowRoot"
+  level: visual
+  severity: medium
+
+- sprint: SPRINT-033
+  type: deferred_visual
+  bucket: testing
+  dedup_key: visual_macos_screencapturekit_-3811_display_asleep
+  action: "Wake the macOS display (or unlock the screen) and re-run visual verification of TASK-731's panel-surface refactor in the Electron app. With `pnpm dev` already running and the post-sprint code HMR-loaded at 04:51:11Z, the panels flow needs human eyes: open a project, switch between Claude/Logs/Diff/Terminal panels, verify panel mount/unmount behavior is unchanged from main, then create a new session and verify it activates correctly. Peekaboo MCP captures the cyboflow window (PID 80782) at 650,264 1260×811 once the display is awake."
+  blocked_checks:
+    - "visual_macos — TASK-731 panel-surface refactor (CyboflowRoot + ProjectView migrated onto usePanelSurface hook) needs UI verification: panel activation/switching, session creation flow, project view rendering"
+  level: deferred
+  severity: medium
+  created_at: "2026-05-22T22:05:00.000Z"
+  updated_at: "2026-05-22T22:05:00.000Z"
 
 ## Deferred Visual
 

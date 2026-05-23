@@ -24,6 +24,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { TRPCError } from '@trpc/server';
 import { getStuckInspectionHandler } from '../../trpc/routers/runs';
+import { seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -95,22 +96,6 @@ function seedStuckRun(
   ).run(runId, workflowId, stuckReason);
 }
 
-/** Insert a single pending approval row for the given run. */
-function seedPendingApproval(
-  db: Database.Database,
-  runId: string,
-  toolName: string,
-  toolInputJson: string,
-): string {
-  const approvalId = `approval-${runId}`;
-  db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status)
-     VALUES (?, ?, ?, ?, 'use-1', 'pending')`,
-  ).run(approvalId, runId, toolName, toolInputJson);
-  return approvalId;
-}
-
 /** Insert N raw_events rows for a run, returning the inserted ids. */
 function seedRawEvents(
   db: Database.Database,
@@ -147,7 +132,7 @@ describe('getStuckInspectionHandler', () => {
     const stuckReason = 'no_progress';
 
     seedStuckRun(db, runId, stuckReason);
-    seedPendingApproval(db, runId, 'bash', JSON.stringify({ cmd: 'echo hi' }));
+    seedApproval(db, { id: `approval-${runId}`, runId, toolName: 'bash', toolInputJson: JSON.stringify({ cmd: 'echo hi' }), toolUseId: 'use-1' });
     const allIds = seedRawEvents(db, runId, 15);
 
     const adapter = dbAdapter(db);
