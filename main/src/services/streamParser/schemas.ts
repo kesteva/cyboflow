@@ -18,7 +18,7 @@
  */
 
 import { z } from 'zod';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemApiRetryEvent, SystemCompactEvent, UnknownStreamEvent } from '../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Block-level schemas
@@ -27,19 +27,19 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 const textBlockSchema = z.object({
   type: z.literal('text'),
   text: z.string(),
-}).passthrough();
+});
 
 const toolUseBlockSchema = z.object({
   type: z.literal('tool_use'),
   id: z.string(),
   name: z.string(),
   input: z.record(z.unknown()),
-}).passthrough();
+});
 
 const thinkingBlockSchema = z.object({
   type: z.literal('thinking'),
   thinking: z.string(),
-}).passthrough();
+});
 
 /**
  * tool_result.content can be a plain string or an array of { type, text } objects.
@@ -52,7 +52,7 @@ const toolResultBlockSchema = z.object({
   tool_use_id: z.string(),
   content: toolResultContentSchema,
   is_error: z.boolean().optional(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // System variant schemas (subtype-discriminated)
@@ -77,7 +77,7 @@ const systemInitSchema = z.object({
   output_style: z.string().optional(),
   skills: z.record(z.unknown()).optional(),
   plugins: z.array(z.object({ name: z.string(), path: z.string() }).passthrough()).optional(),
-}).passthrough();
+});
 
 /**
  * system/compact_boundary: Claude Agent SDK shape for context-window compaction.
@@ -91,7 +91,7 @@ const systemCompactBoundarySchema = z.object({
     trigger: z.union([z.literal('manual'), z.literal('auto')]),
     pre_tokens: z.number(),
   }).passthrough(),
-}).passthrough();
+});
 
 /**
  * system/hook_started: emitted when a registered hook begins executing.
@@ -105,7 +105,7 @@ const systemHookStartedSchema = z.object({
   hook_event: z.string(),
   uuid: z.string(),
   session_id: z.string(),
-}).passthrough();
+});
 
 /**
  * system/hook_response: emitted when a registered hook finishes.
@@ -125,7 +125,7 @@ const systemHookResponseSchema = z.object({
   outcome: z.union([z.literal('success'), z.literal('error'), z.literal('cancelled')]),
   uuid: z.string(),
   session_id: z.string(),
-}).passthrough();
+});
 
 /**
  * system/status: SDK internal status changes (compacting, requesting).
@@ -140,7 +140,7 @@ const systemStatusSchema = z.object({
   compact_error: z.string().optional(),
   uuid: z.string(),
   session_id: z.string(),
-}).passthrough();
+});
 
 // Inner discriminated union for system variants — dispatches on subtype.
 const systemUnionSchema = z.discriminatedUnion('subtype', [
@@ -181,7 +181,7 @@ const assistantEventSchema = z.object({
   session_id: z.string().optional(),
   uuid: z.string().optional(),
   error: z.object({ message: z.string().optional() }).passthrough().optional(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // User variant schema
@@ -204,7 +204,7 @@ const userEventSchema = z.object({
   parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
   uuid: z.string().optional(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // Result variant schemas (subtype-discriminated into five siblings)
@@ -236,27 +236,27 @@ const resultBaseFields = {
 const resultSuccessSchema = z.object({
   ...resultBaseFields,
   subtype: z.literal('success'),
-}).passthrough();
+});
 
 const resultErrorMaxTurnsSchema = z.object({
   ...resultBaseFields,
   subtype: z.literal('error_max_turns'),
-}).passthrough();
+});
 
 const resultErrorMaxBudgetSchema = z.object({
   ...resultBaseFields,
   subtype: z.literal('error_max_budget_usd'),
-}).passthrough();
+});
 
 const resultErrorDuringExecutionSchema = z.object({
   ...resultBaseFields,
   subtype: z.literal('error_during_execution'),
-}).passthrough();
+});
 
 const resultErrorMaxStructuredOutputRetriesSchema = z.object({
   ...resultBaseFields,
   subtype: z.literal('error_max_structured_output_retries'),
-}).passthrough();
+});
 
 // Inner discriminated union for result variants — dispatches on subtype.
 const resultUnionSchema = z.discriminatedUnion('subtype', [
@@ -302,7 +302,7 @@ const streamEventSchema = z.object({
   parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
   uuid: z.string().optional(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // Session info schema (orchestrator-synthetic, top-level discriminant)
@@ -320,7 +320,7 @@ const sessionInfoSchema = z.object({
   model: z.string(),
   permission_mode: z.string(),
   timestamp: z.string(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // Rate limit event schema (top-level discriminant)
@@ -351,7 +351,7 @@ const rateLimitEventSchema = z.object({
   }).passthrough(),
   uuid: z.string(),
   session_id: z.string(),
-}).passthrough();
+});
 
 // ---------------------------------------------------------------------------
 // Top-level union
@@ -380,7 +380,21 @@ export const claudeStreamEventSchema = z.union([
 // Compile-time drift bridges
 // ---------------------------------------------------------------------------
 
-// Ensures schema output is assignable to ClaudeStreamEvent. TypeScript errors
-// here if the schema drifts from the shared type definition.
+// Forward bridge: ensures schema output is assignable to ClaudeStreamEvent.
+// TypeScript errors here if the schema drifts from the shared type definition.
 const _typeCheck: ClaudeStreamEvent = {} as z.infer<typeof claudeStreamEventSchema>;
 void _typeCheck;
+
+// Reverse bridge: assert ClaudeStreamEvent is assignable to z.infer<schema>.
+// Together with _typeCheck above, this forces TS↔Zod to stay structurally
+// equal — fields added to the TS union but missing from the Zod schema
+// (or vice versa) produce a `tsc --noEmit` error at this line.
+// Requires outer schemas to have no .passthrough() (Option 3 — TASK-656).
+//
+// SystemApiRetryEvent, SystemCompactEvent: intentionally-omitted legacy CLI
+// variants kept in the TS union to compile messageProjection.ts skip branches
+// during the migration window. Zod schema intentionally does not model them.
+// UnknownStreamEvent: parser-only catch-all; never produced by Zod safeParse.
+// Excluding all three is correct — new drift on OTHER variants is still caught.
+const _reverseCheck: z.infer<typeof claudeStreamEventSchema> = {} as Exclude<ClaudeStreamEvent, SystemApiRetryEvent | SystemCompactEvent | UnknownStreamEvent>;
+void _reverseCheck;
