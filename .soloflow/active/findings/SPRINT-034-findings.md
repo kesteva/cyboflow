@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-034
-pending_count: 6
-last_updated: "2026-05-23T22:15:00.000Z"
+pending_count: 7
+last_updated: "2026-05-23T21:19:05.823Z"
 ---
 # Findings Queue
 
@@ -100,3 +100,12 @@ TASK-555 gated: failing blocking prereq (notarytool credentials missing).
 - **location:** frontend/src/components/PromptHistory.tsx:82, frontend/src/components/PromptHistoryModal.tsx:96, frontend/src/hooks/useAddTerminalPanel.ts:15,26, frontend/src/components/panels/SetupTasksPanel.tsx:88
 - **description:** These 4 files outside original files_owned contain stale comment references to SessionView that would cause the acceptance criteria grep-zero check to fail. Claimed to remove comments (no functional impact). Required to meet AC: grep -rn SessionView frontend/src/ returns 0 matches.
 - **resolved_by:** verifier — not actually a scope deviation: all 5 edited files (PromptHistory.tsx, PromptHistoryModal.tsx, useAddTerminalPanel.ts, SetupTasksPanel.tsx, useAddTerminalPanel.test.tsx) ARE listed in TASK-691-plan.md files_owned (lines 19-23). Executor mislabeled in-scope edits as deviations. Also AC-prescribed: AC2 ("No SessionView references remain in frontend/src/") forces these stale-comment removals.
+
+## FIND-SPRINT-034-11
+- **type:** bug
+- **source:** TASK-692 (executor)
+- **severity:** high
+- **status:** open
+- **location:** main/src/services/sessionManager.ts:7
+- **description:** TASK-691 was designed to retire frontend consumers of Crystal-era session data methods, but it did not retire the backend consumer: sessionManager.ts (files_readonly in TASK-692). sessionManager.ts actively imports and calls: getSessionOutputs, addSessionOutput, addPromptMarker, getPromptMarkers, addConversationMessage, getConversationMessages, createExecutionDiff on DatabaseService. It also imports Session, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData from database/models.ts. Additionally, session_outputs/conversation_messages/prompt_markers/execution_diffs tables cannot be safely dropped because panel-era methods (addPanelOutput, getPanelOutputs, etc.) still write to those same tables. The sessions table cannot be dropped because schema.sql (readonly) recreates it on every boot and tool_panels has a FK dependency. TASK-692 cannot remove these methods from database.ts or types from models.ts without failing typecheck, and cannot drop the tables without breaking panelManager at runtime.
+- **suggested_action:** Create a sibling task (analogous to Option B from the escalation) to retire sessionManager.ts Crystal-session method calls and update schema.sql before re-running TASK-692 as a pure drop migration.
