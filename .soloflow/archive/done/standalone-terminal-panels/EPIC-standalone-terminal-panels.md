@@ -1,7 +1,7 @@
 ---
 epic: standalone-terminal-panels
 created: 2026-05-19T00:00:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-019]
 ---
 
