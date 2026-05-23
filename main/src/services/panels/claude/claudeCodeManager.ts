@@ -15,11 +15,10 @@ import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preT
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
-import { EventRouter, RawEventsSink } from '../../streamParser';
+import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -115,6 +114,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Populated lazily on first composeMcpServers() call that needs it.
    */
   private cachedNodePath: string | null = null;
+
+  /**
+   * Narrower owned by this manager. Every SDK event flows through
+   * `narrowing.narrow()` before reaching the EventRouter — the single
+   * validated boundary into raw_events. Fail-soft: returns
+   * `{ kind: '__unknown__', raw }` on Zod failure, never throws.
+   *
+   * Internal construction (not constructor-injected) keeps cliManagerFactory
+   * call sites unchanged. The narrower has no per-instance state besides an
+   * optional verbose-logger, so a fresh instance per manager is the right
+   * granularity. Tests inject behavior via the SDK query() mock, not the
+   * narrower.
+   */
+  private readonly narrowing: TypedEventNarrowing = new TypedEventNarrowing();
 
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
@@ -334,13 +347,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       for await (const event of q) {
         if (abortController.signal.aborted) break;
 
-        // Forward to EventRouter / RawEventsSink pipeline.
-        // The SDK emits typed SDKMessage objects. We cast to ClaudeStreamEvent
-        // for the router (both share the same wire-format shape for the types
-        // that EventRouter / RawEventsSink consume: system/init, assistant, user,
-        // result, stream_event).
+        // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
+        const typed = this.narrowing.narrow(event);
+
         try {
-          router.emitForRun(runId, event as unknown as ClaudeStreamEvent);
+          router.emitForRun(runId, typed);
         } catch (routerErr) {
           this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
         }
