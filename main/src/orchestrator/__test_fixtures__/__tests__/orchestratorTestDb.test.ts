@@ -18,7 +18,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import Database from 'better-sqlite3';
-import { createTestDb, seedRun } from '../orchestratorTestDb';
+import { createTestDb, seedRun, seedApproval } from '../orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Parity test helpers
@@ -123,6 +123,109 @@ describe('seedRun', () => {
     ).run();
     const { workflowId } = seedRun(db, { id: 'run-shared', workflowId: 'wf-shared' });
     expect(workflowId).toBe('wf-shared');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests: seedApproval
+// ---------------------------------------------------------------------------
+
+describe('seedApproval', () => {
+  it('inserts an approvals row with default values and returns the inserted id', () => {
+    const db = createTestDb();
+    const { runId } = seedRun(db);
+
+    // returns the inserted approval id (string)
+    const approvalId = seedApproval(db, { runId });
+    expect(typeof approvalId).toBe('string');
+    expect(approvalId.length).toBeGreaterThan(0);
+
+    const row = db
+      .prepare(
+        'SELECT id, run_id, tool_name, tool_input_json, tool_use_id, status FROM approvals WHERE id = ?',
+      )
+      .get(approvalId) as {
+      id: string;
+      run_id: string;
+      tool_name: string;
+      tool_input_json: string;
+      tool_use_id: string;
+      status: string;
+    } | undefined;
+
+    expect(row).toBeDefined();
+    // seedApproval default values
+    expect(row!.tool_name).toBe('bash');
+    expect(row!.tool_input_json).toBe('{}');
+    expect(row!.status).toBe('pending');
+    // tool_use_id defaults to id
+    expect(row!.tool_use_id).toBe(approvalId);
+    expect(row!.run_id).toBe(runId);
+  });
+
+  it('honors status override', () => {
+    const db = createTestDb();
+    const { runId } = seedRun(db);
+
+    const approvalId = seedApproval(db, { runId, status: 'approved' });
+
+    const row = db
+      .prepare('SELECT status FROM approvals WHERE id = ?')
+      .get(approvalId) as { status: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('approved');
+  });
+
+  it('honors explicit id override', () => {
+    const db = createTestDb();
+    const { runId } = seedRun(db);
+
+    const approvalId = seedApproval(db, { id: 'my-explicit-approval', runId });
+    expect(approvalId).toBe('my-explicit-approval');
+
+    const row = db
+      .prepare('SELECT id FROM approvals WHERE id = ?')
+      .get('my-explicit-approval') as { id: string } | undefined;
+    expect(row).toBeDefined();
+  });
+
+  it('stores toolName, toolInputJson, and createdAt verbatim', () => {
+    const db = createTestDb();
+    const { runId } = seedRun(db);
+    const createdAt = '2026-01-15T12:00:00.000Z';
+
+    const approvalId = seedApproval(db, {
+      runId,
+      toolName: 'str_replace_editor',
+      toolInputJson: '{"path":"/tmp/test.ts"}',
+      createdAt,
+    });
+
+    const row = db
+      .prepare('SELECT tool_name, tool_input_json, created_at FROM approvals WHERE id = ?')
+      .get(approvalId) as {
+      tool_name: string;
+      tool_input_json: string;
+      created_at: string;
+    } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row!.tool_name).toBe('str_replace_editor');
+    expect(row!.tool_input_json).toBe('{"path":"/tmp/test.ts"}');
+    expect(row!.created_at).toBe(createdAt);
+  });
+
+  it('uses explicit toolUseId when provided', () => {
+    const db = createTestDb();
+    const { runId } = seedRun(db);
+
+    const approvalId = seedApproval(db, { runId, toolUseId: 'use-explicit-123' });
+
+    const row = db
+      .prepare('SELECT tool_use_id FROM approvals WHERE id = ?')
+      .get(approvalId) as { tool_use_id: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.tool_use_id).toBe('use-explicit-123');
   });
 });
 
