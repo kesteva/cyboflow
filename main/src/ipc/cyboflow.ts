@@ -25,7 +25,8 @@ import { z } from 'zod';
 import type { AppServices } from './types';
 import { resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows } from '../orchestrator/workflowRegistry';
 import type { OrchestratorHealth } from '../orchestrator/health';
-import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import { HEALTH_STARTING } from '../../../shared/types/mcpHealth';
+import { setHealthProvider } from '../orchestrator/trpc/routers/health';
 import { validateInput } from './validateInput';
 
 // ---------------------------------------------------------------------------
@@ -45,16 +46,21 @@ import { validateInput } from './validateInput';
  */
 let _orchestratorHealth: OrchestratorHealth | null = null;
 
-/** The safe fallback returned before the health singleton is injected. */
-const HEALTH_STARTING: McpServerHealth = { status: 'starting', restartAttempts: 0 };
-
 /**
  * Inject the OrchestratorHealth singleton.
+ *
  * Call once from main/src/index.ts during app bootstrap, after
  * McpServerLifecycle.start() is called.
+ *
+ * This setter wires BOTH surfaces in a single call:
+ *   - The IPC handler (`cyboflow:mcp-health`) reads `_orchestratorHealth` directly.
+ *   - The tRPC procedure (`cyboflow.health.mcpServer`) reads via `setHealthProvider`,
+ *     which is forwarded here so callers do not need to invoke both setters
+ *     independently and risk the two surfaces diverging.
  */
 export function setCyboflowHealth(health: OrchestratorHealth): void {
   _orchestratorHealth = health;
+  setHealthProvider(health);
 }
 
 // ---------------------------------------------------------------------------
