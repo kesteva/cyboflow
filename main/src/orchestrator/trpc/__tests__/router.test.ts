@@ -89,9 +89,9 @@ describe('appRouter (createCaller)', () => {
   // coverage. The procedure's tRPC wrapper (FORBIDDEN/PRECONDITION_FAILED
   // guards) is covered by integration tests that build a real DB context.
 
-  it('cyboflow.runs.start throws NOT_IMPLEMENTED', async () => {
+  it('cyboflow.runs.start throws METHOD_NOT_SUPPORTED when deps not wired', async () => {
     await expect(
-      caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 'proj-1' }),
+      caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 1 }),
     ).rejects.toSatisfy(isNotImplemented);
   });
 
