@@ -23,7 +23,8 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { TRPCError } from '@trpc/server';
-import { getStuckInspectionHandler } from '../../trpc/routers/runs';
+import { getStuckInspectionHandler } from '../inspectorQueries';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
@@ -56,24 +57,6 @@ function createTestDb(): Database.Database {
     ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at TEXT;
   `);
   return db;
-}
-
-/**
- * Build a narrow DB adapter compatible with getStuckInspectionHandler.
- * The handler only calls db.prepare(sql).get(...) and db.prepare(sql).all(...).
- */
-function dbAdapter(db: Database.Database) {
-  return {
-    prepare<Row = unknown>(sql: string) {
-      const stmt = db.prepare(sql);
-      return {
-        get: (...params: unknown[]): Row | undefined =>
-          stmt.get(...params) as Row | undefined,
-        all: (...params: unknown[]): Row[] =>
-          stmt.all(...params) as Row[],
-      };
-    },
-  };
 }
 
 /** Seed a workflow + workflow_runs row with stuck status. */
