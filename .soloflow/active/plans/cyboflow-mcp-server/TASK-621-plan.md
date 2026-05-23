@@ -1,8 +1,8 @@
 ---
 id: TASK-621
 idea: null
-status: approved
-created: 2026-05-16T00:00:00Z
+status: ready
+created: "2026-05-16T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/cyboflowMcpServer.ts
 files_readonly:
@@ -12,14 +12,14 @@ acceptance_criteria:
     verification: "grep -n 'async function executeMcpQuery' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns exactly 1 match"
   - criterion: "No unchecked `as { ok: boolean; ... }` cast remains."
     verification: "grep -nE 'as \\{ ok: boolean' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns 0 matches"
-  - criterion: "All three CallTool branches end in `return executeMcpQuery(...)`; no per-branch await sendQuery / try-catch remains in the registration."
+  - criterion: All three CallTool branches end in `return executeMcpQuery(...)`; no per-branch await sendQuery / try-catch remains in the registration.
     verification: "grep -nE 'await sendQuery\\(' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns 0 matches; grep -nc 'return executeMcpQuery' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns 3"
   - criterion: "Malformed orchestrator response (missing 'ok' field or non-object) produces a meaningful error string — not the empty object {}."
     verification: "grep -n 'invalid_orchestrator_response' main/src/orchestrator/mcpServer/cyboflowMcpServer.ts returns ≥1 match"
-  - criterion: "pnpm typecheck and pnpm lint pass."
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
-  - criterion: "Full main test suite continues to pass (no test files import from cyboflowMcpServer.ts; mocked-string usages unchanged)."
-    verification: "pnpm --filter main test exits 0"
+  - criterion: pnpm typecheck and pnpm lint pass.
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
+  - criterion: Full main test suite continues to pass (no test files import from cyboflowMcpServer.ts; mocked-string usages unchanged).
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-mcp-server
@@ -27,7 +27,6 @@ test_strategy:
   needed: false
   justification: "cyboflowMcpServer.ts is an isolated stdio subprocess excluded from unit-test coverage by design (TASK-453 done report). Sibling tests in mcpServer/__tests__/ test parent-process code, do not import from this file, and reference it only as a mocked string path. The malformed-response correctness invariant is small enough that an inline runtime type-guard plus typecheck/lint gates suffice; behavioral coverage of the query types lives in mcpQueryHandler.test.ts."
 ---
-
 # TASK-621: Extract executeMcpQuery helper to deduplicate three MCP tool branches
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-620
 idea: null
-status: approved
-created: 2026-05-16T00:00:00Z
+status: ready
+created: "2026-05-16T00:00:00Z"
 files_owned:
   - shared/types/mcpHealth.ts
   - main/src/ipc/cyboflow.ts
@@ -16,22 +16,22 @@ files_readonly:
   - main/src/orchestrator/__tests__/health.test.ts
   - main/src/index.ts
 acceptance_criteria:
-  - criterion: "HEALTH_STARTING is exported from shared/types/mcpHealth.ts as a McpServerHealth-typed constant."
+  - criterion: HEALTH_STARTING is exported from shared/types/mcpHealth.ts as a McpServerHealth-typed constant.
     verification: "grep -nE '^export const HEALTH_STARTING' shared/types/mcpHealth.ts returns exactly 1 match"
-  - criterion: "main/src/ipc/cyboflow.ts no longer declares a local HEALTH_STARTING and imports the shared one."
+  - criterion: main/src/ipc/cyboflow.ts no longer declares a local HEALTH_STARTING and imports the shared one.
     verification: "grep -nE '^const HEALTH_STARTING' main/src/ipc/cyboflow.ts returns 0 matches; grep -nE 'import .*HEALTH_STARTING.* from .*shared/types/mcpHealth' main/src/ipc/cyboflow.ts returns ≥1 match"
   - criterion: "main/src/orchestrator/trpc/routers/health.ts no longer inlines the literal '{ status: 'starting' as const, restartAttempts: 0 }'."
     verification: "grep -nE \"status: 'starting' as const, restartAttempts: 0\" main/src/orchestrator/trpc/routers/health.ts returns 0 matches"
-  - criterion: "main/src/orchestrator/trpc/routers/health.ts imports and returns HEALTH_STARTING from the shared module."
+  - criterion: main/src/orchestrator/trpc/routers/health.ts imports and returns HEALTH_STARTING from the shared module.
     verification: "grep -n 'HEALTH_STARTING' main/src/orchestrator/trpc/routers/health.ts returns ≥2 matches"
-  - criterion: "setCyboflowHealth in main/src/ipc/cyboflow.ts also invokes setHealthProvider with the same instance."
+  - criterion: setCyboflowHealth in main/src/ipc/cyboflow.ts also invokes setHealthProvider with the same instance.
     verification: "grep -n 'setHealthProvider' main/src/ipc/cyboflow.ts returns ≥2 matches (import + call)"
-  - criterion: "Existing cyboflow.test.ts continues to pass with one new IPC-vs-tRPC parity test."
-    verification: "pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0"
-  - criterion: "New test file main/src/orchestrator/trpc/routers/__tests__/health.test.ts exists with 2+ cases (HEALTH_STARTING fallback + setHealthProvider delegation)."
-    verification: "test -f main/src/orchestrator/trpc/routers/__tests__/health.test.ts; pnpm --filter main exec vitest run src/orchestrator/trpc/routers/__tests__/health.test.ts exits 0"
-  - criterion: "Full main suite and typecheck remain green."
-    verification: "pnpm --filter main test exits 0; pnpm --filter main typecheck exits 0"
+  - criterion: Existing cyboflow.test.ts continues to pass with one new IPC-vs-tRPC parity test.
+    verification: pnpm --filter main exec vitest run src/ipc/__tests__/cyboflow.test.ts exits 0
+  - criterion: New test file main/src/orchestrator/trpc/routers/__tests__/health.test.ts exists with 2+ cases (HEALTH_STARTING fallback + setHealthProvider delegation).
+    verification: test -f main/src/orchestrator/trpc/routers/__tests__/health.test.ts; pnpm --filter main exec vitest run src/orchestrator/trpc/routers/__tests__/health.test.ts exits 0
+  - criterion: Full main suite and typecheck remain green.
+    verification: pnpm --filter main test exits 0; pnpm --filter main typecheck exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-mcp-server
@@ -40,16 +40,15 @@ test_strategy:
   justification: "Unification changes setCyboflowHealth's observable surface (now propagates to tRPC). Cross-surface parity contract requires a new test in cyboflow.test.ts; tRPC procedure gets its own isolated test file."
   targets:
     - behavior: "After setCyboflowHealth(h), the IPC handler and the tRPC procedure return the same snapshot"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: unit
-    - behavior: "tRPC health.mcpServer returns HEALTH_STARTING when no provider has been injected"
-      test_file: "main/src/orchestrator/trpc/routers/__tests__/health.test.ts"
+    - behavior: tRPC health.mcpServer returns HEALTH_STARTING when no provider has been injected
+      test_file: main/src/orchestrator/trpc/routers/__tests__/health.test.ts
       type: unit
-    - behavior: "tRPC health.mcpServer returns the snapshot from the OrchestratorHealth instance after setHealthProvider"
-      test_file: "main/src/orchestrator/trpc/routers/__tests__/health.test.ts"
+    - behavior: tRPC health.mcpServer returns the snapshot from the OrchestratorHealth instance after setHealthProvider
+      test_file: main/src/orchestrator/trpc/routers/__tests__/health.test.ts
       type: unit
 ---
-
 # TASK-620: Unify OrchestratorHealth singleton injection + extract shared HEALTH_STARTING constant
 
 ## Objective

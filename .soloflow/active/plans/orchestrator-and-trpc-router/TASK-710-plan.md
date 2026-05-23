@@ -1,8 +1,8 @@
 ---
 id: TASK-710
 idea: IDEA-022
-status: approved
-created: 2026-05-21T14:00:00Z
+status: ready
+created: "2026-05-21T14:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/orchestrator/runQueries.ts
@@ -20,11 +20,11 @@ files_readonly:
   - frontend/src/utils/cyboflowApi.ts
   - .soloflow/active/plans/approval-router-and-permission-fix/TASK-706-plan.md
 acceptance_criteria:
-  - criterion: "shared/types/workflows.ts exports a WorkflowRunListRow interface mirroring the policy_json-less subset returned by cyboflow.runs.list."
+  - criterion: shared/types/workflows.ts exports a WorkflowRunListRow interface mirroring the policy_json-less subset returned by cyboflow.runs.list.
     verification: "grep -nE 'export interface WorkflowRunListRow' shared/types/workflows.ts returns exactly 1 match; grep -nE 'policy_json' shared/types/workflows.ts | grep -v 'WorkflowRunRow' returns 0 matches."
   - criterion: "main/src/orchestrator/runQueries.ts exports a pure listRunsHandler(db, projectId): WorkflowRunListRow[] function using DatabaseLike."
     verification: "grep -nE 'export function listRunsHandler' main/src/orchestrator/runQueries.ts returns 1 match; grep -nE 'FROM workflow_runs' main/src/orchestrator/runQueries.ts returns at least 1 match; grep -nE 'ORDER BY created_at DESC' main/src/orchestrator/runQueries.ts returns at least 1 match; grep -nE 'policy_json' main/src/orchestrator/runQueries.ts returns 0 matches."
-  - criterion: "runsRouter.list in main/src/orchestrator/trpc/routers/runs.ts is implemented as a real query that delegates to listRunsHandler via ctx.db (Pattern A); the NOT_IMPLEMENTED stub is removed."
+  - criterion: runsRouter.list in main/src/orchestrator/trpc/routers/runs.ts is implemented as a real query that delegates to listRunsHandler via ctx.db (Pattern A); the NOT_IMPLEMENTED stub is removed.
     verification: "grep -nE 'list: protectedProcedure' main/src/orchestrator/trpc/routers/runs.ts -A 8 contains 'listRunsHandler' and 'ctx.db'; grep -nE \"throwNotImplemented\\('workflow-runs'\\)\\s*\\)?\\s*$\" main/src/orchestrator/trpc/routers/runs.ts -B 2 returns 0 matches near the list procedure."
   - criterion: "list input shape is z.object({ projectId: z.number().int().positive() }) — matching the raw-IPC handler's contract."
     verification: "grep -nE 'list: protectedProcedure' main/src/orchestrator/trpc/routers/runs.ts -A 4 contains 'z.number().int().positive()' and 'projectId'."
@@ -32,11 +32,11 @@ acceptance_criteria:
     verification: "grep -nE \"code:\\s*'FORBIDDEN'\" main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match; grep -nE \"code:\\s*'PRECONDITION_FAILED'\" main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match."
   - criterion: "Standalone-typecheck invariant preserved: no electron / better-sqlite3 / main/src/services/* imports in runQueries.ts or in the routers/runs.ts edits."
     verification: "grep -nE \"from\\s+['\\\"](electron|better-sqlite3)['\\\"]|from\\s+['\\\"].*main/src/services\" main/src/orchestrator/runQueries.ts main/src/orchestrator/trpc/routers/runs.ts returns 0 matches."
-  - criterion: "Unit test main/src/orchestrator/__tests__/listRunsHandler.test.ts exists and exercises listRunsHandler directly against an in-memory DB seeded with migration 006."
+  - criterion: Unit test main/src/orchestrator/__tests__/listRunsHandler.test.ts exists and exercises listRunsHandler directly against an in-memory DB seeded with migration 006.
     verification: "test -f main/src/orchestrator/__tests__/listRunsHandler.test.ts && grep -nE \"describe\\('listRunsHandler'\" main/src/orchestrator/__tests__/listRunsHandler.test.ts returns 1 match."
   - criterion: "Test covers four behaviors: (a) empty result for a project with no runs, (b) ordered DESC by created_at, (c) projectId scoping (runs from another project excluded), (d) returned rows omit policy_json."
-    verification: "pnpm --filter @cyboflow/main test listRunsHandler exits 0."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+    verification: pnpm --filter @cyboflow/main test listRunsHandler exits 0.
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on:
   - TASK-706
@@ -49,17 +49,16 @@ test_strategy:
     - behavior: "listRunsHandler(db, projectId) returns [] when the project has no workflow_runs rows."
       test_file: main/src/orchestrator/__tests__/listRunsHandler.test.ts
       type: unit
-    - behavior: "Two rows for project 1 with 100ms-apart timestamps return newest-first."
+    - behavior: Two rows for project 1 with 100ms-apart timestamps return newest-first.
       test_file: main/src/orchestrator/__tests__/listRunsHandler.test.ts
       type: unit
-    - behavior: "Rows scoped by projectId — runs for project 2 are excluded when querying project 1."
+    - behavior: Rows scoped by projectId — runs for project 2 are excluded when querying project 1.
       test_file: main/src/orchestrator/__tests__/listRunsHandler.test.ts
       type: unit
-    - behavior: "Returned rows do not contain a policy_json field even when the underlying row has one."
+    - behavior: Returned rows do not contain a policy_json field even when the underlying row has one.
       test_file: main/src/orchestrator/__tests__/listRunsHandler.test.ts
       type: unit
 ---
-
 # Implement `cyboflow.runs.list` against the live DB
 
 ## Objective

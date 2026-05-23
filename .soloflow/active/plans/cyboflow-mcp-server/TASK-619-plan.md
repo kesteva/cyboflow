@@ -1,8 +1,8 @@
 ---
 id: TASK-619
 idea: null
-status: approved
-created: 2026-05-16T00:00:00Z
+status: ready
+created: "2026-05-16T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts
   - main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts
@@ -11,22 +11,22 @@ files_readonly:
   - main/src/orchestrator/mcpServer/mcpServerLifecycle.ts
   - main/src/orchestrator/mcpServer/scriptPath.ts
 acceptance_criteria:
-  - criterion: "ClaudeCodeManager has a cachedNodePathPromise field populated inside setOrchSocketPath() by calling findNodeExecutable() at that boot moment."
+  - criterion: ClaudeCodeManager has a cachedNodePathPromise field populated inside setOrchSocketPath() by calling findNodeExecutable() at that boot moment.
     verification: "grep -n 'cachedNodePathPromise' main/src/services/panels/claude/claudeCodeManager.ts returns ≥2 matches"
-  - criterion: "The fire-and-forget void findNodeExecutable().then(...) block in composeMcpServers() is removed."
+  - criterion: The fire-and-forget void findNodeExecutable().then(...) block in composeMcpServers() is removed.
     verification: "grep -n 'void findNodeExecutable' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches AND grep -nE 'cachedNodePath\\s*\\?\\?\\s*[\\x27\\\"]node[\\x27\\\"]' main/src/services/panels/claude/claudeCodeManager.ts returns 0 matches"
-  - criterion: "composeMcpServers() is async and awaits the resolved node path."
+  - criterion: composeMcpServers() is async and awaits the resolved node path.
     verification: "grep -nE 'private\\s+async\\s+composeMcpServers' main/src/services/panels/claude/claudeCodeManager.ts returns 1 match"
-  - criterion: "buildSdkOptions() is async and its only call site in spawnCliProcess awaits it."
+  - criterion: buildSdkOptions() is async and its only call site in spawnCliProcess awaits it.
     verification: "grep -nE 'private\\s+async\\s+buildSdkOptions' main/src/services/panels/claude/claudeCodeManager.ts returns 1 match AND `await this.buildSdkOptions(` count matches `this.buildSdkOptions(` count"
   - criterion: "When findNodeExecutable() rejects, composeMcpServers() logs a warning and OMITS the cyboflow entry — no command:'node' fallback ships."
     verification: "New test 'omits cyboflow entry when findNodeExecutable rejects' asserts no cyboflow key + logger.warn called"
   - criterion: "First-session race regression test asserts: setOrchSocketPath → composeMcpServers → result.cyboflow.command === '/mock/path/node' (never bare 'node')."
     verification: "Test 'eager-populates node path before first composeMcpServers call' asserts result.mcpServers.cyboflow.command"
   - criterion: "findNodeExecutable is invoked exactly once per setOrchSocketPath, regardless of session count."
-    verification: "Test asserts findNodeExecutable mock was called exactly once after 3 sequential composeMcpServers calls"
-  - criterion: "pnpm typecheck and pnpm lint pass."
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
+    verification: Test asserts findNodeExecutable mock was called exactly once after 3 sequential composeMcpServers calls
+  - criterion: pnpm typecheck and pnpm lint pass.
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-mcp-server
@@ -35,16 +35,15 @@ test_strategy:
   justification: "Race-fix behavior must be locked down by a race-deterministic unit test. No existing test covers composeMcpServers — net-new file. Pattern mirrors mcpServerLifecycle.test.ts (hermetic vi.mock, no real subprocess)."
   targets:
     - behavior: "On setOrchSocketPath(), findNodeExecutable() is invoked once; subsequent composeMcpServers() awaits the stored promise and injects the resolved path"
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts
       type: unit
     - behavior: "If findNodeExecutable() rejects, composeMcpServers logs warn and omits cyboflow entry — does NOT ship command:'node'"
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts
       type: unit
     - behavior: "When orchSocketPath is never set, no cyboflow entry is injected and findNodeExecutable is not called (Crystal-legacy regression guard)"
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts"
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts
       type: unit
 ---
-
 # TASK-619: Eager-populate cachedNodePath at boot to prevent first-session MCP spawn failure
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-711
 idea: IDEA-022
-status: approved
-created: 2026-05-21T14:00:00Z
+status: ready
+created: "2026-05-21T14:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/workflows.ts
   - main/src/orchestrator/trpc/context.ts
@@ -32,17 +32,17 @@ acceptance_criteria:
     verification: "grep -nE \"code:\\s*'NOT_FOUND'\" main/src/orchestrator/trpc/routers/workflows.ts returns at least 1 match."
   - criterion: "list preserves auto-seed behavior — when listByProject returns [], the router calls buildDefaultSoloFlowWorkflows(resolveSoloFlowPluginRoot(os.homedir()).root), calls seed(projectId, descriptors), and re-lists."
     verification: "grep -nE 'buildDefaultSoloFlowWorkflows' main/src/orchestrator/trpc/routers/workflows.ts returns at least 1 match; grep -nE 'resolveSoloFlowPluginRoot' main/src/orchestrator/trpc/routers/workflows.ts returns at least 1 match; grep -nE '\\.seed\\(' main/src/orchestrator/trpc/routers/workflows.ts returns at least 1 match."
-  - criterion: "main/src/index.ts wires the live workflowRegistry instance into createContext via the existing attachOrchestratorTrpc call site."
+  - criterion: main/src/index.ts wires the live workflowRegistry instance into createContext via the existing attachOrchestratorTrpc call site.
     verification: "grep -nE 'createContext\\(\\{[^}]*workflowRegistry' main/src/index.ts returns exactly 1 match."
   - criterion: "Both procedures throw TRPCError code='PRECONDITION_FAILED' when ctx.workflowRegistry is undefined."
     verification: "grep -nE \"code:\\s*'PRECONDITION_FAILED'\" main/src/orchestrator/trpc/routers/workflows.ts returns at least 1 match."
-  - criterion: "Stale assertions in router.test.ts that workflows.list/.get throw NOT_IMPLEMENTED are updated or removed."
+  - criterion: Stale assertions in router.test.ts that workflows.list/.get throw NOT_IMPLEMENTED are updated or removed.
     verification: "grep -nE \"workflows\\.list.*isNotImplemented\" main/src/orchestrator/trpc/__tests__/router.test.ts returns 0 matches."
   - criterion: "New test file main/src/orchestrator/trpc/routers/__tests__/workflows.test.ts exercises: (a) list returns seeded rows, (b) list auto-seeds 5 SoloFlow defaults when empty, (c) get returns row by id, (d) get throws NOT_FOUND for unknown id, (e) both throw PRECONDITION_FAILED when workflowRegistry undefined."
     verification: "test -f main/src/orchestrator/trpc/routers/__tests__/workflows.test.ts; pnpm --filter @cyboflow/main test 'trpc/routers/__tests__/workflows' exits 0."
-  - criterion: "Standalone-typecheck invariant preserved under main/src/orchestrator/trpc/."
+  - criterion: Standalone-typecheck invariant preserved under main/src/orchestrator/trpc/.
     verification: "grep -rnE \"from\\s+['\\\"](electron|better-sqlite3)['\\\"]|from\\s+['\\\"].*main/src/services\" main/src/orchestrator/trpc/ returns 0 matches (the ipcAdapter.ts 'electron' carve-out remains the sole exception)."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on: []
 estimated_complexity: medium
@@ -67,7 +67,6 @@ test_strategy:
       test_file: main/src/orchestrator/trpc/routers/__tests__/workflows.test.ts
       type: integration
 ---
-
 # Wire `cyboflow.workflows.list` and `.get` to WorkflowRegistry
 
 ## Objective

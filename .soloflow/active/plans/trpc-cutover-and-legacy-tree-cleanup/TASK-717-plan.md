@@ -1,8 +1,8 @@
 ---
 id: TASK-717
 idea: IDEA-023
-status: approved
-created: 2026-05-21T14:30:00Z
+status: ready
+created: "2026-05-21T14:30:00Z"
 files_owned:
   - main/src/trpc/routers/runs.ts
   - main/src/trpc/routers/events.ts
@@ -19,7 +19,7 @@ files_readonly:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/orchestrator/trpc/routers/approvals.ts
 acceptance_criteria:
-  - criterion: "The `main/src/trpc/` directory contains zero files (or no longer exists at all)."
+  - criterion: The `main/src/trpc/` directory contains zero files (or no longer exists at all).
     verification: "find main/src/trpc -type f 2>/dev/null returns 0 results; ls main/src/trpc 2>/dev/null returns nothing or 'No such file or directory'."
   - criterion: "No file under `main/src/orchestrator/**` or `main/src/ipc/**` imports from `main/src/trpc/*` (the directory is fully de-referenced)."
     verification: "grep -rnE \"from\\s+['\\\"](\\.\\./)*trpc/(routers|index|context|trpc)\" main/src/orchestrator main/src/ipc returns 0 matches."
@@ -27,7 +27,7 @@ acceptance_criteria:
     verification: "grep -rn 'export function approveRestOfRunHandler' main/src/orchestrator returns at least 1 match; grep -rn 'export function rejectRestOfRunHandler' main/src/orchestrator returns at least 1 match; same greps on main/src/trpc return 0 matches."
   - criterion: "TASK-709 confirmed completed: `getStuckInspectionHandler` lives at `main/src/orchestrator/inspectorQueries.ts` (not in the legacy tree)."
     verification: "test -f main/src/orchestrator/inspectorQueries.ts && grep -n 'export function getStuckInspectionHandler' main/src/orchestrator/inspectorQueries.ts returns 1 match."
-  - criterion: "Test files that depended on the legacy tree have been migrated or deleted. Specifically `main/src/trpc/__tests__/approvals.test.ts` is removed; equivalent coverage either pre-exists or has been added in the approval-router epic."
+  - criterion: Test files that depended on the legacy tree have been migrated or deleted. Specifically `main/src/trpc/__tests__/approvals.test.ts` is removed; equivalent coverage either pre-exists or has been added in the approval-router epic.
     verification: "test ! -f main/src/trpc/__tests__/approvals.test.ts ; grep -rn 'approveRestOfRunHandler\\|rejectRestOfRunHandler' main/src/orchestrator/__tests__ main/src/orchestrator/trpc/__tests__ returns at least 1 match."
   - criterion: "pnpm typecheck && pnpm lint && pnpm test all exit 0."
     verification: "pnpm typecheck && pnpm lint && pnpm test"
@@ -39,7 +39,6 @@ depends_on:
 estimated_complexity: small
 epic: trpc-cutover-and-legacy-tree-cleanup
 ---
-
 # Delete the legacy `main/src/trpc/` tree
 
 ## Objective

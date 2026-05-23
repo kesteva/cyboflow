@@ -1,7 +1,7 @@
 ---
 id: TASK-692
 idea: IDEA-017
-status: in-flight
+status: ready
 created: "2026-05-20T00:00:00Z"
 files_owned:
   - main/src/database/migrations/008_drop_legacy_crystal_tables.sql
