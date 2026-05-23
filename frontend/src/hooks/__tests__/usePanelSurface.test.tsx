@@ -38,6 +38,7 @@ const {
   mockDeletePanel,
   mockGetOrCreateMainRepoSession,
   mockSetActiveSessionStore,
+  mockSessionStoreSubscribe,
 } = vi.hoisted(() => ({
   mockAddPanel: vi.fn(),
   mockSetActivePanelInStore: vi.fn(),
@@ -51,6 +52,9 @@ const {
   mockDeletePanel: vi.fn(),
   mockGetOrCreateMainRepoSession: vi.fn(),
   mockSetActiveSessionStore: vi.fn(),
+  // Mutable subscribe spy — tests that need to capture the subscriber can
+  // configure this via mockSessionStoreSubscribe.mockImplementation(...).
+  mockSessionStoreSubscribe: vi.fn(() => () => undefined),
 }));
 
 // Mock usePanelStore — needs both hook form and .getState static on the export.
@@ -92,7 +96,7 @@ vi.mock('../../stores/sessionStore', () => ({
       setActiveSession: mockSetActiveSessionStore,
       sessions: [],
     }),
-    subscribe: vi.fn(() => () => undefined),
+    subscribe: mockSessionStoreSubscribe,
   },
 }));
 
@@ -465,5 +469,87 @@ describe('usePanelSurface — onPanelCreated subscription', () => {
     unmount();
 
     expect(mockUnsubscribe).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSessionStore.subscribe — in-hook subscriber keeps mainRepoSession in sync
+// with IPC-driven session updates (e.g. session-updated event from backend).
+// ---------------------------------------------------------------------------
+
+describe('usePanelSurface — useSessionStore.subscribe syncs mainRepoSession', () => {
+  // We'll capture the subscriber the hook registers so we can fire it manually.
+  type StoreState = { sessions: typeof MOCK_SESSION[] };
+  let capturedSubscriber: ((state: StoreState) => void) | null = null;
+  const mockStoreUnsubscribe = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedSubscriber = null;
+
+    // Configure subscribe to capture the callback and return an unsubscribe spy.
+    mockSessionStoreSubscribe.mockImplementation(
+      (cb: (state: StoreState) => void) => {
+        capturedSubscriber = cb;
+        return mockStoreUnsubscribe;
+      },
+    );
+
+    mockGetOrCreateMainRepoSession.mockResolvedValue({
+      success: true,
+      data: MOCK_SESSION,
+    });
+    mockSetActiveSessionStore.mockResolvedValue(undefined);
+    mockLoadPanelsForSession.mockResolvedValue([]);
+    mockSetPanels.mockReturnValue(undefined);
+  });
+
+  it('updates mainRepoSession when the subscriber fires with an updated session', async () => {
+    const { result } = renderHook(() =>
+      usePanelSurface(1, { autoCreatePermanentPanels: false }),
+    );
+    await flushAsync();
+
+    // Confirm the hook resolved its initial session.
+    expect(result.current.mainRepoSession).toEqual(MOCK_SESSION);
+    // Confirm the hook registered a subscriber.
+    expect(capturedSubscriber).not.toBeNull();
+
+    // Simulate a backend-driven session update (e.g. name changed).
+    const UPDATED_SESSION = { ...MOCK_SESSION, name: 'main-repo-updated' };
+    act(() => {
+      capturedSubscriber!({ sessions: [UPDATED_SESSION] });
+    });
+
+    // The hook should reflect the updated session.
+    expect(result.current.mainRepoSession).toEqual(UPDATED_SESSION);
+  });
+
+  it('does NOT update mainRepoSession when the subscriber fires for a different session', async () => {
+    const { result } = renderHook(() =>
+      usePanelSurface(1, { autoCreatePermanentPanels: false }),
+    );
+    await flushAsync();
+
+    expect(capturedSubscriber).not.toBeNull();
+
+    const OTHER_SESSION = { ...MOCK_SESSION, id: 'other-session-xyz', name: 'other' };
+    act(() => {
+      capturedSubscriber!({ sessions: [OTHER_SESSION] });
+    });
+
+    // The hook's mainRepoSession should remain the original.
+    expect(result.current.mainRepoSession).toEqual(MOCK_SESSION);
+  });
+
+  it('unsubscribes from sessionStore when the hook unmounts', async () => {
+    const { unmount } = renderHook(() =>
+      usePanelSurface(1, { autoCreatePermanentPanels: false }),
+    );
+    await flushAsync();
+
+    unmount();
+
+    expect(mockStoreUnsubscribe).toHaveBeenCalled();
   });
 });
