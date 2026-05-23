@@ -19,32 +19,6 @@ import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
-// Test-database helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Seed helper: insert a workflow + workflow_run + N pending approvals.
- *
- * Returns the array of inserted approval IDs.
- */
-function seedPendingApprovals(
-  db: ReturnType<typeof createTestDb>,
-  runId: string,
-  count: number,
-): string[] {
-  seedRun(db, { id: runId });
-
-  const ids: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const approvalId = `${runId}-approval-${i}`;
-    ids.push(approvalId);
-    seedApproval(db, { id: approvalId, runId, toolName: 'Bash' });
-  }
-
-  return ids;
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -57,8 +31,18 @@ describe('approveRestOfRun handler', () => {
     const adapter = dbAdapter(db);
 
     // Seed 3 pending approvals in run-A and 2 in run-B.
-    const runAIds = seedPendingApprovals(db, 'run-A', 3);
-    const runBIds = seedPendingApprovals(db, 'run-B', 2);
+    seedRun(db, { id: 'run-A' });
+    const runAIds = [0, 1, 2].map((i) => {
+      const id = `run-A-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-A', toolName: 'Bash' });
+      return id;
+    });
+    seedRun(db, { id: 'run-B' });
+    const runBIds = [0, 1].map((i) => {
+      const id = `run-B-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-B', toolName: 'Bash' });
+      return id;
+    });
 
     // Call approveRestOfRun for run-A only.
     const result = await approveRestOfRunHandler(adapter, 'run-A');
@@ -122,8 +106,18 @@ describe('rejectRestOfRun handler', () => {
     const adapter = dbAdapter(db);
 
     // Seed 3 pending approvals in run-A and 2 in run-B.
-    const runAIds = seedPendingApprovals(db, 'run-A', 3);
-    const runBIds = seedPendingApprovals(db, 'run-B', 2);
+    seedRun(db, { id: 'run-A' });
+    const runAIds = [0, 1, 2].map((i) => {
+      const id = `run-A-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-A', toolName: 'Bash' });
+      return id;
+    });
+    seedRun(db, { id: 'run-B' });
+    const runBIds = [0, 1].map((i) => {
+      const id = `run-B-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-B', toolName: 'Bash' });
+      return id;
+    });
 
     // Call rejectRestOfRun for run-A only.
     const result = await rejectRestOfRunHandler(adapter, 'run-A');
@@ -193,7 +187,12 @@ describe('decideRestOfRunHandler error logging', () => {
 
     const db = createTestDb();
     // Seed 2 pending approvals so we can force the second UPDATE to throw.
-    const ids = seedPendingApprovals(db, 'run-err-approve', 2);
+    seedRun(db, { id: 'run-err-approve' });
+    const ids = [0, 1].map((i) => {
+      const id = `run-err-approve-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-err-approve', toolName: 'Bash' });
+      return id;
+    });
 
     // Wrap db.prepare so the second UPDATE call (for ids[1]) throws.
     let updateCallCount = 0;
@@ -237,7 +236,12 @@ describe('decideRestOfRunHandler error logging', () => {
 
     const db = createTestDb();
     // Seed 2 pending approvals so we can force the second UPDATE to throw.
-    const ids = seedPendingApprovals(db, 'run-err-reject', 2);
+    seedRun(db, { id: 'run-err-reject' });
+    const ids = [0, 1].map((i) => {
+      const id = `run-err-reject-approval-${i}`;
+      seedApproval(db, { id, runId: 'run-err-reject', toolName: 'Bash' });
+      return id;
+    });
 
     // Wrap db.prepare so the second UPDATE call (for ids[1]) throws.
     let updateCallCount = 0;
