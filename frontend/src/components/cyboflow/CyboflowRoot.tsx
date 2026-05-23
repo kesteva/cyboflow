@@ -16,6 +16,7 @@ import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { API } from '../../utils/api';
 import { usePanelStore } from '../../stores/panelStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { panelApi } from '../../services/panelApi';
 import type { Session } from '../../types/session';
 import type { ToolPanel } from '../../../../shared/types/panels';
@@ -56,6 +57,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         if (response.success && response.data) {
           setMainRepoSessionId(response.data.id);
           setMainRepoSession(response.data);
+          // Mirror ProjectView: activate this session in the session store so
+          // session-scoped panels (ClaudePanel → useClaudePanel reads from
+          // useSessionStore) see it as active. Without this, ClaudePanel renders
+          // its "No active session" empty state.
+          await useSessionStore.getState().setActiveSession(response.data.id);
         }
       } catch (err) {
         console.error('[CyboflowRoot] Failed to resolve main-repo session:', err);
