@@ -1,4 +1,6 @@
 import type { ClaudeJsonMessage, MessageContent, TextContent } from '../types/session';
+import type { ToolResultBlock } from '../../../shared/types/claudeStream';
+import { extractToolResultText } from '../../../shared/utils/extractToolResultText';
 
 // Simple fallback formatter for unknown message types
 function formatJsonForOutput(jsonMessage: ClaudeJsonMessage): string {
@@ -26,12 +28,6 @@ interface ToolCall {
   id: string;
   name: string;
   input: Record<string, unknown>;
-}
-
-interface ToolResult {
-  type: 'tool_result';
-  tool_use_id: string;
-  content: string;
 }
 
 interface PendingToolCall {
@@ -153,7 +149,7 @@ function getArrayProp(input: Record<string, unknown>, key: string): unknown[] | 
  */
 export function formatToolInteraction(
   toolCall: ToolCall,
-  toolResult: ToolResult | null,
+  toolResult: ToolResultBlock | null,
   callTimestamp: string,
   resultTimestamp?: string
 ): string {
@@ -279,12 +275,13 @@ export function formatToolInteraction(
     output += `\x1b[90m├─ Result${resultTime}:\x1b[0m\r\n`;
     
     if (toolResult.content) {
+      const resultText = extractToolResultText(toolResult.content);
       // Check if this is an image read result
       let isImageResult = false;
       if (toolCall.name === 'Read' && toolCall.input.file_path) {
         try {
           // Check if the result is a JSON array with image data
-          const parsed = JSON.parse(toolResult.content);
+          const parsed = JSON.parse(resultText);
           if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].type === 'image') {
             isImageResult = true;
             // Display a friendly message instead of the base64 data
@@ -300,19 +297,19 @@ export function formatToolInteraction(
           // Not JSON or not an image, proceed with normal handling
         }
       }
-      
+
       if (!isImageResult) {
         // Apply relative paths to the result content
-        const processedContent = makePathsRelative(toolResult.content);
+        const processedContent = makePathsRelative(resultText);
         const lines = processedContent.split('\n');
       // Show more lines for errors to ensure important information isn't hidden
       const isError = toolCall.name === 'Bash' && (
-        toolResult.content.includes('error:') || 
-        toolResult.content.includes('Error:') || 
-        toolResult.content.includes('ERROR') ||
-        toolResult.content.includes('fatal:') ||
-        toolResult.content.includes('Command failed') ||
-        toolResult.content.includes('aborted')
+        resultText.includes('error:') ||
+        resultText.includes('Error:') ||
+        resultText.includes('ERROR') ||
+        resultText.includes('fatal:') ||
+        resultText.includes('Command failed') ||
+        resultText.includes('aborted')
       );
       const maxLines = isError ? 30 : 15;
       
@@ -414,15 +411,16 @@ export function formatToolInteraction(
   
   if (toolResult) {
     // Check if this was an error result
+    const resultText2 = toolResult ? extractToolResultText(toolResult.content) : '';
     const isError = toolCall.name === 'Bash' && toolResult.content && (
-      toolResult.content.includes('error:') || 
-      toolResult.content.includes('Error:') || 
-      toolResult.content.includes('ERROR') ||
-      toolResult.content.includes('fatal:') ||
-      toolResult.content.includes('Command failed') ||
-      toolResult.content.includes('aborted')
+      resultText2.includes('error:') ||
+      resultText2.includes('Error:') ||
+      resultText2.includes('ERROR') ||
+      resultText2.includes('fatal:') ||
+      resultText2.includes('Command failed') ||
+      resultText2.includes('aborted')
     );
-    
+
     if (isError) {
       output += `\x1b[90m└─ \x1b[91m✗ Failed\x1b[0m\r\n`;
     } else {
@@ -482,14 +480,14 @@ export function formatJsonForOutputEnhanced(jsonMessage: ClaudeJsonMessage): str
     const content = jsonMessage.message.content;
     
     if (Array.isArray(content)) {
-      const toolResults = content.filter((item: MessageContent) => item.type === 'tool_result') as ToolResult[];
+      const toolResults = content.filter((item: MessageContent) => item.type === 'tool_result') as ToolResultBlock[];
       
       if (toolResults.length > 0) {
         // Match results with pending calls and format them
         return toolResults
-          .map((result: ToolResult) => {
+          .map((result: ToolResultBlock) => {
             const pending = pendingToolCalls.get(result.tool_use_id);
-            
+
             if (pending) {
               pendingToolCalls.delete(result.tool_use_id);
               return formatToolInteraction(
@@ -499,27 +497,26 @@ export function formatJsonForOutputEnhanced(jsonMessage: ClaudeJsonMessage): str
                 timestamp
               );
             }
-            
-            // Orphaned tool result
+
+            // Orphaned tool result — extract text first, then filter base64, then relativize paths
             const time = new Date(timestamp).toLocaleTimeString();
-            
-            // Filter out any base64 data from the result
-            let content = result.content || '';
-            
-            // First, filter out base64 data from the content
-            const filteredContent = filterBase64Data(content);
-            
+
+            // Filter out any base64 data from the extracted text
+            const filteredContent = filterBase64Data(extractToolResultText(result.content));
+
             // Then convert to string for display
+            let contentStr: string;
             if (typeof filteredContent === 'string') {
-              content = makePathsRelative(filteredContent);
+              contentStr = makePathsRelative(filteredContent);
             } else if (filteredContent !== null && filteredContent !== undefined) {
               // Convert filtered object/array to string
-              content = JSON.stringify(filteredContent, null, 2);
-              content = makePathsRelative(content);
+              contentStr = makePathsRelative(JSON.stringify(filteredContent, null, 2));
+            } else {
+              contentStr = '';
             }
-            
+
             return `\r\n\x1b[36m[${time}]\x1b[0m \x1b[90m📥 Tool Result [${result.tool_use_id}]\x1b[0m\r\n` +
-                   `\x1b[37m${content}\x1b[0m\r\n\r\n`;
+                   `\x1b[37m${contentStr}\x1b[0m\r\n\r\n`;
           })
           .join('');
       }
