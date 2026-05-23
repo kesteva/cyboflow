@@ -1,17 +1,26 @@
 /**
- * Integration tests for the orchestrator tRPC runs.getStuckInspection procedure
- * (TASK-709).
+ * Integration tests for the orchestrator tRPC runs procedures.
  *
- * Tests exercise the live runsRouter.getStuckInspection procedure via
- * createCaller, using an in-memory SQLite database (GATE_SCHEMA + migration 007
- * stub), the dbAdapter fixture, and the real getStuckInspectionHandler.
+ * Covers:
  *
- * Cases:
+ * runs.getStuckInspection (TASK-709):
+ *  Tests exercise the live runsRouter.getStuckInspection procedure via
+ *  createCaller, using an in-memory SQLite database (GATE_SCHEMA + migration 007
+ *  stub), the dbAdapter fixture, and the real getStuckInspectionHandler.
  *  (a) Happy path: stuck run + pending approval + 15 raw events → returns
  *      correct shaped result with 10 most recent events.
  *  (b) Unknown runId → TRPCError NOT_FOUND.
  *  (c) Non-'local' userId → TRPCError FORBIDDEN.
  *  (d) Missing ctx.db → TRPCError PRECONDITION_FAILED.
+ *
+ * runs.list (TASK-710 — wrapper-layer guard coverage):
+ *  Tests exercise the tRPC FORBIDDEN/PRECONDITION_FAILED guards that sit around
+ *  the listRunsHandler call. Handler-level behavior (ordering, scoping,
+ *  policy_json exclusion) is covered in
+ *  main/src/orchestrator/__tests__/listRunsHandler.test.ts.
+ *  (a) Happy path: seeded runs return the correct list for the given projectId.
+ *  (b) Non-'local' userId → TRPCError FORBIDDEN.
+ *  (c) Missing ctx.db → TRPCError PRECONDITION_FAILED.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -20,6 +29,7 @@ import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
+import { createTestDb, seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Test-database setup
@@ -185,6 +195,84 @@ describe('cyboflow.runs.getStuckInspection', () => {
 
     await expect(
       caller.cyboflow.runs.getStuckInspection({ runId: 'any-run-id' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.list wrapper-layer integration tests (TASK-710)
+//
+// These tests target the tRPC-layer guards (FORBIDDEN, PRECONDITION_FAILED)
+// that wrap the listRunsHandler call. Handler-level contracts (ordering,
+// projectId scoping, policy_json exclusion) are covered by the unit tests in
+// main/src/orchestrator/__tests__/listRunsHandler.test.ts.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.list', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    // createTestDb applies GATE_SCHEMA (migration 006 equivalent) with FK ON.
+    db = createTestDb();
+  });
+
+  // -------------------------------------------------------------------------
+  // (a) Happy path — seeded runs for projectId=1 are returned
+  // -------------------------------------------------------------------------
+  it('(a) happy path: returns seeded runs for the given projectId', async () => {
+    seedRun(db, { id: 'run-list-1', projectId: 1 });
+    seedRun(db, { id: 'run-list-2', projectId: 1 });
+    // A run for a different project — must NOT appear.
+    seedRun(db, { id: 'run-other-proj', projectId: 2 });
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.list({ projectId: 1 });
+
+    expect(result).toHaveLength(2);
+    const ids = result.map((r) => r.id);
+    expect(ids).toContain('run-list-1');
+    expect(ids).toContain('run-list-2');
+    expect(ids).not.toContain('run-other-proj');
+
+    // policy_json must not appear on any returned row.
+    for (const row of result) {
+      expect(Object.keys(row)).not.toContain('policy_json');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (b) Non-'local' userId → FORBIDDEN
+  // -------------------------------------------------------------------------
+  it('(b) non-local userId → TRPCError FORBIDDEN', async () => {
+    const adapter = dbAdapter(db);
+    // Bypass createContext to inject a non-'local' userId; the type cast
+    // mirrors the pattern used in the getStuckInspection FORBIDDEN test.
+    const ctx = {
+      userId: 'someone-else' as 'local',
+      setDockBadge: () => undefined,
+      db: adapter,
+    };
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.cyboflow.runs.list({ projectId: 1 }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'FORBIDDEN',
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // (c) Missing ctx.db → PRECONDITION_FAILED
+  // -------------------------------------------------------------------------
+  it('(c) missing ctx.db → TRPCError PRECONDITION_FAILED', async () => {
+    // createContext without db — db will be undefined.
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(
+      caller.cyboflow.runs.list({ projectId: 1 }),
     ).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
