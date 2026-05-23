@@ -10,8 +10,8 @@ import type { WorkflowRunListRow } from '../../../shared/types/workflows';
 /**
  * Returns all workflow runs for a given project, ordered newest-first.
  *
- * Excludes the heavy `policy_json` column intentionally — callers that need
- * the full row (including policy_json) should query workflow_runs directly.
+ * The heavy snapshot column is excluded intentionally — callers that need
+ * the full row should query workflow_runs directly.
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - The project_id to filter by.

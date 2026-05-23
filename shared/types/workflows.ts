@@ -45,7 +45,7 @@ export interface WorkflowRunRow {
 
 /**
  * Subset of WorkflowRunRow returned by cyboflow.runs.list (and the raw-IPC
- * cyboflow:listRuns handler). Excludes the heavy policy_json column.
+ * cyboflow:listRuns handler). The heavy snapshot column is excluded.
  * Centralized so the tRPC procedure and the legacy cyboflowApi wrapper
  * share one shape.
  */
