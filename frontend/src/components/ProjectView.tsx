@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback } from 'react';
 import { Session } from '../types/session';
 import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
@@ -24,8 +24,6 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
   onGitPush,
   isMerging
 }) => {
-  const [isLoadingSession, setIsLoadingSession] = useState(false);
-
   const {
     mainRepoSession,
     sessionPanels,
@@ -37,18 +35,9 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
   // Derived local — used by hooks that expect a sessionId string.
   const mainRepoSessionId = mainRepoSession?.id ?? null;
 
-  // Clear the loading spinner once the hook has resolved the main-repo session.
-  // Session activation is handled inside usePanelSurface — no need to call it here.
-  useEffect(() => {
-    if (mainRepoSession) {
-      setIsLoadingSession(false);
-    }
-  }, [mainRepoSession]);
-
-  // Show loading indicator while the panel surface hasn't resolved yet.
-  useEffect(() => {
-    setIsLoadingSession(true);
-  }, [projectId]);
+  // Spinner state is fully derivable from the hook's resolution status —
+  // the previous two-effect state machine had an ordering-race risk.
+  const isLoadingSession = projectId !== null && mainRepoSession === null;
 
   const ensureClaudePanel = useEnsureClaudePanel(mainRepoSession, { logTag: 'ProjectView' });
 
