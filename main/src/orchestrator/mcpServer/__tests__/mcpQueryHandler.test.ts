@@ -24,7 +24,54 @@ import Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
+
+// ---------------------------------------------------------------------------
+// Minimal schema for this test suite
+// ---------------------------------------------------------------------------
+// Mirrors the relevant subset of REGISTRY_SCHEMA + GATE_SCHEMA with FK
+// constraints present so that foreign_keys = ON enforces referential integrity
+// exactly as production does. workflow_runs has no FOREIGN KEY on workflow_id
+// here (workflows table omitted) — seedRun inserts directly without a parent
+// workflows row, which is fine for unit tests.
+// ---------------------------------------------------------------------------
+
+const MINIMAL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL,
+  project_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
+  worktree_path TEXT,
+  branch_name TEXT,
+  policy_json TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  tool_input_json TEXT NOT NULL,
+  tool_use_id TEXT NOT NULL,
+  rationale TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  decided_at DATETIME,
+  decided_by TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS raw_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+);
+`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,8 +79,8 @@ import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema'
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
-  db.pragma('foreign_keys = OFF'); // disabled: preserving existing test contract (seeds workflow_runs without a parent workflow row)
-  db.exec(GATE_SCHEMA);
+  db.pragma('foreign_keys = ON');
+  db.exec(MINIMAL_SCHEMA);
   return db;
 }
 
@@ -305,6 +352,38 @@ describe('McpQueryHandler', () => {
         .get('run-e') as { status: string } | undefined;
 
       expect(run?.status).toBe('running'); // unchanged
+    });
+
+    it('returns ok:false with error="checkpoint_requires_real_run" and inserts NO row when runId is "orchestrator"', async () => {
+      // The singleton MCP server runs with CYBOFLOW_RUN_ID='orchestrator'.
+      // That sentinel has no matching workflow_runs row and must be rejected
+      // at the handler boundary — before any INSERT — to prevent a FK violation.
+      const { socket, writes } = makeSocketDouble();
+      const msg: McpQueryMessage = {
+        type: 'mcp-submit-checkpoint',
+        requestId: 'req-sentinel',
+        runId: 'orchestrator',
+        label: 'should-be-rejected',
+        note: 'this must not reach the database',
+      };
+
+      await handler.handleMessage(msg, socket);
+
+      // Wire-protocol contract: newline-delimited framing
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
+      // Response shape
+      const response = parseLastWrite(writes);
+      expect(response.type).toBe('mcp-query-response');
+      expect(response.requestId).toBe('req-sentinel');
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('checkpoint_requires_real_run');
+
+      // Must not have written any raw_events row
+      const rows = db
+        .prepare(`SELECT id FROM raw_events WHERE run_id = 'orchestrator'`)
+        .all();
+      expect(rows).toHaveLength(0);
     });
   });
 

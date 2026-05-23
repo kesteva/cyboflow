@@ -181,6 +181,16 @@ export class McpQueryHandler {
     msg: Extract<McpQueryMessage, { type: 'mcp-submit-checkpoint' }>,
     client: net.Socket,
   ): void {
+    if (msg.runId === 'orchestrator') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'checkpoint_requires_real_run',
+      });
+      return;
+    }
+
     const now = new Date().toISOString();
     const payload = JSON.stringify({
       label: msg.label,
