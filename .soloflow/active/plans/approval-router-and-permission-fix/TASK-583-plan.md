@@ -1,10 +1,10 @@
 ---
 id: TASK-583
 idea: SPRINT-006-compound
-status: blocked
+status: deferred
 blocked_reason: "Tightens socket file permissions (0o600). Under the SDK substrate, the socket file is created at startup but not used; tightening its perms has no live security benefit. Defer until IDEA-013 lands and the socket is back on the hot path. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/cyboflowPermissionIpcServer.ts
   - main/src/services/__tests__/cyboflowPermissionIpcServerPermissions.test.ts
@@ -15,7 +15,7 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-006-proposal.md
   - .soloflow/active/plans/approval-router-and-permission-fix/EPIC-approval-router-and-permission-fix.md
 acceptance_criteria:
-  - criterion: "Socket directory creation uses mode 0o700"
+  - criterion: Socket directory creation uses mode 0o700
     verification: "grep -nE 'mkdirSync\\([^)]+,\\s*\\{[^}]*mode:\\s*0o700' main/src/services/cyboflowPermissionIpcServer.ts returns at least 1 match"
   - criterion: "Socket file is chmod'd to 0o600 after server.listen() succeeds, before the start() promise resolves"
     verification: "grep -nE 'chmodSync\\(this\\.socketPath,\\s*0o600\\)' main/src/services/cyboflowPermissionIpcServer.ts returns at least 1 match; the call appears inside the `server.listen(this.socketPath, () => { ... })` callback, before `resolve()`"
@@ -25,10 +25,10 @@ acceptance_criteria:
     verification: "test -f main/src/services/__tests__/cyboflowPermissionIpcServerPermissions.test.ts AND grep -cE '0o600|0o700' main/src/services/__tests__/cyboflowPermissionIpcServerPermissions.test.ts returns at least 4 AND pnpm --filter main test cyboflowPermissionIpcServerPermissions exits 0"
   - criterion: "docs/cyboflow_system_design.md permission-bridge section documents the trusted-boundary contract: the Unix socket is `chmod 0600`, dir `chmod 0700`, and the security model assumes a same-UID trust boundary (no defense against other processes running as the same user)"
     verification: "grep -nE 'chmod 0600|chmod 0700|trusted boundary|same.UID|same.user' docs/cyboflow_system_design.md returns at least 2 matches in proximity to the permission-bridge section"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
 depends_on: []
 estimated_complexity: low
 epic: approval-router-and-permission-fix
@@ -43,7 +43,6 @@ test_strategy:
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServerPermissions.test.ts
       type: unit
 ---
-
 # Chmod unix socket to 0o600 and socket directory to 0o700 after server.listen()
 
 ## Objective

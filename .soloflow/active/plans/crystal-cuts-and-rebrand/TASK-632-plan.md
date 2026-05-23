@@ -1,7 +1,7 @@
 ---
 id: TASK-632
 idea: SPRINT-014-COMPOUND
-status: pending
+status: deferred
 created: "2026-05-17T00:00:00Z"
 files_owned:
   - frontend/src/components/Settings.tsx
@@ -16,16 +16,16 @@ acceptance_criteria:
     verification: "grep -nE '^DECISION 1 RESOLVED:' .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-632-plan.md returns 1 match identifying A | B | C"
   - criterion: "DECISION 2: Discord invite URL — user has selected option A/B/C and recorded it below"
     verification: "grep -nE '^DECISION 2 RESOLVED:' .soloflow/active/plans/crystal-cuts-and-rebrand/TASK-632-plan.md returns 1 match identifying A | B | C"
-  - criterion: "Code changes per resolution; grep verifies each URL matches the chosen state (specific verification depends on chosen option)"
-    verification: "(parametric — see Implementation Steps for per-option grep)"
-  - criterion: "pnpm typecheck and pnpm lint pass"
+  - criterion: Code changes per resolution; grep verifies each URL matches the chosen state (specific verification depends on chosen option)
+    verification: (parametric — see Implementation Steps for per-option grep)
+  - criterion: pnpm typecheck and pnpm lint pass
     verification: "pnpm typecheck && pnpm lint exit 0"
 depends_on: []
 estimated_complexity: low
 epic: crystal-cuts-and-rebrand
 test_strategy:
   needed: false
-  justification: "URL/string swap with no logic change. Byte-level grep assertions on the chosen URL string are sufficient verification. No sibling tests exist for the three touched files."
+  justification: URL/string swap with no logic change. Byte-level grep assertions on the chosen URL string are sufficient verification. No sibling tests exist for the three touched files.
 ---
 # Settle branding decisions: UTM parameters and Discord invite URL
 
