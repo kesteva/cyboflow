@@ -12,11 +12,6 @@
         "TASK-727"
       ]
     },
-    "TASK-730": {
-      "status": "in_progress",
-      "depends_on": [],
-      "started": "2026-05-23T04:20:53.015Z"
-    },
     "TASK-731": {
       "status": "in_progress",
       "depends_on": [],
