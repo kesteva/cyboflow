@@ -29,7 +29,7 @@ import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
-import { createTestDb, seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
+import { seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Test-database setup
