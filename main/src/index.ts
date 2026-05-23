@@ -32,7 +32,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setStartRunDeps } from './orchestrator/trpc/routers/runs';
 import { approvalEvents } from './orchestrator/trpc/routers/events';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { DatabaseLike } from './orchestrator/types';
@@ -84,6 +84,7 @@ let taskQueue: TaskQueue | null = null;
 let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
+let runLauncher: RunLauncher;
 
 // Service instances
 let configManager: ConfigManager;
@@ -599,7 +600,7 @@ async function initializeServices() {
   // it, the run stays at `starting` forever.
   runQueues = new RunQueueRegistry();
 
-  const runLauncher = new RunLauncher(
+  runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
     worktreeManager,
@@ -735,6 +736,12 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] cancelAndRestart deps wired');
+
+    setStartRunDeps({
+      runLauncher,
+      sessionManager,
+    });
+    console.log('[Main] runs.start deps wired');
   }
 
   // Track app lifecycle events

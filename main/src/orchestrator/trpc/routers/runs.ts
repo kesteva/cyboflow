@@ -48,6 +48,45 @@ export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
 }
 
 // ---------------------------------------------------------------------------
+// start dependency bag
+//
+// Injected at boot by main/src/index.ts via setStartRunDeps() after both
+// RunLauncher and SessionManager are constructed.  Until wired, the mutation
+// throws METHOD_NOT_SUPPORTED — same pattern as cancel and cancelAndRestart.
+// ---------------------------------------------------------------------------
+
+export interface RunLauncherLike {
+  launch(workflowId: string, projectPath: string): Promise<{
+    runId: string;
+    worktreePath: string;
+    branchName: string;
+  }>;
+}
+
+export interface SessionManagerLike {
+  getProjectById(projectId: number): { path: string } | undefined;
+}
+
+export interface StartRunDeps {
+  runLauncher: RunLauncherLike;
+  sessionManager: SessionManagerLike;
+}
+
+let startRunDeps: StartRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the start mutation.
+ *
+ * Called once at boot by main/src/index.ts after RunLauncher and
+ * SessionManager have been initialized.
+ *
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setStartRunDeps(deps: StartRunDeps): void {
+  startRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
 // cancel dependency bag
 //
 // Mirrors the cancelAndRestartDeps pattern above. Injected at boot by
@@ -157,9 +196,33 @@ export const runsRouter = router({
 
   /** Start a new workflow run for the given workflow and project. */
   start: protectedProcedure
-    .input(z.object({ workflowId: z.string(), projectId: z.string() }))
-    // STUB — raw-IPC equivalent (cyboflow:startRun) in main/src/ipc/cyboflow.ts is the live surface. TBD-tRPC-cutover migration replaces this stub.
-    .mutation(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({
+      workflowId: z.string().min(1),
+      projectId: z.number().int().positive(),
+    }))
+    .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+      if (!startRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'start dependencies not wired yet. Call setStartRunDeps() at boot.',
+        });
+      }
+      const project = startRunDeps.sessionManager.getProjectById(input.projectId);
+      if (!project) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Project ${input.projectId} not found`,
+        });
+      }
+      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
+        input.workflowId,
+        project.path,
+      );
+      return { runId, worktreePath, branchName };
+    }),
 
   /** Cancel a running workflow run by ID. */
   cancel: protectedProcedure
