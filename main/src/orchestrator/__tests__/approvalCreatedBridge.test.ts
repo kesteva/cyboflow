@@ -23,9 +23,8 @@ import type Database from 'better-sqlite3';
 import { buildApprovalCreatedEvent } from '../approvalCreatedBridge';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
+import { selectPendingApprovals } from '../approvalListing';
 import type { ApprovalRequest } from '../../../../shared/types/approval';
-import type { Approval } from '../../../../shared/types/approvals';
-import { truncatePayloadPreview } from '../../../../shared/utils/approvals';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
@@ -44,51 +43,6 @@ function seedWorkflowAndRun(
     workflowId: `workflow-${workflowName}`,
     workflowName,
   });
-}
-
-/**
- * Replicate listPending logic from trpc/routers/approvals.ts for parity testing.
- * Returns the Approval[] rows visible to the UI.
- */
-function listPending(db: Database.Database): Approval[] {
-  interface DbRow {
-    id: string;
-    runId: string;
-    workflowName: string;
-    toolName: string;
-    payloadPreviewRaw: string;
-    rationale: string | null;
-    createdAt: string;
-    status: string;
-  }
-
-  const rows = db.prepare(
-    `SELECT
-       a.id          AS id,
-       a.run_id      AS runId,
-       w.name        AS workflowName,
-       a.tool_name   AS toolName,
-       a.tool_input_json AS payloadPreviewRaw,
-       a.rationale   AS rationale,
-       a.created_at  AS createdAt,
-       a.status      AS status
-     FROM approvals a
-     JOIN workflow_runs r ON r.id = a.run_id
-     JOIN workflows     w ON w.id = r.workflow_id
-     WHERE a.status = 'pending'
-     ORDER BY a.created_at ASC`,
-  ).all() as DbRow[];
-
-  return rows.map((row): Approval => ({
-    id: row.id,
-    runId: row.runId,
-    workflowName: row.workflowName,
-    toolName: row.toolName,
-    payloadPreview: truncatePayloadPreview(row.payloadPreviewRaw),
-    rationale: row.rationale,
-    createdAt: new Date(row.createdAt).toISOString(),
-    status: row.status as Approval['status'],
-  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +129,8 @@ describe('buildApprovalCreatedEvent', () => {
     // Bridge produces the SSE event
     const bridgeEvent = buildApprovalCreatedEvent(request, adapter);
 
-    // listPending produces the REST query result
-    const pending = listPending(db);
+    // selectPendingApprovals produces the REST query result (same function as tRPC listPending)
+    const pending = selectPendingApprovals(adapter);
     expect(pending).toHaveLength(1);
 
     // Round-trip parity: the SSE push and the query must agree on workflowName
