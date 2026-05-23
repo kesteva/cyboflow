@@ -461,26 +461,30 @@ describe('UnknownStreamEvent fallback', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Passthrough preservation — unknown fields survive parsing
+// Passthrough — outer-schema unknown fields are stripped (Option 3 — TASK-656)
 // ---------------------------------------------------------------------------
 
 describe('passthrough', () => {
-  it('preserves an unknown field (future_unannounced_field) when added to a known fixture', () => {
-    // Mutate a copy of system_init to add a hypothetical future field.
-    // The Zod schema uses .passthrough() so unknown fields are carried through.
+  it('strips an unknown top-level field (future_unannounced_field) on a known fixture — outer schemas no longer use .passthrough()', () => {
+    // Option 3 (TASK-656): outer union-member schemas drop .passthrough() to
+    // allow the bidirectional _reverseCheck compile-time bridge to work.
+    // Unknown fields at the outer schema level are now silently stripped by Zod
+    // (default z.object strip mode). New SDK fields at the outer level will
+    // surface as __unknown__ variants via the catch-all, forcing an explicit
+    // schema update — this is a feature, not a regression.
     const mutated = { ...systemInit(), future_unannounced_field: 'lorem' };
 
     expect(() => narrower.narrow(mutated)).not.toThrow();
     const event = narrower.narrow(mutated);
 
-    // The unknown field must be preserved on the parsed object (not stripped)
-    expect(event).toHaveProperty('future_unannounced_field', 'lorem');
-
+    // The event still parses correctly as the expected variant (not __unknown__)
+    // since the known fields are all present; the unknown field is stripped.
     if ('kind' in event) {
       throw new Error('Expected typed variant, got UnknownStreamEvent');
     }
-    // Confirm it still parsed as the correct variant (not degraded to __unknown__)
     expect(event.type).toBe('system');
+    // Outer unknown field is stripped (not preserved) — this is the Option 3 trade-off.
+    expect(event).not.toHaveProperty('future_unannounced_field');
   });
 });
 

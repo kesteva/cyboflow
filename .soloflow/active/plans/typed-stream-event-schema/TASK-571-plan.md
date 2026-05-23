@@ -1,7 +1,7 @@
 ---
 id: TASK-571
 title: Add bidirectional TS↔Zod drift bridge to schemas.ts
-status: deferred
+status: superseded
 epic: typed-stream-event-schema
 source: compound/SPRINT-004-005
 source_sprint: SPRINT-004
