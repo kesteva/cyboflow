@@ -93,6 +93,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * in this SDK path) and the cyboflow MCP server.
    */
   setOrchSocketPath(socketPath: string): void {
+    // TODO(epic-7): first production caller is the OrchSocketProvider wiring task.
+    // Until that task lands, composeMcpServers() always takes the orchSocketPath=null branch
+    // and no cyboflow_* tools are surfaced to Claude sessions.
     this.orchSocketPath = socketPath;
     // Eagerly kick off node-path resolution at boot so the first session never
     // races against a not-yet-resolved promise.  The result is stored as a
