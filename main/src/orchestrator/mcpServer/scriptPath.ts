@@ -1,64 +1,75 @@
 /**
- * scriptPath — shared helper for resolving and extracting the
- * cyboflowMcpServer.js subprocess script.
+ * scriptPath — shared helper for resolving the cyboflowMcpServer.js subprocess
+ * script path.
  *
  * Used by both McpServerLifecycle (singleton spawn) and claudeCodeManager
  * (per-session .mcp.json injection) so both callers see the same script.
  *
- * Asar-extraction pattern lifted from the original claudeCodeManager
- * approach: if the candidate script path is inside an .asar archive
- * (packaged DMG), the script is extracted to ~/.cyboflow/ on first use
- * and subsequent calls return the extracted path.
+ * Resolution strategy:
+ * - Packaged build: returns process.resourcesPath + app.asar.unpacked relative
+ *   path.  The script is listed in package.json `build.asarUnpack` so it is
+ *   placed outside the ASAR archive by electron-builder and is directly
+ *   executable by Node without any extraction step.
+ * - Dev mode: returns the sibling .js file compiled by `pnpm run build:main`
+ *   into main/dist/main/src/orchestrator/mcpServer/ (__dirname at runtime).
+ *
+ * The result is memoized at module level.  Pass `dirOverride` to bypass the
+ * cache — this is used by tests to drive both branches without module reload.
  *
  * Standalone-typecheck invariant: this file imports from 'electron' only
  * for app.isPackaged which is mocked in the Vitest setup.
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 
-/** Name of the MCP server script once extracted to the cyboflow directory. */
+/** Name of the MCP server script. */
 const SCRIPT_FILENAME = 'cyboflowMcpServer.js';
+
+/**
+ * Relative path from process.resourcesPath to the unpacked script.
+ * Mirrors the `build.asarUnpack` entry in package.json.
+ */
+const ASAR_UNPACKED_REL =
+  'app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js';
+
+/** Module-level cache so the resolution runs at most once per process. */
+let cachedResolvedPath: string | null = null;
 
 /**
  * Resolve the absolute path to the cyboflowMcpServer.js script.
  *
- * - Dev mode: returns the sibling .js file compiled by `pnpm run build:main`
- *   into main/dist/main/src/orchestrator/mcpServer/.
- * - Packaged DMG (asar): reads the script out of the .asar virtual FS via
- *   fs.readFileSync (which Electron patches to support .asar paths) and writes
- *   it to ~/.cyboflow/cyboflowMcpServer.js before returning that path.
- *
- * The extraction is idempotent — if the extracted file already exists it is
- * overwritten so updates delivered via a new DMG are picked up on next start.
- *
  * @param dirOverride  Optional absolute directory to look in instead of
- *                     __dirname.  Useful for tests that cannot set __dirname.
+ *                     __dirname.  When supplied the module-level cache is
+ *                     bypassed so tests can exercise each branch independently.
  */
 export function resolveMcpServerScriptPath(dirOverride?: string): string {
-  const searchDir = dirOverride ?? __dirname;
-  const candidatePath = path.join(searchDir, SCRIPT_FILENAME);
-
-  if (app.isPackaged && candidatePath.includes('.asar')) {
-    // Packaged path — script is inside the .asar archive.  Extract it so Node
-    // can require/spawn it directly (spawning from inside .asar is unsupported).
-    const scriptContent = fs.readFileSync(candidatePath, 'utf8');
-    const extractedPath = getCyboflowSubdirectory(SCRIPT_FILENAME);
-
-    // Ensure the target directory exists.
-    const targetDir = path.dirname(extractedPath);
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-
-    fs.writeFileSync(extractedPath, scriptContent, 'utf8');
-    fs.chmodSync(extractedPath, 0o755);
-
-    return extractedPath;
+  // Bypass the cache when a dirOverride is provided (test-only path).
+  if (dirOverride !== undefined) {
+    return computeResolvedPath(dirOverride);
   }
 
-  // Dev path — return as-is (the file is built into main/dist/ and is
-  // directly executable by Node without extraction).
-  return candidatePath;
+  if (cachedResolvedPath === null) {
+    cachedResolvedPath = computeResolvedPath(undefined);
+  }
+  return cachedResolvedPath;
+}
+
+function computeResolvedPath(dirOverride: string | undefined): string {
+  if (app.isPackaged) {
+    // Packaged build — the script is asar-unpacked and directly accessible.
+    return path.join(process.resourcesPath, ASAR_UNPACKED_REL);
+  }
+
+  // Dev mode — the script is compiled alongside this file by tsc.
+  const searchDir = dirOverride ?? __dirname;
+  return path.join(searchDir, SCRIPT_FILENAME);
+}
+
+/**
+ * Reset the module-level path cache.
+ *
+ * Exported for unit tests only — do NOT call from production code.
+ */
+export function __resetCacheForTests(): void {
+  cachedResolvedPath = null;
 }
