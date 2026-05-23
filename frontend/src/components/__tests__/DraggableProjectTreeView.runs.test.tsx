@@ -112,7 +112,6 @@ vi.mock('../../stores/navigationStore', () => ({
 // Mock heavy sub-components and stores
 // ---------------------------------------------------------------------------
 
-vi.mock('../CreateSessionDialog', () => ({ CreateSessionDialog: () => null }));
 vi.mock('../SessionListItem', () => ({ SessionListItem: () => null }));
 vi.mock('../ProjectSettings', () => ({ default: () => null }));
 vi.mock('../EmptyState', () => ({
