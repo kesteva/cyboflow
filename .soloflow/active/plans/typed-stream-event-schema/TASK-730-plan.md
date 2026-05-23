@@ -1,7 +1,7 @@
 ---
 id: TASK-730
 idea: FIND-SPRINT-032-2
-status: ready
+status: in-flight
 created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/services/panels/claude/claudeCodeManager.ts

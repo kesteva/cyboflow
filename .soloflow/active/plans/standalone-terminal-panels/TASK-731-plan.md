@@ -1,7 +1,7 @@
 ---
 id: TASK-731
 idea: FIND-SPRINT-032-3
-status: ready
+status: in-flight
 created: "2026-05-22T00:00:00Z"
 files_owned:
   - frontend/src/hooks/usePanelSurface.ts

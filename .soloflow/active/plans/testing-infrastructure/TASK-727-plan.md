@@ -1,10 +1,10 @@
 ---
 id: TASK-727
 idea: SPRINT-031-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-031
 source_finding: FIND-SPRINT-031-7
-created: 2026-05-22T00:00:00Z
+created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
   - main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
@@ -26,24 +26,24 @@ files_readonly:
   - main/src/database/migrations/006_cyboflow_schema.sql
   - .soloflow/active/plans/testing-infrastructure/EPIC-testing-infrastructure.md
 acceptance_criteria:
-  - criterion: "Audit grep before changes — sweep step 1 — confirms the 6 fragmented seed-helper sites still exist (sanity gate so the executor knows the work is needed)"
+  - criterion: Audit grep before changes — sweep step 1 — confirms the 6 fragmented seed-helper sites still exist (sanity gate so the executor knows the work is needed)
     verification: "grep -rnE 'seedPendingApproval\\b|seedApprovalRow\\b|seedPendingApprovals\\b' main/src --include='*.ts' returns at least 4 matches across the 6 listed test files BEFORE step 2 runs"
-  - criterion: "orchestratorTestDb.ts exports a seedApproval function with the SeedApprovalOverrides interface"
+  - criterion: orchestratorTestDb.ts exports a seedApproval function with the SeedApprovalOverrides interface
     verification: "grep -nE 'export function seedApproval\\(' main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts returns 1 match AND grep -nE 'export interface SeedApprovalOverrides' main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts returns 1 match"
   - criterion: "seedApproval returns the inserted approval id (string), and the inserted row has the expected defaults: status='pending', tool_name='bash', tool_input_json='{}', tool_use_id={id}, created_at=ISO-now"
     verification: "grep -nE 'returns? the inserted approval id|seedApproval.+default' main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts returns at least 1 match AND pnpm --filter main test orchestratorTestDb exits 0"
-  - criterion: "The 6 migrated test files no longer define local seed helpers that insert into approvals; each imports seedApproval from orchestratorTestDb"
+  - criterion: The 6 migrated test files no longer define local seed helpers that insert into approvals; each imports seedApproval from orchestratorTestDb
     verification: "grep -rnE 'function (seedPendingApproval|seedApprovalRow|seedPendingApprovals)\\(' main/src --include='*.ts' returns 0 matches AND grep -rnE 'import \\{[^}]*seedApproval[^}]*\\} from .+orchestratorTestDb' main/src/orchestrator/__tests__/runRecovery.test.ts main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts main/src/orchestrator/__tests__/inspectorQueries.test.ts main/src/orchestrator/__tests__/stuckDetector.test.ts main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts main/src/trpc/__tests__/approvals.test.ts returns 6 matches"
   - criterion: "No inline INSERT INTO approvals statements remain in the 6 migrated test files (the production sites in approvalRouter.ts and transitions.ts and the readonly sites in mcpQueryHandler.test.ts, approvalRouter.test.ts, transitions.test.ts, cyboflowSchema.test.ts are intentionally excluded)"
     verification: "grep -nE 'INSERT INTO approvals' main/src/orchestrator/__tests__/runRecovery.test.ts main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts main/src/orchestrator/__tests__/inspectorQueries.test.ts main/src/orchestrator/__tests__/stuckDetector.test.ts main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts main/src/trpc/__tests__/approvals.test.ts returns 0 matches"
   - criterion: "docs/CODE-PATTERNS.md 'Database seed helpers' section is updated to reference seedApproval alongside seedRun"
     verification: "grep -nE 'seedApproval\\b' docs/CODE-PATTERNS.md returns at least 1 match AND the match falls inside the 'Database seed helpers' subsection (line within ~30 lines after the heading)"
-  - criterion: "All 6 migrated test files still pass"
-    verification: "pnpm --filter main test runRecovery approvalCreatedBridge inspectorQueries stuckDetector trpc/routers/__tests__/approvals trpc/__tests__/approvals exits 0"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
+  - criterion: All 6 migrated test files still pass
+    verification: pnpm --filter main test runRecovery approvalCreatedBridge inspectorQueries stuckDetector trpc/routers/__tests__/approvals trpc/__tests__/approvals exits 0
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
 depends_on: []
 estimated_complexity: medium
 epic: testing-infrastructure
@@ -60,14 +60,13 @@ test_strategy:
     - behavior: "seedApproval with overrides.id='custom-id' returns 'custom-id'"
       test_file: main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
       type: unit
-    - behavior: "seedApproval with overrides.toolName / overrides.toolInputJson / overrides.createdAt are stored verbatim in the row"
+    - behavior: seedApproval with overrides.toolName / overrides.toolInputJson / overrides.createdAt are stored verbatim in the row
       test_file: main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
       type: unit
     - behavior: "Migrated tests still pass — runRecovery, approvalCreatedBridge, inspectorQueries, stuckDetector, trpc routers approvals, trpc approvals"
       test_file: main/src/orchestrator/__tests__/runRecovery.test.ts
       type: integration
 ---
-
 # Extract shared seedApproval fixture and consolidate 6 divergent approval seeding helpers
 
 ## Objective
