@@ -6,17 +6,63 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-709": { "status": "pending", "depends_on": ["TASK-706"] },
-    "TASK-710": { "status": "pending", "depends_on": ["TASK-706"] },
-    "TASK-711": { "status": "pending", "depends_on": [] },
-    "TASK-712": { "status": "pending", "depends_on": [] },
-    "TASK-713": { "status": "pending", "depends_on": [] },
-    "TASK-714": { "status": "pending", "depends_on": ["TASK-710", "TASK-711"] },
-    "TASK-715": { "status": "pending", "depends_on": ["TASK-712", "TASK-713", "TASK-714"] },
-    "TASK-716": { "status": "pending", "depends_on": ["TASK-714", "TASK-715"] },
-    "TASK-717": { "status": "pending", "depends_on": ["TASK-716", "TASK-709"] },
-    "TASK-732": { "status": "pending", "depends_on": [] },
-    "TASK-733": { "status": "pending", "depends_on": ["TASK-732"] }
+    "TASK-710": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-706"
+      ]
+    },
+    "TASK-711": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-712": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-713": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-714": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-710",
+        "TASK-711"
+      ]
+    },
+    "TASK-715": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-712",
+        "TASK-713",
+        "TASK-714"
+      ]
+    },
+    "TASK-716": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-714",
+        "TASK-715"
+      ]
+    },
+    "TASK-717": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-716",
+        "TASK-709"
+      ]
+    },
+    "TASK-732": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-733": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-732"
+      ]
+    }
   },
   "playwright_target": {
     "kind": "electron",
