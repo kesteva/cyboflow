@@ -1,8 +1,8 @@
 ---
-pending_count: 28
+pending_count: 26
 buckets:
   decisions: 0
-  actions: 3
+  actions: 1
   testing: 20
   deferred_visual: 5
 items: []
@@ -14,26 +14,6 @@ items: []
 _No items._
 
 ## Actions
-
-- task: TASK-555
-  type: action_required
-  bucket: actions
-  action: "Configure Apple notarytool credentials: run `xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>`, then set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars"
-  blocked_checks:
-    - "prerequisite: notarytool credentials missing"
-  level: ground_truth
-  severity: high
-
-- task: TASK-618
-  type: action_required
-  bucket: actions
-  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-618-plan.md
-  action: "Run pnpm run build:mac:arm64 once Apple notarytool credentials are configured; verify (1) find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js returns >=1 match (AC2); (2) launch packaged app, create a Claude session, confirm no spawn error in logs and that ~/.cyboflow/cyboflowMcpServer.js was NOT re-created (AC6)."
-  blocked_checks:
-    - "AC2: packaged build contains cyboflowMcpServer.js under app.asar.unpacked/..."
-    - "AC6: packaged app launches without re-extracting MCP server"
-  level: ground_truth
-  severity: medium
 
 - task: TASK-655
   type: config_issue
@@ -353,7 +333,6 @@ _No items._
   flows_deferred:
     - null
 
-
 - sprint: SPRINT-034
   type: deferred_visual
   bucket: deferred_visual
@@ -366,9 +345,9 @@ _No items._
     - "currently-running pnpm dev is at commit 1da6cc9 (mid-TASK-690), not HEAD (8e4acaf) — restart pnpm dev on HEAD before re-running flows for an authoritative pass"
   flows_deferred:
     - "Deletion sweep (TASK-689/690/691) — sidebar renders, App.tsx legacy toggle removed, no broken imports at runtime"
-    - "Tool-result rendering — TASK-655 extractToolResultText behavior parity with pre-sprint"
-    - "First Claude session — TASK-619 cachedNodePath race fix + TASK-620 health surface"
-    - "Stream-parse — TASK-656 Option-3 schema bridge accepts canonical SDK events"
+    - Tool-result rendering — TASK-655 extractToolResultText behavior parity with pre-sprint
+    - First Claude session — TASK-619 cachedNodePath race fix + TASK-620 health surface
+    - Stream-parse — TASK-656 Option-3 schema bridge accepts canonical SDK events
   level: sprint
   severity: medium
   created_at: "2026-05-23T21:25:57Z"
@@ -385,6 +364,30 @@ _No items._
     - TASK-691
 
 ## Overridden
+
+- task: TASK-618
+  type: overridden
+  bucket: actions
+  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-618-plan.md
+  action: "Run pnpm run build:mac:arm64 once Apple notarytool credentials are configured; verify (1) find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js returns >=1 match (AC2); (2) launch packaged app, create a Claude session, confirm no spawn error in logs and that ~/.cyboflow/cyboflowMcpServer.js was NOT re-created (AC6)."
+  blocked_checks:
+    - "AC2: packaged build contains cyboflowMcpServer.js under app.asar.unpacked/..."
+    - "AC6: packaged app launches without re-extracting MCP server"
+  level: ground_truth
+  severity: medium
+  override: "Apple signing/packaging items are out of scope for this sprint's orchestrator/tRPC/testing-infrastructure tasks; will be revisited at next release prep."
+  override_at: "2026-05-23T22:27:23.735Z"
+
+- task: TASK-555
+  type: overridden
+  bucket: actions
+  action: "Configure Apple notarytool credentials: run `xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>`, then set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars"
+  blocked_checks:
+    - "prerequisite: notarytool credentials missing"
+  level: ground_truth
+  severity: high
+  override: "Apple signing/packaging items are out of scope for this sprint's orchestrator/tRPC/testing-infrastructure tasks; will be revisited at next release prep."
+  override_at: "2026-05-23T22:27:20.375Z"
 
 - task: TASK-652
   type: overridden
