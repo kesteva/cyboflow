@@ -201,38 +201,30 @@ export function usePanelSurface(
     async (panel: ToolPanel) => {
       if (!mainRepoSessionId) return;
 
-      if (autoCreatePermanentPanels) {
-        // ProjectView mode: permanent panels are not closeable.
-        if (panel.type === 'dashboard' || panel.type === 'setup-tasks') {
-          return;
-        }
-
-        const idx = sessionPanels.findIndex((p) => p.id === panel.id);
-        let next: ToolPanel | undefined = sessionPanels[idx + 1] ?? sessionPanels[idx - 1];
-
-        // If no adjacent panel or it resolves to the same panel, fall back to dashboard.
-        if (!next || next.id === panel.id) {
-          next = sessionPanels.find((p) => p.type === 'dashboard') ?? sessionPanels[0];
-        }
-
-        removePanel(mainRepoSessionId, panel.id);
-        if (next) {
-          setActivePanelInStore(mainRepoSessionId, next.id);
-          await panelApi.setActivePanel(mainRepoSessionId, next.id);
-        }
-        await panelApi.deletePanel(panel.id);
-      } else {
-        // CyboflowRoot mode: every user-initiated panel is closeable; no permanence guard.
-        const idx = sessionPanels.findIndex((p) => p.id === panel.id);
-        const next = sessionPanels[idx + 1] ?? sessionPanels[idx - 1];
-
+      const closeAndActivate = async (next: ToolPanel | undefined) => {
         removePanel(mainRepoSessionId, panel.id);
         if (next && next.id !== panel.id) {
           setActivePanelInStore(mainRepoSessionId, next.id);
           await panelApi.setActivePanel(mainRepoSessionId, next.id);
         }
         await panelApi.deletePanel(panel.id);
+      };
+
+      const idx = sessionPanels.findIndex((p) => p.id === panel.id);
+      let next: ToolPanel | undefined = sessionPanels[idx + 1] ?? sessionPanels[idx - 1];
+
+      if (autoCreatePermanentPanels) {
+        // ProjectView mode: permanent panels are not closeable.
+        if (panel.type === 'dashboard' || panel.type === 'setup-tasks') {
+          return;
+        }
+        // If no adjacent panel or it resolves to the same panel, fall back to dashboard.
+        if (!next || next.id === panel.id) {
+          next = sessionPanels.find((p) => p.type === 'dashboard') ?? sessionPanels[0];
+        }
       }
+
+      await closeAndActivate(next);
     },
     [mainRepoSessionId, sessionPanels, removePanel, setActivePanelInStore, autoCreatePermanentPanels],
   );
