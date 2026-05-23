@@ -4,6 +4,10 @@ import { useSession } from '../../contexts/SessionContext';
 import { panelApi } from '../../services/panelApi';
 import { API } from '../../utils/api';
 import type { SetupTasksPanelState } from '../../../../shared/types/panels';
+
+// Active consumer: usePanelSurface (autoCreatePermanentPanels=true, ProjectView path) via PanelContainer case 'setup-tasks'.
+// Not a deletion candidate — re-evaluate only if ProjectView is retired or setup-tasks panel type is removed.
+
 interface SetupTask {
   id: string;
   title: string;
