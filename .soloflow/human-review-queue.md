@@ -1,10 +1,10 @@
 ---
-pending_count: 27
+pending_count: 28
 buckets:
   decisions: 0
   actions: 3
   testing: 20
-  deferred_visual: 4
+  deferred_visual: 5
 items: []
 ---
 # Human Review Queue
@@ -46,7 +46,8 @@ _No items._
   level: visual
   severity: low
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-23T20:24:55.800Z"
+  updated_at: "2026-05-23T21:25:57Z"
+  sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
 
 ## Testing
 
@@ -351,6 +352,37 @@ _No items._
     - "playwright E2E (`pnpm test`) — `tests/cyboflow-day3-gate.spec.ts` imports vitest and breaks `playwright test` collection (pre-existing, unrelated to sprint); even when excluded, all other specs hit the same `electronTRPC` constraint."
   flows_deferred:
     - null
+
+
+- sprint: SPRINT-034
+  type: deferred_visual
+  bucket: deferred_visual
+  source: shadow-sprint-verifier
+  dedup_key: visual_web_electron_renderer_needs_full_electron
+  action: "End-of-sprint visual smoke for SPRINT-034 (mixed: 5 MCP/packaging tasks, 1 schema bridge, 1 toolFormatter, 3 Crystal-era deletion sweep). Visual flows worth a human pass against the merged HEAD: (1) Open any project after launch — confirm the sidebar (`DraggableProjectTreeView`) renders without referencing the deleted `ProjectTreeView` / `CreateSessionDialog` / `CreateSessionButton` (TASK-689). (2) Confirm App.tsx no longer offers a `useLegacyCrystalView` toggle / SessionView render branch — only the cyboflow shell renders (TASK-690/691). (3) Open a Claude panel and exercise tool-result rendering with at least one tool whose `content` is an array of blocks — verify text renders identically to pre-sprint and that orphan image-only tool_results render as empty string (FIND-SPRINT-034-4 behavioral note, accepted by plan). (4) Create a new Claude session — verify MCP servers compose cleanly on the first session (TASK-619 eager-cachedNodePath fix) and that MCP health surfaces a non-error status (TASK-620 setHealthProvider). (5) Run any flow that lands the orchestrator in a stream-parse path — confirm the new Option-3 schemas (TASK-656: dropped outer .passthrough() + _reverseCheck bridge) still accept canonical SDK events without rejecting. NOTE: capture is currently blocked — see dedup_key=visual_macos_unavailable in the Actions section. The runtime debug log evidence from `pnpm dev` against TASK-690 commit (1da6cc9) shows clean post-reload state, so the deletion sweep appears regression-free; this human pass is corroborative."
+  blocked_checks:
+    - "visual_web — http://localhost:4521 cannot bootstrap standalone; Playwright smoke + health-check confirmed 4/4 fail with body=hidden because electronTRPC preload is absent (pre-existing, per CLAUDE.md)."
+    - "visual_macos — Peekaboo MCP probe shows Screen Recording + Accessibility granted but `mcp__peekaboo__image` against the Electron window fails with 'Failed to start stream due to audio/video capture failure' (background AND foreground capture_focus). Reproduces FIND-SPRINT-034-3 and the existing TASK-655 action_required entry above (dedup_key=visual_macos_unavailable)."
+    - "currently-running pnpm dev is at commit 1da6cc9 (mid-TASK-690), not HEAD (8e4acaf) — restart pnpm dev on HEAD before re-running flows for an authoritative pass"
+  flows_deferred:
+    - "Deletion sweep (TASK-689/690/691) — sidebar renders, App.tsx legacy toggle removed, no broken imports at runtime"
+    - "Tool-result rendering — TASK-655 extractToolResultText behavior parity with pre-sprint"
+    - "First Claude session — TASK-619 cachedNodePath race fix + TASK-620 health surface"
+    - "Stream-parse — TASK-656 Option-3 schema bridge accepts canonical SDK events"
+  level: sprint
+  severity: medium
+  created_at: "2026-05-23T21:25:57Z"
+  affected_tasks:
+    - TASK-617
+    - TASK-618
+    - TASK-619
+    - TASK-620
+    - TASK-621
+    - TASK-655
+    - TASK-656
+    - TASK-689
+    - TASK-690
+    - TASK-691
 
 ## Overridden
 
