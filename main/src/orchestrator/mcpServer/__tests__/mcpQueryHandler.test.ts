@@ -16,7 +16,7 @@
  *    unrecognized type and never throws.
  *
  * All tests use an in-memory better-sqlite3 instance initialised with the
- * imported GATE_SCHEMA fixture (no real migration runner — tests are hermetic). A writes-capturing
+ * inline `MINIMAL_SCHEMA` const declared below (no real migration runner — tests are hermetic). A writes-capturing
  * socket test double is used to assert on the JSON response bodies.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
