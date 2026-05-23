@@ -12,8 +12,10 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
+import type { WorkflowRunListRow } from '../../../../../shared/types/workflows';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
+import { listRunsHandler } from '../../runQueries';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -137,11 +139,21 @@ export async function cancelHandler(
 }
 
 export const runsRouter = router({
-  /** List workflow runs, optionally filtered by project. */
+  /** List workflow runs for a project, ordered newest-first. */
   list: protectedProcedure
-    .input(z.object({ projectId: z.string().optional() }))
-    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
-    .query(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({ projectId: z.number().int().positive() }))
+    .query(({ ctx, input }): WorkflowRunListRow[] => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return listRunsHandler(ctx.db, input.projectId);
+    }),
 
   /** Start a new workflow run for the given workflow and project. */
   start: protectedProcedure
