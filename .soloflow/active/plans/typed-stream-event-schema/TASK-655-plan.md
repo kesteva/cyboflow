@@ -1,7 +1,7 @@
 ---
 id: TASK-655
 idea: IDEA-003
-status: ready
+status: in-flight
 created: "2026-05-19T00:00:00Z"
 files_owned:
   - shared/utils/extractToolResultText.ts
