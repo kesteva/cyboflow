@@ -1,10 +1,10 @@
 ---
 id: TASK-580
 idea: SPRINT-006-compound
-status: blocked
+status: deferred
 blocked_reason: "Hardens the Unix-socket transport between the bridge subprocess and the IPC server. Under the now-decided plan (IDEA-014 SDK substrate completes the prototype), the socket is not on the hot path. The IPC server stays wired up per the EPIC's portability note so this task remains a one-task pivot once IDEA-013 (post-prototype interactive-shell support) lands and the socket is back in use. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/cyboflowPermissionIpcServer.ts
   - main/src/services/cyboflowPermissionBridge.ts
@@ -19,24 +19,24 @@ files_readonly:
   - .soloflow/active/plans/approval-router-and-permission-fix/EPIC-approval-router-and-permission-fix.md
   - .soloflow/active/plans/approval-router-and-permission-fix/TASK-302-plan.md
 acceptance_criteria:
-  - criterion: "CyboflowPermissionIpcServer maintains a per-socket buffer; the `client.on('data', ...)` handler appends the incoming chunk to the buffer, splits on `\\n`, parses every complete line, and retains any trailing partial-line in the buffer for the next chunk"
-    verification: "grep -nE 'buffer|split.*\\\\n|indexOf.*\\\\n' main/src/services/cyboflowPermissionIpcServer.ts returns at least 3 matches AND grep -n 'JSON.parse' main/src/services/cyboflowPermissionIpcServer.ts shows the JSON.parse call is inside a per-line loop (not directly on data.toString())"
-  - criterion: "CyboflowPermissionIpcServer's socketReply closure writes JSON followed by a `\\n` terminator on every reply (both the success path and the catch/deny path)"
-    verification: "grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\\n['\\\"]\" main/src/services/cyboflowPermissionIpcServer.ts returns at least 2 matches (one for success path, one for catch path)"
-  - criterion: "cyboflowPermissionBridge.ts maintains a per-socket buffer for the IPC client; the `ipcClient.on('data', ...)` handler appends, splits on `\\n`, and parses complete lines"
-    verification: "grep -nE 'buffer|split.*\\\\n|indexOf.*\\\\n' main/src/services/cyboflowPermissionBridge.ts returns at least 3 matches AND the JSON.parse call is inside a per-line loop"
-  - criterion: "cyboflowPermissionBridge.ts writes the outbound request with a trailing `\\n` on the socket"
-    verification: "grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\\n['\\\"]\" main/src/services/cyboflowPermissionBridge.ts returns at least 1 match"
-  - criterion: "build-cyboflow-permission-bridge.js (the standalone-bundled bridge string) emits the same buffer-and-write contract — both the IPC-client data handler and the outbound IPC write include `\\n` framing"
-    verification: "grep -nE 'buffer|split.*\\\\\\\\n' main/build-cyboflow-permission-bridge.js returns at least 2 matches in the IPC client section (lines around the existing `ipcClient.on('data', ...)` block); grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\\\\\\\\\\n['\\\"]\" main/build-cyboflow-permission-bridge.js returns at least 1 match in the outbound write"
+  - criterion: "CyboflowPermissionIpcServer maintains a per-socket buffer; the `client.on('data', ...)` handler appends the incoming chunk to the buffer, splits on `\n`, parses every complete line, and retains any trailing partial-line in the buffer for the next chunk"
+    verification: "grep -nE 'buffer|split.*\\\n|indexOf.*\\\n' main/src/services/cyboflowPermissionIpcServer.ts returns at least 3 matches AND grep -n 'JSON.parse' main/src/services/cyboflowPermissionIpcServer.ts shows the JSON.parse call is inside a per-line loop (not directly on data.toString())"
+  - criterion: "CyboflowPermissionIpcServer's socketReply closure writes JSON followed by a `\n` terminator on every reply (both the success path and the catch/deny path)"
+    verification: "grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\n['\\\"]\" main/src/services/cyboflowPermissionIpcServer.ts returns at least 2 matches (one for success path, one for catch path)"
+  - criterion: "cyboflowPermissionBridge.ts maintains a per-socket buffer for the IPC client; the `ipcClient.on('data', ...)` handler appends, splits on `\n`, and parses complete lines"
+    verification: "grep -nE 'buffer|split.*\\\n|indexOf.*\\\n' main/src/services/cyboflowPermissionBridge.ts returns at least 3 matches AND the JSON.parse call is inside a per-line loop"
+  - criterion: "cyboflowPermissionBridge.ts writes the outbound request with a trailing `\n` on the socket"
+    verification: "grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\n['\\\"]\" main/src/services/cyboflowPermissionBridge.ts returns at least 1 match"
+  - criterion: "build-cyboflow-permission-bridge.js (the standalone-bundled bridge string) emits the same buffer-and-write contract — both the IPC-client data handler and the outbound IPC write include `\n` framing"
+    verification: "grep -nE 'buffer|split.*\\\\\\\n' main/build-cyboflow-permission-bridge.js returns at least 2 matches in the IPC client section (lines around the existing `ipcClient.on('data', ...)` block); grep -nE \"JSON\\.stringify\\(.*\\)\\s*\\+\\s*['\\\"]\\\\\\\\\\\\\\\n['\\\"]\" main/build-cyboflow-permission-bridge.js returns at least 1 match in the outbound write"
   - criterion: "Unit-test suite for CyboflowPermissionIpcServer covers the three framing scenarios: (a) single complete line, (b) two messages coalesced into one chunk, (c) one message split across two chunks. All three pass."
     verification: "test -f main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts AND grep -cE 'single complete|coalesced|split across' main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts returns at least 3; pnpm --filter main test cyboflowPermissionIpcServer exits 0 and shows at least 3 cases"
   - criterion: "Manual smoke test from TASK-255 still works: a Claude session can start, the bridge connects, a permission request flows through to ApprovalRouter, and an approve/deny reply travels back end-to-end. Document the manual smoke result in the done report."
     verification: "Done report includes a `Manual smoke` section listing: app launched via `pnpm dev`; a Claude session created; an approve/deny path round-tripped; bridge logs show no JSON.parse SyntaxError"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
 depends_on:
   - TASK-579
 estimated_complexity: medium
@@ -45,20 +45,19 @@ test_strategy:
   needed: true
   justification: "Framing is the load-bearing invariant that prevents the DB-wedge bug. Coalescing and chunk-splitting cannot be visually verified — they require a test that synthesizes the byte stream. Pair-tasking with B3 (zod validation), which extends the same test file with envelope-shape cases."
   targets:
-    - behavior: "Single complete newline-terminated message parses into one ApprovalRouter.requestApproval call"
+    - behavior: Single complete newline-terminated message parses into one ApprovalRouter.requestApproval call
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
-    - behavior: "Two complete messages arriving in one data chunk both parse and both reach ApprovalRouter (coalescing case)"
+    - behavior: Two complete messages arriving in one data chunk both parse and both reach ApprovalRouter (coalescing case)
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
-    - behavior: "One message split across two data chunks parses correctly once both chunks have arrived; the trailing partial line is buffered between chunks (chunk-splitting case)"
+    - behavior: One message split across two data chunks parses correctly once both chunks have arrived; the trailing partial line is buffered between chunks (chunk-splitting case)
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
-    - behavior: "Malformed line (broken JSON) is logged and the buffer continues processing subsequent complete lines without crashing the connection"
+    - behavior: Malformed line (broken JSON) is logged and the buffer continues processing subsequent complete lines without crashing the connection
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
 ---
-
 # Add newline-delimited message framing to the unix socket (IPC server + bridge)
 
 ## Objective

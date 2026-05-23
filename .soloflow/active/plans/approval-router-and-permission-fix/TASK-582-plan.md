@@ -1,10 +1,10 @@
 ---
 id: TASK-582
 idea: SPRINT-006-compound
-status: blocked
+status: deferred
 blocked_reason: "Fixes IPC server init ordering relative to ApprovalRouter. Under the SDK substrate, the IPC server is wired but inactive (per EPIC portability note for IDEA-013), so init-ordering bugs have no observable effect. Defer until IDEA-013 lands. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/index.ts
 files_readonly:
@@ -21,16 +21,16 @@ acceptance_criteria:
     verification: "grep -nE 'new RunQueueRegistry\\(\\)' main/src/index.ts shows a match at a line BELOW the `async function initializeServices()` declaration AND ABOVE the line that calls `cyboflowPermissionIpcServer.start()`; grep -nE 'ApprovalRouter\\.initialize\\(' main/src/index.ts shows a match in the same range; both matches must be < the line number of `await cyboflowPermissionIpcServer.start()`"
   - criterion: "`new EventEmitter()` for the orchestrator deps and `orchestrator = new Orchestrator({...})` still happen after `createWindow()` (lifecycle for the BrowserWindow-dependent tRPC attach remains unchanged)"
     verification: "grep -nE 'orchestrator = new Orchestrator' main/src/index.ts shows the match remains inside the `app.whenReady().then(...)` block — line number > the line of `await createWindow()`"
-  - criterion: "The orchestrator wiring block continues to pass the SAME RunQueueRegistry instance (and SAME db adapter) to `Orchestrator` constructor that was used in `ApprovalRouter.initialize()`. No duplicate `new RunQueueRegistry()` exists in the wiring block."
+  - criterion: The orchestrator wiring block continues to pass the SAME RunQueueRegistry instance (and SAME db adapter) to `Orchestrator` constructor that was used in `ApprovalRouter.initialize()`. No duplicate `new RunQueueRegistry()` exists in the wiring block.
     verification: "grep -cE 'new RunQueueRegistry\\(\\)' main/src/index.ts returns exactly 1"
   - criterion: "Permission IPC server's `client.on('data', ...)` handler can resolve `ApprovalRouter.getInstance()` without throwing the uninitialized-singleton error. Verified by a startup-ordering integration test: spawn the main process or simulate `initializeServices()` end-to-end and confirm a stale-fd-on-boot connection does not throw."
     verification: "Either a new vitest case in main/src/__tests__/startupOrdering.test.ts asserts ApprovalRouter.initialize() returns before CyboflowPermissionIpcServer.start() resolves (using a sequence-tracking spy on each), OR a documented manual smoke in the done report: (i) leave a stale `.sock` file at `~/.cyboflow/sockets/cyboflow-permissions-<pid>.sock` from a previous run; (ii) write a Node script that opens a connection to that path immediately when the file appears; (iii) launch `pnpm dev`; (iv) confirm no `ApprovalRouter has not been initialized` error in logs."
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
-  - criterion: "Main process unit tests pass"
-    verification: "pnpm --filter main test exits 0"
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
+  - criterion: Main process unit tests pass
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: approval-router-and-permission-fix
@@ -38,11 +38,10 @@ test_strategy:
   needed: true
   justification: "Startup-ordering bugs are notoriously absent from typecheck and lint surfaces — they require an integration-style test that observes the actual call sequence. One unit-test file. The manual smoke fallback is acceptable when CI cannot reliably synthesize a stale-fd race, but the preferred deliverable is the spy-based test."
   targets:
-    - behavior: "ApprovalRouter.initialize() resolves before cyboflowPermissionIpcServer.start() during `initializeServices()`"
+    - behavior: ApprovalRouter.initialize() resolves before cyboflowPermissionIpcServer.start() during `initializeServices()`
       test_file: main/src/__tests__/startupOrdering.test.ts
       type: integration
 ---
-
 # Fix ApprovalRouter initialization ordering relative to cyboflowPermissionIpcServer.start()
 
 ## Objective

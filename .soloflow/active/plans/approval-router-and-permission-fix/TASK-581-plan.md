@@ -1,10 +1,10 @@
 ---
 id: TASK-581
 idea: SPRINT-006-compound
-status: blocked
+status: deferred
 blocked_reason: "Adds zod validation at the IPC server's socket boundary. Under the SDK substrate (prototype), the socket is not on the hot path — validation has no live traffic to guard. Defer until IDEA-013 lands and the shell hook starts driving the socket again. Unblock when IDEA-013 starts planning."
 source_sprint: SPRINT-006
-created: 2026-05-14T00:00:00Z
+created: "2026-05-14T00:00:00Z"
 files_owned:
   - main/src/services/cyboflowPermissionIpcServer.ts
   - main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
@@ -26,11 +26,11 @@ acceptance_criteria:
     verification: "grep -nE '1024\\s*\\*\\s*1024|1_048_576|MAX_LINE_BYTES' main/src/services/cyboflowPermissionIpcServer.ts returns at least 1 match AND the buffer-loop in cyboflowPermissionIpcServer.ts checks line.length (or buffer.length) before JSON.parse"
   - criterion: "Unit tests cover: (a) valid permission-request passes through to ApprovalRouter, (b) message with missing requestId returns a logged validation failure (and no ApprovalRouter call), (c) message with non-record `input` field is rejected, (d) message exceeding 1 MB is dropped and the buffer is reset"
     verification: "grep -cE 'zod|safeParse|invalid|missing requestId|oversize|1 ?MB' main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts returns at least 4 AND pnpm --filter main test cyboflowPermissionIpcServer exits 0 and shows at least 4 new cases (in addition to the framing cases from TASK-580)"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
-  - criterion: "No new runtime dependency is added — zod is already declared in main/package.json"
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
+  - criterion: No new runtime dependency is added — zod is already declared in main/package.json
     verification: "grep -nE '\"zod\":' main/package.json returns 1 match (the existing entry); diff of main/package.json shows zero new dependency lines added in this task"
 depends_on:
   - TASK-580
@@ -40,7 +40,7 @@ test_strategy:
   needed: true
   justification: "Input validation is a security boundary — the boundary must be exercised by tests, not just typed. Four cases. Shares the test file with TASK-580's framing cases (same file lives in main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts)."
   targets:
-    - behavior: "Valid `permission-request` envelope passes zod parse and reaches ApprovalRouter.requestApproval"
+    - behavior: Valid `permission-request` envelope passes zod parse and reaches ApprovalRouter.requestApproval
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
     - behavior: "Envelope missing `requestId` is rejected by zod, ApprovalRouter is NOT called, and (if a recoverable raw-payload `requestId` exists) a deny reply is written"
@@ -53,7 +53,6 @@ test_strategy:
       test_file: main/src/services/__tests__/cyboflowPermissionIpcServer.test.ts
       type: unit
 ---
-
 # Add zod input validation to cyboflowPermissionIpcServer
 
 ## Objective
