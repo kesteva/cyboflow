@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-034
-pending_count: 4
-last_updated: "2026-05-23T20:30:00.000Z"
+pending_count: 3
+last_updated: "2026-05-23T21:00:00.000Z"
 ---
 # Findings Queue
 
@@ -42,4 +42,13 @@ TASK-555 gated: failing blocking prereq (notarytool credentials missing).
 - **location:** frontend/src/utils/toolFormatter.ts:505-516, main/src/utils/toolFormatter.ts:647-658
 - **description:** After TASK-655, the orphaned-tool-result branch passes `extractToolResultText(result.content)` (always returns `string`) into `filterBase64Data` (returns primitives unchanged), so `filteredContent` is now provably a `string`. The downstream `else if (filteredContent !== null && filteredContent !== undefined) { ... JSON.stringify(...) }` and trailing `else { contentStr = ''; }` branches are unreachable dead code, and `filterBase64Data` itself is a no-op on this path. Secondary behavioral note: orphan `tool_result` blocks whose content is an array of image blocks (`{type: 'image', source: {type: 'base64', data: ...}}`) now render as empty string instead of the previous JSON-stringified `{... "data": "[Base64 data filtered]" ...}` — because `extractToolResultText` drops every block without a `text` field. Acceptable per the plan's "Lowest Confidence Area" note; flagging so future support tickets about missing orphan-image-result rendering link back here.
 - **suggested_action:** Collapse the orphan branch to `const contentStr = makePathsRelative(extractToolResultText(result.content));` (frontend) / `... (extractToolResultText(result.content), gitRepoPath);` (main), deleting `filterBase64Data` from this call chain and the unreachable conditional arms. If support reveals real users hitting orphan-image-result rendering, add an image-block branch to `extractToolResultText` (e.g. render `[Image: <size>KB]` placeholder).
-- **resolved_by:**
+- **resolved_by:** 
+
+## FIND-SPRINT-034-5
+- **type:** scope_deviation
+- **source:** TASK-656 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/services/streamParser/__tests__/schemas.test.ts
+- **description:** Option 3 implementation requires updating the passthrough-preservation assertions in schemas.test.ts and typedEventNarrowing.test.ts. These files are listed as files_readonly in the plan but the plan body §Option 3 explicitly calls out these test updates as part of the change. Files claimed via claim-file.js (both granted without conflict) to make the changes.
+- **resolved_by:** verifier — plan-prescribed: §Option 3 lines 67-69 explicitly call for updating `schemas.test.ts:357-375` and `typedEventNarrowing.test.ts:100-105` passthrough assertions; both files also appear in `files_owned` (lines 9-10), so the plan frontmatter is internally contradictory but the prescription is unambiguous. Also AC-prescribed: AC4 requires vitest to pass after dropping outer `.passthrough()`, which forces the assertion updates.
