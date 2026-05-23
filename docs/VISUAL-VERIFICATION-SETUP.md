@@ -49,6 +49,16 @@ silently blocked. If `visual_macos` returns screenshots but clicks/keystrokes
 do nothing, check Accessibility first. After granting either permission, quit
 and relaunch the host process.
 
+### Troubleshooting: "audio/video capture failure" despite grants showing clean
+
+If `mcp__peekaboo__image` against the Cyboflow Electron window returns
+`Failed to start stream due to audio/video capture failure` while
+`mcp__peekaboo__probe` reports both grants granted, the **Electron dev
+binary itself** needs its own Screen Recording entry — separate from the
+Peekaboo CLI binary. Locate it with `find node_modules/.pnpm -name 'Electron.app' -maxdepth 6`,
+grant Screen Recording in System Settings, and relaunch `pnpm dev`. Blocked
+two consecutive sprints (FIND-SPRINT-034-3).
+
 ## Mobile (visual_mobile) — not applicable
 
 cyboflow is desktop-only. `verification.visual_mobile=false`.
