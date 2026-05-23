@@ -2,7 +2,7 @@
 id: TASK-555
 idea: IDEA-012
 idea_id: IDEA-012
-status: ready
+status: in-flight
 created: "2026-05-11T00:00:00Z"
 files_owned:
   - package.json

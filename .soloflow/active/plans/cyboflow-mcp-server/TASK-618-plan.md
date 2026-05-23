@@ -1,7 +1,7 @@
 ---
 id: TASK-618
 idea: null
-status: ready
+status: in-flight
 created: "2026-05-16T00:00:00Z"
 files_owned:
   - package.json

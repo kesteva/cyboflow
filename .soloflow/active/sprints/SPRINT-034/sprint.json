@@ -1,0 +1,34 @@
+{
+  "sprint": {
+    "id": "SPRINT-034",
+    "status": "active",
+    "started": "2026-05-23T00:00:00.000Z",
+    "execution_mode": "serial"
+  },
+  "tasks": {
+    "TASK-555": { "status": "pending", "depends_on": ["TASK-554"] },
+    "TASK-617": { "status": "pending", "depends_on": [] },
+    "TASK-618": { "status": "pending", "depends_on": [] },
+    "TASK-619": { "status": "pending", "depends_on": [] },
+    "TASK-620": { "status": "pending", "depends_on": [] },
+    "TASK-621": { "status": "pending", "depends_on": [] },
+    "TASK-655": { "status": "pending", "depends_on": [] },
+    "TASK-656": { "status": "pending", "depends_on": [] },
+    "TASK-689": { "status": "pending", "depends_on": ["TASK-687"] },
+    "TASK-690": { "status": "pending", "depends_on": ["TASK-688", "TASK-689"] },
+    "TASK-691": { "status": "pending", "depends_on": ["TASK-690"] },
+    "TASK-692": { "status": "pending", "depends_on": ["TASK-691"] }
+  },
+  "playwright_target": {
+    "kind": "electron",
+    "evidence": "electron in package.json",
+    "dev_url_hint": null,
+    "divergence_risk": false
+  },
+  "run": {
+    "branch": "soloflow/run-20260523-122747-SPRINT-034",
+    "base_branch": "main",
+    "base_sha": "f793b15ca3fa129a0f5158548328b649ab100a4e",
+    "created_at": "2026-05-23T12:27:47.000Z"
+  }
+}

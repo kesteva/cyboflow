@@ -1,7 +1,7 @@
 ---
 id: TASK-689
 idea: IDEA-017
-status: ready
+status: in-flight
 created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/components/CreateSessionDialog.tsx
