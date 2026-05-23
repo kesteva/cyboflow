@@ -1,8 +1,8 @@
 ---
 id: TASK-732
 idea: SPRINT-033-compound
-status: ready
-created: 2026-05-22T00:00:00Z
+status: in-flight
+created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
   - main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
@@ -24,44 +24,43 @@ acceptance_criteria:
     verification: "A new test in orchestratorTestDb.test.ts asserts `db.pragma('foreign_keys', { simple: true })` === 0 after `createTestDb({ disableForeignKeys: true })`."
   - criterion: "When called with `includeStuckDetectedAt: true`, the workflow_runs table has the `stuck_detected_at` column (added by migration 007)."
     verification: "A new test in orchestratorTestDb.test.ts asserts `PRAGMA table_info(workflow_runs)` includes a row with name='stuck_detected_at' after `createTestDb({ includeStuckDetectedAt: true })`."
-  - criterion: "The GATE_SCHEMA parity test still passes for the default `createTestDb()` call path (the new options do NOT widen GATE_SCHEMA itself; they only layer additional SQL after exec)."
+  - criterion: The GATE_SCHEMA parity test still passes for the default `createTestDb()` call path (the new options do NOT widen GATE_SCHEMA itself; they only layer additional SQL after exec).
     verification: "`pnpm --filter main test -- orchestratorTestDb.test` passes; the 'GATE_SCHEMA parity vs 006_cyboflow_schema.sql' describe block remains green."
   - criterion: "All 6 inline `INSERT INTO approvals` sites in test files are replaced with calls to the canonical `seedApproval` fixture. After the sweep, `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` returns 0 matches."
     verification: "Run `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` from the repo's main/ workspace — output must be empty."
-  - criterion: "All 4 modified test files import `seedApproval` from `__test_fixtures__/orchestratorTestDb` and their local `seedApproval` helpers (if any) are deleted to avoid name shadowing."
+  - criterion: All 4 modified test files import `seedApproval` from `__test_fixtures__/orchestratorTestDb` and their local `seedApproval` helpers (if any) are deleted to avoid name shadowing.
     verification: "grep -n 'from .*__test_fixtures__/orchestratorTestDb' main/src/database/__tests__/cyboflowSchema.test.ts main/src/services/cyboflow/__tests__/transitions.test.ts main/src/orchestrator/__tests__/approvalRouter.test.ts main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts shows the import in each; grep -n 'function seedApproval' across those four files returns 0 matches."
-  - criterion: "All migrated tests still pass after the sweep — `pnpm --filter main test` exits 0."
-    verification: "Run `pnpm --filter main test` from repo root; expect exit code 0 with no test failures in the 4 swept files."
+  - criterion: All migrated tests still pass after the sweep — `pnpm --filter main test` exits 0.
+    verification: Run `pnpm --filter main test` from repo root; expect exit code 0 with no test failures in the 4 swept files.
 depends_on: []
 estimated_complexity: medium
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "Adds new public surface to orchestratorTestDb (two options) — the existing parity-pinned test file is the natural home for new cases. Each migrated test file is itself a test file; running them after the sweep validates the migration."
+  justification: Adds new public surface to orchestratorTestDb (two options) — the existing parity-pinned test file is the natural home for new cases. Each migrated test file is itself a test file; running them after the sweep validates the migration.
   targets:
     - behavior: "createTestDb({ disableForeignKeys: true }) returns a DB with FK enforcement off"
-      test_file: "main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts"
+      test_file: main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
       type: unit
     - behavior: "createTestDb({ includeStuckDetectedAt: true }) returns a DB whose workflow_runs has the stuck_detected_at column"
-      test_file: "main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts"
+      test_file: main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
       type: unit
     - behavior: "createTestDb() with no args preserves the existing default contract (FK ON, no stuck_detected_at column) — parity test stays green"
-      test_file: "main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts"
+      test_file: main/src/orchestrator/__test_fixtures__/__tests__/orchestratorTestDb.test.ts
       type: unit
-    - behavior: "All 6 sites that previously inserted approvals inline still pass after switching to seedApproval"
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+    - behavior: All 6 sites that previously inserted approvals inline still pass after switching to seedApproval
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: integration
-    - behavior: "transitions.test.ts cases still pass after local seedApproval helper is replaced by the canonical fixture"
-      test_file: "main/src/services/cyboflow/__tests__/transitions.test.ts"
+    - behavior: transitions.test.ts cases still pass after local seedApproval helper is replaced by the canonical fixture
+      test_file: main/src/services/cyboflow/__tests__/transitions.test.ts
       type: unit
-    - behavior: "approvalRouter Case 12 (recoverStaleAwaitingReview) still passes after the inline INSERT is replaced by seedApproval"
-      test_file: "main/src/orchestrator/__tests__/approvalRouter.test.ts"
+    - behavior: approvalRouter Case 12 (recoverStaleAwaitingReview) still passes after the inline INSERT is replaced by seedApproval
+      test_file: main/src/orchestrator/__tests__/approvalRouter.test.ts
       type: unit
     - behavior: "mcpQueryHandler tests still pass after local seedApproval helper is replaced; the file's FK-off DB is now provided by createTestDb({ disableForeignKeys: true })"
-      test_file: "main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts"
+      test_file: main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts
       type: unit
 ---
-
 # Extend orchestratorTestDb with disableForeignKeys + includeStuckDetectedAt options, then sweep the 6 remaining inline INSERT INTO approvals sites
 
 ## Objective

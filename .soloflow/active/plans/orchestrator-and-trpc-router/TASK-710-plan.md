@@ -1,7 +1,7 @@
 ---
 id: TASK-710
 idea: IDEA-022
-status: ready
+status: in-flight
 created: "2026-05-21T14:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts

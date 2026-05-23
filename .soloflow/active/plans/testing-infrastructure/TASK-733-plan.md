@@ -1,8 +1,8 @@
 ---
 id: TASK-733
 idea: SPRINT-033-compound
-status: ready
-created: 2026-05-22T00:00:00Z
+status: in-flight
+created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/orchestrator/__tests__/cancelAndRestart.test.ts
   - main/src/orchestrator/__tests__/runLauncher.test.ts
@@ -23,7 +23,7 @@ files_readonly:
   - main/src/database/migrations/007_add_stuck_reason.sql
   - docs/CODE-PATTERNS.md
 acceptance_criteria:
-  - criterion: "All 11 listed test files import `createTestDb` from `__test_fixtures__/orchestratorTestDb` (and pass options where required for migration-007 or FK-off cases) — no local `function createTestDb` or `function createTestDbNoFk` definitions remain."
+  - criterion: All 11 listed test files import `createTestDb` from `__test_fixtures__/orchestratorTestDb` (and pass options where required for migration-007 or FK-off cases) — no local `function createTestDb` or `function createTestDbNoFk` definitions remain.
     verification: "Run `grep -rn 'function createTestDb' main/src --include='*.test.ts'` — output must be empty."
   - criterion: "Files that previously applied migration 007 (cancelAndRestart.test.ts, stuckDetector.test.ts) now call `createTestDb({ includeStuckDetectedAt: true })` and no longer use `readFileSync(SCHEMA_007, …)` for migration 007."
     verification: "grep -n 'SCHEMA_007\\|MIGRATION_007\\|007_add_stuck_reason' main/src/orchestrator/__tests__/cancelAndRestart.test.ts main/src/orchestrator/__tests__/stuckDetector.test.ts returns 0 matches in code."
@@ -33,50 +33,50 @@ acceptance_criteria:
     verification: "grep -n 'createTestDbNoFk' main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts returns 0 matches."
   - criterion: "mcpQueryHandler.test.ts's local createTestDb is replaced by `createTestDb({ disableForeignKeys: true })`."
     verification: "grep -n 'function createTestDb\\|foreign_keys = OFF' main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts returns 0 matches for `function createTestDb`."
-  - criterion: "All 11 migrated test files still pass after consolidation — `pnpm --filter main test` exits 0."
-    verification: "Run `pnpm --filter main test` from repo root; expect exit code 0."
-depends_on: [TASK-732]
+  - criterion: All 11 migrated test files still pass after consolidation — `pnpm --filter main test` exits 0.
+    verification: Run `pnpm --filter main test` from repo root; expect exit code 0.
+depends_on:
+  - TASK-732
 estimated_complexity: medium
 epic: testing-infrastructure
 test_strategy:
   needed: true
   justification: "Pure refactor toward a shared fixture. The 11 migrated test files are themselves the regression coverage — they were green before and must remain green after. No new behaviors are introduced; no new test cases need to be authored. The parity test in __test_fixtures__/__tests__/orchestratorTestDb.test.ts now implicitly covers all 11 files (that's the entire point of the consolidation)."
   targets:
-    - behavior: "cancelAndRestart integration tests still pass (FK ON + migration 007 columns present)"
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+    - behavior: cancelAndRestart integration tests still pass (FK ON + migration 007 columns present)
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: integration
-    - behavior: "runLauncher integration tests still pass"
-      test_file: "main/src/orchestrator/__tests__/runLauncher.test.ts"
+    - behavior: runLauncher integration tests still pass
+      test_file: main/src/orchestrator/__tests__/runLauncher.test.ts
       type: integration
-    - behavior: "workflowRegistry tests still pass (REGISTRY_SCHEMA → GATE_SCHEMA upgrade is a no-op because workflowRegistry only touches workflows/workflow_runs)"
-      test_file: "main/src/orchestrator/__tests__/workflowRegistry.test.ts"
+    - behavior: workflowRegistry tests still pass (REGISTRY_SCHEMA → GATE_SCHEMA upgrade is a no-op because workflowRegistry only touches workflows/workflow_runs)
+      test_file: main/src/orchestrator/__tests__/workflowRegistry.test.ts
       type: unit
-    - behavior: "runExecutor RunLauncher integration block still passes"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+    - behavior: runExecutor RunLauncher integration block still passes
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
-    - behavior: "inspectorQueries handler tests still pass (stuck_detected_at column present via canonical option)"
-      test_file: "main/src/orchestrator/__tests__/inspectorQueries.test.ts"
+    - behavior: inspectorQueries handler tests still pass (stuck_detected_at column present via canonical option)
+      test_file: main/src/orchestrator/__tests__/inspectorQueries.test.ts
       type: integration
-    - behavior: "runLifecycle transition + cancel handler tests still pass"
-      test_file: "main/src/orchestrator/__tests__/runLifecycle.test.ts"
+    - behavior: runLifecycle transition + cancel handler tests still pass
+      test_file: main/src/orchestrator/__tests__/runLifecycle.test.ts
       type: unit
-    - behavior: "stuckDetector tests still pass (FK ON + migration 007 columns)"
-      test_file: "main/src/orchestrator/__tests__/stuckDetector.test.ts"
+    - behavior: stuckDetector tests still pass (FK ON + migration 007 columns)
+      test_file: main/src/orchestrator/__tests__/stuckDetector.test.ts
       type: unit
-    - behavior: "mcpQueryHandler tests still pass (FK off preserved via canonical option)"
-      test_file: "main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts"
+    - behavior: mcpQueryHandler tests still pass (FK off preserved via canonical option)
+      test_file: main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts
       type: unit
-    - behavior: "claudeCodeManager.killProcess tests still pass"
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts"
+    - behavior: claudeCodeManager.killProcess tests still pass
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
       type: unit
-    - behavior: "claudeCodeManagerWiring tests still pass (both FK-on and FK-off describe blocks)"
-      test_file: "main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts"
+    - behavior: claudeCodeManagerWiring tests still pass (both FK-on and FK-off describe blocks)
+      test_file: main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts
       type: unit
-    - behavior: "ipc/cyboflow handler tests still pass"
-      test_file: "main/src/ipc/__tests__/cyboflow.test.ts"
+    - behavior: ipc/cyboflow handler tests still pass
+      test_file: main/src/ipc/__tests__/cyboflow.test.ts
       type: integration
 ---
-
 # Consolidate the 11 local createTestDb definitions onto the canonical orchestratorTestDb fixture
 
 ## Objective

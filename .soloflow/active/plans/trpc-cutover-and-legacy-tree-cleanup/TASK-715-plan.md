@@ -1,7 +1,7 @@
 ---
 id: TASK-715
 idea: IDEA-023
-status: ready
+status: in-flight
 created: "2026-05-21T14:30:00Z"
 files_owned:
   - frontend/src/components/cyboflow/WorkflowPicker.tsx
