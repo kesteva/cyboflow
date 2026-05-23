@@ -84,9 +84,10 @@ describe('createContext', () => {
 describe('appRouter (createCaller)', () => {
   const caller = appRouter.createCaller(createContext());
 
-  it('cyboflow.runs.list throws NOT_IMPLEMENTED', async () => {
-    await expect(caller.cyboflow.runs.list({})).rejects.toSatisfy(isNotImplemented);
-  });
+  // cyboflow.runs.list is live (TASK-710) — see
+  // main/src/orchestrator/__tests__/listRunsHandler.test.ts for handler-level
+  // coverage. The procedure's tRPC wrapper (FORBIDDEN/PRECONDITION_FAILED
+  // guards) is covered by integration tests that build a real DB context.
 
   it('cyboflow.runs.start throws NOT_IMPLEMENTED', async () => {
     await expect(
@@ -140,7 +141,9 @@ describe('appRouter (createCaller)', () => {
     // All procedures use protectedProcedure; if any threw UNAUTHORIZED we
     // would have seen it in the tests above. This test makes the intent
     // explicit by asserting the error code is METHOD_NOT_SUPPORTED, not UNAUTHORIZED.
-    const err = await caller.cyboflow.runs.list({}).catch((e: unknown) => e);
+    // Uses cyboflow.runs.get (still a NOT_IMPLEMENTED stub) since
+    // cyboflow.runs.list went live in TASK-710.
+    const err = await caller.cyboflow.runs.get({ runId: 'run-1' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TRPCError);
     expect((err as TRPCError).code).toBe('METHOD_NOT_SUPPORTED');
     expect((err as TRPCError).code).not.toBe('UNAUTHORIZED');
