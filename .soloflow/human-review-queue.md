@@ -1,8 +1,8 @@
 ---
-pending_count: 26
+pending_count: 27
 buckets:
   decisions: 0
-  actions: 2
+  actions: 3
   testing: 20
   deferred_visual: 4
 items: []
@@ -34,6 +34,19 @@ _No items._
     - "AC6: packaged app launches without re-extracting MCP server"
   level: ground_truth
   severity: medium
+
+- task: TASK-655
+  type: config_issue
+  bucket: actions
+  dedup_key: visual_macos_unavailable
+  plan_ref: .soloflow/active/plans/typed-stream-event-schema/TASK-655-plan.md
+  action: "Verifier could not run visual_macos verification: Peekaboo MCP probe reported Screen Recording + Accessibility grants present, but live capture against the running Cyboflow Electron window failed with \"Failed to start stream due to audio/video capture failure\" on both background and auto focus modes. Confirm Cyboflow is granted Screen Recording explicitly (System Settings → Privacy & Security → Screen Recording), restart pnpm dev, and re-run. See docs/VISUAL-VERIFICATION-SETUP.md."
+  blocked_checks:
+    - Level 2 visual_macos verification of toolFormatter rendered output
+  level: visual
+  severity: low
+  created_at: "2026-05-23T20:24:55.800Z"
+  updated_at: "2026-05-23T20:24:55.800Z"
 
 ## Testing
 
