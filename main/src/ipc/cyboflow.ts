@@ -26,40 +26,20 @@ import type { AppServices } from './types';
 import { resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows } from '../orchestrator/workflowRegistry';
 import type { OrchestratorHealth } from '../orchestrator/health';
 import { HEALTH_STARTING } from '../../../shared/types/mcpHealth';
-import { setHealthProvider } from '../orchestrator/trpc/routers/health';
+import { setHealthProvider, getHealthProvider } from '../orchestrator/trpc/routers/health';
 import { validateInput } from './validateInput';
-
-// ---------------------------------------------------------------------------
-// OrchestratorHealth singleton (injected after McpServerLifecycle is wired)
-// ---------------------------------------------------------------------------
-
-/**
- * Module-level OrchestratorHealth singleton.
- *
- * Null until the McpServerLifecycle is wired (epic 6). While null, the
- * cyboflow:mcp-health handler returns the safe 'starting' default so the
- * frontend dot stays yellow instead of crashing.
- *
- * Set this via setCyboflowHealth() after constructing OrchestratorHealth
- * in the app bootstrap path (main/src/index.ts) once the McpServerLifecycle
- * singleton is available.
- */
-let _orchestratorHealth: OrchestratorHealth | null = null;
 
 /**
  * Inject the OrchestratorHealth singleton.
  *
- * Call once from main/src/index.ts during app bootstrap, after
- * McpServerLifecycle.start() is called.
- *
- * This setter wires BOTH surfaces in a single call:
- *   - The IPC handler (`cyboflow:mcp-health`) reads `_orchestratorHealth` directly.
- *   - The tRPC procedure (`cyboflow.health.mcpServer`) reads via `setHealthProvider`,
- *     which is forwarded here so callers do not need to invoke both setters
- *     independently and risk the two surfaces diverging.
+ * @deprecated Use `setHealthProvider` from `./orchestrator/trpc/routers/health`
+ * directly (called from main/src/index.ts at boot).  This shim exists only to
+ * preserve the test-file import until TASK-716 cleans it up.  It no longer
+ * maintains a parallel module-level singleton — it delegates entirely to
+ * setHealthProvider so the IPC handler and tRPC procedure share one source of
+ * truth.
  */
 export function setCyboflowHealth(health: OrchestratorHealth): void {
-  _orchestratorHealth = health;
   setHealthProvider(health);
 }
 
@@ -198,19 +178,20 @@ export function registerCyboflowHandlers(ipcMain: IpcMain, services: AppServices
    * cyboflow:mcp-health
    *
    * Returns a point-in-time snapshot of the MCP server's health status.
-   * Interim IPC channel bridging the frontend sidebar dot until the
-   * tRPC ipcLink (orchestrator-and-trpc-router epic) is fully wired.
+   * Interim IPC channel bridging the frontend sidebar dot until TASK-715
+   * migrates the renderer to the tRPC transport (TASK-716 then deletes this).
    *
-   * Returns { status: 'starting', restartAttempts: 0 } when the
-   * OrchestratorHealth singleton has not yet been injected via
-   * setCyboflowHealth(), ensuring the sidebar dot shows yellow rather
-   * than erroring out on first paint.
+   * Reads from the SAME OrchestratorHealth singleton as the tRPC
+   * cyboflow.health.mcpServer procedure via getHealthProvider(), so both
+   * surfaces are always in sync.  Falls back to HEALTH_STARTING before
+   * setHealthProvider() is called at boot.
    */
   ipcMain.handle('cyboflow:mcp-health', () => {
-    if (_orchestratorHealth === null) {
+    const health = getHealthProvider();
+    if (health === null) {
       return HEALTH_STARTING;
     }
-    return _orchestratorHealth.getMcpServerStatus();
+    return health.getMcpServerStatus();
   });
 }
 
