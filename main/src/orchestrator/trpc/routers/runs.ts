@@ -13,6 +13,7 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
+import { getStuckInspectionHandler } from '../../inspectorQueries';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -25,7 +26,7 @@ import type { ApprovalRouter } from '../../approvalRouter';
 //
 // Injected at boot by main/src/index.ts via setCancelAndRestartDeps().
 // All fields are optional so the router compiles during the workflow-runs epic
-// before wiring is complete — the mutation throws NOT_IMPLEMENTED when deps
+// before wiring is complete — the mutation throws METHOD_NOT_SUPPORTED when deps
 // are absent rather than crashing the process.
 // ---------------------------------------------------------------------------
 
@@ -37,7 +38,7 @@ let cancelAndRestartDeps: CancelAndRestartDeps | null = null;
  * Called once at boot by main/src/index.ts after the DB, ApprovalRouter,
  * RunQueueRegistry, and ClaudeCodeManager have been initialized.
  *
- * Until this is called the mutation throws NOT_IMPLEMENTED (same as
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED (same as
  * all other stub procedures in this router).
  */
 export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
@@ -192,7 +193,7 @@ export const runsRouter = router({
    *
    * Standalone-typecheck invariant: the real collaborators (db, approvalRouter,
    * runQueues, claudeManagerStop) are injected via setCancelAndRestartDeps().
-   * Until that is called the mutation throws NOT_IMPLEMENTED.
+   * Until that is called the mutation throws METHOD_NOT_SUPPORTED.
    */
   cancelAndRestart: protectedProcedure
     .input(z.object({ runId: z.string() }))
@@ -218,37 +219,26 @@ export const runsRouter = router({
    * Principal scoping: v1 uses userId === 'local' for all runs. The guard
    * is structurally present for forward compatibility when the v2 team-tier
    * swap introduces real per-user scoping.
-   *
-   * Implementation note: ctx.db is not yet wired into the tRPC context
-   * (pending approval-router epic). The handler function
-   * `getStuckInspectionHandler` in main/src/trpc/routers/runs.ts is
-   * directly testable without the tRPC wrapper; the procedure stub throws
-   * NOT_IMPLEMENTED until ctx.db is wired.
-   *
-   * TODO(workflow-runs epic): replace stub with:
-   *   if (ctx.principal.userId !== 'local') {
-   *     throw new TRPCError({ code: 'FORBIDDEN' });
-   *   }
-   *   const result = getStuckInspectionHandler(ctx.db, input.runId);
-   *   if (!result) throw new TRPCError({ code: 'NOT_FOUND' });
-   *   return result;
    */
   getStuckInspection: protectedProcedure
     .input(z.object({ runId: z.string() }))
     .query(async ({ ctx, input }): Promise<StuckInspectionResult> => {
-      // Principal scoping — structurally present for v2 forward-compat.
-      // In v1, ctx.userId is always 'local', matching the implicit run ownership.
       if (ctx.userId !== 'local') {
         throw new TRPCError({ code: 'FORBIDDEN' });
       }
-      // STUB — tRPC is the actual call path (StuckInspectorModal); implementation pending workflow-runs epic.
-      // DB not yet wired into tRPC context (approval-router epic).
-      // Throw NOT_IMPLEMENTED so the modal surfaces a visible error rather than
-      // silently returning empty data.
-      void input; // consumed once DB is wired
-      throw new TRPCError({
-        code: 'NOT_IMPLEMENTED',
-        message: `getStuckInspection is not wired yet (workflow-runs epic). runId=${input.runId}`,
-      });
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      const result = getStuckInspectionHandler(ctx.db, input.runId);
+      if (result === null) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Run ${input.runId} not found`,
+        });
+      }
+      return result;
     }),
 });
