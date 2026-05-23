@@ -84,8 +84,6 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
       }
 
       console.log('[SetupTasksPanel] Successfully set run script to ./cyboflow-run.sh');
-      
-      // TODO(TASK-691): SetupTasksPanel will be deleted with the SessionView retirement
     } catch (error) {
       console.error('Error updating project settings:', error);
       alert(`Error updating project settings: ${error}`);

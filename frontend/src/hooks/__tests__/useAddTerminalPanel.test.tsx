@@ -59,7 +59,7 @@ const MOCK_SESSION = {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView pattern)', () => {
+describe('useAddTerminalPanel — happy path with onAfterActivate (RunView pattern)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreatePanel.mockResolvedValue(MOCK_PANEL);
@@ -68,7 +68,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView p
 
   it('calls panelApi.createPanel with the correct shape', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'SessionView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'RunView' })
     );
     await act(async () => { await result.current(); });
 
@@ -83,7 +83,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView p
 
   it('calls addPanel with the returned panel', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'SessionView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'RunView' })
     );
     await act(async () => { await result.current(); });
 
@@ -93,7 +93,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView p
 
   it('calls setActivePanelInStore with sessionId and panelId', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'SessionView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'RunView' })
     );
     await act(async () => { await result.current(); });
 
@@ -103,7 +103,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView p
 
   it('calls panelApi.setActivePanel with sessionId and panelId', async () => {
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { logTag: 'SessionView' })
+      useAddTerminalPanel(MOCK_SESSION, { logTag: 'RunView' })
     );
     await act(async () => { await result.current(); });
 
@@ -114,7 +114,7 @@ describe('useAddTerminalPanel — happy path with onAfterActivate (SessionView p
   it('invokes onAfterActivate with sessionId and panelId when provided', async () => {
     const onAfterActivate = vi.fn();
     const { result } = renderHook(() =>
-      useAddTerminalPanel(MOCK_SESSION, { onAfterActivate, logTag: 'SessionView' })
+      useAddTerminalPanel(MOCK_SESSION, { onAfterActivate, logTag: 'RunView' })
     );
     await act(async () => { await result.current(); });
 
