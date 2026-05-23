@@ -12,7 +12,7 @@ export interface UseAddTerminalPanelSession {
 }
 
 export interface UseAddTerminalPanelOptions {
-  /** Optional side-effect run after the panel is activated. Used by SessionView to track navigation history. */
+  /** Optional side-effect run after the panel is activated. Used to track navigation history. */
   onAfterActivate?: (sessionId: string, panelId: string) => void;
   /** Log tag for the no-session guard's console.warn. Defaults to 'useAddTerminalPanel'. */
   logTag?: string;
@@ -23,8 +23,8 @@ export interface UseAddTerminalPanelOptions {
  * registers it in the panel store, marks it active, and fires the optional onAfterActivate
  * side-effect. The callback is a no-op (with a console.warn) when session is null/undefined.
  *
- * Shared by ProjectView and SessionView so future changes to panelApi.createPanel's
- * input shape (or to the post-create activation sequence) propagate to both call sites.
+ * Shared by ProjectView and other views so future changes to panelApi.createPanel's
+ * input shape (or to the post-create activation sequence) propagate to all call sites.
  */
 export function useAddTerminalPanel(
   session: UseAddTerminalPanelSession | null | undefined,

@@ -316,8 +316,8 @@ Two valid categories:
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical examples (Crystal-preserved):** `main/src/services/worktreeManager.ts:472`
-  (method-group), `frontend/src/components/SessionView.tsx:14` (import-line)
+- **Canonical example (Crystal-preserved):** `main/src/services/worktreeManager.ts:472`
+  (method-group)
 - **Canonical example (forward-looking placeholder):**
   `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
   (Day-3 ApprovalRouter integration point)
