@@ -4,8 +4,6 @@ import { useSession } from '../../contexts/SessionContext';
 import { panelApi } from '../../services/panelApi';
 import { API } from '../../utils/api';
 import type { SetupTasksPanelState } from '../../../../shared/types/panels';
-import { CreateSessionDialog } from '../CreateSessionDialog';
-
 interface SetupTask {
   id: string;
   title: string;
@@ -27,8 +25,6 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
   const [tasksStatus, setTasksStatus] = useState<Record<string, boolean>>({});
   const [isChecking, setIsChecking] = useState(false);
   const [expandedTask, setExpandedTask] = useState<string | null>(null);
-  const [showSessionDialog, setShowSessionDialog] = useState(false);
-
   // Get project info from session context
   const projectId = sessionContext?.projectId;
 
@@ -89,8 +85,7 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
 
       console.log('[SetupTasksPanel] Successfully set run script to ./cyboflow-run.sh');
       
-      // Now open the session dialog with the specific prompt
-      setShowSessionDialog(true);
+      // TODO(TASK-691): SetupTasksPanel will be deleted with the SessionView retirement
     } catch (error) {
       console.error('Error updating project settings:', error);
       alert(`Error updating project settings: ${error}`);
@@ -446,19 +441,6 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
         </div>
       </div>
       
-      {/* Create Session Dialog for run script */}
-      <CreateSessionDialog
-        isOpen={showSessionDialog}
-        onClose={() => {
-          setShowSessionDialog(false);
-          // Refresh task status after dialog closes
-          setTimeout(() => checkAllTasks(), 500);
-        }}
-        projectId={parseInt(projectId)}
-        projectName={sessionContext?.projectName}
-        initialPrompt="Create a new file cyboflow-run.sh that launches this project. Before launching, the script should safely kill any other running instances of the project."
-        initialSessionName="build-run-script"
-      />
     </div>
   );
 };

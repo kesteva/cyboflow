@@ -3,8 +3,6 @@ import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Sett
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
-// @cyboflow-hidden: SessionListItem — TASK-689 owns its deletion. Grep anchor preserved.
-import { CreateSessionDialog } from './CreateSessionDialog';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -78,8 +76,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingArchived, setIsLoadingArchived] = useState(false);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [selectedProjectForCreate, setSelectedProjectForCreate] = useState<Project | null>(null);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [selectedProjectForSettings, setSelectedProjectForSettings] = useState<Project | null>(null);
   const [showAddProjectDialog, setShowAddProjectDialog] = useState(false);
@@ -327,24 +323,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       loadFoldersForProjects(projectsWithRuns);
     }
   }, [projectsWithRuns.length]);
-
-  // Keyboard shortcut for new session
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'N') {
-        e.preventDefault();
-        const activeProject = projectsWithRuns.find(p => p.id === activeProjectId) || projectsWithRuns[0];
-        if (activeProject) {
-          setSelectedProjectForCreate(activeProject);
-          setShowCreateDialog(true);
-        } else {
-          showError({ title: 'No Project Available', error: 'Please create or select a project first.' });
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectsWithRuns, activeProjectId]);
 
   // Track running project scripts
   useEffect(() => {
@@ -651,11 +629,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       showError({ title: 'Failed to run script', error: error instanceof Error ? error.message : 'Unknown error occurred' });
     }
   }, [showError, runningProjectId, closingProjectId]);
-
-  const handleCreateSession = (project: Project) => {
-    setSelectedProjectForCreate(project);
-    setShowCreateDialog(true);
-  };
 
   // ---------------------------------------------------------------------------
   // Project creation
@@ -1060,15 +1033,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                     </div>
 
                     <button
-                      onClick={(e) => { e.stopPropagation(); handleCreateSession(project); }}
-                      className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-all opacity-0 group-hover:opacity-100"
-                      title="New Session"
-                    >
-                      <Plus className="w-3 h-3" />
-                      <span>New Session</span>
-                    </button>
-
-                    <button
                       onClick={(e) => handleRefreshProjectGitStatus(project, e)}
                       disabled={refreshingProjects.has(project.id)}
                       className={`p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-all opacity-0 group-hover:opacity-100 ${
@@ -1282,19 +1246,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
           )}
         </div>
       </div>
-
-      {/* CreateSessionDialog — preserved (TASK-689 owns deletion) */}
-      {showCreateDialog && (
-        <CreateSessionDialog
-          isOpen={showCreateDialog}
-          onClose={() => {
-            setShowCreateDialog(false);
-            setSelectedProjectForCreate(null);
-          }}
-          projectName={selectedProjectForCreate?.name}
-          projectId={selectedProjectForCreate?.id}
-        />
-      )}
 
       {selectedProjectForSettings && (
         <ProjectSettings
