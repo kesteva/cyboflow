@@ -6,14 +6,14 @@
  * Component call sites are unchanged when the internals are swapped.
  *
  * IPC channels:
- *   cyboflow:listWorkflows  — list workflows for a project (+ auto-seed)
  *   cyboflow:startRun       — launch a new workflow run
  *   cyboflow:stream:<runId> — push channel for stream events (renderer-side only)
  *   cyboflow:approveRun     — approve / deny a day-3 gate approval request
  *   cyboflow:mcp-health     — polled by mcpHealthStore (removed from this util in TASK-626)
+ *
+ * NOTE: listWorkflows and listRuns have been migrated to tRPC (TASK-714).
+ *   Use trpc.cyboflow.workflows.list and trpc.cyboflow.runs.list instead.
  */
-import type { WorkflowRow } from '../../../shared/types/workflows';
-import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 import type { IPCResponse } from './api';
 import type {
   SystemInitEvent,
@@ -63,24 +63,6 @@ export interface StartRunResult {
 }
 
 /**
- * Subset of `WorkflowRunRow` (shared/types/cyboflow.ts) returned by cyboflow:listRuns.
- * Intentionally excludes `policy_json` (not needed by the sidebar list view).
- */
-export interface WorkflowRunListRow {
-  id: string;
-  workflow_id: string;
-  project_id: number;
-  status: WorkflowRunStatus;
-  worktree_path: string | null;
-  branch_name: string | null;
-  created_at: string;
-  updated_at: string;
-  started_at: string | null;
-  ended_at: string | null;
-  stuck_reason: string | null;
-}
-
-/**
  * Discriminated union over all IPC envelope `type` values the renderer can receive.
  *
  * Derived from the shared `StreamEnvelope` discriminant in
@@ -103,19 +85,8 @@ function requireElectron(): NonNullable<Window['electron']> {
 }
 
 // ---------------------------------------------------------------------------
-// Named function exports (AC5: at least 4 named exports matching the contract)
+// Named function exports
 // ---------------------------------------------------------------------------
-
-/**
- * List the workflows registered for a project.
- * The main-process handler auto-seeds the 5 SoloFlow defaults on first call.
- */
-export async function listWorkflows({ projectId }: { projectId: number }): Promise<WorkflowRow[]> {
-  const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:listWorkflows', { projectId }) as IPCResponse<WorkflowRow[]>;
-  if (!res.success) throw new Error(res.error ?? 'listWorkflows failed');
-  return res.data ?? [];
-}
 
 /**
  * Launch a new workflow run for the given workflow.
@@ -192,25 +163,12 @@ export async function approveRun({
   if (!res.success) throw new Error(res.error ?? 'approveRun failed');
 }
 
-/**
- * List the workflow runs for a project, newest first.
- * Returns a lightweight row (policy_json excluded).
- */
-export async function listRuns({ projectId }: { projectId: number }): Promise<WorkflowRunListRow[]> {
-  const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:listRuns', { projectId }) as IPCResponse<WorkflowRunListRow[]>;
-  if (!res.success) throw new Error(res.error ?? 'listRuns failed');
-  return res.data ?? [];
-}
-
 // ---------------------------------------------------------------------------
 // Convenience object — re-exports the named functions for callers that prefer
 // a namespace import (`cyboflowApi.startRun(...)`)
 // ---------------------------------------------------------------------------
 
 export const cyboflowApi = {
-  listWorkflows,
-  listRuns,
   startRun,
   subscribeToStreamEvents,
   approveRun,

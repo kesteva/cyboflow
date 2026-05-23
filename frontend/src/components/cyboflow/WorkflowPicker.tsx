@@ -1,12 +1,14 @@
 /**
  * WorkflowPicker — dropdown of the 5 SoloFlow workflows + Start Run button.
  *
- * Accepts a `projectId` prop; on mount it calls `cyboflowApi.listWorkflows`
+ * Accepts a `projectId` prop; on mount it calls `trpc.cyboflow.workflows.list`
  * and populates a `<select>`.  Clicking "Start Run" calls
  * `cyboflowApi.startRun` and stores the returned runId in `cyboflowStore`.
+ * (startRun cutover to tRPC is handled in TASK-715.)
  */
 import { useState, useEffect } from 'react';
 import { cyboflowApi } from '../../utils/cyboflowApi';
+import { trpc } from '../../utils/trpcClient';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 
@@ -27,8 +29,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     setIsLoading(true);
     setError(null);
 
-    cyboflowApi
-      .listWorkflows({ projectId })
+    trpc.cyboflow.workflows.list
+      .query({ projectId })
       .then((rows) => {
         if (cancelled) return;
         setWorkflows(rows);
