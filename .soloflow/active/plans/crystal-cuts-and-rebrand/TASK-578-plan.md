@@ -1,7 +1,7 @@
 ---
 id: TASK-578
 idea: SPRINT-006-compound
-status: in-flight
+status: done
 created: "2026-05-14T00:00:00Z"
 files_owned:
   - frontend/src/components/AboutDialog.tsx
