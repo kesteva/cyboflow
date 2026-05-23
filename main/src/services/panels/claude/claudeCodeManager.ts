@@ -93,7 +93,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * in this SDK path) and the cyboflow MCP server.
    */
   setOrchSocketPath(socketPath: string): void {
+    // TODO(epic-7): first production caller is the OrchSocketProvider wiring task.
+    // Until that task lands, composeMcpServers() always takes the orchSocketPath=null branch
+    // and no cyboflow_* tools are surfaced to Claude sessions.
     this.orchSocketPath = socketPath;
+    // Eagerly kick off node-path resolution at boot so the first session never
+    // races against a not-yet-resolved promise.  The result is stored as a
+    // Promise field; composeMcpServers() awaits it rather than polling.
+    this.cachedNodePathPromise = findNodeExecutable();
   }
 
   /** Active SDK runs, keyed by panelId. */
@@ -110,10 +117,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private orchSocketPath: string | null = null;
 
   /**
-   * Cached node executable path for the cyboflow MCP entry.
-   * Populated lazily on first composeMcpServers() call that needs it.
+   * Cached promise for the node executable path used in the cyboflow MCP entry.
+   * Populated eagerly inside setOrchSocketPath() so the path is resolved before
+   * the first composeMcpServers() call. Awaited (not polled) in composeMcpServers().
    */
-  private cachedNodePath: string | null = null;
+  private cachedNodePathPromise: Promise<string> | null = null;
 
   /**
    * Narrower owned by this manager. Every SDK event flows through
@@ -249,7 +257,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
 
       // Build SDK options.
-      const sdkOptions = this.buildSdkOptions(options);
+      const sdkOptions = await this.buildSdkOptions(options);
 
       // Set up the per-run pipeline (EventRouter + RawEventsSink).
       const runId = panelId;
@@ -394,7 +402,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // SDK options builder
   // ---------------------------------------------------------------------------
 
-  private buildSdkOptions(options: ClaudeSpawnOptions): Options {
+  private async buildSdkOptions(options: ClaudeSpawnOptions): Promise<Options> {
     const sdkOptions: Options = {
       cwd: options.worktreePath,
       includePartialMessages: true,
@@ -403,7 +411,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         preset: 'claude_code',
         append: this.composeSystemPromptAppend(options) ?? undefined,
       },
-      mcpServers: this.composeMcpServers(options),
+      mcpServers: await this.composeMcpServers(options),
       env: this.composeRunEnv(options),
       // Isolate from ~/.claude/settings.json: the user's interactive-mode
       // permission rules (e.g. defaultMode: 'auto' + Bash(...) allow list)
@@ -458,22 +466,23 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * cyboflow_list_pending_approvals, cyboflow_get_run, and
    * cyboflow_submit_checkpoint during the session.
    */
-  private composeMcpServers(options: ClaudeSpawnOptions): Record<string, McpServerConfig> {
+  private async composeMcpServers(options: ClaudeSpawnOptions): Promise<Record<string, McpServerConfig>> {
     const { mcpServers } = this.getBaseProjectMcpServers(options.sessionId);
 
     if (this.orchSocketPath) {
       try {
         const cyboflowMcpScriptPath = resolveMcpServerScriptPath();
-        // Use cached node path or fall back to 'node' if not yet resolved.
-        // The full async resolution runs in the background; most sessions will
-        // use the cached value from a prior call.
-        const nodeCmd = this.cachedNodePath ?? 'node';
-
-        // Kick off async resolution so subsequent sessions get the real path.
-        if (!this.cachedNodePath) {
-          void findNodeExecutable().then((resolved) => {
-            this.cachedNodePath = resolved;
-          });
+        // Await the eagerly-started promise so we always get the real node path.
+        // If the promise rejects (node not found) we warn and skip the cyboflow
+        // entry — never ship a broken command:'node' fallback.
+        let nodeCmd: string;
+        try {
+          nodeCmd = await (this.cachedNodePathPromise ?? (this.cachedNodePathPromise = findNodeExecutable()));
+        } catch (nodeErr) {
+          this.logger?.warn(
+            `[ClaudeCodeManager] Could not resolve node executable; omitting cyboflow MCP entry: ${nodeErr instanceof Error ? nodeErr.message : String(nodeErr)}`,
+          );
+          return mcpServers as Record<string, McpServerConfig>;
         }
 
         const cyboflowEntry: McpServerConfig = {

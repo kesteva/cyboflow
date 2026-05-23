@@ -96,15 +96,17 @@ describe('TypedEventNarrowing', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Passthrough — unknown fields survive narrowing
+  // Strip behavior — outer-schema unknown fields are stripped (Option 3 — TASK-656)
   // -------------------------------------------------------------------------
 
-  it('preserves unknown/extra fields on a known variant (.passthrough() contract)', () => {
+  it('strips unknown/extra top-level fields on a known variant (outer schemas use strip mode after TASK-656)', () => {
     const withExtra = { ...systemInit(), future_unannounced_field: 'test-value' };
 
     const event = narrower.narrow(withExtra);
+    // Event still narrows to the correct typed variant (not __unknown__)
     expect('kind' in event).toBe(false);
-    expect(event).toHaveProperty('future_unannounced_field', 'test-value');
+    // Outer unknown field is stripped — Option 3 trade-off (TASK-656)
+    expect(event).not.toHaveProperty('future_unannounced_field');
   });
 
   // -------------------------------------------------------------------------

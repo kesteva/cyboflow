@@ -12,6 +12,7 @@
  */
 import { router, publicProcedure } from '../trpc';
 import type { OrchestratorHealth } from '../../health';
+import { HEALTH_STARTING } from '../../../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
 // Module-level injectable singleton (set once at app boot via setHealthProvider)
@@ -42,7 +43,7 @@ export const healthRouter = router({
    */
   mcpServer: publicProcedure.query(() => {
     if (_health === null) {
-      return { status: 'starting' as const, restartAttempts: 0 };
+      return HEALTH_STARTING;
     }
     return _health.getMcpServerStatus();
   }),

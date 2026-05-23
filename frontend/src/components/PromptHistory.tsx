@@ -79,7 +79,6 @@ export function PromptHistory() {
       try {
         const response = await API.prompts.getByPromptId(promptItem.id);
         if (response.success && response.data) {
-          // Dispatch an event that SessionView can listen for
           window.dispatchEvent(new CustomEvent('navigateToPrompt', {
             detail: {
               sessionId: promptItem.sessionId,
