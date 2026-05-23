@@ -13,28 +13,14 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { execSync } from 'child_process';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
 import { join } from 'path';
 import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../routers/approvals';
 import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
+import { createTestDb, seedRun, seedApproval } from '../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Test-database helpers
 // ---------------------------------------------------------------------------
-
-const SCHEMA_PATH = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-/** Creates a fresh in-memory SQLite database with the cyboflow schema applied. */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
 
 /**
  * Seed helper: insert a workflow + workflow_run + N pending approvals.
@@ -42,31 +28,17 @@ function createTestDb(): Database.Database {
  * Returns the array of inserted approval IDs.
  */
 function seedPendingApprovals(
-  db: Database.Database,
+  db: ReturnType<typeof createTestDb>,
   runId: string,
   count: number,
 ): string[] {
-  const workflowId = `workflow-${runId}`;
-  db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, 'test-workflow', '{}')`,
-  ).run(workflowId);
-
-  db.prepare(
-    `INSERT OR IGNORE INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json)
-     VALUES (?, ?, 1, '/tmp/test', 'running', '{}')`,
-  ).run(runId, workflowId);
+  seedRun(db, { id: runId });
 
   const ids: string[] = [];
   for (let i = 0; i < count; i++) {
     const approvalId = `${runId}-approval-${i}`;
     ids.push(approvalId);
-    db.prepare(
-      `INSERT INTO approvals
-         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-       VALUES (?, ?, 'Bash', '{}', ?, 'pending', datetime('now'))`,
-    ).run(approvalId, runId, approvalId);
+    seedApproval(db, { id: approvalId, runId, toolName: 'Bash' });
   }
 
   return ids;
