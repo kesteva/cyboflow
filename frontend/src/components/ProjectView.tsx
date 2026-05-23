@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useSessionStore } from '../stores/sessionStore';
 import { Session } from '../types/session';
 import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
@@ -38,15 +37,12 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
   // Derived local — used by hooks that expect a sessionId string.
   const mainRepoSessionId = mainRepoSession?.id ?? null;
 
-  // Activate session in the session store whenever the main-repo session changes.
-  // This mirrors the original ProjectView behaviour so session-scoped panels
-  // (ClaudePanel → useClaudePanel) see the right active session.
+  // Clear the loading spinner once the hook has resolved the main-repo session.
+  // Session activation is handled inside usePanelSurface — no need to call it here.
   useEffect(() => {
-    if (!mainRepoSession) return;
-    setIsLoadingSession(false);
-    useSessionStore.getState().setActiveSession(mainRepoSession.id).catch((err) => {
-      console.error('[ProjectView] Failed to set active session in store:', err);
-    });
+    if (mainRepoSession) {
+      setIsLoadingSession(false);
+    }
   }, [mainRepoSession]);
 
   // Show loading indicator while the panel surface hasn't resolved yet.
