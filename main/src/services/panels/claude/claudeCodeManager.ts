@@ -121,13 +121,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * validated boundary into raw_events. Fail-soft: returns
    * `{ kind: '__unknown__', raw }` on Zod failure, never throws.
    *
-   * Internal construction (not constructor-injected) keeps cliManagerFactory
-   * call sites unchanged. The narrower has no per-instance state besides an
-   * optional verbose-logger, so a fresh instance per manager is the right
-   * granularity. Tests inject behavior via the SDK query() mock, not the
-   * narrower.
+   * Constructed in the constructor body after super() so this.logger is
+   * available — passing the logger enables verbose Zod-failure diagnostics
+   * per the CLAUDE.md optional-logger rule.
    */
-  private readonly narrowing: TypedEventNarrowing = new TypedEventNarrowing();
+  private readonly narrowing: TypedEventNarrowing;
 
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
@@ -139,6 +137,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (db == null) {
       throw new TypeError('[ClaudeCodeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
+    this.narrowing = new TypedEventNarrowing(this.logger);
   }
 
   // ---------------------------------------------------------------------------

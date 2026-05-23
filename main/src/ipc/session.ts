@@ -19,6 +19,7 @@ import type { SerializedArchiveTask } from '../services/archiveProgressManager';
 import { MessageProjection, TypedEventNarrowing } from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionOutput } from '../types/session';
+import type { Logger } from '../utils/logger';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -40,8 +41,9 @@ import type { SessionOutput } from '../types/session';
 export function projectStoredOutputs(
   outputs: SessionOutput[],
   panelId: string,
+  logger?: Logger,
 ): UnifiedMessage[] {
-  const narrower = new TypedEventNarrowing();
+  const narrower = new TypedEventNarrowing(logger);
   const projection = new MessageProjection(panelId);
   const result: UnifiedMessage[] = [];
 
@@ -950,7 +952,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       const outputs = await sessionManager.getPanelOutputs(panelId);
-      const unifiedMessages = projectStoredOutputs(outputs, panelId);
+      const unifiedMessages = projectStoredOutputs(outputs, panelId, services.logger);
 
       console.log(`[IPC] panel ${panelId}: projected ${unifiedMessages.length} UnifiedMessages from ${outputs.length} raw outputs`);
       return { success: true, data: unifiedMessages };

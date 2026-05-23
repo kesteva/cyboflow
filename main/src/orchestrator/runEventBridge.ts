@@ -152,7 +152,12 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
   }
 
   // narrowing is always needed (used unconditionally in the publish envelope path).
-  const narrowing: TypedEventNarrowing = opts.narrowing ?? new TypedEventNarrowing();
+  // LoggerLike (info/warn/error/debug) lacks the `verbose` method TypedEventNarrowing
+  // expects, so adapt the orchestrator's debug channel to the streamParser's ILogger.
+  const narrowingLogger = logger
+    ? { verbose: (m: string) => logger.debug(m) }
+    : undefined;
+  const narrowing: TypedEventNarrowing = opts.narrowing ?? new TypedEventNarrowing(narrowingLogger);
 
   // When skipPersistence is true, skip EventRouter + RawEventsSink construction
   // entirely. The opts.router / opts.sink injection seams (used by tests) are
