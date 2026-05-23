@@ -32,6 +32,8 @@ import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { registerCyboflowHandlers, setCyboflowHealth } from '../cyboflow';
+import { appRouter } from '../../orchestrator/trpc/router';
+import { createContext } from '../../orchestrator/trpc/context';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -427,6 +429,31 @@ describe('registerCyboflowHandlers — cyboflow:mcp-health', () => {
     expect(result.status).toBe('failed');
     expect(result.lastError).toBe('subprocess exited with code 1');
     expect(result.restartAttempts).toBe(2);
+  });
+
+  it('IPC handler and tRPC cyboflow.health.mcpServer return the same snapshot (parity)', async () => {
+    const db = createTestDb();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerCyboflowHandlers(
+      ipcMain as unknown as Parameters<typeof registerCyboflowHandlers>[0],
+      makeServices(db),
+    );
+
+    const mockStatus = { status: 'running' as const, restartAttempts: 3, lastError: undefined };
+    const mockHealth = {
+      getMcpServerStatus: vi.fn(() => mockStatus),
+      setMcpError: vi.fn(),
+    };
+
+    // A single setCyboflowHealth call must wire both the IPC singleton and the
+    // tRPC setHealthProvider so both surfaces return the same snapshot.
+    setCyboflowHealth(mockHealth as unknown as Parameters<typeof setCyboflowHealth>[0]);
+
+    const ipcResult = await invoke(handlers, 'cyboflow:mcp-health', undefined);
+    const trpcResult = await appRouter.createCaller(createContext()).cyboflow.health.mcpServer();
+
+    expect(ipcResult).toEqual(trpcResult);
+    expect(trpcResult).toEqual(mockStatus);
   });
 });
 
