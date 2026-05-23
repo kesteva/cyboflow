@@ -385,10 +385,20 @@ export const claudeStreamEventSchema = z.union([
 const _typeCheck: ClaudeStreamEvent = {} as z.infer<typeof claudeStreamEventSchema>;
 void _typeCheck;
 
-// Reverse bridge: assert ClaudeStreamEvent is assignable to z.infer<schema>.
-// Together with _typeCheck above, this forces TS↔Zod to stay structurally
-// equal — fields added to the TS union but missing from the Zod schema
-// (or vice versa) produce a `tsc --noEmit` error at this line.
+// Reverse bridge: asserts ClaudeStreamEvent (minus the three exclusions below)
+// is assignable to z.infer<schema>. Together with _typeCheck above, this
+// catches REQUIRED-field drift in both directions — a required field added
+// to the TS union but missing from the Zod schema (or vice versa) produces a
+// `tsc --noEmit` error at this line.
+//
+// Known gap (FIND-SPRINT-020-3): optional fields (`?:`) added to a TS
+// interface are NOT caught here. TS treats absence and `undefined` as
+// assignment-compatible, so the bridge cannot distinguish "schema doesn't
+// model this field" from "field is just absent in this instance." Optional-
+// field drift surfaces only at runtime via the `__unknown__` fallback when a
+// downstream consumer needs the field. Option 2 (eliminate the drift surface
+// by collapsing to `z.infer`) would close this gap; deferred per TASK-656.
+//
 // Requires outer schemas to have no .passthrough() (Option 3 — TASK-656).
 //
 // SystemApiRetryEvent, SystemCompactEvent: intentionally-omitted legacy CLI
