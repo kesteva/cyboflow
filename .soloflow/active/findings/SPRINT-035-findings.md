@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
 pending_count: 2
-last_updated: "2026-05-23T23:30:00.000Z"
+last_updated: "2026-05-23T23:25:00.000Z"
 ---
 # Findings Queue
 
@@ -43,4 +43,13 @@ last_updated: "2026-05-23T23:30:00.000Z"
 - **location:** main/src/orchestrator/trpc/routers/workflows.ts:21,41 and main/src/orchestrator/trpc/routers/approvals.ts (whole file)
 - **description:** Principal-scoping enforcement is inconsistent across the orchestrator tRPC routers. `runs.ts` re-asserts `ctx.userId !== 'local'` → `TRPCError FORBIDDEN` at the top of every procedure (list, cancel, cancelAndRestart, getStuckInspection — 4 sites), but the newly-implemented `workflows.list`/`workflows.get` (TASK-711) and the live `approvals.*` procedures rely only on `protectedProcedure`'s `userId` truthiness check. In v1 this is functionally equivalent because `createContext()` hard-codes `'local'`, but the docblock in `context.ts` explicitly anticipates a v2 team-tier swap that replaces `'local'` with a real session principal — at that point the workflows + approvals procedures would silently lose principal scoping while the runs procedures retain it. The TASK-711 plan ACs did not require this guard, so its omission is consistent with the plan and not a TASK-711 regression — it is a pre-existing project-wide inconsistency that the new procedures inherit.
 - **suggested_action:** When the v2 session-token swap is planned (or sooner — under a small "tRPC principal-scoping hardening" task), choose one canonical pattern (either lift the `userId !== 'local'` check into a `localOnlyProcedure = protectedProcedure.use(...)` middleware reused everywhere, or remove it from `runs.ts` if it is redundant with the v2 plan) and apply it uniformly across `routers/runs.ts`, `routers/workflows.ts`, and `routers/approvals.ts`.
-- **resolved_by:**
+- **resolved_by:** 
+
+## FIND-SPRINT-035-5
+- **type:** scope_deviation
+- **source:** TASK-712 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/__tests__/router.test.ts:94
+- **description:** required to meet AC: test used projectId: string (old stub schema); after runs.start rewire, schema requires z.number().int().positive(). Test also expected NOT_IMPLEMENTED but now METHOD_NOT_SUPPORTED fires when deps absent. Test updated to match new schema and behavior.
+- **resolved_by:** verifier — not actually a scope deviation: `main/src/orchestrator/trpc/__tests__/router.test.ts` is listed in TASK-712's `files_owned` (line 9 of plan). The executor mislabeled an in-scope edit as a deviation. The edit is also AC-prescribed (AC8: typecheck must exit 0 — the old `projectId: 'proj-1'` would have type-failed against the new `z.number().int().positive()` schema).
