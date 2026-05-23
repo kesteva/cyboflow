@@ -1,6 +1,6 @@
 ---
 sprint: SPRINT-034
-pending_count: 3
+pending_count: 4
 last_updated: "2026-05-23T21:00:00.000Z"
 ---
 # Findings Queue
@@ -52,3 +52,22 @@ TASK-555 gated: failing blocking prereq (notarytool credentials missing).
 - **location:** main/src/services/streamParser/__tests__/schemas.test.ts
 - **description:** Option 3 implementation requires updating the passthrough-preservation assertions in schemas.test.ts and typedEventNarrowing.test.ts. These files are listed as files_readonly in the plan but the plan body §Option 3 explicitly calls out these test updates as part of the change. Files claimed via claim-file.js (both granted without conflict) to make the changes.
 - **resolved_by:** verifier — plan-prescribed: §Option 3 lines 67-69 explicitly call for updating `schemas.test.ts:357-375` and `typedEventNarrowing.test.ts:100-105` passthrough assertions; both files also appear in `files_owned` (lines 9-10), so the plan frontmatter is internally contradictory but the prescription is unambiguous. Also AC-prescribed: AC4 requires vitest to pass after dropping outer `.passthrough()`, which forces the assertion updates.
+
+## FIND-SPRINT-034-6
+- **type:** scope_deviation
+- **source:** TASK-689 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx:115
+- **description:** required to meet AC: completeness gate found this test file also references CreateSessionDialog via vi.mock. Removing the stale mock is required so grep -rn returns 0 matches for CreateSessionDialog across frontend/src/.
+- **resolved_by:** verifier — not actually a scope deviation: frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx IS listed in the plan's files_owned (line 12 of TASK-689-plan.md frontmatter). Executor mislabeled an in-scope edit as a deviation. Also AC-prescribed: AC line 28 ("No source file under frontend/src/ references the identifier CreateSessionDialog") forces removal of the stale vi.mock.
+
+## FIND-SPRINT-034-7
+- **source:** TASK-689 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/types/electron.d.ts:76
+- **description:** Stale documentation comment references `ProjectTreeView` as one of the local-type definers for the `ProjectWithSessions[]` shape returned by `getAllWithProjects` / `getArchivedWithProjects`. TASK-689 deleted `frontend/src/components/ProjectTreeView.tsx` entirely (unused legacy duplicate), so the comment now points at a nonexistent file. The runtime contract is unchanged — `DraggableProjectTreeView.tsx` still locally defines its own shape and casts the `unknown[]` payload — but the comment misleads a future reader trying to locate the canonical type definition. Out of TASK-689's diff scope (electron.d.ts is not in files_owned).
+- **suggested_action:** Update line 76 to read `// but that type is locally defined in DraggableProjectTreeView.` (drop the ` / ProjectTreeView` suffix). One-line edit, no behavior change.
+- **resolved_by:** 
