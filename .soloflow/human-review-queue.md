@@ -1,8 +1,8 @@
 ---
-pending_count: 24
+pending_count: 26
 buckets:
   decisions: 0
-  actions: 0
+  actions: 2
   testing: 20
   deferred_visual: 4
 items: []
@@ -15,7 +15,25 @@ _No items._
 
 ## Actions
 
-_No items._
+- task: TASK-555
+  type: action_required
+  bucket: actions
+  action: "Configure Apple notarytool credentials: run `xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>`, then set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars"
+  blocked_checks:
+    - "prerequisite: notarytool credentials missing"
+  level: ground_truth
+  severity: high
+
+- task: TASK-618
+  type: action_required
+  bucket: actions
+  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-618-plan.md
+  action: "Run pnpm run build:mac:arm64 once Apple notarytool credentials are configured; verify (1) find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js returns >=1 match (AC2); (2) launch packaged app, create a Claude session, confirm no spawn error in logs and that ~/.cyboflow/cyboflowMcpServer.js was NOT re-created (AC6)."
+  blocked_checks:
+    - "AC2: packaged build contains cyboflowMcpServer.js under app.asar.unpacked/..."
+    - "AC6: packaged app launches without re-extracting MCP server"
+  level: ground_truth
+  severity: medium
 
 ## Testing
 
