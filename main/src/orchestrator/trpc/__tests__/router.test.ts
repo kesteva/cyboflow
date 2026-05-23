@@ -7,12 +7,12 @@
  * Tests:
  *   1. createContext() returns { userId: 'local' }.
  *   2. protectedProcedure accepts a context with userId defined (no UNAUTHORIZED).
- *   3. appRouter.cyboflow.runs.list throws NOT_IMPLEMENTED.
+ *   3. appRouter.cyboflow.runs.list is live (TASK-710) — guard coverage in runs.test.ts.
  *   4. appRouter.cyboflow.approvals.listPending returns [] (working stub — DB not yet wired).
  *   4b. appRouter.cyboflow.approvals.approve returns { success: true } (working stub).
  *   4c. appRouter.cyboflow.approvals.reject returns { success: true } (working stub).
- *   5. appRouter.cyboflow.workflows.list throws NOT_IMPLEMENTED.
- *   6. appRouter.cyboflow.workflows.get throws NOT_IMPLEMENTED.
+ *   5. appRouter.cyboflow.workflows.list is live (TASK-711) — coverage in workflows.test.ts.
+ *   6. appRouter.cyboflow.workflows.get is live (TASK-711) — coverage in workflows.test.ts.
  *   7. cyboflow.events.onStreamEvent is a placeholder: yields zero events before
  *      signal abort and terminates cleanly when the signal is aborted.
  *   8. cyboflow.events.onApprovalCreated is a placeholder: yields zero events
@@ -111,15 +111,9 @@ describe('appRouter (createCaller)', () => {
   // see main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts for
   // integration coverage against ApprovalRouter + real SQLite.
 
-  it('cyboflow.workflows.list throws NOT_IMPLEMENTED', async () => {
-    await expect(caller.cyboflow.workflows.list()).rejects.toSatisfy(isNotImplemented);
-  });
-
-  it('cyboflow.workflows.get throws NOT_IMPLEMENTED', async () => {
-    await expect(
-      caller.cyboflow.workflows.get({ workflowId: 'wf-1' }),
-    ).rejects.toSatisfy(isNotImplemented);
-  });
+  // cyboflow.workflows procedures (list, get) are live (TASK-711) —
+  // see main/src/orchestrator/trpc/routers/__tests__/workflows.test.ts for
+  // integration coverage against WorkflowRegistry + real SQLite.
 
   it('cyboflow.events.setBadgeCount forwards count to ctx.setDockBadge', async () => {
     const captured: number[] = [];
