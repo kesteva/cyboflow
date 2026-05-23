@@ -83,6 +83,7 @@ function setAppTitle() {
 let taskQueue: TaskQueue | null = null;
 let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
+let workflowRegistry: WorkflowRegistry;
 
 // Service instances
 let configManager: ConfigManager;
@@ -513,7 +514,7 @@ async function initializeServices() {
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
   const cyboflowDb = makeDatabaseLike(databaseService);
-  const workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
+  workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
   const mcpConfigWriter = new McpConfigWriter();
 
   // Concrete publisher: adapts BrowserWindow.webContents.send to the
@@ -688,7 +689,7 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count) }),
+      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count), workflowRegistry }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
