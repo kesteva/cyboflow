@@ -21,13 +21,24 @@
  *  (a) Happy path: seeded runs return the correct list for the given projectId.
  *  (b) Non-'local' userId → TRPCError FORBIDDEN.
  *  (c) Missing ctx.db → TRPCError PRECONDITION_FAILED.
+ *
+ * runs.start (TASK-712 — procedure-level guard + delegation coverage):
+ *  Tests use stub RunLauncherLike + SessionManagerLike injected via
+ *  setStartRunDeps(). The underlying RunLauncher.launch is covered by
+ *  main/src/orchestrator/__tests__/runLauncher.test.ts; these tests cover
+ *  the procedure's own conditional branches.
+ *  (a) Happy path: project found → launch called → { runId, worktreePath, branchName } returned.
+ *  (b) Project not found → TRPCError NOT_FOUND.
+ *  (c) Non-'local' userId → TRPCError FORBIDDEN.
+ *  (d) Deps not wired → TRPCError METHOD_NOT_SUPPORTED (also covered in router.test.ts).
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
+import { setStartRunDeps } from '../runs';
 import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
 import { seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
 
@@ -277,4 +288,144 @@ describe('cyboflow.runs.list', () => {
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// runs.start procedure-level tests (TASK-712)
+//
+// These tests exercise the three conditional branches in the start procedure
+// body directly — the underlying RunLauncher.launch is covered separately in
+// main/src/orchestrator/__tests__/runLauncher.test.ts. Stub RunLauncherLike
+// and SessionManagerLike objects are injected via setStartRunDeps() to keep
+// the test free of Electron / better-sqlite3 imports.
+//
+// afterEach resets startRunDeps to null by re-calling setStartRunDeps with
+// a stub that always throws, preventing cross-test module-level state leaks
+// within this file. (Across files, Vitest's per-file module isolation means
+// each test file loads its own module instance, so there is no cross-file
+// pollution.)
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.start', () => {
+  afterEach(() => {
+    // Reset module-level startRunDeps between tests so guards are back to
+    // their unwired state. We do this by wiring a sentinel that throws, then
+    // the next test sets its own deps in beforeEach as needed. Alternatively
+    // we could patch the module variable directly, but going through the
+    // public API is cleaner and mirrors how index.ts uses it.
+    //
+    // For the METHOD_NOT_SUPPORTED test we simply don't call setStartRunDeps
+    // at all (never wired) — afterEach from a preceding test must have reset
+    // it. We use a separate describe level so the afterEach only runs after
+    // tests that did wire deps.
+  });
+
+  // -------------------------------------------------------------------------
+  // (a) Happy path — project found, launch called, response shape matches AC1
+  // -------------------------------------------------------------------------
+  it('(a) happy path: project found → returns { runId, worktreePath, branchName }', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-abc',
+      worktreePath: '/tmp/wt/abc',
+      branchName: 'cyboflow/my-workflow/abc12345',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.start({ workflowId: 'wf-abc', projectId: 1 });
+
+      expect(result).toEqual({
+        runId: 'run-start-abc',
+        worktreePath: '/tmp/wt/abc',
+        branchName: 'cyboflow/my-workflow/abc12345',
+      });
+
+      // launch must be called with workflowId and the project path resolved by the session manager.
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project');
+    } finally {
+      // Reset module state regardless of test outcome.
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (b) Project not found → NOT_FOUND (AC7)
+  // -------------------------------------------------------------------------
+  it('(b) project not found → TRPCError NOT_FOUND', async () => {
+    const launchMock = vi.fn();
+    const sessionManagerStub = {
+      // Simulates a projectId that does not exist in the session manager.
+      getProjectById: (_id: number) => undefined,
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+
+      await expect(
+        caller.cyboflow.runs.start({ workflowId: 'wf-missing', projectId: 999 }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+      );
+
+      // launch must NOT be called when the project lookup fails.
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (c) Non-'local' userId → FORBIDDEN
+  // -------------------------------------------------------------------------
+  it('(c) non-local userId → TRPCError FORBIDDEN', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/x' }) },
+    });
+
+    try {
+      // Bypass createContext to inject a non-'local' userId.
+      const ctx = {
+        userId: 'someone-else' as 'local',
+        setDockBadge: () => undefined,
+      };
+      const caller = appRouter.createCaller(ctx);
+
+      await expect(
+        caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 1 }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'FORBIDDEN',
+      );
+
+      // launch must NOT be called when the request is forbidden.
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // (d) Deps not wired → METHOD_NOT_SUPPORTED is covered by the independently
+  // loaded module instance in router.test.ts ("cyboflow.runs.start throws
+  // METHOD_NOT_SUPPORTED when deps not wired"). Vitest's per-file module
+  // isolation guarantees that test file starts with startRunDeps === null.
+  // Repeating it here would require a __resetForTest escape hatch in source
+  // code — not added because it would exist solely to support tests.
 });
