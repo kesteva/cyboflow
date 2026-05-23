@@ -12,9 +12,13 @@
  *    and checks info.changes > 0 before writing the allow reply on the socket.
  *    If changes === 0, the run was concurrently canceled — no socket write.
  *
- * 3. Both requestApproval and respond submit their mutations via the per-run
- *    p-queue obtained from the RunQueueRegistry, ensuring serialization of
- *    all state mutations for the same run.
+ * 3. Both requestApproval and respond submit their mutations via an
+ *    ApprovalRouter-owned per-run p-queue (this.approvalQueues), ensuring
+ *    serialization of all approval-mutations for the same run.  This queue
+ *    is intentionally separate from RunQueueRegistry's per-run queue: that
+ *    queue hosts the long-running runExecutor.execute() task, and re-entering
+ *    it from inside a PreToolUse hook would self-deadlock (see
+ *    runQueueRegistry.ts §no-recursive-enqueue rule).
  *
  * 4. The deny path updates approvals.status='rejected' and does NOT touch
  *    workflow_runs.status — Claude will receive the deny on the socket, emit
@@ -95,9 +99,31 @@ export class ApprovalRouter extends EventEmitter {
   private pending = new Map<string, PendingEntry>();
 
   /**
+   * Per-run serialization queues for approval-router mutations.
+   *
+   * MUST be separate from RunQueueRegistry's per-run queues — RunLauncher
+   * already enqueues `runExecutor.execute(runId)` on that queue, and the SDK
+   * PreToolUse hook fires from WITHIN that task. Re-entering the same queue
+   * from inside it would self-deadlock (see runQueueRegistry.ts §no-recursive-
+   * enqueue rule).  Approval mutations therefore live on their own queue here.
+   */
+  private approvalQueues = new Map<string, PQueue>();
+
+  private getApprovalQueue(runId: string): PQueue {
+    let q = this.approvalQueues.get(runId);
+    if (!q) {
+      q = new PQueue({ concurrency: 1 });
+      this.approvalQueues.set(runId, q);
+    }
+    return q;
+  }
+
+  /**
    * @param db              - Narrow DatabaseLike surface (no better-sqlite3 import).
-   * @param getQueueForRun  - Returns (or lazily creates) the per-run PQueue from
-   *                          RunQueueRegistry.  Pass `registry.getOrCreate.bind(registry)`.
+   * @param getQueueForRun  - Retained for backward compatibility with existing
+   *                          callers/tests; NOT used internally.  ApprovalRouter
+   *                          serializes its own mutations via approvalQueues
+   *                          (see field doc above for the rationale).
    */
   constructor(
     private readonly db: DatabaseLike,
@@ -198,7 +224,7 @@ export class ApprovalRouter extends EventEmitter {
       rejectDecision = rej;
     });
 
-    await this.getQueueForRun(runId).add(async () => {
+    await this.getApprovalQueue(runId).add(async () => {
       // Atomic: UPDATE workflow_runs + INSERT approvals in one transaction.
       const txn = this.db.transaction(() => {
         const updateStmt = this.db.prepare(
@@ -279,7 +305,7 @@ export class ApprovalRouter extends EventEmitter {
     // are serialized — the second one finds the entry already gone and
     // returns as a silent no-op, satisfying the exactly-once socketReply
     // contract.
-    await this.getQueueForRun(peek.request.runId).add(async () => {
+    await this.getApprovalQueue(peek.request.runId).add(async () => {
       // Re-fetch inside the queue — a prior concurrent respond() may have
       // already removed the entry.
       const entry = this.pending.get(approvalId);
@@ -357,7 +383,7 @@ export class ApprovalRouter extends EventEmitter {
     const entry = this.pending.get(approvalId);
     if (!entry) return;
 
-    await this.getQueueForRun(entry.request.runId).add(async () => {
+    await this.getApprovalQueue(entry.request.runId).add(async () => {
       const entryNow = this.pending.get(approvalId);
       if (!entryNow) return; // respond() beat the timer inside the queue.
 
