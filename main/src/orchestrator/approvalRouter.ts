@@ -119,15 +119,15 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
-   * @param db              - Narrow DatabaseLike surface (no better-sqlite3 import).
-   * @param getQueueForRun  - Retained for backward compatibility with existing
-   *                          callers/tests; NOT used internally.  ApprovalRouter
-   *                          serializes its own mutations via approvalQueues
-   *                          (see field doc above for the rationale).
+   * @param db               - Narrow DatabaseLike surface (no better-sqlite3 import).
+   * @param _getQueueForRun  - Retained for backward compatibility with existing
+   *                           callers/tests; NOT used internally.  ApprovalRouter
+   *                           serializes its own mutations via approvalQueues
+   *                           (see field doc above for the rationale).
    */
   constructor(
     private readonly db: DatabaseLike,
-    private readonly getQueueForRun: (runId: string) => PQueue,
+    _getQueueForRun: (runId: string) => PQueue,
   ) {
     super();
   }
