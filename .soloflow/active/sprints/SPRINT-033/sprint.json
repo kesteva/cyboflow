@@ -11,11 +11,6 @@
       "depends_on": [
         "TASK-727"
       ]
-    },
-    "TASK-731": {
-      "status": "in_progress",
-      "depends_on": [],
-      "started": "2026-05-23T04:20:53.042Z"
     }
   },
   "playwright_target": {
