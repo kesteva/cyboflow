@@ -1,8 +1,8 @@
 ---
 id: TASK-713
 idea: IDEA-023
-status: approved
-created: 2026-05-21T14:30:00Z
+status: ready
+created: "2026-05-21T14:30:00Z"
 files_owned:
   - main/src/index.ts
   - main/src/ipc/cyboflow.ts
@@ -13,7 +13,7 @@ files_readonly:
 acceptance_criteria:
   - criterion: "`main/src/index.ts` calls `setHealthProvider(orchestratorHealth)` once at boot, after `OrchestratorHealth` is constructed."
     verification: "grep -nE 'setHealthProvider\\(' main/src/index.ts returns exactly 1 match; grep -nE \"import\\s*\\{[^}]*setHealthProvider\" main/src/index.ts returns at least 1 match."
-  - criterion: "The module-level `_orchestratorHealth` singleton and `setCyboflowHealth` export are removed from `main/src/ipc/cyboflow.ts`."
+  - criterion: The module-level `_orchestratorHealth` singleton and `setCyboflowHealth` export are removed from `main/src/ipc/cyboflow.ts`.
     verification: "grep -nE '_orchestratorHealth' main/src/ipc/cyboflow.ts returns 0 matches; grep -nE 'export function setCyboflowHealth' main/src/ipc/cyboflow.ts returns 0 matches."
   - criterion: "The `cyboflow:mcp-health` raw-IPC handler in `main/src/ipc/cyboflow.ts` still works — it now reads from the SAME `OrchestratorHealth` instance that powers `setHealthProvider`, not from a parallel singleton. Tactic: the handler can either (a) be left in place and updated to read the live `OrchestratorHealth` via an `AppServices` field, or (b) deleted in this same PR if the renderer cutover is moved earlier."
     verification: "Either: grep -n 'cyboflow:mcp-health' main/src/ipc/cyboflow.ts returns 0 matches AND TASK-715 has been merged; OR grep -nE 'services\\.orchestratorHealth\\.getMcpServerStatus|services\\.cyboflow\\.health\\.getMcpServerStatus' main/src/ipc/cyboflow.ts returns at least 1 match (handler reads via services not the deleted module-level singleton)."
@@ -21,13 +21,12 @@ acceptance_criteria:
     verification: "grep -nE '_orchestratorHealth|setCyboflowHealth' main/src/ipc/__tests__/cyboflow.test.ts returns 0 matches."
   - criterion: "`cyboflow.health.mcpServer` tRPC query returns live data in a `pnpm dev` smoke. Manual verification — sidebar dot shows green (or red on simulated failure), not stuck at yellow `{status:'starting'}`."
     verification: "Manual: pnpm dev; open DevTools renderer console; `await window.electron.trpc.cyboflow.health.mcpServer.query()` returns `{status:'healthy', ...}` (or current real status, not 'starting')."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on: []
 estimated_complexity: small
 epic: trpc-cutover-and-legacy-tree-cleanup
 ---
-
 # Wire `cyboflow.health.mcpServer` and remove the parallel singleton
 
 ## Objective

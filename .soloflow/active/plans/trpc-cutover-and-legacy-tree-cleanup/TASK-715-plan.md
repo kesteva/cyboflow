@@ -1,8 +1,8 @@
 ---
 id: TASK-715
 idea: IDEA-023
-status: approved
-created: 2026-05-21T14:30:00Z
+status: ready
+created: "2026-05-21T14:30:00Z"
 files_owned:
   - frontend/src/components/cyboflow/WorkflowPicker.tsx
   - frontend/src/stores/mcpHealthStore.ts
@@ -19,7 +19,7 @@ acceptance_criteria:
     verification: "grep -nE 'cyboflowApi\\.startRun|import\\s*\\{[^}]*startRun' frontend/src/components/cyboflow/WorkflowPicker.tsx returns 0 matches; grep -nE 'trpc\\.cyboflow\\.runs\\.start' frontend/src/components/cyboflow/WorkflowPicker.tsx returns at least 1 match."
   - criterion: "mcpHealthStore.ts no longer calls `window.electron.invoke('cyboflow:mcp-health'...)` ; uses `trpc.cyboflow.health.mcpServer.query()` instead. Polling cadence preserved."
     verification: "grep -nE \"'cyboflow:mcp-health'|window\\.electron\\.invoke\" frontend/src/stores/mcpHealthStore.ts returns 0 matches; grep -nE 'trpc\\.cyboflow\\.health\\.mcpServer' frontend/src/stores/mcpHealthStore.ts returns at least 1 match."
-  - criterion: "The `startRun` named export and its convenience-object entry are removed from `frontend/src/utils/cyboflowApi.ts`."
+  - criterion: The `startRun` named export and its convenience-object entry are removed from `frontend/src/utils/cyboflowApi.ts`.
     verification: "grep -nE 'export (async )?function startRun|startRun:' frontend/src/utils/cyboflowApi.ts returns 0 matches."
   - criterion: "After this task, `frontend/src/utils/cyboflowApi.ts` retains only `approveRun`, `subscribeToStreamEvents`, the `StreamEvent`/`StreamEventType` types, and any shared `requireElectron` guard."
     verification: "grep -nE 'export ' frontend/src/utils/cyboflowApi.ts produces a list containing approveRun, subscribeToStreamEvents, StreamEvent (and helpers) — and excluding listRuns, listWorkflows, startRun, mcpHealth."
@@ -28,8 +28,8 @@ acceptance_criteria:
   - criterion: "Manual smoke: in `pnpm dev`, starting a workflow from the picker still creates a run; the MCP sidebar dot still shows correct health color and updates on polling intervals."
     verification: "Manual: pnpm dev; click 'New run', pick a workflow, confirm a worktree is created and the run starts. Observe the sidebar dot color updates after ~10s."
   - criterion: "`pnpm --filter frontend test` exits 0."
-    verification: "pnpm --filter frontend test"
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+    verification: pnpm --filter frontend test
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on:
   - TASK-712
@@ -38,7 +38,6 @@ depends_on:
 estimated_complexity: medium
 epic: trpc-cutover-and-legacy-tree-cleanup
 ---
-
 # Renderer cutover: `startRun` and `mcp-health`
 
 ## Objective

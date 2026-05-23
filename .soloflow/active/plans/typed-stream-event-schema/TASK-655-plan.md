@@ -1,8 +1,8 @@
 ---
 id: TASK-655
 idea: IDEA-003
-status: in-flight
-created: 2026-05-19T00:00:00Z
+status: ready
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - shared/utils/extractToolResultText.ts
   - frontend/src/utils/toolFormatter.ts
@@ -16,7 +16,7 @@ files_readonly:
   - main/src/utils/formatters.ts
   - main/src/utils/formatters.test.ts
 acceptance_criteria:
-  - criterion: "Neither toolFormatter.ts file declares a local `interface ToolResult` shadow type."
+  - criterion: Neither toolFormatter.ts file declares a local `interface ToolResult` shadow type.
     verification: "grep -nE \"^interface ToolResult\\b\" frontend/src/utils/toolFormatter.ts main/src/utils/toolFormatter.ts returns 0 matches."
   - criterion: "Both toolFormatter.ts files import `ToolResultBlock` from `shared/types/claudeStream.ts` and use it in `formatToolInteraction`'s signature."
     verification: "grep -nE \"ToolResultBlock\" frontend/src/utils/toolFormatter.ts main/src/utils/toolFormatter.ts each show at least one import and one parameter usage."
@@ -26,7 +26,7 @@ acceptance_criteria:
     verification: "grep -nE \"toolResult\\.content\\.(includes|split)|JSON\\.parse\\(toolResult\\.content\\)|makePathsRelative\\(toolResult\\.content\" frontend/src/utils/toolFormatter.ts main/src/utils/toolFormatter.ts returns 0 matches; grep -nE \"\\$\\{item\\.content\\}\" frontend/src/utils/formatters.ts returns 0 matches."
   - criterion: "`extractToolResultText` imported and used in all three consumer files."
     verification: "grep -nE \"extractToolResultText\" frontend/src/utils/toolFormatter.ts frontend/src/utils/formatters.ts main/src/utils/toolFormatter.ts each return at least one import and one call."
-  - criterion: "New test file `frontend/src/utils/toolFormatter.test.ts` exists and covers the array-content branch."
+  - criterion: New test file `frontend/src/utils/toolFormatter.test.ts` exists and covers the array-content branch.
     verification: "test -f frontend/src/utils/toolFormatter.test.ts && `pnpm --filter frontend test -- toolFormatter` exits 0."
   - criterion: "All workspace tests, typecheck, and lint pass."
     verification: "`pnpm --filter frontend test`, `pnpm --filter main test`, `pnpm typecheck`, `pnpm lint` all exit 0."
@@ -35,26 +35,25 @@ estimated_complexity: medium
 epic: typed-stream-event-schema
 test_strategy:
   needed: true
-  justification: "frontend/src/utils/toolFormatter.ts has zero existing test coverage and 10+ array-unsafe callsites. A new vitest file is the durable regression artifact."
+  justification: frontend/src/utils/toolFormatter.ts has zero existing test coverage and 10+ array-unsafe callsites. A new vitest file is the durable regression artifact.
   targets:
     - behavior: "formatToolInteraction with a Bash tool result whose content is `[{type:'text', text:'fatal: bad refspec'}]` produces output containing 'fatal' and is tinted as '✗ Failed'."
-      test_file: "frontend/src/utils/toolFormatter.test.ts"
+      test_file: frontend/src/utils/toolFormatter.test.ts
       type: unit
-    - behavior: "formatToolInteraction with array-form content does not throw on JSON.parse for Read-tool results."
-      test_file: "frontend/src/utils/toolFormatter.test.ts"
+    - behavior: formatToolInteraction with array-form content does not throw on JSON.parse for Read-tool results.
+      test_file: frontend/src/utils/toolFormatter.test.ts
       type: unit
-    - behavior: "formatToolInteraction with plain-string content matches pre-task baseline (regression check)."
-      test_file: "frontend/src/utils/toolFormatter.test.ts"
+    - behavior: formatToolInteraction with plain-string content matches pre-task baseline (regression check).
+      test_file: frontend/src/utils/toolFormatter.test.ts
       type: unit
     - behavior: "Orphaned array-form tool_result renders as readable text, not [object Object]."
-      test_file: "frontend/src/utils/toolFormatter.test.ts"
+      test_file: frontend/src/utils/toolFormatter.test.ts
       type: unit
     - behavior: "extractToolResultText handles string, array-of-text-blocks, and empty array."
-      test_file: "frontend/src/utils/toolFormatter.test.ts"
+      test_file: frontend/src/utils/toolFormatter.test.ts
       type: unit
 prerequisites: []
 ---
-
 # Fix frontend ToolResultContent unsafe callsites and delete shadow interface ToolResult declarations
 
 ## Objective

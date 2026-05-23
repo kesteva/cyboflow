@@ -1,8 +1,8 @@
 ---
 id: TASK-714
 idea: IDEA-023
-status: approved
-created: 2026-05-21T14:30:00Z
+status: ready
+created: "2026-05-21T14:30:00Z"
 files_owned:
   - frontend/src/components/DraggableProjectTreeView.tsx
   - frontend/src/components/cyboflow/WorkflowPicker.tsx
@@ -20,17 +20,17 @@ acceptance_criteria:
     verification: "grep -nE 'listRuns' frontend/src/components/DraggableProjectTreeView.tsx returns 0 matches; grep -nE 'trpc\\.cyboflow\\.runs\\.list' frontend/src/components/DraggableProjectTreeView.tsx returns at least 1 match."
   - criterion: "WorkflowPicker.tsx no longer imports `listWorkflows` from `cyboflowApi`; uses `trpc.cyboflow.workflows.list.query({ projectId })` instead. (startRun cutover is TASK-715 and remains in this file pending that task.)"
     verification: "grep -nE 'cyboflowApi\\.listWorkflows|import\\s*\\{[^}]*listWorkflows' frontend/src/components/cyboflow/WorkflowPicker.tsx returns 0 matches; grep -nE 'trpc\\.cyboflow\\.workflows\\.list' frontend/src/components/cyboflow/WorkflowPicker.tsx returns at least 1 match."
-  - criterion: "The `listRuns` and `listWorkflows` named exports — and their entries in the `cyboflowApi` convenience object — are removed from `frontend/src/utils/cyboflowApi.ts`."
+  - criterion: The `listRuns` and `listWorkflows` named exports — and their entries in the `cyboflowApi` convenience object — are removed from `frontend/src/utils/cyboflowApi.ts`.
     verification: "grep -nE 'export (async )?function listRuns|export (async )?function listWorkflows|listRuns:|listWorkflows:' frontend/src/utils/cyboflowApi.ts returns 0 matches."
   - criterion: "If `WorkflowRunListRow` is still referenced anywhere in the renderer post-migration, it imports from `shared/types/workflows` (the canonical promoted location from TASK-710), not from `cyboflowApi.ts`."
     verification: "grep -rnE 'WorkflowRunListRow' frontend/src | grep -v 'cyboflowApi.ts' | xargs grep -lE 'from.*cyboflowApi' returns 0 matches (i.e. no file both uses WorkflowRunListRow AND imports from cyboflowApi)."
   - criterion: "All tests that previously mocked `cyboflowApi.listRuns` / `.listWorkflows` are updated to mock the tRPC client instead, OR the mocks are removed if the test no longer covers that path."
     verification: "grep -nE 'cyboflowApi.*listRuns|cyboflowApi.*listWorkflows' frontend/src/**/__tests__/**/*.{ts,tsx} returns 0 matches."
   - criterion: "`pnpm --filter frontend test` exits 0."
-    verification: "pnpm --filter frontend test"
+    verification: pnpm --filter frontend test
   - criterion: "Manual smoke: in `pnpm dev`, the sidebar project tree still expands to show runs; the workflow picker still lists 5 default workflows for a fresh project."
     verification: "Manual: pnpm dev; expand a project in the sidebar — runs render correctly; click 'New run' — picker shows 5 workflows."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on:
   - TASK-710
@@ -38,7 +38,6 @@ depends_on:
 estimated_complexity: medium
 epic: trpc-cutover-and-legacy-tree-cleanup
 ---
-
 # Renderer cutover: `listRuns` and `listWorkflows`
 
 ## Objective

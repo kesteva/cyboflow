@@ -1,8 +1,8 @@
 ---
 id: TASK-656
 idea: SPRINT-020
-status: in-flight
-created: 2026-05-19T00:00:00Z
+status: ready
+created: "2026-05-19T00:00:00Z"
 files_owned:
   - main/src/services/streamParser/schemas.ts
   - .soloflow/active/plans/typed-stream-event-schema/TASK-571-plan.md
@@ -19,16 +19,15 @@ acceptance_criteria:
   - criterion: "TASK-571 is closed: either marked done with an amended AC (Option 1), or superseded by this task with a settle-task human_needed → done transition (Options 2/3)."
     verification: "grep -nE 'status: (done|superseded)' .soloflow/active/plans/typed-stream-event-schema/TASK-571-plan.md returns 1 match."
   - criterion: "`pnpm typecheck` and `pnpm --filter main exec vitest run` pass."
-    verification: "Exit code 0 for both."
+    verification: Exit code 0 for both.
 depends_on: []
 estimated_complexity: medium
 epic: typed-stream-event-schema
 test_strategy:
   needed: false
-  justification: "The decision is itself the work product. Code changes that follow the decision are all type-only or schema-shape-only; `pnpm typecheck` is the verification command and the existing `schemas.test.ts` round-trips already cover the runtime path."
+  justification: The decision is itself the work product. Code changes that follow the decision are all type-only or schema-shape-only; `pnpm typecheck` is the verification command and the existing `schemas.test.ts` round-trips already cover the runtime path.
 prerequisites: []
 ---
-
 # Resolve the _reverseCheck bidirectional drift-detection gap
 
 > Selected option: 3 — Drop `.passthrough()` in non-leaf schemas.

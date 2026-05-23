@@ -1,8 +1,8 @@
 ---
 id: TASK-709
 idea: IDEA-022
-status: approved
-created: 2026-05-21T14:00:00Z
+status: ready
+created: "2026-05-21T14:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/orchestrator/inspectorQueries.ts
@@ -38,7 +38,7 @@ acceptance_criteria:
     verification: "grep -rnE \"from\\s+['\\\"](electron|better-sqlite3)['\\\"]|from\\s+['\\\"].*main/src/services\" main/src/orchestrator/inspectorQueries.ts main/src/orchestrator/trpc/routers/runs.ts returns 0 matches."
   - criterion: "New test file `main/src/orchestrator/trpc/routers/__tests__/runs.test.ts` exists, builds a tRPC caller against an in-memory SQLite DB, and covers: (a) happy path, (b) unknown runId → NOT_FOUND, (c) non-`'local'` userId → FORBIDDEN, (d) missing ctx.db → PRECONDITION_FAILED."
     verification: "test -f main/src/orchestrator/trpc/routers/__tests__/runs.test.ts && grep -nE 'NOT_FOUND|FORBIDDEN|PRECONDITION_FAILED' main/src/orchestrator/trpc/routers/__tests__/runs.test.ts | wc -l returns at least 3; pnpm --filter @cyboflow/main test 'trpc/routers/__tests__/runs' exits 0."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on:
   - TASK-706
@@ -61,7 +61,6 @@ test_strategy:
       test_file: main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
       type: integration
 ---
-
 # Wire `cyboflow.runs.getStuckInspection` to its canonical handler
 
 ## Objective

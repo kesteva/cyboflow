@@ -1,8 +1,8 @@
 ---
 id: TASK-712
 idea: IDEA-023
-status: approved
-created: 2026-05-21T14:30:00Z
+status: ready
+created: "2026-05-21T14:30:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/index.ts
@@ -17,7 +17,7 @@ acceptance_criteria:
     verification: "grep -nE 'start: protectedProcedure' main/src/orchestrator/trpc/routers/runs.ts -A 8 contains 'workflowId:' and 'projectId: z.number().int().positive()'; grep -nE 'runId.*worktreePath.*branchName' main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match."
   - criterion: "`runs.start` no longer throws NOT_IMPLEMENTED — the procedure body delegates to `runLauncher.launch(workflowId, projectPath)`."
     verification: "grep -nE 'start: protectedProcedure' main/src/orchestrator/trpc/routers/runs.ts -A 16 contains 'runLauncher.launch'; the NOT_IMPLEMENTED throw is removed from the start procedure."
-  - criterion: "Narrow `RunLauncherLike` and `SessionManagerLike` interfaces are defined locally in `runs.ts` (or in `orchestrator/types.ts`); no value imports of `RunLauncher` or `SessionManager` classes appear under `main/src/orchestrator/trpc/`."
+  - criterion: Narrow `RunLauncherLike` and `SessionManagerLike` interfaces are defined locally in `runs.ts` (or in `orchestrator/types.ts`); no value imports of `RunLauncher` or `SessionManager` classes appear under `main/src/orchestrator/trpc/`.
     verification: "grep -nE 'interface RunLauncherLike' main/src/orchestrator/trpc/routers/runs.ts returns 1 match; grep -nE 'interface SessionManagerLike' main/src/orchestrator/trpc/routers/runs.ts returns 1 match; grep -nE \"from '.*services/sessionManager'\" main/src/orchestrator/trpc/routers/runs.ts returns 0 matches."
   - criterion: "`setStartRunDeps({ runLauncher, sessionManager })` is exported from runs.ts and called once from `main/src/index.ts` at boot, after both services are constructed."
     verification: "grep -nE 'export function setStartRunDeps' main/src/orchestrator/trpc/routers/runs.ts returns 1 match; grep -nE 'setStartRunDeps\\(' main/src/index.ts returns exactly 1 match."
@@ -27,13 +27,12 @@ acceptance_criteria:
     verification: "grep -nE \"from\\s+['\\\"](electron|better-sqlite3)['\\\"]|from\\s+['\\\"].*main/src/services\" main/src/orchestrator/trpc/routers/runs.ts returns 0 matches."
   - criterion: "If a project is not found via SessionManagerLike.getProjectById(projectId), the procedure throws TRPCError code='NOT_FOUND'."
     verification: "grep -nE \"code:\\s*'NOT_FOUND'\" main/src/orchestrator/trpc/routers/runs.ts -B 2 -A 2 contains 'Project' (or grep shows a NOT_FOUND adjacent to a getProjectById null-check)."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
+  - criterion: pnpm typecheck and pnpm lint exit 0.
     verification: "pnpm typecheck && pnpm lint"
 depends_on: []
 estimated_complexity: medium
 epic: trpc-cutover-and-legacy-tree-cleanup
 ---
-
 # Wire `cyboflow.runs.start` tRPC mutation
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-690
 idea: IDEA-017
-status: in-flight
+status: ready
 created: "2026-05-20T00:00:00Z"
 files_owned:
   - frontend/src/App.tsx
