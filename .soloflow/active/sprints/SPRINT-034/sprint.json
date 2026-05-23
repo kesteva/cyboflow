@@ -14,10 +14,12 @@
       "verdict_at": "2026-05-23T19:29:02.982Z"
     },
     "TASK-692": {
-      "status": "pending",
+      "status": "blocked",
       "depends_on": [
         "TASK-691"
-      ]
+      ],
+      "started": "2026-05-23T21:14:48.861Z",
+      "verdict_at": "2026-05-23T21:19:35.056Z"
     }
   },
   "playwright_target": {
