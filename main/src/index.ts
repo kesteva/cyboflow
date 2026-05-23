@@ -33,6 +33,8 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setStartRunDeps } from './orchestrator/trpc/routers/runs';
+import { setHealthProvider } from './orchestrator/trpc/routers/health';
+import { OrchestratorHealth } from './orchestrator/health';
 import { approvalEvents } from './orchestrator/trpc/routers/events';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { DatabaseLike } from './orchestrator/types';
@@ -85,6 +87,7 @@ let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
+let orchestratorHealth: OrchestratorHealth;
 
 // Service instances
 let configManager: ConfigManager;
@@ -614,6 +617,16 @@ async function initializeServices() {
     runQueues,
   );
 
+  // OrchestratorHealth — constructed with a sentinel lifecycle so both the
+  // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
+  // procedure read from the same source of truth.  The sentinel reports
+  // 'starting' (yellow dot) until the real McpServerLifecycle is wired in
+  // epic 7 (permissionIpcServer + socket path).
+  orchestratorHealth = new OrchestratorHealth({
+    getStatus: () => 'starting' as const,
+    getRestartAttempts: () => 0,
+  });
+
   const services: AppServices = {
     app,
     configManager,
@@ -634,7 +647,7 @@ async function initializeServices() {
     logger,
     archiveProgressManager,
     analyticsManager,
-    cyboflow: { workflowRegistry, runLauncher },
+    cyboflow: { workflowRegistry, runLauncher, orchestratorHealth },
   };
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
@@ -742,6 +755,9 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    setHealthProvider(orchestratorHealth);
+    console.log('[Main] health.mcpServer deps wired');
   }
 
   // Track app lifecycle events

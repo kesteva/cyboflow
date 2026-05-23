@@ -19,6 +19,7 @@ import type { ArchiveProgressManager } from '../services/archiveProgressManager'
 import type { AnalyticsManager } from '../services/analyticsManager';
 import type { WorkflowRegistry } from '../orchestrator/workflowRegistry';
 import type { RunLauncher } from '../orchestrator/runLauncher';
+import type { OrchestratorHealth } from '../orchestrator/health';
 
 export interface AppServices {
   app: App;
@@ -43,5 +44,11 @@ export interface AppServices {
   cyboflow: {
     workflowRegistry: WorkflowRegistry;
     runLauncher: RunLauncher;
+    /**
+     * OrchestratorHealth singleton shared by the raw-IPC cyboflow:mcp-health
+     * handler and the tRPC cyboflow.health.mcpServer procedure.  Optional until
+     * TASK-716 updates the test helpers; always present in production boot.
+     */
+    orchestratorHealth?: OrchestratorHealth;
   };
 } 
