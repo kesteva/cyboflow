@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-034
-pending_count: 7
-last_updated: "2026-05-23T21:19:05.823Z"
+pending_count: 11
+last_updated: "2026-05-23T21:32:18.281Z"
 ---
 # Findings Queue
 
@@ -109,3 +109,69 @@ TASK-555 gated: failing blocking prereq (notarytool credentials missing).
 - **location:** main/src/services/sessionManager.ts:7
 - **description:** TASK-691 was designed to retire frontend consumers of Crystal-era session data methods, but it did not retire the backend consumer: sessionManager.ts (files_readonly in TASK-692). sessionManager.ts actively imports and calls: getSessionOutputs, addSessionOutput, addPromptMarker, getPromptMarkers, addConversationMessage, getConversationMessages, createExecutionDiff on DatabaseService. It also imports Session, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData from database/models.ts. Additionally, session_outputs/conversation_messages/prompt_markers/execution_diffs tables cannot be safely dropped because panel-era methods (addPanelOutput, getPanelOutputs, etc.) still write to those same tables. The sessions table cannot be dropped because schema.sql (readonly) recreates it on every boot and tool_panels has a FK dependency. TASK-692 cannot remove these methods from database.ts or types from models.ts without failing typecheck, and cannot drop the tables without breaking panelManager at runtime.
 - **suggested_action:** Create a sibling task (analogous to Option B from the escalation) to retire sessionManager.ts Crystal-session method calls and update schema.sql before re-running TASK-692 as a pure drop migration.
+
+## FIND-SPRINT-034-12
+- **source:** SPRINT-034 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/utils/toolFormatter.ts, frontend/src/utils/formatters.ts:11, frontend/src/utils/toolFormatter.test.ts
+- **description:** Cross-task dead code surfaced after TASK-691 deletion sweep — the entire frontend `toolFormatter.ts` (541 LOC) plus the `formatJsonForWeb` export in `frontend/src/utils/formatters.ts` have ZERO production callers in `frontend/src/`. Grep confirms: only `toolFormatter.test.ts` (new in this sprint) imports `formatToolInteraction` from the frontend copy; nothing imports `formatJsonForOutputEnhanced` or `formatJsonForWeb`. The active path is `main/src/utils/toolFormatter.ts`, invoked by `main/src/ipc/session.ts:809`.
+- **suggested_action:** Delete `frontend/src/utils/toolFormatter.ts`, the `formatJsonForWeb` export in `frontend/src/utils/formatters.ts`, and `frontend/src/utils/toolFormatter.test.ts`. The frontend never displays raw Claude stream content directly — the live rendering surface (`frontend/src/components/panels/claude/RichOutputView.tsx` and siblings) consumes structured `UnifiedMessage`/`ToolResultBlock` payloads from `main/src/ipc/session.ts`. If a frontend-side raw formatter is ever needed later, it should re-import from a shared `shared/utils/` module, not be a hand-maintained copy of the main-process formatter.
+- **resolved_by:** 
+
+
+
+
+This became a cross-task waste in SPRINT-034 because TASK-655 (TypedStreamEventSchema epic) spent effort hardening BOTH copies in lockstep — commits 5a148da (frontend) + a58fa0d (main) made symmetric edits — and also added the 189-line `toolFormatter.test.ts` against the dead frontend copy. The hardening of the dead frontend copy is wasted work that future refactors will continue to pay tax on (any change to ToolResultBlock semantics must keep two near-identical 600-line files in sync). The two copies already drift slightly (the frontend one omits `gitRepoPath` and uses a different `formatJsonForOutput` body), so the diff between them is structural, not just import paths.
+
+Suspected tasks: TASK-655 (added test against dead surface and hardened dead copy), TASK-691 (deleted SessionView/useSessionView, the only legitimate consumers of formatJsonForOutputEnhanced/formatJsonForWeb — leaving the utilities orphaned).
+
+## FIND-SPRINT-034-13
+- **source:** SPRINT-034 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/PromptHistory.tsx:82, frontend/src/components/PromptHistoryModal.tsx:96
+- **description:** Dead `navigateToPrompt` CustomEvent dispatch in two locations. Both files `window.dispatchEvent(new CustomEvent(navigateToPrompt, { detail: { sessionId, promptIndex, ... } }))` but grep across `frontend/src` and `main/src` finds ZERO listeners. SessionView was the original listener; TASK-691 deleted it.
+- **suggested_action:** Two options: (1) Re-wire prompt navigation to the new shell — add an effect inside `CyboflowRoot` (or a future RunView) that listens for `navigateToPrompt` and routes the user to the matching run/panel. (2) If prompt-history-navigation is not a v1 feature, delete the dispatch block in both files (the modal will still close on click via the existing `onClose()` call) and consider deleting the standalone `PromptHistory.tsx` along with its `frontend/src/types/electron.d.ts:205` comment reference. Recommend option (2) unless a UX requirement says otherwise.
+- **resolved_by:** 
+
+
+
+Cross-task signature: TASK-691 explicitly stripped the comment `// Dispatch an event that SessionView can listen for` from BOTH files (visible in diff) without deleting the dispatch body. The comment-only edit makes the dispatch appear scoped/intentional while it is now a no-op — every Recent-Prompts click in the modal fires an event that no consumer hears, silently breaking the prompt-navigation UX.
+
+Also: `PromptHistory.tsx` (the non-modal standalone export) has zero importers across `frontend/src` — only `PromptHistoryModal` is mounted (App.tsx:365). The standalone `PromptHistory.tsx` (152 LOC) appears to be orphaned alongside the dead event.
+
+Suspected tasks: TASK-691 (deleted the only navigateToPrompt listener and removed the comment hint but not the dispatch).
+
+## FIND-SPRINT-034-14
+- **source:** SPRINT-034 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** package.json:108
+- **description:** `build.asarUnpack` was widened from a single file to the directory glob `main/dist/main/src/orchestrator/mcpServer/**/*.js`. This now unpacks FOUR compiled files: `cyboflowMcpServer.js`, `mcpQueryHandler.js`, `mcpServerLifecycle.js`, `scriptPath.js`. Only `cyboflowMcpServer.js` needs unpacking — it is the subprocess script spawned via `child_process` (and ASAR cannot be executed directly). The other three are imported by the bundled main process (which already runs from inside ASAR), so they exist twice on disk in packaged builds: once inside `app.asar`, once unpacked. Minor disk waste plus a tiny attack surface (the unpacked copies live on a writable filesystem path) — the in-ASAR copy is what Node actually resolves via the bundled `require`/import graph, so swapping the unpacked copy has no effect, but the duplication is unnecessary.
+- **suggested_action:** Tighten the glob to `main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js` (literal file, no glob) OR `main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer*.js` if a future task introduces sibling helper scripts that are also spawned. Verify before changing: this requires the packaged-build smoke that is already queued under TASK-618 deferred-actions (run `pnpm run build:mac:arm64` and `find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/*.js`).
+- **resolved_by:** 
+
+
+Suspected tasks: TASK-618.
+
+## FIND-SPRINT-034-15
+- **source:** SPRINT-034 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/panels/claude/claudeCodeManager.ts:94, main/src/orchestrator/runLauncher.ts:131, main/src/index.ts:535
+- **description:** The cyboflow MCP entry path (TASK-619 eager-resolve, TASK-621 helper extraction, TASK-620 health surface) is wired infrastructure with no production trigger today. Audit:
+
+- `ClaudeCodeManager.setOrchSocketPath()` (line 94) is called only from tests — `grep -rn setOrchSocketPath main/src --exclude-dir=__tests__` returns zero hits outside the manager itself.
+- `OrchSocketProvider.getSocketPath()` (referenced at runLauncher.ts:131 and index.ts:535) is stubbed to `throw new Error(cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer))`.
+- Therefore in v1 every `composeMcpServers()` call evaluates `if (this.orchSocketPath)` as false and returns base servers only. No session ever exercises the eager-resolve, the executeMcpQuery helper, or the cyboflow tool handlers.
+
+This is not a bug — the work is correct preemptive plumbing for the epic-7 wiring task. Flagging because (a) the SPRINT-034 verifier reports 5 of 11 tasks as done against a code path with no end-to-end exercise; future regressions in this surface wont surface via the main app QA. (b) The infrastructure adds ~250 LOC of tests + ~150 LOC of production code that is purely contract-bound today.
+
+Suspected tasks: TASK-619, TASK-620, TASK-621.
+- **suggested_action:** No code change. Two recommended follow-ups: (1) When the epic-7 task lands that wires `OrchSocketProvider` and calls `setOrchSocketPath()` from `index.ts`, ensure it executes a manual smoke verifying a Claude session actually invokes a `cyboflow_*` tool — the unit-test coverage today exercises the contract but not the SDK integration. (2) Add a `TODO(epic-7)` comment in `claudeCodeManager.ts:94` noting that `setOrchSocketPath` is awaiting its first production caller, so the next contact knows the eager-resolve has not yet been exercised against real data.
+- **resolved_by:** 
