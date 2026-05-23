@@ -1,10 +1,10 @@
 ---
 id: TASK-728
 idea: SPRINT-031-compound
-status: ready
+status: in-flight
 source_sprint: SPRINT-031
 source_finding: FIND-SPRINT-031-8
-created: 2026-05-22T00:00:00Z
+created: "2026-05-22T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalListing.ts
   - main/src/orchestrator/__tests__/approvalListing.test.ts
@@ -18,31 +18,32 @@ files_readonly:
   - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
   - .soloflow/active/plans/approval-router-and-permission-fix/EPIC-approval-router-and-permission-fix.md
 acceptance_criteria:
-  - criterion: "New module main/src/orchestrator/approvalListing.ts exists and exports selectPendingApprovals"
+  - criterion: New module main/src/orchestrator/approvalListing.ts exists and exports selectPendingApprovals
     verification: "test -f main/src/orchestrator/approvalListing.ts AND grep -nE 'export function selectPendingApprovals\\(' main/src/orchestrator/approvalListing.ts returns 1 match"
   - criterion: "selectPendingApprovals signature is (db: DatabaseLike) => Approval[] — typed import from shared/types/approvals.ts, not a local re-declaration"
     verification: "grep -nE 'import type \\{[^}]*Approval[^}]*\\} from .+shared/types/approvals' main/src/orchestrator/approvalListing.ts returns 1 match AND grep -nE 'import type \\{[^}]*DatabaseLike[^}]*\\} from .+types' main/src/orchestrator/approvalListing.ts returns 1 match"
   - criterion: "The new module is a standalone-typecheck-safe leaf: no imports from electron, better-sqlite3, or main/src/services/*"
     verification: "grep -nE \"from 'electron'|from 'better-sqlite3'|from '.+main/src/services/\" main/src/orchestrator/approvalListing.ts returns 0 matches"
-  - criterion: "selectPendingApprovals uses truncatePayloadPreview from shared/utils/approvals.ts (not a re-implemented 512-char slice)"
+  - criterion: selectPendingApprovals uses truncatePayloadPreview from shared/utils/approvals.ts (not a re-implemented 512-char slice)
     verification: "grep -nE 'truncatePayloadPreview' main/src/orchestrator/approvalListing.ts returns at least 1 match AND grep -nE 'slice\\(0,\\s*512\\)' main/src/orchestrator/approvalListing.ts returns 0 matches"
-  - criterion: "The tRPC listPending procedure in main/src/orchestrator/trpc/routers/approvals.ts calls selectPendingApprovals(ctx.db) instead of inlining the SELECT JOIN"
+  - criterion: The tRPC listPending procedure in main/src/orchestrator/trpc/routers/approvals.ts calls selectPendingApprovals(ctx.db) instead of inlining the SELECT JOIN
     verification: "grep -nE 'selectPendingApprovals\\(' main/src/orchestrator/trpc/routers/approvals.ts returns at least 1 match AND grep -cE 'SELECT\\s+a\\.id\\s+AS id' main/src/orchestrator/trpc/routers/approvals.ts returns 0 (the SELECT-AS-id literal must no longer appear here)"
   - criterion: "The DbApprovalRow internal type in main/src/orchestrator/trpc/routers/approvals.ts is removed (migrated into approvalListing.ts as a non-exported helper, or deleted entirely if inlined)"
     verification: "grep -nE 'interface DbApprovalRow' main/src/orchestrator/trpc/routers/approvals.ts returns 0 matches"
-  - criterion: "approvalCreatedBridge.test.ts imports selectPendingApprovals and uses it as the parity proxy — the 40-line local listPending function is deleted"
+  - criterion: approvalCreatedBridge.test.ts imports selectPendingApprovals and uses it as the parity proxy — the 40-line local listPending function is deleted
     verification: "grep -nE 'import \\{[^}]*selectPendingApprovals[^}]*\\} from .+approvalListing' main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts returns 1 match AND grep -nE 'function listPending\\(' main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts returns 0 matches"
   - criterion: "The round-trip-parity test in approvalCreatedBridge.test.ts still passes — bridge.workflowName === selectPendingApprovals(db)[0].workflowName"
     verification: "pnpm --filter main test approvalCreatedBridge exits 0 AND grep -nE 'bridgeEvent\\.approval\\.workflowName.+pending\\[0\\]\\.workflowName' main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts returns 1 match"
-  - criterion: "The orchestrator tRPC approvals test file still passes — including the oldest-first ordering test and the 512-char truncation test"
+  - criterion: The orchestrator tRPC approvals test file still passes — including the oldest-first ordering test and the 512-char truncation test
     verification: "pnpm --filter main test 'trpc/routers/__tests__/approvals' exits 0"
   - criterion: "A new unit test for selectPendingApprovals covers: empty table, ordering by created_at ASC, payloadPreview truncation, workflowName resolution via JOIN, exclusion of non-pending statuses"
     verification: "test -f main/src/orchestrator/__tests__/approvalListing.test.ts AND grep -cE 'describe\\(.selectPendingApprovals' main/src/orchestrator/__tests__/approvalListing.test.ts returns at least 1 AND pnpm --filter main test approvalListing exits 0"
-  - criterion: "Main process typecheck passes"
-    verification: "pnpm --filter main typecheck exits 0"
-  - criterion: "Main process lint passes"
-    verification: "pnpm --filter main lint exits 0"
-depends_on: [TASK-727]
+  - criterion: Main process typecheck passes
+    verification: pnpm --filter main typecheck exits 0
+  - criterion: Main process lint passes
+    verification: pnpm --filter main lint exits 0
+depends_on:
+  - TASK-727
 estimated_complexity: medium
 epic: approval-router-and-permission-fix
 test_strategy:
@@ -52,13 +53,13 @@ test_strategy:
     - behavior: "selectPendingApprovals returns [] when the approvals table is empty"
       test_file: main/src/orchestrator/__tests__/approvalListing.test.ts
       type: unit
-    - behavior: "selectPendingApprovals returns rows ordered by created_at ASC (oldest first)"
+    - behavior: selectPendingApprovals returns rows ordered by created_at ASC (oldest first)
       test_file: main/src/orchestrator/__tests__/approvalListing.test.ts
       type: unit
-    - behavior: "selectPendingApprovals truncates payloadPreview to 512 chars via truncatePayloadPreview"
+    - behavior: selectPendingApprovals truncates payloadPreview to 512 chars via truncatePayloadPreview
       test_file: main/src/orchestrator/__tests__/approvalListing.test.ts
       type: unit
-    - behavior: "selectPendingApprovals resolves workflowName via JOIN to workflows.name"
+    - behavior: selectPendingApprovals resolves workflowName via JOIN to workflows.name
       test_file: main/src/orchestrator/__tests__/approvalListing.test.ts
       type: unit
     - behavior: "selectPendingApprovals excludes non-pending approvals (status='approved', 'rejected', 'expired', 'timed_out')"
@@ -67,11 +68,10 @@ test_strategy:
     - behavior: "Round-trip parity continues to hold: bridge.workflowName === selectPendingApprovals(db)[0].workflowName for the same seeded approval"
       test_file: main/src/orchestrator/__tests__/approvalCreatedBridge.test.ts
       type: integration
-    - behavior: "tRPC listPending procedure end-to-end shape continues to match the migrated implementation"
+    - behavior: tRPC listPending procedure end-to-end shape continues to match the migrated implementation
       test_file: main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts
       type: integration
 ---
-
 # Extract selectPendingApprovals helper so the tRPC router and bridge parity test share the same SQL
 
 ## Objective
