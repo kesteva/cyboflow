@@ -33,10 +33,10 @@ export type McpHealthUiStatus = 'healthy' | 'starting' | 'error';
  * procedure (main/src/orchestrator/trpc/routers/health.ts) use this constant
  * so their pre-injection behaviour is identical and defined in one place.
  */
-export const HEALTH_STARTING: McpServerHealth = {
+export const HEALTH_STARTING: Readonly<McpServerHealth> = Object.freeze({
   status: 'starting',
   restartAttempts: 0,
-};
+});
 
 /**
  * Canonical raw-status → UI-status mapping. Single source of truth — both
