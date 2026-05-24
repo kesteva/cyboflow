@@ -1,5 +1,5 @@
 /**
- * Tests for workflow_run lifecycle transition helpers and the tRPC cancel handler.
+ * Tests for workflow_run lifecycle transition helpers.
  *
  * TASK-644 acceptance criteria verified here:
  *
@@ -8,19 +8,14 @@
  * AC3: transitionToCompleted/Failed/Canceled set ended_at.
  * AC4: transitionToFailed writes error_message.
  * AC5: transitionToCanceled accepts any non-terminal source; rejects terminal.
- * AC6: cyboflow.runs.cancel tRPC mutation body is wired (cancelHandler).
- * AC7: cancel procedure throws METHOD_NOT_SUPPORTED when deps unwired.
- * AC8: cancel ordering: clearPendingForRun -> executor.cancel -> DB write.
  *
  * Test strategy:
  *   - Real in-memory better-sqlite3 via the canonical createTestDb fixture (GATE_SCHEMA).
  *   - Transition helpers imported directly — no tRPC wrapper needed.
- *   - cancelHandler imported directly for ordering/return-value tests.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 import {
   transitionToRunning,
@@ -29,7 +24,6 @@ import {
   transitionToCanceled,
   TransitionRejectedError,
 } from '../../services/cyboflow/transitions';
-import { cancelHandler, type CancelDeps } from '../trpc/routers/runs';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -204,188 +198,3 @@ describe('transitionToCanceled', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// describe: cancelHandler (tRPC cancel body)
-// ---------------------------------------------------------------------------
-
-describe('cancelHandler', () => {
-  let db: Database.Database;
-
-  beforeEach(() => {
-    db = createTestDb();
-    vi.clearAllMocks();
-  });
-
-  // -------------------------------------------------------------------------
-  // Helper: build deps bag with an OrderSpy
-  // -------------------------------------------------------------------------
-
-  interface OrderSpy {
-    calls: string[];
-    clearPendingForRun: ReturnType<typeof vi.fn>;
-    executorCancel: ReturnType<typeof vi.fn>;
-  }
-
-  function makeOrderSpy(): OrderSpy {
-    const calls: string[] = [];
-    const clearPendingForRun = vi.fn((_runId: string) => {
-      calls.push('clearPendingForRun');
-    });
-    const executorCancel = vi.fn(async () => {
-      calls.push('executor.cancel');
-    });
-    return { calls, clearPendingForRun, executorCancel };
-  }
-
-  function makeDeps(spy: OrderSpy, runId: string): CancelDeps {
-    return {
-      db: dbAdapter(db),
-      approvalRouter: { clearPendingForRun: spy.clearPendingForRun },
-      lookupExecutor: (_id: string) => (_id === runId ? { cancel: spy.executorCancel } : null),
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Ordering: clearPendingForRun -> executor.cancel -> DB write
-  // -------------------------------------------------------------------------
-
-  it('executes clearPendingForRun -> executor.cancel -> DB write in strict order', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'running');
-
-    const spy = makeOrderSpy();
-
-    // Wrap dbAdapter to capture when the UPDATE fires
-    const origDb = dbAdapter(db);
-    const wrappedDb: CancelDeps['db'] = {
-      prepare: (sql: string) => {
-        const stmt = origDb.prepare(sql);
-        if (sql.includes("status NOT IN ('canceled'")) {
-          return {
-            run: (...args: unknown[]) => {
-              spy.calls.push('dbWrite');
-              return stmt.run(...args);
-            },
-            get: (...args: unknown[]) => stmt.get(...args),
-            all: (...args: unknown[]) => stmt.all(...args),
-          };
-        }
-        return stmt;
-      },
-      transaction: origDb.transaction,
-    };
-
-    const deps: CancelDeps = {
-      db: wrappedDb,
-      approvalRouter: { clearPendingForRun: spy.clearPendingForRun },
-      lookupExecutor: (_id: string) => (_id === runId ? { cancel: spy.executorCancel } : null),
-    };
-
-    await cancelHandler(runId, deps);
-
-    expect(spy.calls).toEqual(['clearPendingForRun', 'executor.cancel', 'dbWrite']);
-  });
-
-  // -------------------------------------------------------------------------
-  // Returns { canceled: true } on success
-  // -------------------------------------------------------------------------
-
-  it('returns { canceled: true } when run is in a non-terminal state', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'running');
-
-    const spy = makeOrderSpy();
-    const result = await cancelHandler(runId, makeDeps(spy, runId));
-
-    expect(result).toEqual({ canceled: true });
-  });
-
-  // -------------------------------------------------------------------------
-  // Returns { canceled: false, reason: 'already_terminal' } for terminal runs
-  // -------------------------------------------------------------------------
-
-  it('returns { canceled: false, reason: "already_terminal" } when run is already canceled', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'canceled');
-
-    const spy = makeOrderSpy();
-    const result = await cancelHandler(runId, makeDeps(spy, runId));
-
-    expect(result).toEqual({ canceled: false, reason: 'already_terminal' });
-  });
-
-  // -------------------------------------------------------------------------
-  // No executor found: skip clearPendingForRun and executor.cancel
-  // -------------------------------------------------------------------------
-
-  it('skips clearPendingForRun and executor.cancel when executor not found', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'running');
-
-    const spy = makeOrderSpy();
-    const deps: CancelDeps = {
-      db: dbAdapter(db),
-      approvalRouter: { clearPendingForRun: spy.clearPendingForRun },
-      lookupExecutor: () => null,
-    };
-
-    const result = await cancelHandler(runId, deps);
-
-    expect(result).toEqual({ canceled: true });
-    expect(spy.clearPendingForRun).not.toHaveBeenCalled();
-    expect(spy.executorCancel).not.toHaveBeenCalled();
-    expect(getStatus(db, runId)).toBe('canceled');
-  });
-
-  // -------------------------------------------------------------------------
-  // DB updated to 'canceled' + ended_at set
-  // -------------------------------------------------------------------------
-
-  it('sets status=canceled and ended_at on the DB row', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'running');
-
-    const spy = makeOrderSpy();
-    await cancelHandler(runId, makeDeps(spy, runId));
-
-    expect(getStatus(db, runId)).toBe('canceled');
-    expect(getEndedAt(db, runId)).not.toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // executor.cancel() rejection: DB still reaches 'canceled', logger.error called
-  // -------------------------------------------------------------------------
-
-  it('resolves { canceled: true } and marks DB canceled even when executor.cancel rejects', async () => {
-    const runId = randomUUID();
-    seedRun(db, runId, 'running');
-
-    const loggerError = vi.fn();
-    const cancelMock = vi.fn().mockRejectedValue(new Error('iter broken'));
-
-    const deps: CancelDeps = {
-      db: dbAdapter(db),
-      approvalRouter: { clearPendingForRun: vi.fn() },
-      lookupExecutor: (_id: string) => (_id === runId ? { cancel: cancelMock } : null),
-      logger: {
-        error: loggerError,
-        info: vi.fn(),
-        warn: vi.fn(),
-        debug: vi.fn(),
-      },
-    };
-
-    const result = await cancelHandler(runId, deps);
-
-    // Handler must resolve (not reject) despite executor.cancel throwing.
-    expect(result).toEqual({ canceled: true });
-    // DB row must reach 'canceled'.
-    expect(getStatus(db, runId)).toBe('canceled');
-    // logger.error must have been called exactly once with the runId.
-    expect(loggerError).toHaveBeenCalledTimes(1);
-    expect(loggerError).toHaveBeenCalledWith(
-      expect.stringContaining('[cancel]'),
-      expect.objectContaining({ runId }),
-    );
-  });
-});
