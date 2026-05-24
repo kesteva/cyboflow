@@ -1,46 +1,21 @@
 /**
- * cyboflow.runs sub-router handler implementations.
+ * Orchestrator-subtree handler for the stuck-run inspection query.
  *
- * Exports testable handler functions that can be called directly in unit tests
- * without the tRPC wrapper. The orchestrator's runsRouter stubs delegate here
- * once ctx.db is wired.
+ * Ported from main/src/trpc/routers/runs.ts (which will be deleted in TASK-717
+ * as part of the legacy-tree cleanup). Keeping the handler here avoids a hard
+ * dependency on the legacy tree when TASK-717 runs its directory rm.
  *
- * Following the same pattern as main/src/trpc/routers/approvals.ts, which hosts
- * approveRestOfRunHandler alongside a re-export of the live approvalsRouter.
- *
- * Standalone-typecheck invariant: no imports from 'electron'.
+ * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
+ * or main/src/services/*.
  */
-
-// Re-export the canonical router so callers can import both the router and
-// handler functions from a single location.
-export { runsRouter } from '../../orchestrator/trpc/routers/runs';
-
-// ---------------------------------------------------------------------------
-// Output types — imported for local use and re-exported from the shared module
-// so downstream consumers can import from a single location without creating
-// an import cycle.
-// ---------------------------------------------------------------------------
-
+import type { DatabaseLike } from './types';
 import type {
   RawEvent,
   PendingApproval,
   StuckInspectionResult,
-} from '../../../../shared/types/stuckInspection';
+} from '../../../shared/types/stuckInspection';
 
 export type { RawEvent, PendingApproval, StuckInspectionResult };
-
-// ---------------------------------------------------------------------------
-// Narrow DB types for direct testing
-// ---------------------------------------------------------------------------
-
-interface PreparedStatement<Row> {
-  get: (...params: unknown[]) => Row | undefined;
-  all: (...params: unknown[]) => Row[];
-}
-
-interface InspectorDb {
-  prepare<Row = unknown>(sql: string): PreparedStatement<Row>;
-}
 
 // ---------------------------------------------------------------------------
 // Row types (internal)
@@ -86,17 +61,17 @@ interface EventRow {
  * @returns Full inspection payload or null if the run does not exist.
  */
 export function getStuckInspectionHandler(
-  db: InspectorDb,
+  db: DatabaseLike,
   runId: string,
 ): StuckInspectionResult | null {
   // 1. Fetch run metadata.
   const run = db
-    .prepare<RunRow>(
+    .prepare(
       `SELECT id, status, stuck_reason, stuck_detected_at
        FROM workflow_runs
        WHERE id = ?`,
     )
-    .get(runId);
+    .get(runId) as RunRow | undefined;
 
   if (run === undefined) {
     return null;
@@ -104,14 +79,14 @@ export function getStuckInspectionHandler(
 
   // 2. Fetch the first pending approval for this run.
   const approvalRow = db
-    .prepare<ApprovalRow>(
+    .prepare(
       `SELECT tool_name, tool_input_json, created_at
        FROM approvals
        WHERE run_id = ? AND status = 'pending'
        ORDER BY created_at ASC
        LIMIT 1`,
     )
-    .get(runId);
+    .get(runId) as ApprovalRow | undefined;
 
   let pendingApproval: PendingApproval | null = null;
   if (approvalRow !== undefined) {
@@ -130,14 +105,14 @@ export function getStuckInspectionHandler(
 
   // 3. Fetch the latest 10 raw_events ordered by id DESC.
   const eventRows = db
-    .prepare<EventRow>(
+    .prepare(
       `SELECT id, event_type, payload_json, created_at
        FROM raw_events
        WHERE run_id = ?
        ORDER BY id DESC
        LIMIT 10`,
     )
-    .all(runId);
+    .all(runId) as EventRow[];
 
   const recentEvents: RawEvent[] = eventRows.map((row) => {
     let payload: unknown;

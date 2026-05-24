@@ -22,12 +22,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
+import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 
 // ---------------------------------------------------------------------------
@@ -75,18 +74,6 @@ vi.mock('../../../utils/sessionValidation', () => ({
 // ---------------------------------------------------------------------------
 // Database / ApprovalRouter helpers (mirrors approvalRouter.test.ts)
 // ---------------------------------------------------------------------------
-
-const SCHEMA_PATH = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
 
 function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
   const queues = new Map<string, PQueue>();

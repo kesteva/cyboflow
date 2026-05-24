@@ -12,7 +12,6 @@ is still scoped as "not yet built."
 | **Amber solid** | Intentional extension point that must not be collapsed (`AbstractCliManager`). |
 | **Amber dashed** | Stub exists in source but does nothing meaningful (raw IPC `NOT_IMPLEMENTED`, tRPC throwing stubs, tRPC working stubs returning benign defaults). |
 | **Red dashed** | File does not exist yet; blocks the stubs above (`permissionIpcServer`, `ApprovalRouter` — both owned by epic 7). |
-| **Gray dashed** | Legacy/unwired (`main/src/trpc/routers/`) — deletion candidate during `TBD-tRPC-cutover`. |
 
 ## Diagram
 
@@ -49,7 +48,6 @@ graph TB
             subgraph IPC["IPC Surfaces"]
                 RawIPC["Raw ipcMain handlers<br/>main/src/ipc/<br/>session / git / panels / cyboflow"]
                 AppRouter["tRPC appRouter<br/>main/src/orchestrator/trpc/router.ts<br/>cyboflow.{runs, approvals,<br/>workflows, events, health}"]
-                LegacyTrpc["main/src/trpc/routers/<br/>legacy / unwired - delete or merge"]
             end
 
             subgraph CyboflowIPC["cyboflow.* transport status"]
@@ -143,7 +141,6 @@ graph TB
     StubRaw -. blocked on .-> NotBuilt
     WorkingTrpc -. blocked on .-> NotBuilt
     ThrowTrpc -. blocked on .-> NotBuilt
-    LegacyTrpc -. candidate for TBD-tRPC-cutover .-> AppRouter
 
     subgraph Shared["shared/types/ - contract layer"]
         Types[Crystal: models / panels / cliPanels / aiPanelConfig<br/>Cyboflow: cyboflow / workflows / approvals /<br/>mcpHealth / stuckDetection / unifiedMessage<br/>Transport: trpc - re-exports AppRouter]
@@ -156,13 +153,10 @@ graph TB
     classDef notbuilt fill:#fee2e2,stroke:#ef4444,stroke-width:2px,stroke-dasharray: 6 4,color:#000
     classDef stub fill:#fef3c7,stroke:#f59e0b,stroke-dasharray: 4 3,color:#000
     classDef product fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#000
-    classDef legacy fill:#f3f4f6,stroke:#9ca3af,stroke-dasharray: 4 3,color:#374151
-
     class Abstract extension
     class PermSrv,ApprovalRouter notbuilt
     class StubRaw,ThrowTrpc,WorkingTrpc stub
     class LiveRaw,LiveTrpc product
-    class LegacyTrpc legacy
     class CyboflowStores product
 ```
 
@@ -179,6 +173,3 @@ single bottleneck behind three different stub buckets in source today:
 exist yet — only the listener side is missing. `permissionModeMapper` and
 `preToolUseHookHelper` already wire approval *routing*; they just route into a future
 `ApprovalRouter` rather than today's stub log lines.
-
-The gray dashed `LegacyTrpc` tree (`main/src/trpc/routers/`) is the cleanup component
-of the `TBD-tRPC-cutover` migration, not a separate epic.

@@ -12,7 +12,10 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
+import type { WorkflowRunListRow } from '../../../../../shared/types/workflows';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
+import { getStuckInspectionHandler } from '../../inspectorQueries';
+import { listRunsHandler } from '../../runQueries';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -25,7 +28,7 @@ import type { ApprovalRouter } from '../../approvalRouter';
 //
 // Injected at boot by main/src/index.ts via setCancelAndRestartDeps().
 // All fields are optional so the router compiles during the workflow-runs epic
-// before wiring is complete — the mutation throws NOT_IMPLEMENTED when deps
+// before wiring is complete — the mutation throws METHOD_NOT_SUPPORTED when deps
 // are absent rather than crashing the process.
 // ---------------------------------------------------------------------------
 
@@ -37,11 +40,50 @@ let cancelAndRestartDeps: CancelAndRestartDeps | null = null;
  * Called once at boot by main/src/index.ts after the DB, ApprovalRouter,
  * RunQueueRegistry, and ClaudeCodeManager have been initialized.
  *
- * Until this is called the mutation throws NOT_IMPLEMENTED (same as
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED (same as
  * all other stub procedures in this router).
  */
 export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
   cancelAndRestartDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// start dependency bag
+//
+// Injected at boot by main/src/index.ts via setStartRunDeps() after both
+// RunLauncher and SessionManager are constructed.  Until wired, the mutation
+// throws METHOD_NOT_SUPPORTED — same pattern as cancel and cancelAndRestart.
+// ---------------------------------------------------------------------------
+
+export interface RunLauncherLike {
+  launch(workflowId: string, projectPath: string): Promise<{
+    runId: string;
+    worktreePath: string;
+    branchName: string;
+  }>;
+}
+
+export interface SessionManagerLike {
+  getProjectById(projectId: number): { path: string } | undefined;
+}
+
+export interface StartRunDeps {
+  runLauncher: RunLauncherLike;
+  sessionManager: SessionManagerLike;
+}
+
+let startRunDeps: StartRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the start mutation.
+ *
+ * Called once at boot by main/src/index.ts after RunLauncher and
+ * SessionManager have been initialized.
+ *
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setStartRunDeps(deps: StartRunDeps): void {
+  startRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,17 +178,51 @@ export async function cancelHandler(
 }
 
 export const runsRouter = router({
-  /** List workflow runs, optionally filtered by project. */
+  /** List workflow runs for a project, ordered newest-first. */
   list: protectedProcedure
-    .input(z.object({ projectId: z.string().optional() }))
-    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
-    .query(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({ projectId: z.number().int().positive() }))
+    .query(({ ctx, input }): WorkflowRunListRow[] => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return listRunsHandler(ctx.db, input.projectId);
+    }),
 
   /** Start a new workflow run for the given workflow and project. */
   start: protectedProcedure
-    .input(z.object({ workflowId: z.string(), projectId: z.string() }))
-    // STUB — raw-IPC equivalent (cyboflow:startRun) in main/src/ipc/cyboflow.ts is the live surface. TBD-tRPC-cutover migration replaces this stub.
-    .mutation(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({
+      workflowId: z.string().min(1),
+      projectId: z.number().int().positive(),
+    }))
+    .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
+      if (ctx.userId !== 'local') {
+        throw new TRPCError({ code: 'FORBIDDEN' });
+      }
+      if (!startRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'start dependencies not wired yet. Call setStartRunDeps() at boot.',
+        });
+      }
+      const project = startRunDeps.sessionManager.getProjectById(input.projectId);
+      if (!project) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Project ${input.projectId} not found`,
+        });
+      }
+      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
+        input.workflowId,
+        project.path,
+      );
+      return { runId, worktreePath, branchName };
+    }),
 
   /** Cancel a running workflow run by ID. */
   cancel: protectedProcedure
@@ -192,7 +268,7 @@ export const runsRouter = router({
    *
    * Standalone-typecheck invariant: the real collaborators (db, approvalRouter,
    * runQueues, claudeManagerStop) are injected via setCancelAndRestartDeps().
-   * Until that is called the mutation throws NOT_IMPLEMENTED.
+   * Until that is called the mutation throws METHOD_NOT_SUPPORTED.
    */
   cancelAndRestart: protectedProcedure
     .input(z.object({ runId: z.string() }))
@@ -218,37 +294,26 @@ export const runsRouter = router({
    * Principal scoping: v1 uses userId === 'local' for all runs. The guard
    * is structurally present for forward compatibility when the v2 team-tier
    * swap introduces real per-user scoping.
-   *
-   * Implementation note: ctx.db is not yet wired into the tRPC context
-   * (pending approval-router epic). The handler function
-   * `getStuckInspectionHandler` in main/src/trpc/routers/runs.ts is
-   * directly testable without the tRPC wrapper; the procedure stub throws
-   * NOT_IMPLEMENTED until ctx.db is wired.
-   *
-   * TODO(workflow-runs epic): replace stub with:
-   *   if (ctx.principal.userId !== 'local') {
-   *     throw new TRPCError({ code: 'FORBIDDEN' });
-   *   }
-   *   const result = getStuckInspectionHandler(ctx.db, input.runId);
-   *   if (!result) throw new TRPCError({ code: 'NOT_FOUND' });
-   *   return result;
    */
   getStuckInspection: protectedProcedure
     .input(z.object({ runId: z.string() }))
     .query(async ({ ctx, input }): Promise<StuckInspectionResult> => {
-      // Principal scoping — structurally present for v2 forward-compat.
-      // In v1, ctx.userId is always 'local', matching the implicit run ownership.
       if (ctx.userId !== 'local') {
         throw new TRPCError({ code: 'FORBIDDEN' });
       }
-      // STUB — tRPC is the actual call path (StuckInspectorModal); implementation pending workflow-runs epic.
-      // DB not yet wired into tRPC context (approval-router epic).
-      // Throw NOT_IMPLEMENTED so the modal surfaces a visible error rather than
-      // silently returning empty data.
-      void input; // consumed once DB is wired
-      throw new TRPCError({
-        code: 'NOT_IMPLEMENTED',
-        message: `getStuckInspection is not wired yet (workflow-runs epic). runId=${input.runId}`,
-      });
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      const result = getStuckInspectionHandler(ctx.db, input.runId);
+      if (result === null) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Run ${input.runId} not found`,
+        });
+      }
+      return result;
     }),
 });

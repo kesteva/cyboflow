@@ -12,23 +12,55 @@ import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi — same pattern as RunView.test.tsx
+// Mock cyboflowApi — keeps only the entries that WorkflowPicker/RunView still
+// use after TASK-715 (startRun and listWorkflows are now gone from cyboflowApi).
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: vi.fn(() => vi.fn()),
   cyboflowApi: {
     subscribeToStreamEvents: vi.fn(() => vi.fn()),
-    listWorkflows: vi.fn().mockResolvedValue([
-      { id: 'wf-1', name: 'soloflow' },
-      { id: 'wf-2', name: 'planner' },
-    ]),
-    startRun: vi.fn().mockResolvedValue({
-      runId: 'run-test-001',
-      worktreePath: '/tmp/wt',
-      branchName: 'run/run-test-001',
-    }),
     approveRun: vi.fn(),
+  },
+}));
+
+// ---------------------------------------------------------------------------
+// tRPC mock — override the global setup.ts stub to add runs.start.mutate and
+// health.mcpServer.query so WorkflowPicker and mcpHealthStore work.
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+        start: {
+          mutate: vi.fn().mockResolvedValue({
+            runId: 'run-test-001',
+            worktreePath: '/tmp/wt',
+            branchName: 'run/run-test-001',
+          }),
+        },
+      },
+      workflows: {
+        list: {
+          query: vi.fn().mockResolvedValue([
+            { id: 'wf-1', project_id: 0, name: 'soloflow', workflow_path: null, permission_mode: 'default', created_at: '' },
+            { id: 'wf-2', project_id: 0, name: 'planner', workflow_path: null, permission_mode: 'default', created_at: '' },
+          ]),
+        },
+      },
+      health: {
+        mcpServer: { query: vi.fn().mockResolvedValue({ status: 'running', restartAttempts: 0 }) },
+      },
+      events: {
+        onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        setBadgeCount: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+      },
+      approvals: {
+        listPending: { query: vi.fn().mockResolvedValue([]) },
+      },
+    },
   },
 }));
 
@@ -57,6 +89,7 @@ vi.mock('../../../services/panelApi', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { trpc } from '../../../utils/trpcClient';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -117,9 +150,32 @@ describe('CyboflowRoot', () => {
     });
   });
 
+  it('Start Run button is disabled while the mutation is in-flight (prevents double-submission)', async () => {
+    // Use a never-resolving promise so the button stays in the "starting" state
+    vi.mocked(trpc.cyboflow.runs.start.mutate).mockReturnValue(new Promise(() => {/* never resolves */}));
+
+    render(<CyboflowRoot projectId={1} />);
+
+    // Open the picker modal
+    fireEvent.click(screen.getByRole('button', { name: 'Choose a workflow' }));
+
+    // Wait for workflows to load and the Start Run button to appear
+    const startRunBtn = await screen.findByRole('button', { name: 'Start Run' });
+
+    // Button should be enabled before clicking
+    expect(startRunBtn).not.toBeDisabled();
+
+    // Click Start Run — mutation is now in-flight (never resolves)
+    fireEvent.click(startRunBtn);
+
+    // Button must immediately become disabled
+    await waitFor(() => {
+      expect(startRunBtn).toBeDisabled();
+    });
+  });
+
   it('modal closes automatically after a successful run start', async () => {
-    const { cyboflowApi } = await import('../../../utils/cyboflowApi');
-    vi.mocked(cyboflowApi.startRun).mockResolvedValue({
+    vi.mocked(trpc.cyboflow.runs.start.mutate).mockResolvedValue({
       runId: 'run-auto-close',
       worktreePath: '/tmp/wt-auto',
       branchName: 'run/run-auto-close',

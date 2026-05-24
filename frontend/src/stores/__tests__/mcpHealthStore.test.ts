@@ -3,7 +3,7 @@
  *
  * Verifies:
  *   (a) Initial state is { status: 'starting', lastCheckedAt: null, lastError: null, pid: null }.
- *   (b) After subscribeToMcpHealth resolves one tick, status reflects the IPC
+ *   (b) After subscribeToMcpHealth resolves one tick, status reflects the tRPC
  *       response mapped through toUiStatus.
  *   (c) Subsequent ticks update lastCheckedAt.
  *   (d) Unsubscribe stops the polling loop (no further updates after returned
@@ -13,19 +13,29 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { McpServerHealth } from '../../../../shared/types/mcpHealth';
 
 // ---------------------------------------------------------------------------
-// Mock window.electron.invoke before the store is imported
+// Mock trpc.cyboflow.health.mcpServer.query before the store is imported.
+//
+// vi.mock is hoisted to the top of the file by vitest's transformer, so any
+// variable declared with `const` outside vi.hoisted() is NOT yet initialized
+// when the factory runs.  Use vi.hoisted() so the mock fn is available to the
+// factory at hoist-time.
 // ---------------------------------------------------------------------------
 
-const mockInvoke = vi.fn<(channel: string) => Promise<McpServerHealth | undefined>>();
+const { mockMcpServerQuery } = vi.hoisted(() => ({
+  mockMcpServerQuery: vi.fn<() => Promise<McpServerHealth>>(),
+}));
 
-Object.defineProperty(globalThis, 'window', {
-  value: {
-    electron: {
-      invoke: mockInvoke,
+vi.mock('../../utils/trpcClient', () => ({
+  trpc: {
+    cyboflow: {
+      health: {
+        mcpServer: {
+          query: mockMcpServerQuery,
+        },
+      },
     },
   },
-  writable: true,
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Import the store (after mock setup)
@@ -81,7 +91,7 @@ describe('mcpHealthStore — initial state', () => {
 describe('mcpHealthStore — subscribeToMcpHealth', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    mockInvoke.mockReset();
+    mockMcpServerQuery.mockReset();
     resetStore();
   });
 
@@ -89,9 +99,9 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     vi.useRealTimers();
   });
 
-  it('maps running→healthy after first IPC response', async () => {
+  it('maps running→healthy after first tRPC response', async () => {
     const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(runningHealth);
+    mockMcpServerQuery.mockResolvedValue(runningHealth);
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
@@ -102,7 +112,7 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
 
   it('maps starting→starting', async () => {
     const startingHealth: McpServerHealth = { status: 'starting', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(startingHealth);
+    mockMcpServerQuery.mockResolvedValue(startingHealth);
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
@@ -113,7 +123,7 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
 
   it('maps failed→error', async () => {
     const failedHealth: McpServerHealth = { status: 'failed', restartAttempts: 2, lastError: 'crash' };
-    mockInvoke.mockResolvedValue(failedHealth);
+    mockMcpServerQuery.mockResolvedValue(failedHealth);
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
@@ -125,7 +135,7 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
 
   it('maps stopped→error', async () => {
     const stoppedHealth: McpServerHealth = { status: 'stopped', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(stoppedHealth);
+    mockMcpServerQuery.mockResolvedValue(stoppedHealth);
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
@@ -136,7 +146,7 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
 
   it('updates lastCheckedAt on the first tick', async () => {
     const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(runningHealth);
+    mockMcpServerQuery.mockResolvedValue(runningHealth);
 
     const now = 1000000;
     vi.setSystemTime(now);
@@ -150,12 +160,12 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
 
   it('stops polling after unsubscribe is called', async () => {
     const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
-    mockInvoke.mockResolvedValue(runningHealth);
+    mockMcpServerQuery.mockResolvedValue(runningHealth);
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();
 
-    const callCountAfterFirstTick = mockInvoke.mock.calls.length;
+    const callCountAfterFirstTick = mockMcpServerQuery.mock.calls.length;
     expect(callCountAfterFirstTick).toBeGreaterThanOrEqual(1);
 
     // Unsubscribe stops the loop
@@ -166,11 +176,11 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     // Flush any microtasks that may have been queued
     vi.runAllTicks();
 
-    expect(mockInvoke.mock.calls.length).toBe(callCountAfterFirstTick);
+    expect(mockMcpServerQuery.mock.calls.length).toBe(callCountAfterFirstTick);
   });
 
-  it('stays in current state when IPC throws', async () => {
-    mockInvoke.mockRejectedValue(new Error('IPC unavailable'));
+  it('stays in current state when tRPC query throws', async () => {
+    mockMcpServerQuery.mockRejectedValue(new Error('tRPC unavailable'));
 
     const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
     await flushInitialPoll();

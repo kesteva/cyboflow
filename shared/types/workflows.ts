@@ -43,6 +43,26 @@ export interface WorkflowRunRow {
   updated_at: string;
 }
 
+/**
+ * Subset of WorkflowRunRow returned by cyboflow.runs.list (and the raw-IPC
+ * cyboflow:listRuns handler). The heavy snapshot column is excluded.
+ * Centralized so the tRPC procedure and the legacy cyboflowApi wrapper
+ * share one shape.
+ */
+export interface WorkflowRunListRow {
+  id: string;
+  workflow_id: string;
+  project_id: number;
+  status: WorkflowRunRow['status'];
+  worktree_path: string | null;
+  branch_name: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  stuck_reason: string | null;
+}
+
 export const SOLOFLOW_WORKFLOW_NAMES = [
   'soloflow',
   'planner',

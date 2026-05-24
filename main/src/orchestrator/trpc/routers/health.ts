@@ -22,12 +22,13 @@ let _health: OrchestratorHealth | null = null;
 
 /**
  * Inject the OrchestratorHealth instance.
- * Call this from the IPC wiring layer (main/src/ipc/cyboflow.ts or index.ts)
+ * Call this from the IPC wiring layer (main/src/index.ts)
  * before the tRPC server starts handling requests.
  */
 export function setHealthProvider(health: OrchestratorHealth): void {
   _health = health;
 }
+
 
 // ---------------------------------------------------------------------------
 // health sub-router

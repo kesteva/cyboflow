@@ -15,27 +15,15 @@
  * end-to-end; missing-file tests simply pass a non-existent path.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
-import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Creates a fresh in-memory SQLite database with only the registry tables. */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(REGISTRY_SCHEMA);
-  return db;
-}
+import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 
 /** Write a minimal markdown file with optional frontmatter to a temp dir. */
 function writeTempMd(dir: string, filename: string, content: string): string {
@@ -568,8 +556,7 @@ describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
 
       // Also verify that the permission_mode from the file is parseable as 'acceptEdits'.
       // We use a fresh registry with an in-memory DB to exercise seed() end-to-end.
-      const db = new Database(':memory:');
-      db.exec(REGISTRY_SCHEMA);
+      const db = createTestDb();
 
       const logger = makeSpyLogger();
       const registry = new WorkflowRegistry(dbAdapter(db), logger);

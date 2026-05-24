@@ -13,17 +13,49 @@
 import Database from 'better-sqlite3';
 import { GATE_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 
+/**
+ * Options for createTestDb. All fields are optional; defaults preserve the
+ * previous zero-arg behavior (FK ON, GATE_SCHEMA only).
+ *
+ * Important: the options layer additional SQL ON TOP of GATE_SCHEMA — they do
+ * NOT fold into GATE_SCHEMA itself. The GATE_SCHEMA parity test in
+ * __tests__/orchestratorTestDb.test.ts compares GATE_SCHEMA against
+ * 006_cyboflow_schema.sql using a no-options call; adding options must not
+ * widen GATE_SCHEMA or that parity test would drift.
+ */
+export interface CreateTestDbOptions {
+  /**
+   * If true, FK enforcement is disabled (PRAGMA foreign_keys=OFF).
+   * Defaults to false (FK ON).
+   */
+  disableForeignKeys?: boolean;
+  /**
+   * If true, additionally apply migration 007's ALTER statement, which adds
+   * stuck_detected_at INTEGER to workflow_runs. Defaults to false.
+   *
+   * NOTE: The ALTER statement does NOT use IF NOT EXISTS (SQLite ALTER does
+   * not support that clause). Do not pass this option twice on the same DB.
+   */
+  includeStuckDetectedAt?: boolean;
+}
 
 /**
  * Creates a fresh in-memory SQLite database with the full cyboflow schema
- * (workflows, workflow_runs, approvals, raw_events) and FK enforcement ON.
+ * (workflows, workflow_runs, approvals, raw_events) and FK enforcement ON
+ * by default.
  *
- * Uses GATE_SCHEMA only (in-memory, no file paths).
+ * Pass options to relax FK enforcement or to layer additional migration SQL
+ * (e.g. migration 007's stuck_detected_at column) on top of GATE_SCHEMA.
+ * The GATE_SCHEMA itself is always applied unchanged regardless of options —
+ * only the post-exec steps differ.
  */
-export function createTestDb(): Database.Database {
+export function createTestDb(options?: CreateTestDbOptions): Database.Database {
   const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
+  db.pragma(options?.disableForeignKeys ? 'foreign_keys = OFF' : 'foreign_keys = ON');
   db.exec(GATE_SCHEMA);
+  if (options?.includeStuckDetectedAt) {
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
+  }
   return db;
 }
 

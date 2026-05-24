@@ -13,7 +13,7 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
-import type { WorkflowRunListRow } from '../../utils/cyboflowApi';
+import type { WorkflowRunListRow } from '../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Shared mutable state for mocks
@@ -25,15 +25,33 @@ const mockNavigateToSessions = vi.fn();
 const mockSetActiveProjectId = vi.fn();
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi.listRuns
+// Mock tRPC client (runs.list)
+// ---------------------------------------------------------------------------
+
+vi.mock('../../utils/trpcClient', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        list: {
+          query: vi.fn(async () => mockRuns),
+        },
+      },
+    },
+  },
+}));
+
+// ---------------------------------------------------------------------------
+// Mock cyboflowApi — only the IPC-backed functions remain (subscribeToStreamEvents,
+// approveRun). runs.start has been migrated to trpc in TASK-715.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../utils/cyboflowApi', () => ({
-  listRuns: vi.fn(async () => mockRuns),
   subscribeToStreamEvents: vi.fn(() => () => {}),
-  startRun: vi.fn(),
   approveRun: vi.fn(),
-  listWorkflows: vi.fn(async () => []),
+  cyboflowApi: {
+    subscribeToStreamEvents: vi.fn(() => () => {}),
+    approveRun: vi.fn(),
+  },
 }));
 
 // ---------------------------------------------------------------------------

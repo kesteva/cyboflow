@@ -7,38 +7,46 @@
  *
  * See also: main/src/orchestrator/trpc/routers/health.ts (tRPC procedure).
  */
-import type { McpServerLifecycle } from './mcpServer/mcpServerLifecycle';
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import type { McpServerStatus } from './mcpServer/mcpServerLifecycle';
 
 // Re-export so consumers that imported McpServerHealth from this module
 // continue to compile without update.
 export type { McpServerHealth } from '../../../shared/types/mcpHealth';
 
 /**
+ * Narrow observable interface required by OrchestratorHealth.
+ *
+ * Accepts the concrete McpServerLifecycle (structural match) as well as any
+ * stub or sentinel that satisfies these two methods — useful at boot when the
+ * real lifecycle is not yet wired (e.g. epic 7 permissionIpcServer pending).
+ */
+export interface McpLifecycleReadable {
+  getStatus(): McpServerStatus;
+  getRestartAttempts(): number;
+}
+
+/**
  * Aggregates runtime health data for the cyboflow orchestrator subsystem.
  *
- * Usage (in main/src/ipc/cyboflow.ts):
+ * Usage (in main/src/index.ts):
  * ```ts
  * const health = new OrchestratorHealth(mcpLifecycle);
- * ipcMain.handle('cyboflow:mcp-health', () => health.getMcpServerStatus());
+ * setHealthProvider(health); // wires the tRPC cyboflow.health.mcpServer procedure
  * ```
  *
- * WARNING: The McpServerLifecycle default state is 'stopped', which is normally
- * never observed through a health snapshot in production. Either call
- * mcpLifecycle.start() before constructing OrchestratorHealth, or translate
- * any 'stopped' status → 'starting' until the lifecycle has been started at
- * least once, so the frontend dot stays yellow rather than showing an
- * unexpected red state at boot.
+ * The constructor accepts any McpLifecycleReadable, so a sentinel can be
+ * passed at boot before the real McpServerLifecycle is available (epic 7).
  */
 export class OrchestratorHealth {
   private lastMcpError: string | undefined;
 
   /**
-   * @param mcpLifecycle  The singleton MCP server lifecycle manager.
-   *                      Injected so the health surface has no knowledge of
-   *                      spawn details; it merely reads observable state.
+   * @param mcpLifecycle  Any object satisfying McpLifecycleReadable.
+   *                      Typically the real McpServerLifecycle singleton;
+   *                      a sentinel stub is acceptable at boot.
    */
-  constructor(private readonly mcpLifecycle: McpServerLifecycle) {}
+  constructor(private readonly mcpLifecycle: McpLifecycleReadable) {}
 
   /**
    * Record an MCP-server-level error string.

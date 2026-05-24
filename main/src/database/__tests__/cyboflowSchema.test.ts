@@ -26,6 +26,7 @@ import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseService } from '../database';
+import { seedApproval } from '../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Helper: open a fresh in-memory DB and apply the migration
@@ -213,13 +214,8 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
 
     // Now try to insert an approvals row with an invalid status
     expect(() => {
-      freshDb
-        .prepare(
-          `INSERT INTO approvals
-             (id, run_id, tool_name, tool_input_json, tool_use_id, status)
-           VALUES ('ap-1', 'wr-1', 'bash', '{}', 'tu-1', 'maybe')`
-        )
-        .run();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      seedApproval(freshDb, { id: 'ap-1', runId: 'wr-1', toolUseId: 'tu-1', status: 'maybe' as any });
     }).toThrow(/CHECK constraint failed/);
 
     freshDb.close();
@@ -246,13 +242,7 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
       .run(wfRow2.id);
 
     // Insert without specifying status — should default to 'pending'
-    freshDb
-      .prepare(
-        `INSERT INTO approvals
-           (id, run_id, tool_name, tool_input_json, tool_use_id)
-         VALUES ('ap-1', 'wr-1', 'bash', '{}', 'tu-1')`
-      )
-      .run();
+    seedApproval(freshDb, { id: 'ap-1', runId: 'wr-1', toolUseId: 'tu-1' });
 
     const row = freshDb
       .prepare(`SELECT status FROM approvals WHERE id = 'ap-1'`)
@@ -287,13 +277,7 @@ describe('006_cyboflow_schema — approvals CHECK constraint', () => {
         .run(wfRow3.id);
 
       expect(() => {
-        freshDb
-          .prepare(
-            `INSERT INTO approvals
-               (id, run_id, tool_name, tool_input_json, tool_use_id, status)
-             VALUES ('ap-1', 'wr-1', 'bash', '{}', 'tu-1', ?)`
-          )
-          .run(status);
+        seedApproval(freshDb, { id: 'ap-1', runId: 'wr-1', toolUseId: 'tu-1', status });
       }).not.toThrow();
 
       freshDb.close();

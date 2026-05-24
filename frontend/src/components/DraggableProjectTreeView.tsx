@@ -7,8 +7,8 @@ import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
-import { listRuns } from '../utils/cyboflowApi';
-import type { WorkflowRunListRow } from '../utils/cyboflowApi';
+import { trpc } from '../utils/trpcClient';
+import type { WorkflowRunListRow } from '../../../shared/types/workflows';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
 import type { Project, CreateProjectRequest } from '../types/project';
@@ -175,7 +175,9 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
       // Fetch runs for every project in parallel (newest first — server sorts DESC)
       const runsPerProject = await Promise.all(
-        projects.map(p => listRuns({ projectId: p.id }).catch(() => [] as WorkflowRunListRow[])),
+        projects.map(p =>
+          trpc.cyboflow.runs.list.query({ projectId: p.id }).catch(() => [] as WorkflowRunListRow[]),
+        ),
       );
 
       const projectsWithRunsData: ProjectWithRuns[] = projects.map((p, i) => ({

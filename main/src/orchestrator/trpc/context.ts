@@ -10,6 +10,22 @@
  * this single file (or injecting a session resolver at server-init time).
  */
 import type { DatabaseLike } from '../types';
+import type { WorkflowRow } from '../../../../shared/types/workflows';
+import type { WorkflowDescriptor } from '../workflowRegistry';
+
+/**
+ * Narrow structural interface for WorkflowRegistry used in tRPC context.
+ *
+ * Defined here (rather than importing the concrete WorkflowRegistry class)
+ * so the tRPC subtree never takes a hard dependency on the registry's full
+ * surface — preserves test substitutability and the standalone-typecheck
+ * invariant (no 'better-sqlite3' or fs imports pulled transitively).
+ */
+export interface WorkflowRegistryLike {
+  listByProject(projectId: number): WorkflowRow[];
+  getById(workflowId: string): WorkflowRow | null;
+  seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
+}
 
 /**
  * Injectable dependencies for the tRPC context.
@@ -40,6 +56,20 @@ export interface ContextDeps {
    * intentional default so unit tests that do not need DB access can omit it.
    */
   db?: DatabaseLike;
+
+  /**
+   * Live WorkflowRegistry instance.
+   *
+   * Injected from `main/src/index.ts` via the `workflowRegistry` singleton
+   * constructed at app start. Using the narrow `WorkflowRegistryLike` interface
+   * (rather than importing the concrete WorkflowRegistry class) preserves the
+   * standalone-typecheck invariant and test substitutability.
+   *
+   * Handlers must explicitly check `ctx.workflowRegistry` before use —
+   * `undefined` is the intentional default so unit tests that do not need the
+   * registry can omit it.
+   */
+  workflowRegistry?: WorkflowRegistryLike;
 }
 
 /**
@@ -58,9 +88,10 @@ export function createContext(deps: ContextDeps = {}): {
   userId: 'local';
   setDockBadge: (count: number) => void;
   db?: DatabaseLike;
+  workflowRegistry?: WorkflowRegistryLike;
 } {
-  const { setDockBadge = (_count: number) => undefined, db } = deps;
-  return { userId: 'local' as const, setDockBadge, db };
+  const { setDockBadge = (_count: number) => undefined, db, workflowRegistry } = deps;
+  return { userId: 'local' as const, setDockBadge, db, workflowRegistry };
 }
 
 /** Shape of the tRPC context, inferred from `createContext`. */

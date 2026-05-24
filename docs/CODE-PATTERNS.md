@@ -251,7 +251,7 @@ migration harder.
 Canonical usage:
 
 ```ts
-const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:listRuns');
+const v = validateInput(z.object({ projectId: z.number().finite() }), args, 'cyboflow:approveRun');
 if (!v.ok) return { success: false, error: v.error };
 const { projectId } = v.value;
 ```
