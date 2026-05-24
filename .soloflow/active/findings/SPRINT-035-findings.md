@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
 pending_count: 13
-last_updated: "2026-05-24T00:45:00.000Z"
+last_updated: "2026-05-24T01:05:00.000Z"
 ---
 # Findings Queue
 
@@ -153,38 +153,103 @@ last_updated: "2026-05-24T00:45:00.000Z"
 - **source:** TASK-716 (verifier)
 - **type:** cleanup
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/orchestrator/health.ts:31-35 and main/src/orchestrator/trpc/routers/health.ts:35
 - **description:** Two docstring blocks still reference the raw-IPC `cyboflow:mcp-health` handler that TASK-716 just deleted. `main/src/orchestrator/health.ts:31-35` shows a Usage example "`ipcMain.handle('cyboflow:mcp-health', () => health.getMcpServerStatus());`" in `main/src/ipc/cyboflow.ts` — that file no longer exists as described; the example should be updated to show wiring via `setHealthProvider` + the tRPC `cyboflow.health.mcpServer` procedure. `main/src/orchestrator/trpc/routers/health.ts:35` says "Used by the raw-IPC `cyboflow:mcp-health` handler in main/src/ipc/cyboflow.ts so that both the IPC and tRPC surfaces read from the SAME singleton" — only the tRPC surface remains, so the "both surfaces" framing is now stale. Neither block is a TASK-716 AC violation (the plan's grep ACs are scoped to `main/src/ipc/cyboflow.ts`, the test file, and `frontend/src`), but the doc drift is real. Natural pickup for TASK-717 (legacy-tree deletion already plans docstring refresh per FIND-SPRINT-035-1), which already touches the `main/src/orchestrator/trpc/routers/health.ts` neighborhood.
 - **suggested_action:** In TASK-717, rewrite the Usage block in `main/src/orchestrator/health.ts:28-39` to show the `setHealthProvider(orchestratorHealth)` wire-up from `main/src/index.ts` and drop the `ipcMain.handle('cyboflow:mcp-health', ...)` example. In `main/src/orchestrator/trpc/routers/health.ts:32-37`, drop the "both the IPC and tRPC surfaces" framing — only the tRPC surface remains.
-- **resolved_by:** 
+- **resolved_by:** TASK-717
 
 ## FIND-SPRINT-035-17
 - **source:** TASK-716 (code-reviewer)
 - **type:** cleanup
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/orchestrator/trpc/routers/health.ts:28-41
 - **description:** After TASK-716 deleted the raw-IPC `cyboflow:mcp-health` handler — the only consumer of `getHealthProvider` — the exported helper `getHealthProvider(): OrchestratorHealth | null` is now dead code (zero call sites across `main/src` and `frontend/src`). The matching `_health` module-local is still legitimately written by `setHealthProvider` and read directly inside the `mcpServer` procedure (line 56), so only the public getter is orphaned. Outside TASK-716's `files_owned` (`main/src/orchestrator/trpc/routers/health.ts` is read-only context), but mechanically discoverable now that the IPC handler is gone. Verification: `grep -rn "getHealthProvider" main/src frontend/src` returns exactly 1 hit — the declaration itself.
 - **suggested_action:** Drop the `export function getHealthProvider` declaration from `main/src/orchestrator/trpc/routers/health.ts` and inline `_health` reads (already done inside the procedure). Natural pickup for TASK-717 since it already touches the orchestrator tRPC neighborhood and FIND-SPRINT-035-16 already plans a docstring refresh for the same file.
-- **resolved_by:** 
+- **resolved_by:** TASK-717
 
 ## FIND-SPRINT-035-18
 - **source:** TASK-716 (code-reviewer)
 - **type:** cleanup
 - **severity:** medium
-- **status:** open
+- **status:** resolved
 - **location:** docs/ARCHITECTURE.md:125-131, 152, 327-338
 - **description:** `docs/ARCHITECTURE.md` still documents the four migrated channels — `cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:listRuns`, `cyboflow:mcp-health` — as live raw-IPC channels in three places. (a) Lines 125-129 list them under the IPC section as the current transport. (b) Line 131 says `cyboflow:mcp-health` has a "typed counterpart" in tRPC implying the raw channel is still live. (c) Lines 327-338 describe the renderer "currently mixes raw `electron.invoke` for `cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:listRuns`, `cyboflow:mcp-health` with the typed `cyboflow.*`" — TASK-714/715/716 just completed the migration that this paragraph predicts. Severity raised to medium because ARCHITECTURE.md is the canonical onboarding doc and incoming agents will read the wrong transport mapping. TASK-717's AC7 only updates the *legacy `main/src/trpc/` tree* note — it does NOT touch these channel docs.
 - **suggested_action:** During TASK-717 (or a follow-up doc refresh), rewrite lines 125-131 to show only `cyboflow:approveRun` (stub, epic 7) under raw-IPC, with a note that the four read/write channels migrated to `cyboflow.workflows.list`, `cyboflow.runs.list`, `cyboflow.runs.start`, `cyboflow.health.mcpServer`. Update line 152 to drop the "typed counterpart of raw `cyboflow:listRuns`" framing — there is no longer a raw counterpart. Rewrite lines 327-338 to describe the renderer as fully cut over to tRPC except for the `cyboflow:stream:<runId>` push channel and the `cyboflow:approveRun` stub.
-- **resolved_by:** 
+- **resolved_by:** TASK-717
 
 ## FIND-SPRINT-035-19
 - **source:** TASK-716 (code-reviewer)
 - **type:** cleanup
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** docs/CODE-PATTERNS.md:254
 - **description:** The `validateInput` canonical example in `docs/CODE-PATTERNS.md:254` uses `'cyboflow:listRuns'` as the channel label argument — that channel no longer exists after TASK-716. The example is correct mechanically (the third argument is just a string used in error messages), but using a deleted channel name in onboarding documentation is misleading. Compare with `main/src/ipc/__tests__/validateInput.test.ts` which uses the same channel names — those are pure error-message labels and unaffected.
 - **suggested_action:** Update the example in `docs/CODE-PATTERNS.md:254` to use a still-live channel label, e.g. `'cyboflow:approveRun'` or any of the surviving raw-IPC channels in the codebase. Optionally also update the `validateInput.test.ts` fixtures for consistency, though tests pass regardless.
+- **resolved_by:** TASK-717
+
+## FIND-SPRINT-035-20
+- **type:** scope_deviation
+- **source:** TASK-717 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/approvals.ts
+- **description:** required to meet AC: approveRestOfRunHandler and rejectRestOfRunHandler must live in main/src/orchestrator/**. The orchestrator approvals.ts imported them from the legacy tree; with the legacy tree being deleted, the handlers needed to be inlined here. Also removed getHealthProvider dead export from health.ts per FIND-035-17 pickup.
+- **resolved_by:** verifier — not actually a scope deviation: `main/src/orchestrator/trpc/routers/approvals.ts` is listed in TASK-717's `files_owned` (line 16 of plan). The executor mislabeled an in-scope edit as a deviation. The inlining is also AC-prescribed: AC3 ("approveRestOfRunHandler and rejectRestOfRunHandler live in main/src/orchestrator/**") plus AC6 ("pnpm typecheck exits 0") together require the handlers to be inlined here once the legacy tree is deleted. Same misclassification pattern as FIND-SPRINT-035-5, -7, -10, -13, -14, -15.
+
+## FIND-SPRINT-035-21
+- **type:** scope_deviation
+- **source:** TASK-717 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/__tests__/approvalsHandler.test.ts
+- **description:** required to meet AC5: grep for approveRestOfRunHandler|rejectRestOfRunHandler in main/src/orchestrator/__tests__ or main/src/orchestrator/trpc/__tests__ must return at least 1 match. Created new test file migrating direct handler unit tests from deleted main/src/trpc/__tests__/approvals.test.ts.
+- **resolved_by:** verifier — not actually a scope deviation: `main/src/orchestrator/trpc/__tests__/approvalsHandler.test.ts` is listed in TASK-717's `files_owned` (line 20 of plan). The executor mislabeled an in-scope file creation as a deviation. The new test file is also AC-prescribed: AC5 explicitly requires the equivalent test coverage to exist in the orchestrator subtree post-deletion, and the plan's Implementation Steps step 2 calls out this porting work. Same misclassification pattern as FIND-SPRINT-035-5, -7, -10, -13, -14, -15, -20.
+
+## FIND-SPRINT-035-22
+- **type:** cleanup
+- **source:** TASK-717 (executor)
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/runLifecycle.test.ts:32
+- **description:** AC2 verification grep catches `from ..+/trpc/(routers|...)` in this file at line 32. The import resolves to main/src/orchestrator/trpc/routers/runs.ts (the canonical orchestrator file, not the deleted legacy tree), so the AC intent is satisfied and typecheck passes. The grep pattern cannot distinguish intra-orchestrator relative imports from cross-tree imports. File owned by TASK-733 which may update this import as part of its createTestDb consolidation work.
 - **resolved_by:** 
+
+## FIND-SPRINT-035-23
+- **type:** cleanup
+- **source:** TASK-717 (executor)
+- **severity:** low
+- **status:** open
+- **location:** shared/types/stuckInspection.ts:5
+- **description:** The file header docblock still references main/src/trpc/routers/runs.ts as a handler home and describes an import-cycle motivation. After TASK-717 the legacy tree is deleted; the handler lives in main/src/orchestrator/inspectorQueries.ts and the cycle is impossible. The docblock should be updated to list the canonical handler location and drop the cycle paragraph. File is out of TASK-717 files_owned (shared/types/ is a cross-package type file). FIND-SPRINT-035-1 noted this; still open for a future task.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-26
+- **source:** TASK-717 (verifier)
+- **type:** claude-md
+- **severity:** medium
+- **status:** open
+- **location:** tests/ (Playwright E2E) and package.json:scripts.test
+- **description:** `pnpm test` (root script `playwright test`) is failing 15 specs across `smoke.spec.ts`, `health-check.spec.ts`, `permissions-ui-fixed.spec.ts`, `git-status.spec.ts`, and `standalone-terminal-panels.spec.ts` with a uniform symptom — the Electron renderer's `<body class="dark">` remains hidden / `[data-testid="settings-button"]` never resolves — and verified pre-existing as of parent commit `2a147a5` (TASK-716 done). The failure mode is consistent with an Electron-app-boot / Vite-renderer-bootstrap environmental issue rather than test-spec regressions: CLAUDE.md notes the renderer at http://localhost:4521 "cannot bootstrap standalone — it depends on preload-injected electronTRPC." Yet `playwright.config.ts:42-47` launches `pnpm electron-dev` as a webServer and points `baseURL: 'http://localhost:4521'` — which appears to bypass the Electron BrowserWindow that injects preload, causing every spec that waits on the rendered body to hang. Two consequences: (a) every TASK that includes "pnpm test exits 0" as an AC is silently un-verifiable — the verifier either rubber-stamps with a false-positive "pre-existing flake" caveat (as in TASK-717) or has to do a parent-commit comparison to triangulate; (b) the verification.run_tests=true config gate is degraded — only the unit-test workspace (`pnpm test:unit`, 989 tests) actually validates code changes. This is the same silent-degradation pattern as the visual_web=true / Vite-cannot-bootstrap conflict already documented in CLAUDE.md's Visual Verification section.
+- **suggested_action:** Either (1) reframe the root `"test"` script: rename to `"test:e2e"` (or similar) and make `"test"` an alias for `"test:unit"` so the verifier's AC6 gate exercises the suite that actually validates changes — and document the e2e variant as a separate, optional gate that needs a properly configured Electron+display environment; or (2) fix the Playwright config to launch Electron via `_electron.launch` rather than `pnpm electron-dev` + `baseURL`, matching the CDP-attach pattern documented in `docs/visual-verification-setup.md`; or (3) at minimum, add a CLAUDE.md note acknowledging that `pnpm test` is environment-sensitive and verifiers should treat consistent body-hidden failures across smoke/health-check as pre-existing infra issues, not task regressions.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-25
+- **source:** TASK-717 (verifier)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** docs/ARCHITECTURE-diagram.md:15,52,183
+- **description:** `docs/ARCHITECTURE-diagram.md` still references the deleted `main/src/trpc/routers/` tree as a "gray dashed Legacy/unwired" deletion candidate and shows it as a node in the diagram. After TASK-717 the tree no longer exists. Three locations need updates: (a) line 15 legend entry describing "Gray dashed" still names `main/src/trpc/routers/` with a `TBD-tRPC-cutover` cleanup reference (the cutover is now complete); (b) line 52 declares a `LegacyTrpc` Mermaid node labeled "main/src/trpc/routers/<br/>legacy / unwired - delete or merge"; (c) line 183 narrative paragraph still describes the gray dashed `LegacyTrpc` tree as a cleanup component. File is outside TASK-717's `files_owned` (`docs/ARCHITECTURE.md` only). TASK-717 AC7 was scoped narrowly to `ARCHITECTURE.md`, so this is correctly out-of-scope but the doc drift is real now that the tree is gone.
+- **suggested_action:** Either remove the `LegacyTrpc` node + its edges from the Mermaid diagram and drop the line 15 legend row and line 183 paragraph, or repurpose the gray-dashed category for a different deletion candidate. Mirror the prose updates already made in `docs/ARCHITECTURE.md` (transport status section).
+- **resolved_by:** 
+
+## FIND-SPRINT-035-24
+- **type:** scope_deviation
+- **source:** TASK-717 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** docs/CODE-PATTERNS.md:254
+- **description:** required to meet FIND-035-19 pickup: validateInput example used cyboflow:listRuns (deleted in TASK-716). Updated to cyboflow:approveRun per suggested_action.
+- **resolved_by:** verifier — not actually a scope deviation: `docs/CODE-PATTERNS.md` is listed in TASK-717's `files_owned` (line 21 of plan). The executor mislabeled an in-scope doc edit as a deviation. The edit also resolves FIND-SPRINT-035-19 (which is marked `resolved_by: TASK-717`), so this work is plan-prescribed. Same misclassification pattern as FIND-SPRINT-035-5, -7, -10, -13, -14, -15, -20, -21.
