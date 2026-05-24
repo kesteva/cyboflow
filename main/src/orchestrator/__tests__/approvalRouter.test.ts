@@ -27,7 +27,7 @@ import PQueue from 'p-queue';
 import { ApprovalRouter, RunNotRunningError, APPROVAL_TIMEOUT_MS, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
+import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
 import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 
@@ -892,14 +892,9 @@ describe('ApprovalRouter', () => {
     const runId = 'run-H1';
     seedRun(db, { id: runId, status: 'awaiting_review' });
 
-    // Manually insert a pending approvals row for this run.
+    // Seed a pending approvals row for this run.
     const approvalId = 'approval-H1';
-    const now = new Date().toISOString();
-    db.prepare(
-      `INSERT INTO approvals
-         (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-    ).run(approvalId, runId, 'bash', '{}', approvalId, now);
+    seedApproval(db, { id: approvalId, runId, toolUseId: approvalId });
 
     // Run recovery.
     const count = router.recoverStaleAwaitingReview();

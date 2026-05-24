@@ -69,6 +69,35 @@ describe('createTestDb', () => {
     expect(tables).toContain('approvals');
     expect(tables).toContain('raw_events');
   });
+
+  it('FK enforcement is OFF when called with { disableForeignKeys: true }', () => {
+    const db = createTestDb({ disableForeignKeys: true });
+    const result = db.pragma('foreign_keys', { simple: true });
+    expect(result).toBe(0);
+  });
+
+  it('workflow_runs has stuck_detected_at column when called with { includeStuckDetectedAt: true }', () => {
+    const db = createTestDb({ includeStuckDetectedAt: true });
+    const rows = db
+      .prepare('PRAGMA table_info(workflow_runs)')
+      .all() as { name: string; type: string }[];
+    const col = rows.find((r) => r.name === 'stuck_detected_at');
+    expect(col).toBeDefined();
+    expect(col!.type).toBe('INTEGER');
+  });
+
+  it('default call (no options) still has FK ON and no stuck_detected_at column', () => {
+    const db = createTestDb();
+    // FK must be ON
+    const fk = db.pragma('foreign_keys', { simple: true });
+    expect(fk).toBe(1);
+    // stuck_detected_at must be absent — GATE_SCHEMA mirrors migration 006 only
+    const rows = db
+      .prepare('PRAGMA table_info(workflow_runs)')
+      .all() as { name: string }[];
+    const col = rows.find((r) => r.name === 'stuck_detected_at');
+    expect(col).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
