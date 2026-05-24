@@ -1,28 +1,25 @@
 /**
  * Integration tests for getStuckInspectionHandler.
  *
- * Two test cases per the test_strategy in the TASK-504 plan:
- *
- * 1. Happy-path: 15 raw_events rows inserted for a stuck run + one pending
- *    approval. Call getStuckInspectionHandler. Assert:
- *    (a) recentEvents.length === 10
- *    (b) events are in descending id order
- *    (c) pendingApproval matches the inserted approval
- *    (d) stuckReason matches the run's column value
- *
- * 2. Principal scoping: caller supplies a non-'local' userId → query
- *    throws FORBIDDEN (or equivalent authorization error).
+ * Happy-path coverage per the test_strategy in the TASK-504 plan:
+ * 15 raw_events rows inserted for a stuck run + one pending approval.
+ * Call getStuckInspectionHandler. Assert:
+ *   (a) recentEvents.length === 10
+ *   (b) events are in descending id order
+ *   (c) pendingApproval matches the inserted approval
+ *   (d) stuckReason matches the run's column value
  *
  * All tests use an in-memory better-sqlite3 instance with migrations 006
  * plus an inline stub for the stuck_detected_at column that migration 007
  * will add (TASK-501 owns that migration; this test applies it inline so
  * the handler can be exercised independently).
+ *
+ * Note: Principal-scoping tests were removed by TASK-739 when the
+ * `ctx.userId !== 'local'` guards were dropped from runs.ts in favor of
+ * the load-bearing `isAuthed` middleware on `protectedProcedure`.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { TRPCError } from '@trpc/server';
 import { getStuckInspectionHandler } from '../inspectorQueries';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -152,52 +149,4 @@ describe('getStuckInspectionHandler', () => {
     expect(result).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
-  // Case 2: principal scoping — non-local userId throws FORBIDDEN
-  //
-  // The principal check lives in the tRPC procedure (protectedProcedure in
-  // runsRouter.getStuckInspection). This test verifies the structural guard
-  // by simulating the same check that the procedure body performs.
-  // -------------------------------------------------------------------------
-  it('tRPC principal guard: non-local userId triggers FORBIDDEN error', () => {
-    // Simulate the userId check that the tRPC procedure performs.
-    // In v1, ctx.userId is always 'local'. A different value means the
-    // request came from an unauthorized principal.
-    const userId: string = 'someone-else';
-
-    const assertForbidden = () => {
-      if (userId !== 'local') {
-        throw new TRPCError({ code: 'FORBIDDEN' });
-      }
-    };
-
-    expect(() => assertForbidden()).toThrowError(TRPCError);
-    try {
-      assertForbidden();
-    } catch (err) {
-      expect(err).toBeInstanceOf(TRPCError);
-      expect((err as TRPCError).code).toBe('FORBIDDEN');
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // Case 2b: tRPC procedure stub correctly references ctx.userId
-  // -------------------------------------------------------------------------
-  it('runsRouter.getStuckInspection references ctx.userId for principal scoping', () => {
-    // Structural verification: grep the source of the runs router for the
-    // principal check. The acceptance criterion requires the check to be
-    // structurally present even if the DB isn't wired yet.
-    //
-    // We import the router file as a string and assert the guard is present.
-    // This is a lightweight static check; the unit test in Case 2 verifies the
-    // runtime behaviour of the same check.
-    const runsRouterSource = readFileSync(
-      join(__dirname, '../../orchestrator/trpc/routers/runs.ts'),
-      'utf8',
-    );
-    // The guard must reference ctx.userId — covers the AC requirement.
-    expect(runsRouterSource).toContain('ctx.userId');
-    // The guard must reference 'FORBIDDEN'.
-    expect(runsRouterSource).toContain('FORBIDDEN');
-  });
 });
