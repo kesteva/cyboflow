@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
-pending_count: 6
-last_updated: "2026-05-23T23:55:00.000Z"
+pending_count: 8
+last_updated: "2026-05-24T00:05:00.000Z"
 ---
 # Findings Queue
 
@@ -90,4 +90,24 @@ last_updated: "2026-05-23T23:55:00.000Z"
 - **location:** main/src/orchestrator/health.ts:24 and main/src/orchestrator/mcpServer/mcpServerLifecycle.ts:26 and shared/types/mcpHealth.ts:13
 - **description:** The status union `'starting' | 'running' | 'failed' | 'stopped'` is now duplicated in THREE locations: (1) `shared/types/mcpHealth.ts:13` (`McpServerHealth.status`), (2) `main/src/orchestrator/mcpServer/mcpServerLifecycle.ts:26` (`McpServerStatus` type export), and (3) `main/src/orchestrator/health.ts:24` (newly added `McpLifecycleReadable.getStatus()` return type, introduced in TASK-713's commit 943568d). If the McpServerLifecycle state machine ever gains a new state (e.g. `'restarting'`), the `McpLifecycleReadable` interface in `health.ts` will silently lag — and the resulting `getMcpServerStatus()` shape would no longer match the lifecycle's actual contract until someone notices and edits the duplicated union. This is the same silent-drop pattern called out in the root CLAUDE.md ("IPC handler ↔ declared `T` parity" — mismatched type vs. handler shape hides field renames from TypeScript). The duplication was probably introduced to preserve the `health.ts` standalone-typecheck invariant ("no imports from main/src/services/*"), but `mcpServer/mcpServerLifecycle.ts` is under `orchestrator/`, not `services/` — and its `McpServerStatus` type export is intentionally re-exported standalone (line 25-26 comment "Re-export for callers that want the status type without importing the class"). Importing `type { McpServerStatus }` would not violate the invariant.
 - **suggested_action:** Change `main/src/orchestrator/health.ts:23-26` from the inline union to `import type { McpServerStatus } from './mcpServer/mcpServerLifecycle';` and use `McpServerStatus` in the `McpLifecycleReadable.getStatus()` return type. This collapses one of the three drift surfaces (the remaining duplication between `shared/types/mcpHealth.ts` and `mcpServer/mcpServerLifecycle.ts` is pre-existing and out of scope here). Verify the standalone-typecheck still passes — `McpServerStatus` is a pure type re-export and pulls in no runtime code.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-11
+- **source:** TASK-714 (verifier)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/cyboflow/__tests__/RunView.test.tsx:32 and frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx:22
+- **description:** Two test files (not in TASK-714's files_owned) still ship stale `listWorkflows: vi.fn()` entries inside their `vi.mock('../../../utils/cyboflowApi', () => ({ cyboflowApi: { listWorkflows: ... } }))` blocks, but `listWorkflows` no longer exists as a property of the real `cyboflowApi` object after TASK-714. The mocks are harmless dead weight (TypeScript doesn't check vi.mock factory shapes against the real module, and neither test reads the mock's listWorkflows return value) — both files were green in the 336-test run. The plan's AC5 grep (`cyboflowApi.*listRuns|cyboflowApi.*listWorkflows`) returns 0 matches because the strings appear on their own lines without a preceding `cyboflowApi.` reference; the AC's stricter intent ("mocks are removed if the test no longer covers that path") is not quite satisfied. Pickup is trivial — drop the one line from each mock block. Natural piggyback on TASK-715 (which already owns CyboflowRoot.test.tsx for the startRun cutover) or TASK-716 (raw-IPC handler deletion) if those tasks touch these files.
+- **suggested_action:** In TASK-715 or TASK-716, drop the `listWorkflows: vi.fn(),` (or `listWorkflows: vi.fn().mockResolvedValue([...])`) line from the `vi.mock('../../../utils/cyboflowApi', ...)` blocks in RunView.test.tsx (line 32) and CyboflowRoot.test.tsx (lines 22-25). No test behaviour will change.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-10
+- **source:** TASK-714 (verifier)
+- **type:** claude-md
+- **severity:** medium
+- **status:** open
+- **location:** .soloflow/active/findings/SPRINT-024-findings.md (FIND-SPRINT-024-4 + FIND-SPRINT-024-5)
+- **description:** RECURRENCE of the bug already captured in FIND-SPRINT-035-7. The TASK-714 executor again wrote findings to the misnamed `.soloflow/active/findings/SPRINT-024-findings.md` file (active sprint is SPRINT-035) and again logged "scope_deviation" entries for files that are IN this task's `files_owned`. Specifically: (a) FIND-SPRINT-024-4 logs `frontend/src/test/setup.ts` as a scope deviation, but it is line 12 of TASK-714-plan.md `files_owned`; (b) FIND-SPRINT-024-5 logs `frontend/vitest.config.ts` as a scope deviation, but it is line 13 of TASK-714-plan.md `files_owned` (and the file was not modified anyway — the executor's own note in the finding admits this). Same root cause as FIND-SPRINT-035-5 (TASK-712) and FIND-SPRINT-035-7 (TASK-713): the executor's findings-logging heuristic is not consulting the sprint.json for the active sprint id, nor checking the plan's `files_owned`/`files_readonly` lists before classifying an edit as a deviation. Three consecutive tasks in this sprint (TASK-712, TASK-713, TASK-714) have repeated this exact mistake — strong signal that the executor-prompt guidance is missing or insufficient.
+- **suggested_action:** Compounder: prioritize the executor-side fix proposed in FIND-SPRINT-035-7's suggested_action (resolve sprint id from `.soloflow/sprint.json` before opening the findings file; only log `type: scope_deviation` when the touched path is NOT in `files_owned`). The pattern has now repeated 3× in one sprint; this is no longer an isolated incident. As bookkeeping, the stray `.soloflow/active/findings/SPRINT-024-findings.md` file should be deleted (FIND-SPRINT-024-2..5 are all either erroneous or in-scope and out-of-place); the legitimate FIND-SPRINT-024-1 entry from TASK-692 should be migrated to that sprint's archive if it isn't already there.
 - **resolved_by:** 
