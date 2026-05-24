@@ -29,16 +29,6 @@ export function setHealthProvider(health: OrchestratorHealth): void {
   _health = health;
 }
 
-/**
- * Read the currently-injected OrchestratorHealth instance.
- *
- * Used by the raw-IPC `cyboflow:mcp-health` handler in main/src/ipc/cyboflow.ts
- * so that both the IPC and tRPC surfaces read from the SAME singleton instead of
- * maintaining parallel state.  Returns null until setHealthProvider() is called.
- */
-export function getHealthProvider(): OrchestratorHealth | null {
-  return _health;
-}
 
 // ---------------------------------------------------------------------------
 // health sub-router
