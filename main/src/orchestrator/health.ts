@@ -28,10 +28,10 @@ export interface McpLifecycleReadable {
 /**
  * Aggregates runtime health data for the cyboflow orchestrator subsystem.
  *
- * Usage (in main/src/ipc/cyboflow.ts):
+ * Usage (in main/src/index.ts):
  * ```ts
  * const health = new OrchestratorHealth(mcpLifecycle);
- * ipcMain.handle('cyboflow:mcp-health', () => health.getMcpServerStatus());
+ * setHealthProvider(health); // wires the tRPC cyboflow.health.mcpServer procedure
  * ```
  *
  * The constructor accepts any McpLifecycleReadable, so a sentinel can be
