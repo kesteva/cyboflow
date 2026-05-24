@@ -31,7 +31,7 @@ const { mockGetStuckInspectionQuery } = vi.hoisted(() => ({
   mockGetStuckInspectionQuery: vi.fn(),
 }));
 
-vi.mock('../../../utils/trpcClient', () => ({
+vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       runs: {

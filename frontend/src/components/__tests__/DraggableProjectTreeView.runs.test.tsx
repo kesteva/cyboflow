@@ -28,7 +28,7 @@ const mockSetActiveProjectId = vi.fn();
 // Mock tRPC client (runs.list)
 // ---------------------------------------------------------------------------
 
-vi.mock('../../utils/trpcClient', () => ({
+vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       runs: {

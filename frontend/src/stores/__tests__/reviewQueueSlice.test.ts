@@ -22,7 +22,7 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 // tRPC mock — prevents the module from requiring an Electron IPC bridge
 // ---------------------------------------------------------------------------
 
-vi.mock('../../utils/trpcClient', () => ({
+vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       events: {

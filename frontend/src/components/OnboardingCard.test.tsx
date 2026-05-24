@@ -83,7 +83,7 @@ vi.mock('./ReviewQueue/PendingApprovalCard', () => ({
 }));
 
 // Mock tRPC client — reviewQueueSlice (imported transitively via ReviewQueueView) requires it.
-vi.mock('../utils/trpcClient', () => ({
+vi.mock('../trpc/client', () => ({
   trpc: {
     cyboflow: {
       events: {

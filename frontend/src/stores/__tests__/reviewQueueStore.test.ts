@@ -24,7 +24,7 @@ let mockSubscribe: ReturnType<typeof vi.fn>;
 // module evaluates without the Electron IPC bridge.
 // Path is relative to this test file: ../../utils/trpcClient resolves to
 // frontend/src/utils/trpcClient.ts (two dirs up from __tests__, then utils/).
-vi.mock('../../utils/trpcClient', () => {
+vi.mock('../../trpc/client', () => {
   // These factory functions defer to the outer-scope mutable references so
   // that replacing the references in beforeEach affects each test.
   return {
