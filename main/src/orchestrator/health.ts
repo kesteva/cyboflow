@@ -8,6 +8,7 @@
  * See also: main/src/orchestrator/trpc/routers/health.ts (tRPC procedure).
  */
 import type { McpServerHealth } from '../../../shared/types/mcpHealth';
+import type { McpServerStatus } from './mcpServer/mcpServerLifecycle';
 
 // Re-export so consumers that imported McpServerHealth from this module
 // continue to compile without update.
@@ -21,7 +22,7 @@ export type { McpServerHealth } from '../../../shared/types/mcpHealth';
  * real lifecycle is not yet wired (e.g. epic 7 permissionIpcServer pending).
  */
 export interface McpLifecycleReadable {
-  getStatus(): 'starting' | 'running' | 'failed' | 'stopped';
+  getStatus(): McpServerStatus;
   getRestartAttempts(): number;
 }
 
