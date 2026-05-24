@@ -1,8 +1,17 @@
 /**
- * Unit tests for the approveRestOfRun tRPC handler (TASK-406).
+ * Unit tests for the approveRestOfRun and rejectRestOfRun handler functions.
  *
- * Tests exercise `approveRestOfRunHandler` directly with an in-memory
- * better-sqlite3 instance — no tRPC wrapping, no Electron, no MCP bridge.
+ * Tests exercise `approveRestOfRunHandler` / `rejectRestOfRunHandler` directly
+ * with an in-memory better-sqlite3 instance — no tRPC wrapping, no Electron,
+ * no MCP bridge.
+ *
+ * This file was migrated from main/src/trpc/__tests__/approvals.test.ts in
+ * TASK-717 (legacy-tree deletion).  The handlers now live in
+ * main/src/orchestrator/trpc/routers/approvals.ts.
+ *
+ * For tRPC-level integration tests (listPending, approve, reject,
+ * approveRestOfRun, rejectRestOfRun via createCaller) see
+ * main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts.
  *
  * Test cases:
  *  1. approveRestOfRun decides all pending approvals for the given runId and
@@ -10,13 +19,20 @@
  *  2. approveRestOfRun with a nonexistent runId returns { decided: 0 } and
  *     does not throw.
  *  3. Sweep: grep confirms no global approve-all symbol exists in the codebase.
+ *  4. rejectRestOfRun decides all pending approvals for the given runId and
+ *     does NOT affect approvals from other runs.
+ *  5. rejectRestOfRun with a nonexistent runId returns { decided: 0 } and
+ *     does not throw.
+ *  6. Sweep: grep confirms no global reject-all symbol exists in the codebase.
+ *  7. approve branch — UPDATE failure logs with [approveRestOfRun] prefix.
+ *  8. reject branch — UPDATE failure logs with [rejectRestOfRun] prefix.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { execSync } from 'child_process';
 import { join } from 'path';
 import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../routers/approvals';
-import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
-import { createTestDb, seedRun, seedApproval } from '../../orchestrator/__test_fixtures__/orchestratorTestDb';
+import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
+import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Tests
