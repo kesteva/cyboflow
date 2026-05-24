@@ -1,7 +1,7 @@
 ---
 id: TASK-734
 idea: SPRINT-034-compounder
-status: ready
+status: in-flight
 created: "2026-05-23T22:30:00Z"
 files_owned:
   - frontend/src/utils/toolFormatter.ts
@@ -18,18 +18,18 @@ acceptance_criteria:
     verification: "test ! -f frontend/src/utils/toolFormatter.test.ts"
   - criterion: formatJsonForWeb is no longer exported from frontend/src/utils/formatters.ts.
     verification: "grep -nE '^export.*formatJsonForWeb' frontend/src/utils/formatters.ts returns 0 matches"
-  - criterion: No source file imports formatJsonForWeb, frontend toolFormatter, or its test.
+  - criterion: "No source file imports formatJsonForWeb, frontend toolFormatter, or its test."
     verification: "grep -rnE \"from\\s+['\\\"][^'\\\"]*(utils/toolFormatter|formatJsonForWeb)\" frontend/src/ returns 0 matches"
   - criterion: Frontend tests still pass with a count drop of 15 (the deleted toolFormatter.test.ts cases).
-    verification: "pnpm --filter frontend test exits 0"
+    verification: pnpm --filter frontend test exits 0
   - criterion: Repository-wide typecheck and lint pass.
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-shell-architecture
 test_strategy:
   needed: false
-  justification: Pure deletion sweep. Files have no production importers (verified via grep across frontend/src/). The active code path goes through main/src/utils/toolFormatter.ts called from main/src/ipc/session.ts:809. No new behavior — typecheck-green + lint-green + the existing frontend suite passing (minus the 15 deleted cases) is the correctness contract.
+  justification: "Pure deletion sweep. Files have no production importers (verified via grep across frontend/src/). The active code path goes through main/src/utils/toolFormatter.ts called from main/src/ipc/session.ts:809. No new behavior — typecheck-green + lint-green + the existing frontend suite passing (minus the 15 deleted cases) is the correctness contract."
 prerequisites: []
 ---
 # Delete dead frontend toolFormatter and orphaned formatJsonForWeb export

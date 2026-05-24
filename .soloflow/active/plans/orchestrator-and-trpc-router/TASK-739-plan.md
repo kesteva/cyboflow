@@ -1,8 +1,8 @@
 ---
 id: TASK-739
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
@@ -25,10 +25,10 @@ acceptance_criteria:
   - criterion: "`protectedProcedure`'s `isAuthed` middleware in `main/src/orchestrator/trpc/trpc.ts` continues to gate on `ctx.userId` truthiness — the v2 swap point is preserved."
     verification: "grep -n \"if (!ctx.userId)\" main/src/orchestrator/trpc/trpc.ts shows the existing UNAUTHORIZED check is unchanged"
   - criterion: "`pnpm --filter main typecheck` exits 0 (no type errors from removed assertions)."
-    verification: "pnpm --filter main typecheck exits with code 0"
+    verification: pnpm --filter main typecheck exits with code 0
   - criterion: "`pnpm --filter main test` exits 0 (full main suite green after the test-case deletions)."
-    verification: "pnpm --filter main test exits with code 0"
-  - criterion: "The header docblock comment in `runs.test.ts` is updated to remove references to the deleted FORBIDDEN test cases."
+    verification: pnpm --filter main test exits with code 0
+  - criterion: The header docblock comment in `runs.test.ts` is updated to remove references to the deleted FORBIDDEN test cases.
     verification: "grep -nE \"\\(c\\) Non-'local' userId|non-local userId → FORBIDDEN\" main/src/orchestrator/trpc/routers/__tests__/runs.test.ts returns 0 hits"
 depends_on: []
 estimated_complexity: low
@@ -37,11 +37,10 @@ test_strategy:
   needed: true
   justification: "Three test cases in runs.test.ts depend on the guards being live — removing the guards without removing the tests would leave assertions that NEVER trigger (the production code path no longer rejects). Sibling-test scan: directory main/src/orchestrator/trpc/routers/__tests__/ contains runs.test.ts (owned here). The router.test.ts in main/src/orchestrator/trpc/__tests__/ does not assert on the userId guard for runs procedures so is not affected."
   targets:
-    - behavior: "runs.list / runs.getStuckInspection / runs.start happy paths continue to work after FORBIDDEN guard removal (regression check)."
-      test_file: "main/src/orchestrator/trpc/routers/__tests__/runs.test.ts"
+    - behavior: runs.list / runs.getStuckInspection / runs.start happy paths continue to work after FORBIDDEN guard removal (regression check).
+      test_file: main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
       type: integration
 ---
-
 # Resolve statically-dead `ctx.userId !== 'local'` guards in runs.ts
 
 ## Objective

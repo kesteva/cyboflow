@@ -1,8 +1,8 @@
 ---
 id: TASK-738
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/index.ts
@@ -20,16 +20,16 @@ files_readonly:
 acceptance_criteria:
   - criterion: "`cyboflow.runs.cancel` is no longer reachable as a live procedure in v1 — calling it from a tRPC caller throws `METHOD_NOT_SUPPORTED` with a message that does NOT mention `setCancelDeps`."
     verification: "grep -n \"setCancelDeps\" main/src/orchestrator/trpc/routers/runs.ts returns 0 hits; grep -n \"throwNotImplemented\" main/src/orchestrator/trpc/routers/runs.ts shows the cancel procedure delegating to throwNotImplemented('workflow-runs')"
-  - criterion: "The `CancelDeps` interface and `setCancelDeps`/`cancelDeps`/`cancelHandler` exports are deleted."
+  - criterion: The `CancelDeps` interface and `setCancelDeps`/`cancelDeps`/`cancelHandler` exports are deleted.
     verification: "grep -nE \"(export interface CancelDeps|export function setCancelDeps|export async function cancelHandler|let cancelDeps)\" main/src/orchestrator/trpc/routers/runs.ts returns 0 hits"
   - criterion: "No code in `main/src/` imports `setCancelDeps`, `cancelHandler`, or `CancelDeps`."
     verification: "grep -rnE \"(setCancelDeps|cancelHandler|CancelDeps)\" main/src --include='*.ts' returns 0 hits"
   - criterion: "Cancel-related tests in `runLifecycle.test.ts` (the `describe('cancelHandler', ...)` block and its imports) are removed; the rest of that file continues to pass."
     verification: "grep -n \"describe.*cancelHandler\" main/src/orchestrator/__tests__/runLifecycle.test.ts returns 0 hits; pnpm --filter main test -- runLifecycle exits 0"
   - criterion: "`pnpm --filter main typecheck` exits 0."
-    verification: "pnpm --filter main typecheck exits with code 0"
+    verification: pnpm --filter main typecheck exits with code 0
   - criterion: "`pnpm --filter main test` exits 0."
-    verification: "pnpm --filter main test exits with code 0"
+    verification: pnpm --filter main test exits with code 0
   - criterion: "`grep -rnE \"cyboflow\\.runs\\.cancel\\b\" frontend/src` returns 0 hits (no renderer caller depends on the procedure)."
     verification: "grep -rnE \"cyboflow\\.runs\\.cancel\\.\" frontend/src returns 0 hits (matches `.query(`, `.mutate(`, `.useQuery(`, etc., on the bare `cancel` procedure — `cancelAndRestart` is intentionally excluded by the `\\b` word boundary semantics in the cancel-only grep)"
 depends_on: []
@@ -40,10 +40,9 @@ test_strategy:
   justification: "The change deletes the `cancelHandler` export, which has a sibling test block in `runLifecycle.test.ts` (`describe('cancelHandler', ...)` at line 211). The directory scan (`main/src/orchestrator/__tests__/*.test.ts`) shows runLifecycle.test.ts depends on the symbol — keeping it as-is after the deletion would fail typecheck."
   targets:
     - behavior: "After the cancelHandler export is removed, no test imports a now-missing symbol; the remaining transition tests in runLifecycle.test.ts continue to pass."
-      test_file: "main/src/orchestrator/__tests__/runLifecycle.test.ts"
+      test_file: main/src/orchestrator/__tests__/runLifecycle.test.ts
       type: unit
 ---
-
 # Demote `cyboflow.runs.cancel` to METHOD_NOT_SUPPORTED stub
 
 ## Objective

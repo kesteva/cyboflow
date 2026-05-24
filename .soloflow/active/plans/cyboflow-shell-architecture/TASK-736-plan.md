@@ -1,7 +1,7 @@
 ---
 id: TASK-736
 idea: SPRINT-034-compounder
-status: ready
+status: in-flight
 created: "2026-05-23T22:30:00Z"
 files_owned:
   - main/src/services/sessionManager.ts
@@ -25,20 +25,20 @@ files_readonly:
 acceptance_criteria:
   - criterion: "Truly-orphan sessionManager methods are removed: clearConversation and the getSessionOutput alias (zero callers across frontend/src and main/src verified before deletion)."
     verification: "grep -rnE '\\.(clearConversation|getSessionOutput)\\(' frontend/src main/src returns 0 matches"
-  - criterion: "sessionManager.ts no longer defines clearConversation or getSessionOutput methods."
+  - criterion: sessionManager.ts no longer defines clearConversation or getSessionOutput methods.
     verification: "grep -nE '^\\s*(clearConversation|getSessionOutput)\\s*\\(' main/src/services/sessionManager.ts returns 0 matches"
   - criterion: "TASK-692-plan.md frontmatter is updated with an audit-derived audit_summary that enumerates every Crystal-era table (sessions, session_outputs, conversation_messages, prompt_markers, execution_diffs) with active-caller count, panel_id co-tenancy flag, and option-C risk."
     verification: "grep -n 'audit_summary' .soloflow/active/plans/cyboflow-shell-architecture/TASK-692-plan.md returns >= 1 match"
-  - criterion: "TASK-692-plan.md escalation panelmanager-vs-tool-panels is updated with a 5th option E covering the panel_id co-tenancy gap discovered by this audit."
+  - criterion: TASK-692-plan.md escalation panelmanager-vs-tool-panels is updated with a 5th option E covering the panel_id co-tenancy gap discovered by this audit.
     verification: "grep -nE 'Option E|option_e' .soloflow/active/plans/cyboflow-shell-architecture/TASK-692-plan.md returns >= 1 match"
-  - criterion: "refiner_default_if_unresolved on TASK-692-plan.md is updated to reflect the audit finding (option D — defer — until panel retirement is on the roadmap)."
+  - criterion: refiner_default_if_unresolved on TASK-692-plan.md is updated to reflect the audit finding (option D — defer — until panel retirement is on the roadmap).
     verification: "grep -n 'refiner_default_if_unresolved' .soloflow/active/plans/cyboflow-shell-architecture/TASK-692-plan.md returns the audit-updated value referencing option D"
-  - criterion: "pnpm typecheck exits 0 (confirms the two removed methods truly had zero callers)."
-    verification: "pnpm typecheck"
-  - criterion: "pnpm lint exits 0."
-    verification: "pnpm lint"
-  - criterion: "pnpm --filter main test exits 0 (no regression in main-side suite; sessionManager.mainRepoPermission.test.ts remains green)."
-    verification: "pnpm --filter main test"
+  - criterion: pnpm typecheck exits 0 (confirms the two removed methods truly had zero callers).
+    verification: pnpm typecheck
+  - criterion: pnpm lint exits 0.
+    verification: pnpm lint
+  - criterion: pnpm --filter main test exits 0 (no regression in main-side suite; sessionManager.mainRepoPermission.test.ts remains green).
+    verification: pnpm --filter main test
 depends_on: []
 estimated_complexity: medium
 epic: cyboflow-shell-architecture
@@ -49,7 +49,7 @@ prerequisites:
     blocking: false
 test_strategy:
   needed: false
-  justification: This task removes two confirmed-orphan methods (clearConversation, getSessionOutput alias) with zero callers, and edits a soloflow plan markdown to document an audit. Neither change introduces new behavior. Sibling-test scan: main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts tests getOrCreateMainRepoSession (untouched by this task). The existing suite stays green; running it as part of the AC suite is sufficient.
+  justification: "This task removes two confirmed-orphan methods (clearConversation, getSessionOutput alias) with zero callers, and edits a soloflow plan markdown to document an audit. Neither change introduces new behavior. Sibling-test scan: main/src/services/__tests__/sessionManager.mainRepoPermission.test.ts tests getOrCreateMainRepoSession (untouched by this task). The existing suite stays green; running it as part of the AC suite is sufficient."
 ---
 # Audit sessionManager.ts Crystal-era surface and unblock TASK-692
 
