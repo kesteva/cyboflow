@@ -647,7 +647,7 @@ async function initializeServices() {
     logger,
     archiveProgressManager,
     analyticsManager,
-    cyboflow: { workflowRegistry, runLauncher, orchestratorHealth },
+    cyboflow: { workflowRegistry, runLauncher },
   };
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
