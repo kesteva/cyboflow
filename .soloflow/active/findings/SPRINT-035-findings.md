@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
 pending_count: 13
-last_updated: "2026-05-24T01:05:00.000Z"
+last_updated: "2026-05-24T01:10:00.000Z"
 ---
 # Findings Queue
 
@@ -253,3 +253,22 @@ last_updated: "2026-05-24T01:05:00.000Z"
 - **location:** docs/CODE-PATTERNS.md:254
 - **description:** required to meet FIND-035-19 pickup: validateInput example used cyboflow:listRuns (deleted in TASK-716). Updated to cyboflow:approveRun per suggested_action.
 - **resolved_by:** verifier — not actually a scope deviation: `docs/CODE-PATTERNS.md` is listed in TASK-717's `files_owned` (line 21 of plan). The executor mislabeled an in-scope doc edit as a deviation. The edit also resolves FIND-SPRINT-035-19 (which is marked `resolved_by: TASK-717`), so this work is plan-prescribed. Same misclassification pattern as FIND-SPRINT-035-5, -7, -10, -13, -14, -15, -20, -21.
+
+## FIND-SPRINT-035-27
+- **source:** TASK-732 (verifier)
+- **type:** bug
+- **severity:** medium
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/__tests__/runs.test.ts:87-99
+- **description:** TASK-732's AC5 says "After the sweep, `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` returns 0 matches." The post-commit grep returns 1 match — `runs.test.ts:95` — inside a local `seedPendingApproval` helper (lines 87-99). This site did NOT exist when TASK-732's plan was written (2026-05-22) — it was introduced by sibling tasks TASK-709..712 during this same sprint (SPRINT-035) when `runs.test.ts` was created/expanded to cover the orchestrator tRPC procedures. The plan body (step 1) names exactly 6 pre-flight sites in 4 files, all of which the executor correctly swept; the new 7th site is outside `files_owned` for TASK-732. The literal AC5 grep gate is therefore violated by no fault of the executor's plan adherence, but the grep-gate invariant the AC was designed to establish — "no inline INSERT INTO approvals in any `*.test.ts` under main/src" — is still false after the commit. Verifier issued NEEDS_CHANGES so the sweep is completed in one task rather than left as a follow-up FIND.
+- **suggested_action:** Extend the TASK-732 sweep to include `main/src/orchestrator/trpc/routers/__tests__/runs.test.ts`: delete the local `seedPendingApproval` helper (lines 87-99), import `seedApproval` from `../../../__test_fixtures__/orchestratorTestDb` (next to the existing `seedRun` import on line 43), and rewrite the call site at line 135 from `seedPendingApproval(db, runId, 'approval-gsi-1', 'Bash', JSON.stringify({ cmd: 'echo hi' }))` to `seedApproval(db, { id: 'approval-gsi-1', runId, toolName: 'Bash', toolInputJson: JSON.stringify({ cmd: 'echo hi' }), toolUseId: 'use-approval-gsi-1' })` to preserve the existing `tool_use_id` shape (`use-${approvalId}`). Re-run `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` to confirm 0 matches, then `pnpm --filter main test`.
+- **resolved_by:** verifier — status-sync: TASK-732. Commit 63da719 deletes the local `seedPendingApproval` helper, adds `seedApproval` to the existing canonical import on line 43, and rewrites the call site at line 120 to `seedApproval(db, { id: 'approval-gsi-1', runId, toolName: 'Bash', toolInputJson: ..., toolUseId: 'use-approval-gsi-1' })`. Re-ran `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` → 0 matches; `pnpm --filter main test` → 655 passed.
+
+## FIND-SPRINT-035-28
+- **type:** scope_deviation
+- **source:** TASK-732 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
+- **description:** Required cross-file edit outside original files_owned to eliminate last INSERT INTO approvals in test files. Deleted local seedPendingApproval helper and replaced call with shared seedApproval from orchestratorTestDb fixture. Same pattern as FIND-SPRINT-035-14/15.
+- **resolved_by:** verifier — AC-prescribed: TASK-732's AC5 mandates `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` return 0 matches. The 7th site in runs.test.ts (introduced by sibling TASK-709/710 during this sprint, after TASK-732's plan was written) was the only remaining blocker; the cross-file edit was explicitly directed by FIND-SPRINT-035-27's prior NEEDS_CHANGES and is the only way to satisfy AC5's invariant. Same pattern as FIND-SPRINT-035-14/15 (also AC-prescribed cross-file sweeps).
