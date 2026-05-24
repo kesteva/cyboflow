@@ -40,7 +40,7 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { setStartRunDeps } from '../runs';
 import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
-import { seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
+import { seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Test-database setup
@@ -83,21 +83,6 @@ function seedStuckRun(
   ).run(runId, workflowId, stuckReason);
 }
 
-/** Seed a pending approval row for a run. */
-function seedPendingApproval(
-  db: Database.Database,
-  runId: string,
-  approvalId: string,
-  toolName: string,
-  toolInputJson: string,
-): void {
-  db.prepare(
-    `INSERT INTO approvals
-       (id, run_id, tool_name, tool_input_json, tool_use_id, status)
-     VALUES (?, ?, ?, ?, ?, 'pending')`,
-  ).run(approvalId, runId, toolName, toolInputJson, `use-${approvalId}`);
-}
-
 /** Seed N raw_events rows for a run. Returns inserted row ids. */
 function seedRawEvents(
   db: Database.Database,
@@ -132,7 +117,7 @@ describe('cyboflow.runs.getStuckInspection', () => {
   it('(a) happy path: returns StuckInspectionResult with 10 most recent events', async () => {
     const runId = 'run-gsi-happy';
     seedStuckRun(db, runId, 'no_progress');
-    seedPendingApproval(db, runId, 'approval-gsi-1', 'Bash', JSON.stringify({ cmd: 'echo hi' }));
+    seedApproval(db, { id: 'approval-gsi-1', runId, toolName: 'Bash', toolInputJson: JSON.stringify({ cmd: 'echo hi' }), toolUseId: 'use-approval-gsi-1' });
     const allIds = seedRawEvents(db, runId, 15);
 
     const adapter = dbAdapter(db);
