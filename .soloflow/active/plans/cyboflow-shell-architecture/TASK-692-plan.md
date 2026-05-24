@@ -47,6 +47,34 @@ depends_on:
   - TASK-691
 estimated_complexity: high
 epic: cyboflow-shell-architecture
+audit_summary:
+  conducted_by: TASK-736
+  conducted_date: "2026-05-24"
+  tables:
+    sessions:
+      active_caller_count: ">=22"
+      panel_id_cotenancy: false
+      option_c_risk: "FK referenced by tool_panels.session_id; dropping cascades into panel-init errors if FK enforcement is on. Orphan rows in session_outputs/conversation_messages/prompt_markers if dropped before panel-co-tenant rows are reconciled."
+    session_outputs:
+      active_caller_count: ">=22"
+      panel_id_cotenancy: true
+      option_c_risk: "CRITICAL — addPanelOutput() writes rows with non-NULL panel_id into this table. Dropping the table deletes all panel output data and breaks panelManager."
+    conversation_messages:
+      active_caller_count: ">=17"
+      panel_id_cotenancy: true
+      option_c_risk: "CRITICAL — addPanelConversationMessage() writes rows with non-NULL panel_id. Dropping the table deletes panel conversation history and breaks claude continuation logic."
+    prompt_markers:
+      active_caller_count: ">=11"
+      panel_id_cotenancy: true
+      option_c_risk: "CRITICAL — addPanelPromptMarker() writes rows with non-NULL panel_id. Dropping the table deletes panel prompt tracking and breaks commit manager."
+    execution_diffs:
+      active_caller_count: ">=7"
+      panel_id_cotenancy: false
+      option_c_risk: "LOW — no panel-level writes found; panel_id column was added (migration 004) but no addPanel*ExecutionDiff method exists. Safest table to drop under option C."
+  orphan_methods_dropped_by_task_736:
+    - clearConversation
+    - getSessionOutput (alias to getSessionOutputs)
+  filename_collision_note: "TASK-692's planned migration file 008_drop_legacy_crystal_tables.sql COLLIDES with an existing migration: main/src/database/migrations/008_permission_mode_approve_default.sql (backfills NULL permission_mode rows to 'approve'). TASK-692's executor must use 009_drop_legacy_crystal_tables.sql instead. This collision was discovered by the TASK-736 prerequisite check."
 escalations:
   - id: panelmanager-vs-tool-panels
     severity: blocking
@@ -65,7 +93,11 @@ escalations:
     - id: D
       label: Defer TASK-692 entirely; @cyboflow-hidden-mark schema.sql section and revisit after SDK-migration stabilizes.
       cost: "Keeps schema drift; matches IDEA-017 candidate 2 ('kept as orphan tables for v2')."
-    refiner_default_if_unresolved: C — drop only the Crystal-session subgraph
+    - id: E
+      label: "Panel_id co-tenancy-safe table rebuild: for each of session_outputs, conversation_messages, and prompt_markers, create a _new_ table with only panel-scoped rows (WHERE panel_id IS NOT NULL), then drop the original and rename. Execution_diffs and sessions can be dropped cleanly. Drop sessions last (FK order). Preserve all panel-level data; eliminate all session-level orphans."
+      cost: "HIGH. Requires three concurrent table-rebuild reconcile operations under SQLite FK semantics (similar to reconcileWorkflowsSchema() but in reverse — retain panel rows, drop session rows). Risk: non-trivial rollback if rebuild fails mid-flight. ONLY option that satisfies both 'drop Crystal session rows' AND 'preserve panelManager data' simultaneously. Sprint-scale but feasible. Depends on panel retirement NOT being on the near-roadmap — if panels will also be retired soon, option D is strictly cheaper."
+      option_e: true
+    refiner_default_if_unresolved: "D — defer entirely. The TASK-736 audit revealed option C deletes panel-co-tenant data in session_outputs, conversation_messages, and prompt_markers (rows written by addPanelOutput, addPanelConversationMessage, addPanelPromptMarker with non-NULL panel_id). Option C as written in the escalation summary would break panelManager by deleting live panel data. Option E is feasible but sprint-scale. Deferring is least-risk until panel retirement is on the roadmap."
     blocking: true
 test_strategy:
   needed: true
