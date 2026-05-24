@@ -1,7 +1,7 @@
 ---
 id: TASK-745
 idea: IDEA-024
-status: in-flight
+status: ready
 created: "2026-05-23T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/mcpQueryHandler.ts

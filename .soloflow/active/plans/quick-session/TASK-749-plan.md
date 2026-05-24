@@ -1,7 +1,7 @@
 ---
 id: TASK-749
 idea: IDEA-024
-status: in-flight
+status: ready
 created: "2026-05-23T00:00:00Z"
 files_owned:
   - frontend/src/components/SessionListItem.tsx
