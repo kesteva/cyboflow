@@ -239,7 +239,7 @@ pnpm dev                  # Start Electron dev (frontend Vite dev server + Elect
 pnpm build:mac:arm64      # Full macOS arm64 build → packaged app
 pnpm typecheck            # Type-check all workspaces
 pnpm lint                 # ESLint across all workspaces
-pnpm test                 # Playwright E2E (requires a built app)
+pnpm test:e2e             # Playwright E2E (requires a built app)
 ```
 
 ### asarUnpack contract
