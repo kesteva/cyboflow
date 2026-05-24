@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
-pending_count: 13
-last_updated: "2026-05-24T01:21:47.233Z"
+pending_count: 18
+last_updated: "2026-05-24T01:52:41.464Z"
 ---
 # Findings Queue
 
@@ -297,4 +297,130 @@ last_updated: "2026-05-24T01:21:47.233Z"
 - **location:** main/src/orchestrator/__tests__/stuckDetector.test.ts (deleted lines 562-611 of pre-commit file) — coverage gap, no live code site
 - **description:** TASK-733's executor deleted the entire `describe('Migration 007 idempotency', ...)` block (two test cases, ~60 lines) when the plan's step 9 only authorized deleting "the now-redundant column-presence sanity checks" (singular inline `if (!names.includes('stuck_detected_at'))` checks inside the local helper). The two deleted tests exercised the actual `main/src/database/migrations/007_add_stuck_reason.sql` file from disk — verifying (a) its SQL applies cleanly on top of 006, and (b) the `idx_workflow_runs_status_stuck_at` index gets created. The commit message justified the deletion as "redundant now that TASK-732's canonical option is itself unit-tested," but the canonical option in `orchestratorTestDb.ts:57` uses an **inline** `ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER` — it does **NOT** read or exercise `007_add_stuck_reason.sql`, and it does NOT create the index. Verification: `grep -rn 'idx_workflow_runs_status_stuck_at' main/src --include='*.test.ts'` returns 0 matches after the commit; `grep -rn '007_add_stuck_reason' main/src --include='*.test.ts'` returns 0 matches. The generic `fileMigrationRunner.test.ts` only tests the runner against fixture files (998_/999_), not against `007_add_stuck_reason.sql` specifically. Net effect: future edits to `007_add_stuck_reason.sql` (typos, dropped index, changed column type) would not be caught by any test until the app runs against a real DB. Severity medium because (i) the migration is small and currently stable, but (ii) the executor went beyond what the plan authorized and (iii) the stated justification in the commit message is factually incorrect about what the canonical option covers.
 - **suggested_action:** Open a follow-on task to restore migration-007 file-level coverage in a more appropriate location (e.g. `main/src/database/__tests__/migration007.test.ts` or a new section of `cyboflowSchema.test.ts`). The restored test should: (1) read `007_add_stuck_reason.sql` from disk, (2) apply it on top of a fresh `006_cyboflow_schema.sql` DB, (3) assert the `stuck_detected_at` INTEGER column is added to `workflow_runs`, and (4) assert the `idx_workflow_runs_status_stuck_at` index exists via `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workflow_runs_status_stuck_at'`. The original test block in the commit diff (deleted from stuckDetector.test.ts) can be lifted near-verbatim.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-32
+- **source:** SPRINT-035 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/runs.ts:110-122 and main/src/index.ts (no caller)
+- **description:** cyboflow.runs.cancel is exported as a live mutation that delegates to cancelHandler via the module-level cancelDeps singleton, but setCancelDeps() is NEVER called in production source — only declared. main/src/index.ts wires three sibling setters (setCancelAndRestartDeps at line 744, setStartRunDeps at line 753, setHealthProvider at line 759) but skips setCancelDeps entirely. Every call to cyboflow.runs.cancel will throw TRPCError METHOD_NOT_SUPPORTED with message cancel dependencies not wired yet (workflow-runs epic). Call setCancelDeps() at boot..
+- **suggested_action:** Add a setCancelDeps({ db, approvalRouter: ApprovalRouter.getInstance(), lookupExecutor: (runId) => /* registry lookup */, logger: loggerLike }) call in main/src/index.ts adjacent to the existing setCancelAndRestartDeps call (line 744). Alternatively, if cyboflow.runs.cancel is intentionally not used in v1 (frontend only calls cancelAndRestart), demote the procedure to throwNotImplemented() and delete the dead CancelDeps interface + setter to remove the latent bug. Decide which based on whether epic 7 plans to call cancel directly.
+- **resolved_by:** 
+
+
+
+
+
+Verification: grep -rn setCancelDeps main/src --include=*.ts | grep -v __tests__ | grep -v dist returns only the declaration, comment refs, and the METHOD_NOT_SUPPORTED message — zero call sites. Frontend currently calls cyboflow.runs.cancelAndRestart from PendingApprovalCard.tsx:116 but not the bare cancel, so this is not breaking any UI today; it is a latent bug that any future caller (renderer, integration test, or epic-7 work) would hit silently. Only visible at the cross-task level because TASK-712 wired setStartRunDeps, TASK-713 wired setHealthProvider, and TASK-711 added the cancelHandler test infrastructure — none individually own setCancelDeps wiring.
+
+Suspected tasks: TASK-712, TASK-713 (sibling setter wiring that should have included cancel)
+
+## FIND-SPRINT-035-33
+- **source:** SPRINT-035 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/approvals.ts:40-46
+- **description:** TASK-717 inlined approveRestOfRunHandler/rejectRestOfRunHandler into approvals.ts (good — removes legacy-tree cross-dependency) but introduced a parallel local DatabaseLike type instead of importing the canonical one. Every sibling handler in the orchestrator subtree imports DatabaseLike from ../../types (or ./types):
+- **suggested_action:** Replace the local type declaration at approvals.ts:40-46 with `import type { DatabaseLike } from ../../types;` (mirroring the other three orchestrator handlers). Drop the inline shape entirely. Verify `pnpm --filter main typecheck` still passes — the canonical PreparedStatement.run signature is a strict superset of the local shape (return type widens), so no caller will break.
+- **resolved_by:** 
+
+
+
+
+  inspectorQueries.ts:11   import type { DatabaseLike } from ./types;
+  runQueries.ts:7          import type { DatabaseLike } from ./types;
+  approvalListing.ts:14    import type { DatabaseLike } from ./types;
+
+approvals.ts:40-46 redeclares its own narrow shape:
+
+  type DatabaseLike = {
+    prepare: (sql: string) => {
+      all: (...params: unknown[]) => unknown[];
+      run: (...params: unknown[]) => void;
+    };
+  };
+
+Shape divergence: the canonical PreparedStatement.run returns { changes: number; lastInsertRowid: number | bigint }; the local one returns void. Either shape compiles against better-sqlite3, but if a future handler in approvals.ts ever inspects the result of run() (e.g. assert changes === 1), the local type will mask the field. Cross-task pattern drift introduced when porting handlers across the deleted legacy tree.
+
+Suspected tasks: TASK-717 (handler-inlining task)
+
+## FIND-SPRINT-035-34
+- **source:** SPRINT-035 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/trpc/context.ts:88 and main/src/orchestrator/trpc/routers/runs.ts (5 sites: 185, 204, 231, 276, 301)
+- **description:** Refines FIND-SPRINT-035-4 with the type-system angle the per-task reviewer did not surface.
+- **suggested_action:** Pick one of (a) widen `userId: local` to `userId: string` in context.ts:88 AND createContext return type, then keep the guards as live checks; or (b) delete the 5 `ctx.userId !== local` blocks in runs.ts and the 3 test cases that exercise them, since the literal-type check is structurally unreachable. Option (b) is cleaner for v1; (a) preserves more of v2 forward-compat surface. Coordinate with FIND-SPRINT-035-4s suggested middleware approach.
+- **resolved_by:** 
+
+
+
+context.ts:88-94 returns `userId: local` as a string LITERAL type, not the union `string`. Every `ctx.userId !== local` check in runs.ts (5 occurrences) is therefore statically UNREACHABLE — TypeScript can prove ctx.userId is always the literal local. The check is dead code at compile time.
+
+Evidence: runs.test.ts must use `userId: someone-else as local` (3 sites at lines 172, 250, 389) to write the test — an explicit cast widening narrower-than-needed to defeat the type system. The cast is itself a smell: it tells future readers this branch can never fire under real types; we are faking it.
+
+Two coherent options exist:
+  (a) Make the guard live: widen the `userId` type in context.ts from the literal local to `string` (or to a `UserId` brand). The check then has type-level teeth and the test cast becomes idiomatic.
+  (b) Drop the guard: rely solely on `protectedProcedure`s isAuthed middleware. Delete all 5 `ctx.userId !== local` blocks from runs.ts plus the three test cases. This is the more honest representation of v1 reality (`createContext` hard-codes local, so the principal IS the principal).
+
+Currently the code is the worst of both: unreachable in the type system, reachable only through test casts that lie about the principal type. Inconsistent with workflows.ts and approvals.ts which already chose option (b) — TASK-711s new procedures didnt add the guard.
+
+Suspected tasks: TASK-709 (added one guard), TASK-710 (added one), TASK-711 (left workflows guard-free), TASK-712 (added one for start)
+
+## FIND-SPRINT-035-35
+- **source:** SPRINT-035 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx:31 (and ~9 similar sites)
+- **description:** vi.mock target inconsistency for the tRPC client across the renderer test suite, introduced/cemented this sprint when TASK-714 and TASK-715 added new tRPC-mocking test code.
+- **suggested_action:** Pick one canonical mock target and apply across the renderer test suite. Recommended: mock `…/trpc/client` everywhere (matches the shim docstring and the global setup). Sweep the 9 listed files to replace `vi.mock(…/utils/trpcClient, ...)` with `vi.mock(…/trpc/client, ...)` and adjust the relative paths. Or, if the shim is to be deleted in a future task, do that instead — there is exactly one downstream binding (`export { trpc }`).
+- **resolved_by:** 
+
+
+The canonical client lives at frontend/src/trpc/client.ts. A backwards-compat shim at frontend/src/utils/trpcClient.ts re-exports `trpc` from there. The shims docstring states: Do NOT add new exports here. Import from `@/trpc/client` in new code.
+
+The global setup in frontend/src/test/setup.ts:13 mocks the canonical (`vi.mock(../trpc/client, ...)`) — matches the docstring guidance and the CyboflowRoot.test.tsx:32 pattern (`vi.mock(../../../trpc/client, ...)`).
+
+But 9 test files mock the SHIM instead:
+  frontend/src/stores/__tests__/reviewQueueSlice.test.ts:25
+  frontend/src/stores/__tests__/reviewQueueStore.test.ts:27
+  frontend/src/stores/__tests__/mcpHealthStore.test.ts:28
+  frontend/src/components/OnboardingCard.test.tsx:86
+  frontend/src/components/ReviewQueue/__tests__/StuckInspectorModal.test.tsx:34
+  frontend/src/components/__tests__/ReviewQueueView.test.tsx:23
+  frontend/src/components/ReviewQueue/__tests__/PendingApprovalCard.test.tsx:37
+  frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx:31 (NEW in TASK-714)
+  frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts:28
+  frontend/src/hooks/__tests__/useStuckNotifications.test.ts:42
+
+Both targets WORK today because the shim is a pass-through re-export, but the patterns will diverge the moment the shim grows any logic (e.g. a runtime adapter, error mapper, or instrumentation wrapper). Tests mocking the shim would silently skip the shim logic; tests mocking the canonical would exercise it. Cross-task pattern drift surface.
+
+Suspected tasks: TASK-714 (added DraggableProjectTreeView.runs.test.tsx with shim-target mock), TASK-715 (updated CyboflowRoot.test.tsx with canonical-target mock — the correct pattern)
+
+## FIND-SPRINT-035-36
+- **source:** SPRINT-035 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/index.ts:88-90
+- **description:** TASK-712 added three new module-level singletons that diverge from the existing sibling pattern:
+
+  let taskQueue: TaskQueue | null = null;      (line 85, pre-existing)
+  let orchestrator: Orchestrator | null = null;(line 86, pre-existing)
+  let runQueues: RunQueueRegistry;             (line 87, pre-existing — no init)
+  let workflowRegistry: WorkflowRegistry;      (line 88, NEW this sprint)
+  let runLauncher: RunLauncher;                (line 89, NEW this sprint)
+  let orchestratorHealth: OrchestratorHealth;  (line 90, NEW this sprint)
+
+The first two use `| null = null` so any read-before-init is type-visible (callers must handle null). The last three (and runQueues) are typed as the bare class without an initializer — TypeScripts strictPropertyInitialization does not apply to `let`, so they are silently `undefined` until initializeServices() runs. Reading any of them too early would yield `undefined` with no compile-time signal. The createContext closure at line 706 captures `workflowRegistry` by reference and is safe because attachOrchestratorTrpc only invokes it per-request after initializeServices completes, but the pattern degrades safety for any future reader added at module load time.
+
+Minor cross-task consistency issue — TASK-712 added 3 new singletons in this style without aligning with the older `| null = null` pattern used by taskQueue/orchestrator. The same misalignment exists for runQueues (pre-existing), so this is not strictly TASK-712-introduced but the sprint widened it from 1 to 4 sites.
+
+Suspected tasks: TASK-712 (added runLauncher, orchestratorHealth, workflowRegistry as top-level lets without null initializer)
+- **suggested_action:** Align with the safer pattern: change lines 87-90 to `let runQueues: RunQueueRegistry | null = null; let workflowRegistry: WorkflowRegistry | null = null; let runLauncher: RunLauncher | null = null; let orchestratorHealth: OrchestratorHealth | null = null;`, then at each read site add a non-null assertion or guard. Alternatively, consolidate the four into a single `let services: { runQueues; workflowRegistry; runLauncher; orchestratorHealth } | null = null` assembled inside initializeServices() so the boot-order invariant is encoded once.
 - **resolved_by:** 
