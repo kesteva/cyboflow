@@ -30,8 +30,6 @@ vi.mock('../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: vi.fn(() => vi.fn()),
   cyboflowApi: {
     subscribeToStreamEvents: vi.fn(() => vi.fn()),
-    listWorkflows: vi.fn(),
-    startRun: vi.fn(),
     approveRun: vi.fn(),
   },
 }));

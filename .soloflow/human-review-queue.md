@@ -2,8 +2,8 @@
 pending_count: 28
 buckets:
   decisions: 0
-  actions: 3
-  testing: 20
+  actions: 1
+  testing: 22
   deferred_visual: 5
 items: []
 ---
@@ -15,26 +15,6 @@ _No items._
 
 ## Actions
 
-- task: TASK-555
-  type: action_required
-  bucket: actions
-  action: "Configure Apple notarytool credentials: run `xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>`, then set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars"
-  blocked_checks:
-    - "prerequisite: notarytool credentials missing"
-  level: ground_truth
-  severity: high
-
-- task: TASK-618
-  type: action_required
-  bucket: actions
-  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-618-plan.md
-  action: "Run pnpm run build:mac:arm64 once Apple notarytool credentials are configured; verify (1) find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js returns >=1 match (AC2); (2) launch packaged app, create a Claude session, confirm no spawn error in logs and that ~/.cyboflow/cyboflowMcpServer.js was NOT re-created (AC6)."
-  blocked_checks:
-    - "AC2: packaged build contains cyboflowMcpServer.js under app.asar.unpacked/..."
-    - "AC6: packaged app launches without re-extracting MCP server"
-  level: ground_truth
-  severity: medium
-
 - task: TASK-655
   type: config_issue
   bucket: actions
@@ -43,11 +23,15 @@ _No items._
   action: "Verifier could not run visual_macos verification: Peekaboo MCP probe reported Screen Recording + Accessibility grants present, but live capture against the running Cyboflow Electron window failed with \"Failed to start stream due to audio/video capture failure\" on both background and auto focus modes. Confirm Cyboflow is granted Screen Recording explicitly (System Settings → Privacy & Security → Screen Recording), restart pnpm dev, and re-run. See docs/VISUAL-VERIFICATION-SETUP.md."
   blocked_checks:
     - Level 2 visual_macos verification of toolFormatter rendered output
+    - Level 2 visual_macos verification for TASK-715 WorkflowPicker + mcpHealthStore tRPC cutover
   level: visual
-  severity: low
+  severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-23T21:25:57Z"
+  updated_at: "2026-05-24T00:11:23.128Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
+  affected_tasks:
+    - TASK-655
+    - TASK-715
 
 ## Testing
 
@@ -284,6 +268,26 @@ _No items._
   created_at: "2026-05-22T22:05:00.000Z"
   updated_at: "2026-05-22T22:05:00.000Z"
 
+- task: TASK-715
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/trpc-cutover-and-legacy-tree-cleanup/TASK-715-plan.md
+  action: "Manual smoke per AC6: in pnpm dev, click \"New run\" / \"Start Run\", pick a workflow, confirm a worktree is created and the run starts (tRPC cyboflow.runs.start replaces the cyboflowApi.startRun path). Observe the sidebar MCP dot color updates after ~5s polling intervals (tRPC cyboflow.health.mcpServer.query replaces the raw cyboflow:mcp-health invoke)."
+  blocked_checks:
+    - AC6 — manual smoke for WorkflowPicker tRPC cutover + MCP health-dot polling cadence
+  level: requirements
+  severity: medium
+
+- task: TASK-716
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/trpc-cutover-and-legacy-tree-cleanup/TASK-716-plan.md
+  action: "Run pnpm dev and exercise the four migrated surfaces (project tree expand → workflow picker, start a run, MCP sidebar dot) to confirm no regressions after raw-IPC handler deletion. DevTools console should show zero \"unhandled invoke cyboflow:listWorkflows|listRuns|startRun|mcp-health\" errors. The renderer was cut over to tRPC in TASK-714 + TASK-715 and is verified to no longer reference the removed channels (grep returned 0 invocation matches); manual smoke is the final guardrail. Visual verification via Playwright is non-functional in this project (renderer cannot bootstrap without Electron preload — see CLAUDE.md / docs/VISUAL-VERIFICATION-SETUP.md) and visual_macos via Peekaboo is currently blocked by FIND-SPRINT-035-13 (per-binary Screen Recording grant missing for the dev-time Electron binary)."
+  blocked_checks:
+    - "AC7: Manual smoke — pnpm dev boots without errors; runs list, workflow picker, run-start, and MCP sidebar dot continue to work via tRPC"
+  level: visual
+  severity: medium
+
 ## Deferred Visual
 
 - sprint: SPRINT-010
@@ -294,10 +298,13 @@ _No items._
   action: "End-of-sprint visual smoke for the review-queue-ui epic (TASK-401..TASK-407). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global. Run `pnpm dev` to launch Electron, then drive the six flows: (1) ReviewQueueView empty state, (2) PendingApprovalCard render with a realistic approval payload, (3) Blocking vs Pending section partitioning and the group variant, (4) j/k navigation focus ring (TASK-404), (5) y/n approve/reject keyboard, (6) approveRestOfRun group-card action (TASK-406). Confirm `cyboflow-frontend-debug.log` shows no errors and the dock badge reflects pending count (TASK-407). NOTE (2026-05-19 review-queue run): the prior 'Alternative' note is now actionable — Peekaboo MCP capture works and `verification.visual_macos=true` is set in .soloflow/config.json (commit d189263). Next attempt should use `pnpm dev` + `mcp__peekaboo__image` with `app_target: 'Electron:WINDOW_TITLE:Cyboflow'` to capture each flow. Also note IDEA-017 may restructure the review-queue rail/shell — re-validate flow IDs against any layout changes before re-testing."
   blocked_checks:
     - "End-of-sprint cross-task visual verification of review-queue-ui flows (ReviewQueueView, PendingApprovalCard, group variant, j/k/y/n keyboard, approveRestOfRun, dock-badge sync)"
+    - "Manual smoke: sidebar tree expands to show runs; workflow picker lists 5 default workflows"
   level: visual
   severity: medium
   created_at: "2026-05-15T18:30:00.000Z"
-  updated_at: "2026-05-19T19:00:00.000Z"
+  updated_at: "2026-05-23T23:56:10.493Z"
+  affected_tasks:
+    - TASK-714
 
 - sprint: SPRINT-013
   type: deferred_visual
@@ -353,7 +360,6 @@ _No items._
   flows_deferred:
     - null
 
-
 - sprint: SPRINT-034
   type: deferred_visual
   bucket: deferred_visual
@@ -366,9 +372,9 @@ _No items._
     - "currently-running pnpm dev is at commit 1da6cc9 (mid-TASK-690), not HEAD (8e4acaf) — restart pnpm dev on HEAD before re-running flows for an authoritative pass"
   flows_deferred:
     - "Deletion sweep (TASK-689/690/691) — sidebar renders, App.tsx legacy toggle removed, no broken imports at runtime"
-    - "Tool-result rendering — TASK-655 extractToolResultText behavior parity with pre-sprint"
-    - "First Claude session — TASK-619 cachedNodePath race fix + TASK-620 health surface"
-    - "Stream-parse — TASK-656 Option-3 schema bridge accepts canonical SDK events"
+    - Tool-result rendering — TASK-655 extractToolResultText behavior parity with pre-sprint
+    - First Claude session — TASK-619 cachedNodePath race fix + TASK-620 health surface
+    - Stream-parse — TASK-656 Option-3 schema bridge accepts canonical SDK events
   level: sprint
   severity: medium
   created_at: "2026-05-23T21:25:57Z"
@@ -385,6 +391,30 @@ _No items._
     - TASK-691
 
 ## Overridden
+
+- task: TASK-618
+  type: overridden
+  bucket: actions
+  plan_ref: .soloflow/active/plans/cyboflow-mcp-server/TASK-618-plan.md
+  action: "Run pnpm run build:mac:arm64 once Apple notarytool credentials are configured; verify (1) find dist-electron -path *app.asar.unpacked/main/dist/main/src/orchestrator/mcpServer/cyboflowMcpServer.js returns >=1 match (AC2); (2) launch packaged app, create a Claude session, confirm no spawn error in logs and that ~/.cyboflow/cyboflowMcpServer.js was NOT re-created (AC6)."
+  blocked_checks:
+    - "AC2: packaged build contains cyboflowMcpServer.js under app.asar.unpacked/..."
+    - "AC6: packaged app launches without re-extracting MCP server"
+  level: ground_truth
+  severity: medium
+  override: "Apple signing/packaging items are out of scope for this sprint's orchestrator/tRPC/testing-infrastructure tasks; will be revisited at next release prep."
+  override_at: "2026-05-23T22:27:23.735Z"
+
+- task: TASK-555
+  type: overridden
+  bucket: actions
+  action: "Configure Apple notarytool credentials: run `xcrun notarytool store-credentials AC_PASSWORD --apple-id <email> --team-id <team> --password <app-specific-password>`, then set APPLE_ID / APPLE_TEAM_ID / APPLE_APP_SPECIFIC_PASSWORD env vars"
+  blocked_checks:
+    - "prerequisite: notarytool credentials missing"
+  level: ground_truth
+  severity: high
+  override: "Apple signing/packaging items are out of scope for this sprint's orchestrator/tRPC/testing-infrastructure tasks; will be revisited at next release prep."
+  override_at: "2026-05-23T22:27:20.375Z"
 
 - task: TASK-652
   type: overridden

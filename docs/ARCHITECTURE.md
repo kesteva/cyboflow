@@ -109,59 +109,45 @@ Two parallel surfaces are wired today:
    `cyboflow.health.*`). The renderer uses the typed tRPC client via the bridge wired in
    `main/src/preload.ts:2` (`exposeElectronTRPC`) and attached in `index.ts:686`.
 
-> A second, **legacy/unwired** tRPC tree exists at `main/src/trpc/routers/` (`runs.ts`,
-> `events.ts`, `approvals.ts`). No `src/` file imports it — only two tests reference it.
-> It is a candidate for deletion or merge into `orchestrator/trpc/routers/`.
-
-The target end state (per system design §4) is for the typed tRPC surface to subsume the
-raw-IPC `cyboflow:*` channels; migration is tracked under placeholder ID `TBD-tRPC-cutover`.
+The tRPC surface is now the canonical transport for all `cyboflow.*` channels. The
+`trpc-cutover-and-legacy-tree-cleanup` epic (TASK-713 through TASK-717) completed the
+migration: the four raw-IPC channels (`cyboflow:listWorkflows`, `cyboflow:startRun`,
+`cyboflow:listRuns`, `cyboflow:mcp-health`) have been replaced by
+`cyboflow.workflows.list`, `cyboflow.runs.start`, `cyboflow.runs.list`, and
+`cyboflow.health.mcpServer` respectively. The unwired duplicate tRPC tree that previously
+lived in `main/src/trpc/` has been deleted (TASK-717).
 
 #### cyboflow.* transport status
-
-Four buckets describe the current state:
-
-**Raw-IPC live** — handlers in `main/src/ipc/cyboflow.ts` that the renderer calls today via
-`electron.invoke` (`frontend/src/utils/cyboflowApi.ts`):
-- `cyboflow:listWorkflows` — list/seed workflows for a project.
-- `cyboflow:startRun` — launch a new workflow run.
-- `cyboflow:listRuns` — list `workflow_runs` rows for a project (newest first, excluding
-  the heavy `policy_json` column).
-- `cyboflow:mcp-health` — point-in-time MCP server health snapshot.
-
-Note: `cyboflow:mcp-health` has a typed counterpart at `cyboflow.health.mcpServer`
-(implemented in `main/src/orchestrator/trpc/routers/health.ts`) but `setHealthProvider()`
-is never called from `main/src/index.ts`, so the tRPC procedure always returns the
-`{status:'starting'}` fallback. The raw-IPC channel is the live data path until that
-wiring lands (see "Planned / Not Yet Built").
 
 **Raw-IPC stub** — handler present in `main/src/ipc/cyboflow.ts` but returns NOT_IMPLEMENTED:
 - `cyboflow:approveRun` — approve / deny a day-3 gate approval. Full implementation
   lands in the approval-router epic (epic 7).
 
-**tRPC live (real body)** — procedures in `main/src/orchestrator/trpc/routers/` with a
-real implementation wired today:
-- `cyboflow.runs.cancelAndRestart` — cancels a stuck run and enqueues a fresh run;
-  delegates to `cancelAndRestartHandler` once `setCancelAndRestartDeps()` is called at boot.
-- `cyboflow.runs.cancel` — cancel without restart; same deps-injection pattern via
-  `setCancelDeps()`.
+The renderer is fully cut over to tRPC for all data-plane `cyboflow.*` procedures except
+the `cyboflow:stream:<runId>` push channel and the `cyboflow:approveRun` stub above.
 
-**tRPC stubs** — procedures the renderer already calls via the tRPC client. Two flavors:
+**tRPC live** — all procedures in `main/src/orchestrator/trpc/routers/` with real
+implementations wired today:
+- `cyboflow.workflows.list` — list/seed workflows for a project.
+- `cyboflow.workflows.get` — fetch a single workflow by ID.
+- `cyboflow.runs.list` — list `workflow_runs` rows for a project (newest first).
+- `cyboflow.runs.start` — launch a new workflow run.
+- `cyboflow.runs.cancel` — cancel an in-flight run via `setCancelDeps()` injection.
+- `cyboflow.runs.cancelAndRestart` — cancel a stuck run and enqueue a fresh run.
+- `cyboflow.runs.getStuckInspection` — diagnostic data for a stuck run (stuck reason,
+  pending approval payload, latest raw_events rows). Delegates to
+  `getStuckInspectionHandler` in `main/src/orchestrator/inspectorQueries.ts`.
+- `cyboflow.health.mcpServer` — point-in-time MCP server health snapshot.
+- `cyboflow.approvals.listPending` — list all pending approvals across runs.
+- `cyboflow.approvals.approve`, `cyboflow.approvals.reject` — resolve an in-flight
+  decisionPromise via `ApprovalRouter.respond()`.
+- `cyboflow.approvals.approveRestOfRun`, `cyboflow.approvals.rejectRestOfRun` — per-run
+  batch decision procedures.
+- `cyboflow.events.onApprovalCreated`, `cyboflow.events.onApprovalDecided`,
+  `cyboflow.events.onStreamEvent`, `cyboflow.events.setBadgeCount` — push subscriptions
+  and badge management.
 
-*Throwing stubs* (renderer surfaces a visible error until wired):
-- `cyboflow.runs.getStuckInspection` — called by `StuckInspectorModal`.
-- `cyboflow.runs.list` — list workflow runs (typed counterpart of raw `cyboflow:listRuns`).
-- `cyboflow.workflows.list` — list workflows.
-
-*Working stubs* (return a benign default until wired — the renderer renders an empty UI):
-- `cyboflow.approvals.listPending` — returns `[]` and logs a one-time warning
-  (`approvals.ts:53–57`). Implementation pending DB injection into tRPC context.
-- `cyboflow.approvals.approve`, `cyboflow.approvals.reject` — return `{ success: true }`
-  and log the call. No DB write, no resolution of any pending promise.
-- `cyboflow.approvals.approveRestOfRun` (TASK-406), `cyboflow.approvals.rejectRestOfRun`
-  (TASK-616) — per-run batch decision procedures.
-
-All approvals stubs are consumed by `PendingApprovalCard`, `useReviewQueueKeyboard`, and
-`reviewQueueStore`; the full backing implementation lands in the approval-router epic.
+All procedures are consumed by their respective Zustand stores and React components.
 
 ### Renderer (`frontend/src/`)
 
@@ -311,34 +297,6 @@ injection points) but have no live implementation today. They are concentrated i
   the orchestrator will consume once the server lands.
 - **`cyboflow:approveRun`** (raw IPC) — handler exists and returns
   `NOT_IMPLEMENTED: cyboflow:approveRun is pending epic 7`.
-- **`cyboflow.approvals.{approve,reject}`** (tRPC) — working stubs return `{ success: true }`
-  with a console log; no DB write, no resolution of any pending in-process promise.
-- **`cyboflow.approvals.listPending`** (tRPC) — working stub returns `[]` with a one-time
-  warning; needs `ctx.db` wired into the tRPC context.
-- **`cyboflow.approvals.approveRestOfRun` (TASK-406)** and
-  **`cyboflow.approvals.rejectRestOfRun` (TASK-616)** — per-run batch decision endpoints
-  (stub bodies pending the same DB-injection work).
-
-### Workflow-runs epic — separate gap
-
-- **`cyboflow.runs.getStuckInspection`** — throws `NOT_IMPLEMENTED` until `ctx.db` is wired
-  (`runs.ts:236–251`). Called by `StuckInspectorModal`. Scoped under TASK-709.
-- **`cyboflow.runs.list`** and **`cyboflow.workflows.list/.get`** — all throw `NOT_IMPLEMENTED`;
-  the typed replacements for the raw-IPC `cyboflow:listRuns` / `cyboflow:listWorkflows` channels.
-  Scoped under TASK-710 and TASK-711.
-- **`cyboflow.health.mcpServer`** — fully implemented in
-  `main/src/orchestrator/trpc/routers/health.ts`, but `setHealthProvider()` is never called
-  from `main/src/index.ts`, so the procedure always returns the `{status:'starting'}`
-  fallback. The raw-IPC channel `cyboflow:mcp-health` is the live data path until that
-  wiring lands. Scoped under TASK-713 (in EPIC-trpc-cutover-and-legacy-tree-cleanup).
-
-### Transport migration — `TBD-tRPC-cutover`
-
-The renderer currently mixes raw `electron.invoke` (for `cyboflow:listWorkflows`,
-`cyboflow:startRun`, `cyboflow:listRuns`, `cyboflow:mcp-health`) with the typed `cyboflow.*`
-tRPC client. The target end state is for tRPC to subsume all `cyboflow:*` channels. The
-legacy `main/src/trpc/routers/` tree (unreferenced by any `src/` file today) is a candidate
-for deletion or merge into `main/src/orchestrator/trpc/routers/` as part of this cutover.
 
 ### Team-tier v2 — long-horizon
 

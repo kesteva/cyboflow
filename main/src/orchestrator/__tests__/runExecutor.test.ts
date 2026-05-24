@@ -16,7 +16,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
-import Database from 'better-sqlite3';
 import { RunExecutor } from '../runExecutor';
 import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike } from '../runExecutor';
 import { RunQueueRegistry } from '../RunQueueRegistry';
@@ -31,10 +30,10 @@ import type { WorkflowRow, WorkflowRunRow } from '../../../../shared/types/workf
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { McpConfigWriter } from '../mcpConfigWriter';
-import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
+import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Fixture factories
@@ -861,13 +860,6 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 // ---------------------------------------------------------------------------
 // RunLauncher integration tests
 // ---------------------------------------------------------------------------
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(REGISTRY_SCHEMA);
-  return db;
-}
 
 describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
   it('(f) enqueues execute() via RunQueueRegistry AFTER publisher.publish run_started', async () => {

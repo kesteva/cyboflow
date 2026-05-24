@@ -20,6 +20,7 @@ import {
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
 import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
+import { seedApproval } from '../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -41,13 +42,6 @@ function seedRun(db: Database.Database, status: string): void {
     `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json)
      VALUES (?, ?, 1, '/tmp/wt', ?, '{}')`,
   ).run(RUN_ID, WORKFLOW_ID, status);
-}
-
-function seedApproval(db: Database.Database, status: string): void {
-  db.prepare(
-    `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status)
-     VALUES (?, ?, 'bash', '{}', 'tu-001', ?)`,
-  ).run(APPROVAL_ID, RUN_ID, status);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +205,7 @@ describe('transitions', () => {
   describe('transitionFromAwaitingReview', () => {
     it('(c) reverse happy-path: updates run to running and sets approval to approved', () => {
       seedRun(db, 'awaiting_review');
-      seedApproval(db, 'pending');
+      seedApproval(db, { id: APPROVAL_ID, runId: RUN_ID, toolUseId: 'tu-001', status: 'pending' });
 
       transitionFromAwaitingReview(db, {
         runId: RUN_ID,
@@ -239,7 +233,7 @@ describe('transitions', () => {
 
     it('(d) reverse stale-status: throws TransitionRejectedError when run is in failed state', () => {
       seedRun(db, 'failed');
-      seedApproval(db, 'pending');
+      seedApproval(db, { id: APPROVAL_ID, runId: RUN_ID, toolUseId: 'tu-001', status: 'pending' });
 
       expect(() =>
         transitionFromAwaitingReview(db, {
@@ -260,7 +254,7 @@ describe('transitions', () => {
 
     it('(d) reverse stale-status error has correct code and entity discriminators', () => {
       seedRun(db, 'failed');
-      seedApproval(db, 'pending');
+      seedApproval(db, { id: APPROVAL_ID, runId: RUN_ID, toolUseId: 'tu-001', status: 'pending' });
 
       let caught: unknown;
       try {
@@ -331,7 +325,7 @@ describe('transitions', () => {
 
     it('(f) already-decided approval: throws with entity=approval and rolls back the run status update', () => {
       seedRun(db, 'awaiting_review');
-      seedApproval(db, 'timed_out'); // approval already decided; status guard rejects it
+      seedApproval(db, { id: APPROVAL_ID, runId: RUN_ID, toolUseId: 'tu-001', status: 'timed_out' }); // approval already decided; status guard rejects it
 
       let caught: unknown;
       try {
@@ -383,7 +377,7 @@ describe('transitions', () => {
       );
 
       seedRun(db, 'awaiting_review');
-      seedApproval(db, 'pending');
+      seedApproval(db, { id: APPROVAL_ID, runId: RUN_ID, toolUseId: 'tu-001', status: 'pending' });
 
       expect(() =>
         transitionFromAwaitingReview(db, {

@@ -1,12 +1,13 @@
 /**
  * WorkflowPicker — dropdown of the 5 SoloFlow workflows + Start Run button.
  *
- * Accepts a `projectId` prop; on mount it calls `cyboflowApi.listWorkflows`
+ * Accepts a `projectId` prop; on mount it calls `trpc.cyboflow.workflows.list`
  * and populates a `<select>`.  Clicking "Start Run" calls
- * `cyboflowApi.startRun` and stores the returned runId in `cyboflowStore`.
+ * `trpc.cyboflow.runs.start.mutate` and stores the returned runId in
+ * `cyboflowStore`.
  */
 import { useState, useEffect } from 'react';
-import { cyboflowApi } from '../../utils/cyboflowApi';
+import { trpc } from '../../utils/trpcClient';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 
@@ -19,6 +20,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Load workflows on mount (or when projectId changes)
@@ -27,8 +29,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     setIsLoading(true);
     setError(null);
 
-    cyboflowApi
-      .listWorkflows({ projectId })
+    trpc.cyboflow.workflows.list
+      .query({ projectId })
       .then((rows) => {
         if (cancelled) return;
         setWorkflows(rows);
@@ -52,14 +54,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   }, [projectId]);
 
   const handleStartRun = async () => {
-    if (selectedId === null) return;
+    if (selectedId === null || isStarting) return;
     setError(null);
+    setIsStarting(true);
     try {
-      const result = await cyboflowApi.startRun({ workflowId: selectedId, projectId });
+      const result = await trpc.cyboflow.runs.start.mutate({ workflowId: selectedId, projectId });
       useCyboflowStore.getState().setActiveRun(result.runId);
       onWorkflowStarted?.(result.runId);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to start run');
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -94,7 +99,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
 
       <button
         onClick={handleStartRun}
-        disabled={selectedId === null || isLoading}
+        disabled={selectedId === null || isLoading || isStarting}
         className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         Start Run

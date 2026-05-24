@@ -20,69 +20,15 @@
  * socket test double is used to assert on the JSON response bodies.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-
-// ---------------------------------------------------------------------------
-// Minimal schema for this test suite
-// ---------------------------------------------------------------------------
-// Mirrors the relevant subset of REGISTRY_SCHEMA + GATE_SCHEMA with FK
-// constraints present so that foreign_keys = ON enforces referential integrity
-// exactly as production does. workflow_runs has no FOREIGN KEY on workflow_id
-// here (workflows table omitted) — seedRun inserts directly without a parent
-// workflows row, which is fine for unit tests.
-// ---------------------------------------------------------------------------
-
-const MINIMAL_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
-  permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
-  worktree_path TEXT,
-  branch_name TEXT,
-  policy_json TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  tool_input_json TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  decided_at DATETIME,
-  decided_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-`;
+import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(MINIMAL_SCHEMA);
-  return db;
-}
 
 /**
  * Minimal net.Socket test double that captures write() calls.
@@ -115,19 +61,6 @@ function seedRun(db: Database.Database, id: string): void {
   ).run(id);
 }
 
-function seedApproval(
-  db: Database.Database,
-  id: string,
-  runId: string,
-  status: string,
-  createdAt: string,
-): void {
-  db.prepare(
-    `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-     VALUES (?, ?, 'bash', '{"cmd":"ls"}', ?, ?, ?)`,
-  ).run(id, runId, id, status, createdAt);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -137,7 +70,7 @@ describe('McpQueryHandler', () => {
   let handler: McpQueryHandler;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createTestDb({ disableForeignKeys: true });
     handler = new McpQueryHandler(dbAdapter(db));
   });
 
@@ -169,9 +102,9 @@ describe('McpQueryHandler', () => {
     it('returns ok:true with all pending approvals sorted oldest-first', async () => {
       seedRun(db, 'run-a');
       // Insert newer first to verify ORDER BY created_at ASC
-      seedApproval(db, 'appr-2', 'run-a', 'pending', '2026-01-02T00:00:00Z');
-      seedApproval(db, 'appr-1', 'run-a', 'pending', '2026-01-01T00:00:00Z');
-      seedApproval(db, 'appr-3', 'run-a', 'approved', '2026-01-03T00:00:00Z');
+      seedApproval(db, { id: 'appr-2', runId: 'run-a', status: 'pending', createdAt: '2026-01-02T00:00:00Z', toolUseId: 'appr-2', toolInputJson: '{"cmd":"ls"}' });
+      seedApproval(db, { id: 'appr-1', runId: 'run-a', status: 'pending', createdAt: '2026-01-01T00:00:00Z', toolUseId: 'appr-1', toolInputJson: '{"cmd":"ls"}' });
+      seedApproval(db, { id: 'appr-3', runId: 'run-a', status: 'approved', createdAt: '2026-01-03T00:00:00Z', toolUseId: 'appr-3', toolInputJson: '{"cmd":"ls"}' });
 
       const { socket, writes } = makeSocketDouble();
       const msg: McpQueryMessage = {
@@ -193,7 +126,7 @@ describe('McpQueryHandler', () => {
 
     it('parses tool_input_json into a JS object on each approval', async () => {
       seedRun(db, 'run-b');
-      seedApproval(db, 'appr-x', 'run-b', 'pending', '2026-01-01T00:00:00Z');
+      seedApproval(db, { id: 'appr-x', runId: 'run-b', status: 'pending', createdAt: '2026-01-01T00:00:00Z', toolUseId: 'appr-x', toolInputJson: '{"cmd":"ls"}' });
 
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage(

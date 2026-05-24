@@ -23,8 +23,113 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import type { Approval, ApproveRestOfRunResult, RejectRestOfRunResult } from '../../../../../shared/types/approvals';
 import { ApprovalRouter, ApprovalNotFoundError } from '../../approvalRouter';
-import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../../../trpc/routers/approvals';
 import { selectPendingApprovals } from '../../approvalListing';
+import { withLock } from '../../../utils/mutex';
+import type { DatabaseLike } from '../../types';
+
+// ---------------------------------------------------------------------------
+// approveRestOfRunHandler / rejectRestOfRunHandler
+//
+// Core implementations for per-run batch approval decisions.  Extracted for
+// direct unit testing without the tRPC wrapping.
+//
+// NOTE: previously these lived in the legacy main/src/trpc/routers/approvals.ts
+// tree (deleted in TASK-717).  They now live here — the canonical orchestrator
+// router — so the orchestrator subtree has no cross-tree dependency.
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared implementation for approve/reject-rest-of-run.
+ *
+ * Selects all pending approvals for `runId` and updates each to `decision`
+ * under the per-run mutex.  Best-effort: if a single UPDATE fails, the error
+ * is logged with a decision-derived prefix and iteration continues.
+ *
+ * Not exported — callers must use the named wrappers below.
+ */
+async function decideRestOfRunHandler(
+  db: DatabaseLike,
+  runId: string,
+  decision: 'approved' | 'rejected',
+): Promise<{ decided: number }> {
+  return withLock(`run:${runId}`, async () => {
+    // Select all pending approval IDs for this run only.
+    const rows = db
+      .prepare(
+        `SELECT id FROM approvals WHERE run_id = ? AND status = 'pending'`,
+      )
+      .all(runId) as { id: string }[];
+
+    if (rows.length === 0) {
+      return { decided: 0 };
+    }
+
+    const now = new Date().toISOString();
+    let decided = 0;
+
+    // Derive log-prefix and verb from decision so the messages appear verbatim.
+    const prefix = decision === 'approved' ? 'approveRestOfRun' : 'rejectRestOfRun';
+    const verb = decision === 'approved' ? 'approve' : 'reject';
+
+    for (const row of rows) {
+      try {
+        db.prepare(
+          `UPDATE approvals
+           SET status = ?, decided_at = ?, decided_by = 'user'
+           WHERE id = ? AND status = 'pending'`,
+        ).run(decision, now, row.id);
+        decided++;
+      } catch (err) {
+        // Best-effort: log and continue so a single failure does not block
+        // the remaining approvals.
+        console.error(
+          `[${prefix}] Failed to ${verb} ${row.id} for run ${runId}:`,
+          err,
+        );
+      }
+    }
+
+    return { decided };
+  });
+}
+
+/**
+ * Core implementation of the approveRestOfRun logic — extracted for direct
+ * unit testing without the tRPC wrapping.
+ *
+ * Selects all pending approvals for the given `runId` and sets each to
+ * `status='approved'` under the per-run mutex.  Best-effort: if a single
+ * approval update fails, the error is logged and iteration continues.
+ *
+ * @param db     - A narrow DatabaseLike surface (prepare + run).
+ * @param runId  - The workflow_runs.id to scope the operation to.
+ * @returns `{ decided: number }` — count of approvals approved in this call.
+ */
+export async function approveRestOfRunHandler(
+  db: DatabaseLike,
+  runId: string,
+): Promise<ApproveRestOfRunResult> {
+  return decideRestOfRunHandler(db, runId, 'approved');
+}
+
+/**
+ * Core implementation of the rejectRestOfRun logic — extracted for direct
+ * unit testing without the tRPC wrapping.
+ *
+ * Selects all pending approvals for the given `runId` and sets each to
+ * `status='rejected'` under the per-run mutex.  Best-effort: if a single
+ * approval update fails, the error is logged and iteration continues.
+ *
+ * @param db     - A narrow DatabaseLike surface (prepare + run).
+ * @param runId  - The workflow_runs.id to scope the operation to.
+ * @returns `{ decided: number }` — count of approvals rejected in this call.
+ */
+export async function rejectRestOfRunHandler(
+  db: DatabaseLike,
+  runId: string,
+): Promise<RejectRestOfRunResult> {
+  return decideRestOfRunHandler(db, runId, 'rejected');
+}
 
 export const approvalsRouter = router({
   /**
@@ -119,7 +224,7 @@ export const approvalsRouter = router({
    * Best-effort: if one approval update fails, iteration continues and the
    * count reflects only the successfully approved items.
    *
-   * Delegates to `approveRestOfRunHandler` in main/src/trpc/routers/approvals.ts.
+   * Delegates to `approveRestOfRunHandler` (defined in this file).
    *
    * CONTRACT DIVERGENCE: unlike approve(), this handler only updates the DB and
    * does NOT resolve any in-flight decisionPromise.  The rest-of-run user gesture
@@ -145,7 +250,7 @@ export const approvalsRouter = router({
    * Best-effort: if one approval update fails, iteration continues and the
    * count reflects only the successfully rejected items.
    *
-   * Delegates to `rejectRestOfRunHandler` in main/src/trpc/routers/approvals.ts.
+   * Delegates to `rejectRestOfRunHandler` (defined in this file).
    *
    * CONTRACT DIVERGENCE: unlike reject(), this handler only updates the DB and
    * does NOT resolve any in-flight decisionPromise.  See TODO above re: consolidation.

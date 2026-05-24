@@ -2,13 +2,9 @@
  * Shared types for the stuck-run inspector query and modal.
  *
  * These types are the wire contract between:
- *   - main/src/trpc/routers/runs.ts   (getStuckInspectionHandler + re-export)
- *   - main/src/orchestrator/trpc/routers/runs.ts (tRPC procedure stub)
+ *   - main/src/orchestrator/inspectorQueries.ts (getStuckInspectionHandler)
+ *   - main/src/orchestrator/trpc/routers/runs.ts (cyboflow.runs.getStuckInspection procedure)
  *   - frontend/src/components/ReviewQueue/StuckInspectorModal.tsx (modal)
- *
- * Keeping them here avoids the import cycle that would otherwise exist
- * between the two router files (the orchestrator router re-exports from the
- * trpc router, which previously imported from the orchestrator router).
  *
  * Pure type module: NO runtime imports.
  */

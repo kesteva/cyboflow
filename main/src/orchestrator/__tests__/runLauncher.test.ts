@@ -11,31 +11,20 @@
  * The launch test uses an in-memory SQLite DB for the workflow_runs assertion.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type Database from 'better-sqlite3';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
-import Database from 'better-sqlite3';
 import { RunLauncher } from '../runLauncher';
 import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { McpConfigWriter } from '../mcpConfigWriter';
 import type { RunExecutor } from '../runExecutor';
-import { REGISTRY_SCHEMA } from '../../database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(REGISTRY_SCHEMA);
-  return db;
-}
+import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 
 // Shared stubs for the 4 required MCP collaborators.
 // All tests that construct RunLauncher must pass these (or equivalent stubs)
