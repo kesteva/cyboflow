@@ -41,16 +41,15 @@ vi.mock('../../utils/trpcClient', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowApi (subscribeToStreamEvents, startRun, approveRun only)
+// Mock cyboflowApi — only the IPC-backed functions remain (subscribeToStreamEvents,
+// approveRun). runs.start has been migrated to trpc in TASK-715.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: vi.fn(() => () => {}),
-  startRun: vi.fn(),
   approveRun: vi.fn(),
   cyboflowApi: {
     subscribeToStreamEvents: vi.fn(() => () => {}),
-    startRun: vi.fn(),
     approveRun: vi.fn(),
   },
 }));
