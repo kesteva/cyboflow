@@ -20,7 +20,7 @@ function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
 }
 
 // Mock tRPC client — reviewQueueSlice uses it for subscribeToStuckEvents.
-vi.mock('../../utils/trpcClient', () => ({
+vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       events: {

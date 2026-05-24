@@ -25,7 +25,7 @@ const { mockMcpServerQuery } = vi.hoisted(() => ({
   mockMcpServerQuery: vi.fn<() => Promise<McpServerHealth>>(),
 }));
 
-vi.mock('../../utils/trpcClient', () => ({
+vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       health: {
