@@ -30,31 +30,13 @@
  *  (d) Deps not wired → TRPCError METHOD_NOT_SUPPORTED (also covered in router.test.ts).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { setStartRunDeps } from '../runs';
-import { GATE_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
-import { seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
-
-// ---------------------------------------------------------------------------
-// Test-database setup
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a fresh in-memory SQLite database with GATE_SCHEMA plus an inline
- * application of migration 007 (stuck_detected_at column on workflow_runs).
- */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(GATE_SCHEMA);
-  // Apply migration 007 inline (adds stuck_detected_at INTEGER to workflow_runs).
-  db.exec(`ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER;`);
-  return db;
-}
+import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Seed helpers (inlined — small, out of scope to extract to shared fixture)
@@ -105,7 +87,7 @@ describe('cyboflow.runs.getStuckInspection', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createTestDb({ includeStuckDetectedAt: true });
   });
 
   // -------------------------------------------------------------------------
@@ -185,8 +167,8 @@ describe('cyboflow.runs.list', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    // createTestDb applies GATE_SCHEMA (migration 006 equivalent) with FK ON.
-    db = createTestDb();
+    // createTestDb applies GATE_SCHEMA (migration 006 equivalent) + migration 007 (stuck_detected_at).
+    db = createTestDb({ includeStuckDetectedAt: true });
   });
 
   // -------------------------------------------------------------------------
