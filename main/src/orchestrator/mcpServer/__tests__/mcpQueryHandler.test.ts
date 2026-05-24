@@ -24,6 +24,7 @@ import Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
+import { seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Minimal schema for this test suite
@@ -115,19 +116,6 @@ function seedRun(db: Database.Database, id: string): void {
   ).run(id);
 }
 
-function seedApproval(
-  db: Database.Database,
-  id: string,
-  runId: string,
-  status: string,
-  createdAt: string,
-): void {
-  db.prepare(
-    `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-     VALUES (?, ?, 'bash', '{"cmd":"ls"}', ?, ?, ?)`,
-  ).run(id, runId, id, status, createdAt);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -169,9 +157,9 @@ describe('McpQueryHandler', () => {
     it('returns ok:true with all pending approvals sorted oldest-first', async () => {
       seedRun(db, 'run-a');
       // Insert newer first to verify ORDER BY created_at ASC
-      seedApproval(db, 'appr-2', 'run-a', 'pending', '2026-01-02T00:00:00Z');
-      seedApproval(db, 'appr-1', 'run-a', 'pending', '2026-01-01T00:00:00Z');
-      seedApproval(db, 'appr-3', 'run-a', 'approved', '2026-01-03T00:00:00Z');
+      seedApproval(db, { id: 'appr-2', runId: 'run-a', status: 'pending', createdAt: '2026-01-02T00:00:00Z', toolUseId: 'appr-2', toolInputJson: '{"cmd":"ls"}' });
+      seedApproval(db, { id: 'appr-1', runId: 'run-a', status: 'pending', createdAt: '2026-01-01T00:00:00Z', toolUseId: 'appr-1', toolInputJson: '{"cmd":"ls"}' });
+      seedApproval(db, { id: 'appr-3', runId: 'run-a', status: 'approved', createdAt: '2026-01-03T00:00:00Z', toolUseId: 'appr-3', toolInputJson: '{"cmd":"ls"}' });
 
       const { socket, writes } = makeSocketDouble();
       const msg: McpQueryMessage = {
@@ -193,7 +181,7 @@ describe('McpQueryHandler', () => {
 
     it('parses tool_input_json into a JS object on each approval', async () => {
       seedRun(db, 'run-b');
-      seedApproval(db, 'appr-x', 'run-b', 'pending', '2026-01-01T00:00:00Z');
+      seedApproval(db, { id: 'appr-x', runId: 'run-b', status: 'pending', createdAt: '2026-01-01T00:00:00Z', toolUseId: 'appr-x', toolInputJson: '{"cmd":"ls"}' });
 
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage(
