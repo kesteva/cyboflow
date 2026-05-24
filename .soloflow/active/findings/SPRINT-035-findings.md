@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
-pending_count: 8
-last_updated: "2026-05-24T00:05:00.000Z"
+pending_count: 10
+last_updated: "2026-05-24T00:11:39.190Z"
 ---
 # Findings Queue
 
@@ -97,10 +97,10 @@ last_updated: "2026-05-24T00:05:00.000Z"
 - **type:** cleanup
 - **severity:** low
 - **status:** open
-- **location:** frontend/src/components/cyboflow/__tests__/RunView.test.tsx:32 and frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx:22
-- **description:** Two test files (not in TASK-714's files_owned) still ship stale `listWorkflows: vi.fn()` entries inside their `vi.mock('../../../utils/cyboflowApi', () => ({ cyboflowApi: { listWorkflows: ... } }))` blocks, but `listWorkflows` no longer exists as a property of the real `cyboflowApi` object after TASK-714. The mocks are harmless dead weight (TypeScript doesn't check vi.mock factory shapes against the real module, and neither test reads the mock's listWorkflows return value) — both files were green in the 336-test run. The plan's AC5 grep (`cyboflowApi.*listRuns|cyboflowApi.*listWorkflows`) returns 0 matches because the strings appear on their own lines without a preceding `cyboflowApi.` reference; the AC's stricter intent ("mocks are removed if the test no longer covers that path") is not quite satisfied. Pickup is trivial — drop the one line from each mock block. Natural piggyback on TASK-715 (which already owns CyboflowRoot.test.tsx for the startRun cutover) or TASK-716 (raw-IPC handler deletion) if those tasks touch these files.
-- **suggested_action:** In TASK-715 or TASK-716, drop the `listWorkflows: vi.fn(),` (or `listWorkflows: vi.fn().mockResolvedValue([...])`) line from the `vi.mock('../../../utils/cyboflowApi', ...)` blocks in RunView.test.tsx (line 32) and CyboflowRoot.test.tsx (lines 22-25). No test behaviour will change.
-- **resolved_by:** 
+- **location:** frontend/src/components/cyboflow/__tests__/RunView.test.tsx:32 (still open) and frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx:22 (resolved by TASK-715)
+- **description:** Two test files (not in TASK-714's files_owned) still ship stale `listWorkflows: vi.fn()` entries inside their `vi.mock('../../../utils/cyboflowApi', () => ({ cyboflowApi: { listWorkflows: ... } }))` blocks, but `listWorkflows` no longer exists as a property of the real `cyboflowApi` object after TASK-714. The mocks are harmless dead weight (TypeScript doesn't check vi.mock factory shapes against the real module, and neither test reads the mock's listWorkflows return value) — both files were green in the 336-test run. The plan's AC5 grep (`cyboflowApi.*listRuns|cyboflowApi.*listWorkflows`) returns 0 matches because the strings appear on their own lines without a preceding `cyboflowApi.` reference; the AC's stricter intent ("mocks are removed if the test no longer covers that path") is not quite satisfied. Pickup is trivial — drop the one line from each mock block. Natural piggyback on TASK-715 (which already owns CyboflowRoot.test.tsx for the startRun cutover) or TASK-716 (raw-IPC handler deletion) if those tasks touch these files. Update (TASK-715 verifier): TASK-715 removed the stale entry from CyboflowRoot.test.tsx (the file it owned) but did NOT touch RunView.test.tsx (not in files_owned). RunView.test.tsx:32 still ships `listWorkflows: vi.fn()` and line 33 also ships a stale `startRun: vi.fn()` — both now dead-weight after TASK-715 deleted the real exports. Same dead-weight entries also live in cyboflowStore.test.ts:33 (`startRun: vi.fn()`).
+- **suggested_action:** In TASK-716 (or any later task that touches these files), drop the `listWorkflows: vi.fn(),` AND `startRun: vi.fn(),` lines from the `vi.mock('../../../utils/cyboflowApi', ...)` blocks in RunView.test.tsx (lines 32-33) and cyboflowStore.test.ts (line 33). CyboflowRoot.test.tsx is already clean. No test behaviour will change.
+- **resolved_by:** partial: TASK-715 (CyboflowRoot.test.tsx only)
 
 ## FIND-SPRINT-035-10
 - **source:** TASK-714 (verifier)
@@ -111,3 +111,22 @@ last_updated: "2026-05-24T00:05:00.000Z"
 - **description:** RECURRENCE of the bug already captured in FIND-SPRINT-035-7. The TASK-714 executor again wrote findings to the misnamed `.soloflow/active/findings/SPRINT-024-findings.md` file (active sprint is SPRINT-035) and again logged "scope_deviation" entries for files that are IN this task's `files_owned`. Specifically: (a) FIND-SPRINT-024-4 logs `frontend/src/test/setup.ts` as a scope deviation, but it is line 12 of TASK-714-plan.md `files_owned`; (b) FIND-SPRINT-024-5 logs `frontend/vitest.config.ts` as a scope deviation, but it is line 13 of TASK-714-plan.md `files_owned` (and the file was not modified anyway — the executor's own note in the finding admits this). Same root cause as FIND-SPRINT-035-5 (TASK-712) and FIND-SPRINT-035-7 (TASK-713): the executor's findings-logging heuristic is not consulting the sprint.json for the active sprint id, nor checking the plan's `files_owned`/`files_readonly` lists before classifying an edit as a deviation. Three consecutive tasks in this sprint (TASK-712, TASK-713, TASK-714) have repeated this exact mistake — strong signal that the executor-prompt guidance is missing or insufficient.
 - **suggested_action:** Compounder: prioritize the executor-side fix proposed in FIND-SPRINT-035-7's suggested_action (resolve sprint id from `.soloflow/sprint.json` before opening the findings file; only log `type: scope_deviation` when the touched path is NOT in `files_owned`). The pattern has now repeated 3× in one sprint; this is no longer an isolated incident. As bookkeeping, the stray `.soloflow/active/findings/SPRINT-024-findings.md` file should be deleted (FIND-SPRINT-024-2..5 are all either erroneous or in-scope and out-of-place); the legitimate FIND-SPRINT-024-1 entry from TASK-692 should be migrated to that sprint's archive if it isn't already there.
 - **resolved_by:** 
+
+## FIND-SPRINT-035-12
+- **type:** scope_deviation
+- **source:** TASK-715 (executor)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx:44,49,53
+- **description:** Executor's stated rationale was "required to meet AC5: grep for cyboflowApi.*startRun must return 0 matches" but the AC5 grep is line-based and the original `startRun: vi.fn()` lines (inside the multi-line `cyboflowApi: { … }` block) do NOT match `cyboflowApi.*startRun` on a single line — so AC5 returned 0 matches BEFORE this edit. The edit is defensible cleanup (removes mock entries pointing at a now-deleted export) but is not strictly AC-prescribed and is not in TASK-715's `files_owned`. Tests still pass either way. Verifier-classified as a genuine scope deviation per the plan-prescribed-scope rules.
+- **suggested_action:** Future tasks: if a test file outside `files_owned` ships stale mock entries that are functionally dead (no test reads them), prefer to log a separate cleanup FIND for the next plan to pick up rather than claim the file mid-task. Where the cleanup is in-scope-by-AC, cite the specific AC, not the grep that already returns 0.
+- **resolved_by:**
+
+## FIND-SPRINT-035-13
+- **type:** claude-md
+- **source:** TASK-715 (verifier)
+- **severity:** low
+- **status:** open
+- **location:** docs/VISUAL-VERIFICATION-SETUP.md
+- **description:** Peekaboo MCP image() capture against the running Cyboflow Electron window (PID 80782) failed again this task with "Failed to start stream due to audio/video capture failure" on capture_focus=auto, plus "No displays available for capture" on screen:0. This is a recurrence of the SPRINT-033/SPRINT-034 gap already documented under dedup_key=visual_macos_unavailable in the review queue. Project CLAUDE.md and docs/VISUAL-VERIFICATION-SETUP.md describe the per-binary Screen Recording grant requirement, but the gap re-blocks every visual_macos verification attempt because Cyboflow.app (production binary) gets the grant while the dev-time Electron binary at node_modules/electron/dist/Electron.app/Contents/MacOS/Electron does not inherit it.
+- **suggested_action:** Compounder: consider adding a one-time bootstrap step or a developer-side post-install script that programmatically grants Screen Recording to the dev-time Electron binary (or documents the exact System Settings path users must follow on first dev launch). Alternatively, document an explicit "skip visual_macos for tRPC-cutover/observability-only tasks" guidance so verifiers don’t spend cycles probing a known-broken path. Either way, the recurrence count is high enough that an ergonomic fix is warranted.

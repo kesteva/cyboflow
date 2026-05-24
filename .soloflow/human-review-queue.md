@@ -1,9 +1,9 @@
 ---
-pending_count: 26
+pending_count: 27
 buckets:
   decisions: 0
   actions: 1
-  testing: 20
+  testing: 21
   deferred_visual: 5
 items: []
 ---
@@ -23,11 +23,15 @@ _No items._
   action: "Verifier could not run visual_macos verification: Peekaboo MCP probe reported Screen Recording + Accessibility grants present, but live capture against the running Cyboflow Electron window failed with \"Failed to start stream due to audio/video capture failure\" on both background and auto focus modes. Confirm Cyboflow is granted Screen Recording explicitly (System Settings → Privacy & Security → Screen Recording), restart pnpm dev, and re-run. See docs/VISUAL-VERIFICATION-SETUP.md."
   blocked_checks:
     - Level 2 visual_macos verification of toolFormatter rendered output
+    - Level 2 visual_macos verification for TASK-715 WorkflowPicker + mcpHealthStore tRPC cutover
   level: visual
-  severity: low
+  severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-23T21:25:57Z"
+  updated_at: "2026-05-24T00:11:23.128Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
+  affected_tasks:
+    - TASK-655
+    - TASK-715
 
 ## Testing
 
@@ -263,6 +267,16 @@ _No items._
   severity: medium
   created_at: "2026-05-22T22:05:00.000Z"
   updated_at: "2026-05-22T22:05:00.000Z"
+
+- task: TASK-715
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/trpc-cutover-and-legacy-tree-cleanup/TASK-715-plan.md
+  action: "Manual smoke per AC6: in pnpm dev, click \"New run\" / \"Start Run\", pick a workflow, confirm a worktree is created and the run starts (tRPC cyboflow.runs.start replaces the cyboflowApi.startRun path). Observe the sidebar MCP dot color updates after ~5s polling intervals (tRPC cyboflow.health.mcpServer.query replaces the raw cyboflow:mcp-health invoke)."
+  blocked_checks:
+    - AC6 — manual smoke for WorkflowPicker tRPC cutover + MCP health-dot polling cadence
+  level: requirements
+  severity: medium
 
 ## Deferred Visual
 
