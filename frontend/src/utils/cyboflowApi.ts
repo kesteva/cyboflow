@@ -1,18 +1,15 @@
 /**
- * cyboflowApi — typed wrappers over the IPC surface for the cyboflow orchestrator.
+ * cyboflowApi — typed wrappers over the raw-IPC surface for the cyboflow orchestrator.
  *
- * Currently routes through the raw-IPC bridge; tRPC migration is a separate
- * future task (see docs/ARCHITECTURE.md "cyboflow.* transport status").
- * Component call sites are unchanged when the internals are swapped.
- *
- * IPC channels:
- *   cyboflow:startRun       — launch a new workflow run
+ * IPC channels retained here:
  *   cyboflow:stream:<runId> — push channel for stream events (renderer-side only)
  *   cyboflow:approveRun     — approve / deny a day-3 gate approval request
- *   cyboflow:mcp-health     — polled by mcpHealthStore (removed from this util in TASK-626)
  *
- * NOTE: listWorkflows and listRuns have been migrated to tRPC (TASK-714).
- *   Use trpc.cyboflow.workflows.list and trpc.cyboflow.runs.list instead.
+ * Migrated to tRPC (use the trpc client instead):
+ *   cyboflow:startRun   → trpc.cyboflow.runs.start (TASK-715)
+ *   cyboflow:mcp-health → trpc.cyboflow.health.mcpServer (TASK-715)
+ *   listWorkflows       → trpc.cyboflow.workflows.list (TASK-714)
+ *   listRuns            → trpc.cyboflow.runs.list (TASK-714)
  */
 import type { IPCResponse } from './api';
 import type {
@@ -52,16 +49,6 @@ export type {
   RunStartedEvent,
 };
 
-// ---------------------------------------------------------------------------
-// Result types
-// ---------------------------------------------------------------------------
-
-export interface StartRunResult {
-  runId: string;
-  worktreePath: string;
-  branchName: string;
-}
-
 /**
  * Discriminated union over all IPC envelope `type` values the renderer can receive.
  *
@@ -87,24 +74,6 @@ function requireElectron(): NonNullable<Window['electron']> {
 // ---------------------------------------------------------------------------
 // Named function exports
 // ---------------------------------------------------------------------------
-
-/**
- * Launch a new workflow run for the given workflow.
- * Returns the runId, worktree path, and branch name.
- */
-export async function startRun({
-  workflowId,
-  projectId,
-}: {
-  workflowId: string;
-  projectId: number;
-}): Promise<StartRunResult> {
-  const electron = requireElectron();
-  const res = await electron.invoke('cyboflow:startRun', { workflowId, projectId }) as IPCResponse<StartRunResult>;
-  if (!res.success) throw new Error(res.error ?? 'startRun failed');
-  if (!res.data) throw new Error('startRun: no data in response');
-  return res.data;
-}
 
 /**
  * Subscribe to stream events for a run.
@@ -165,11 +134,10 @@ export async function approveRun({
 
 // ---------------------------------------------------------------------------
 // Convenience object — re-exports the named functions for callers that prefer
-// a namespace import (`cyboflowApi.startRun(...)`)
+// a namespace import (`cyboflowApi.approveRun(...)`)
 // ---------------------------------------------------------------------------
 
 export const cyboflowApi = {
-  startRun,
   subscribeToStreamEvents,
   approveRun,
 };

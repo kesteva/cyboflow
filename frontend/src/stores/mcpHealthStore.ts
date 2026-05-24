@@ -8,7 +8,7 @@
  *   'starting' → yellow (initial boot, restarting, or unknown)
  *   'error'    → red    (failed, stopped, or repeated restart attempts)
  *
- * The underlying IPC channel (`cyboflow:mcp-health`) returns the four-value
+ * The tRPC query (`trpc.cyboflow.health.mcpServer`) returns the four-value
  * McpServerHealth type from shared/types/mcpHealth.ts:
  *   'running'  → mapped to 'healthy'
  *   'starting' → mapped to 'starting'
@@ -17,11 +17,10 @@
  *
  * ## Subscription path
  *
- * This store polls via the `cyboflow:mcp-health` Electron IPC channel
- * (registered in main/src/ipc/cyboflow.ts).  The channel returns a
- * McpServerHealth snapshot on every call.  A tRPC subscription path
- * (`cyboflow.events.onMcpHealth`) does NOT yet exist — TASK-535
- * (cyboflow-mcp-server epic) owns the push-based subscription.
+ * This store polls via `trpc.cyboflow.health.mcpServer.query()`.
+ * The query returns a McpServerHealth snapshot on every call.  A tRPC
+ * subscription path (`cyboflow.events.onMcpHealth`) does NOT yet exist —
+ * TASK-535 (cyboflow-mcp-server epic) owns the push-based subscription.
  *
  * FIND-SPRINT-013-TODO: When TASK-535 lands, subscribe to
  * `trpc.cyboflow.events.onMcpHealth` and remove the polling interval.
@@ -36,6 +35,7 @@
 import { create } from 'zustand';
 import type { McpServerHealth, McpHealthUiStatus } from '../../../shared/types/mcpHealth';
 import { toUiStatus } from '../../../shared/types/mcpHealth';
+import { trpc } from '../utils/trpcClient';
 
 // ---------------------------------------------------------------------------
 // Store status enum (three-value UI-level status)
@@ -67,7 +67,7 @@ export interface McpHealthActions {
   /** Merge a partial state patch into the store (used by the poller). */
   setHealth: (patch: Partial<McpHealthState>) => void;
   /**
-   * Start the polling loop against `cyboflow:mcp-health`.
+   * Start the polling loop against `trpc.cyboflow.health.mcpServer`.
    *
    * Returns an unsubscribe function.  Call during app mount; call the
    * returned cleanup during unmount or hot-reload.
@@ -98,14 +98,12 @@ export const useMcpHealthStore = create<McpHealthState & McpHealthActions>()((se
 
     const poll = async () => {
       try {
-        // Primary channel: cyboflow:mcp-health IPC (main/src/ipc/cyboflow.ts)
+        // Primary channel: trpc.cyboflow.health.mcpServer (tRPC query).
         // Subscription channel: NOT yet available — TASK-535 will add
         //   trpc.cyboflow.events.onMcpHealth push events.
-        const raw = await window.electron?.invoke(
-          'cyboflow:mcp-health',
-        ) as McpServerHealth | undefined;
+        const raw: McpServerHealth = await trpc.cyboflow.health.mcpServer.query();
 
-        if (!alive || !raw) return;
+        if (!alive) return;
 
         set({
           status: toUiStatus(raw.status),
