@@ -1,7 +1,7 @@
 ---
 id: TASK-735
 idea: SPRINT-034-compounder
-status: ready
+status: in-flight
 created: "2026-05-23T22:30:00Z"
 files_owned:
   - frontend/src/components/PromptHistory.tsx
@@ -18,12 +18,12 @@ acceptance_criteria:
     verification: "test ! -f frontend/src/components/PromptHistory.tsx"
   - criterion: frontend/src/components/PromptHistoryModal.tsx no longer contains the dead dispatch block but retains its session-switch + onClose behavior.
     verification: "grep -nE 'navigateToPrompt' frontend/src/components/PromptHistoryModal.tsx returns 0 matches; modal still exports a default React component"
-  - criterion: frontend/src/types/electron.d.ts:205 stale reference to PromptHistory is updated or removed.
+  - criterion: "frontend/src/types/electron.d.ts:205 stale reference to PromptHistory is updated or removed."
     verification: "grep -nE 'PromptHistory' frontend/src/types/electron.d.ts returns 0 matches"
   - criterion: pnpm typecheck and pnpm lint pass.
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0"
+    verification: pnpm typecheck exits 0; pnpm lint exits 0
   - criterion: pnpm --filter frontend test passes (no test depends on the deleted dispatch).
-    verification: "pnpm --filter frontend test exits 0"
+    verification: pnpm --filter frontend test exits 0
 depends_on: []
 estimated_complexity: low
 epic: cyboflow-shell-architecture

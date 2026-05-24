@@ -1,8 +1,8 @@
 ---
 id: TASK-741
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - frontend/src/stores/__tests__/reviewQueueSlice.test.ts
   - frontend/src/stores/__tests__/reviewQueueStore.test.ts
@@ -20,15 +20,15 @@ files_readonly:
   - frontend/src/test/setup.ts
   - frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
 acceptance_criteria:
-  - criterion: "All 10 owned files mock the canonical `…/trpc/client` path (NOT the `…/utils/trpcClient` shim)."
+  - criterion: All 10 owned files mock the canonical `…/trpc/client` path (NOT the `…/utils/trpcClient` shim).
     verification: "grep -rnE \"vi\\.mock\\(['\\\"][^'\\\"]*utils/trpcClient['\\\"]\" frontend/src --include='*.ts' --include='*.tsx' returns 0 hits"
   - criterion: "Each owned file contains a `vi.mock('…/trpc/client', ...)` call at the correct relative-path depth."
     verification: "grep -rnE \"vi\\.mock\\(['\\\"][^'\\\"]*trpc/client['\\\"]\" frontend/src --include='*.ts' --include='*.tsx' shows at least 11 hits (10 owned files + the existing global setup.ts and CyboflowRoot.test.tsx)"
-  - criterion: "The shim at `frontend/src/utils/trpcClient.ts` is unchanged (file presence preserved for backwards compatibility)."
+  - criterion: The shim at `frontend/src/utils/trpcClient.ts` is unchanged (file presence preserved for backwards compatibility).
     verification: "test -f frontend/src/utils/trpcClient.ts && grep -n \"export { trpc } from '../trpc/client'\" frontend/src/utils/trpcClient.ts shows the single re-export line unchanged"
   - criterion: "`pnpm --filter frontend test` exits 0 with all renderer tests passing."
-    verification: "pnpm --filter frontend test exits with code 0; vitest summary shows the 10 owned files passing"
-  - criterion: "Production renderer code that imports `trpc` from `utils/trpcClient` is NOT modified (this task is test-only)."
+    verification: pnpm --filter frontend test exits with code 0; vitest summary shows the 10 owned files passing
+  - criterion: Production renderer code that imports `trpc` from `utils/trpcClient` is NOT modified (this task is test-only).
     verification: "git diff --name-only after the task touches only files under frontend/src/**/__tests__/ AND frontend/src/components/OnboardingCard.test.tsx — no non-test renderer files appear in the diff"
 depends_on: []
 estimated_complexity: low
@@ -37,7 +37,6 @@ test_strategy:
   needed: false
   justification: "This task IS a sweep across 10 existing test files — each file's behavior is preserved (the vi.mock factory shape is unchanged, only the mock target string moves from the shim path to the canonical path). Success is measured by `pnpm --filter frontend test` exiting 0 (the existing assertions in all 10 files validate the swap end-to-end). No new tests need to be authored; no behavior added. Sibling-test scan was performed for each owned file's parent directory — every match is itself one of the owned files; no neighbor depends on the local mock target."
 ---
-
 # Canonicalize tRPC mock target across 9 renderer test files
 
 ## Objective

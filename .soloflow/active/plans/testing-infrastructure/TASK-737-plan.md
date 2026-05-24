@@ -1,8 +1,8 @@
 ---
 id: TASK-737
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - main/src/database/__tests__/migration007.test.ts
 files_readonly:
@@ -11,9 +11,9 @@ files_readonly:
   - main/src/database/__tests__/cyboflowSchema.test.ts
   - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
 acceptance_criteria:
-  - criterion: "A new test file `main/src/database/__tests__/migration007.test.ts` exists and is invoked by `pnpm --filter main test`."
+  - criterion: A new test file `main/src/database/__tests__/migration007.test.ts` exists and is invoked by `pnpm --filter main test`.
     verification: "test -f main/src/database/__tests__/migration007.test.ts && pnpm --filter main test -- migration007 (exits 0; vitest reports the file's test count >= 2)"
-  - criterion: "The test reads `007_add_stuck_reason.sql` from disk via `readFileSync` and applies it on top of `006_cyboflow_schema.sql`."
+  - criterion: The test reads `007_add_stuck_reason.sql` from disk via `readFileSync` and applies it on top of `006_cyboflow_schema.sql`.
     verification: "grep -n \"007_add_stuck_reason\" main/src/database/__tests__/migration007.test.ts shows at least one readFileSync call referencing that filename"
   - criterion: "A test asserts `PRAGMA table_info(workflow_runs)` returns a row with `name='stuck_detected_at'` AND `type='INTEGER'`."
     verification: "grep -n \"stuck_detected_at\" main/src/database/__tests__/migration007.test.ts shows a PRAGMA table_info assertion checking both name and INTEGER type"
@@ -28,16 +28,15 @@ estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "This task IS the test — restoring deleted coverage for migration 007. The plan creates the test file; verification runs it."
+  justification: This task IS the test — restoring deleted coverage for migration 007. The plan creates the test file; verification runs it.
   targets:
-    - behavior: "Reading 007_add_stuck_reason.sql from disk and applying it on top of 006_cyboflow_schema.sql adds the stuck_detected_at INTEGER column to workflow_runs"
-      test_file: "main/src/database/__tests__/migration007.test.ts"
+    - behavior: Reading 007_add_stuck_reason.sql from disk and applying it on top of 006_cyboflow_schema.sql adds the stuck_detected_at INTEGER column to workflow_runs
+      test_file: main/src/database/__tests__/migration007.test.ts
       type: integration
-    - behavior: "Reading 007_add_stuck_reason.sql from disk and applying it creates the idx_workflow_runs_status_stuck_at index"
-      test_file: "main/src/database/__tests__/migration007.test.ts"
+    - behavior: Reading 007_add_stuck_reason.sql from disk and applying it creates the idx_workflow_runs_status_stuck_at index
+      test_file: main/src/database/__tests__/migration007.test.ts
       type: integration
 ---
-
 # Restore Migration-007 idempotency tests
 
 ## Objective

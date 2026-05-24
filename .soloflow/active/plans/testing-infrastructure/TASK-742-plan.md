@@ -1,8 +1,8 @@
 ---
 id: TASK-742
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - package.json
   - CLAUDE.md
@@ -44,7 +44,6 @@ test_strategy:
   needed: false
   justification: "This is a script-rename + docs-disambiguation task. No production code changes; no test file changes. The success signal is that (a) `pnpm test:e2e -- --list` can reach Playwright through the new name, (b) `pnpm test:unit` still works, (c) prose references no longer say `pnpm test` ambiguously. Sibling-test scan: the owned files are package.json + 4 docs files; none of them have sibling test files in their directories (package.json has no neighbor *.test.ts, docs/ contains only Markdown). The reachable Playwright suite under tests/ is in files_readonly — this task does not edit specs, only the script name pointing at them."
 ---
-
 # Fix `pnpm test` / Playwright bootstrap ambiguity in root script
 
 ## Objective

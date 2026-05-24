@@ -1,8 +1,8 @@
 ---
 id: TASK-740
 idea: SPRINT-035-compound
-status: ready
-created: 2026-05-23T12:00:00Z
+status: in-flight
+created: "2026-05-23T12:00:00Z"
 files_owned:
   - main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts
   - main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
@@ -12,18 +12,18 @@ files_readonly:
   - main/src/database/migrations/006_cyboflow_schema.sql
   - main/src/database/migrations/007_add_stuck_reason.sql
 acceptance_criteria:
-  - criterion: "Neither owned file declares a local `function createTestDb`."
+  - criterion: Neither owned file declares a local `function createTestDb`.
     verification: "grep -n \"function createTestDb\" main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts main/src/orchestrator/trpc/routers/__tests__/runs.test.ts returns 0 hits"
-  - criterion: "Both owned files import `createTestDb` from the canonical fixture `main/src/orchestrator/__test_fixtures__/orchestratorTestDb`."
+  - criterion: Both owned files import `createTestDb` from the canonical fixture `main/src/orchestrator/__test_fixtures__/orchestratorTestDb`.
     verification: "grep -nE \"from .*orchestratorTestDb\" main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts main/src/orchestrator/trpc/routers/__tests__/runs.test.ts shows a createTestDb import in BOTH files"
   - criterion: "`runs.test.ts` calls `createTestDb({ includeStuckDetectedAt: true })` (or `createTestDb({ includeStuckDetectedAt: true, disableForeignKeys: false })`) to preserve its prior schema (GATE_SCHEMA + migration 007 ALTER)."
     verification: "grep -n \"includeStuckDetectedAt: true\" main/src/orchestrator/trpc/routers/__tests__/runs.test.ts shows at least one call site"
   - criterion: "`claudeCodeManager.composeMcpServers.test.ts` no longer imports `readFileSync` or `join` solely for schema bootstrapping (the file's own `SCHEMA_PATH` constant + readFileSync schema-read is gone)."
     verification: "grep -n \"SCHEMA_PATH\" main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts returns 0 hits AND grep -n \"006_cyboflow_schema.sql\" main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts returns 0 hits"
   - criterion: "`pnpm --filter main test -- claudeCodeManager.composeMcpServers` exits 0; `pnpm --filter main test -- routers/__tests__/runs` exits 0."
-    verification: "Both targeted test invocations exit with code 0"
+    verification: Both targeted test invocations exit with code 0
   - criterion: "`pnpm --filter main test` exits 0 (full main suite green)."
-    verification: "pnpm --filter main test exits with code 0"
+    verification: pnpm --filter main test exits with code 0
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
@@ -31,7 +31,6 @@ test_strategy:
   needed: false
   justification: "This task IS a test-file refactor — it canonicalizes the fixture import without altering test behavior. The existing test assertions in both files continue to validate the same behavior; this is a no-op-at-runtime cleanup whose success criterion is `pnpm --filter main test` exits 0. Sibling-test scan: the only sibling tests are the two files this task owns. No other test file is affected — the canonical `createTestDb` is already imported by 10 files swept in TASK-733 (verified by grep on `from .*orchestratorTestDb`)."
 ---
-
 # Sweep two remaining local createTestDb declarations to canonical fixture
 
 ## Objective
