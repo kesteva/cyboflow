@@ -28,7 +28,8 @@ pnpm dev               # Electron dev (Vite renderer + Electron main)
 pnpm build:main        # Compile main process (run at least once before `pnpm dev`)
 pnpm typecheck         # Type-check all workspaces
 pnpm lint              # Lint all workspaces
-pnpm test              # Playwright E2E
+pnpm test              # Playwright E2E (requires display + Electron preload — NOT a code-change AC gate; see below)
+pnpm test:unit         # Unit chain — main + frontend vitest, schema parity, build scripts (use this as the verifier AC gate)
 pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron upgrades
 pnpm rebuild better-sqlite3   # Targeted reverse fix: `pnpm dev` postinstall rebuilds for Electron ABI (NMV 136); run this before `pnpm --filter main test` to restore host Node ABI (NMV 127)
 ```
@@ -36,6 +37,8 @@ pnpm rebuild better-sqlite3   # Targeted reverse fix: `pnpm dev` postinstall reb
 Platform packaging (`pnpm build:mac:arm64`, `pnpm build:linux`, etc.) — see `package.json` `scripts`.
 
 Workspace `"test"` scripts that participate in a root multi-tier chain (e.g. `pnpm run test:unit`) MUST be one-shot — use `"vitest run"`, never bare `"vitest"`. Bare `vitest` defaults to watch mode in a TTY and hangs the chain locally (CI escapes only because stdout is not a TTY). Put watch mode on a separate `"test:watch"` key.
+
+The root `pnpm test` script runs Playwright against `http://localhost:4521`, which cannot bootstrap without the Electron `preload`-injected `electronTRPC` (same root cause as the `visual_web` non-functionality below). Specs that wait on `[data-testid="settings-button"]` hang and the suite fails consistently in headless verifier environments. Verifiers MUST use `pnpm test:unit` (or per-workspace `pnpm --filter main test` + `pnpm --filter frontend test`) as the code-change AC gate; treat `pnpm test` failures as environmental until the root script / Playwright config is reworked (see TASK-742).
 
 Visual verification of any frontend UI change requires `pnpm dev` (full Electron). The Vite renderer at `http://localhost:4521` cannot bootstrap standalone — it depends on `preload`-injected `electronTRPC` and will error without the main process. For headless validation when capture is unavailable, read `cyboflow-frontend-debug.log` (see below).
 
