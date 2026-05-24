@@ -202,7 +202,6 @@ interface ElectronAPI {
   };
 
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
-  // PromptHistoryItem is locally typed in consumers (PromptHistory.tsx, PromptHistoryModal.tsx)
   prompts: {
     getAll: () => Promise<IPCDataResponse<unknown[]>>;
     getByPromptId: (promptId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
