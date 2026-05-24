@@ -274,10 +274,13 @@ _No items._
   action: "End-of-sprint visual smoke for the review-queue-ui epic (TASK-401..TASK-407). The Vite renderer at http://localhost:4521 cannot bootstrap standalone — it requires Electron's preload-injected `electronTRPC` global. Run `pnpm dev` to launch Electron, then drive the six flows: (1) ReviewQueueView empty state, (2) PendingApprovalCard render with a realistic approval payload, (3) Blocking vs Pending section partitioning and the group variant, (4) j/k navigation focus ring (TASK-404), (5) y/n approve/reject keyboard, (6) approveRestOfRun group-card action (TASK-406). Confirm `cyboflow-frontend-debug.log` shows no errors and the dock badge reflects pending count (TASK-407). NOTE (2026-05-19 review-queue run): the prior 'Alternative' note is now actionable — Peekaboo MCP capture works and `verification.visual_macos=true` is set in .soloflow/config.json (commit d189263). Next attempt should use `pnpm dev` + `mcp__peekaboo__image` with `app_target: 'Electron:WINDOW_TITLE:Cyboflow'` to capture each flow. Also note IDEA-017 may restructure the review-queue rail/shell — re-validate flow IDs against any layout changes before re-testing."
   blocked_checks:
     - "End-of-sprint cross-task visual verification of review-queue-ui flows (ReviewQueueView, PendingApprovalCard, group variant, j/k/y/n keyboard, approveRestOfRun, dock-badge sync)"
+    - "Manual smoke: sidebar tree expands to show runs; workflow picker lists 5 default workflows"
   level: visual
   severity: medium
   created_at: "2026-05-15T18:30:00.000Z"
-  updated_at: "2026-05-19T19:00:00.000Z"
+  updated_at: "2026-05-23T23:56:10.493Z"
+  affected_tasks:
+    - TASK-714
 
 - sprint: SPRINT-013
   type: deferred_visual
