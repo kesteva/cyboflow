@@ -22,13 +22,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
+import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import { CliManagerFactory } from '../../../cliManagerFactory';
 import type { SessionManager } from '../../../sessionManager';
@@ -93,28 +92,6 @@ vi.mock('../../../utils/sessionValidation', () => ({
 // ---------------------------------------------------------------------------
 // Database / ApprovalRouter helpers
 // ---------------------------------------------------------------------------
-
-const SCHEMA_PATH = join(process.cwd(), 'src/database/migrations/006_cyboflow_schema.sql');
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
-
-/**
- * Create an in-memory DB seeded with the full cyboflow schema but with FK
- * enforcement disabled. Used by the TypedEventNarrowing convergence tests so
- * they can insert raw_events rows without seeding the full FK chain
- * (workflows → workflow_runs → raw_events).
- */
-function createTestDbNoFk(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = OFF');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  return db;
-}
 
 function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
   const queues = new Map<string, PQueue>();
@@ -411,7 +388,7 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     capturedQueryOptions = null;
     // FK enforcement off: raw_events rows can reference a panelId run_id
     // without seeding the workflows → workflow_runs FK chain.
-    db = createTestDbNoFk();
+    db = createTestDb({ disableForeignKeys: true });
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();

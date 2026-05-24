@@ -19,45 +19,13 @@
  * the handler can be exercised independently).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { TRPCError } from '@trpc/server';
 import { getStuckInspectionHandler } from '../inspectorQueries';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import { seedApproval } from '../__test_fixtures__/orchestratorTestDb';
-
-// ---------------------------------------------------------------------------
-// Test-database helpers
-// ---------------------------------------------------------------------------
-
-// Resolve the schema path relative to THIS test file (__dirname is the directory
-// containing this compiled/transformed test in CJS mode — i.e., the __tests__
-// directory).  This avoids any dependency on process.cwd().
-const SCHEMA_PATH = join(
-  __dirname,
-  '../../database/migrations/006_cyboflow_schema.sql',
-);
-
-/**
- * Creates a fresh in-memory SQLite database with:
- * - The full cyboflow schema (migration 006)
- * - An inline stub of migration 007 that adds `stuck_detected_at` to
- *   workflow_runs (TASK-501 owns the real migration file; we apply it here
- *   so the handler can be tested before TASK-501 lands).
- */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_PATH, 'utf8'));
-  // Inline stub for migration 007 (owned by TASK-501).
-  // Adds stuck_detected_at as nullable TEXT (ISO string) — actual migration may
-  // use INTEGER (unix ms); the handler returns it as-is so both work.
-  db.exec(`
-    ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at TEXT;
-  `);
-  return db;
-}
+import { createTestDb, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 
 /** Seed a workflow + workflow_runs row with stuck status. */
 function seedStuckRun(
@@ -104,7 +72,7 @@ describe('getStuckInspectionHandler', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createTestDb({ includeStuckDetectedAt: true });
   });
 
   // -------------------------------------------------------------------------
