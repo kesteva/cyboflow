@@ -219,6 +219,7 @@ describe('decideRestOfRunHandler error logging', () => {
         if (sql.includes('SET status = ?')) {
           return {
             all: (...params: unknown[]) => stmt.all(...params),
+            get: (...params: unknown[]) => stmt.get(...params),
             run: (...params: unknown[]) => {
               updateCallCount++;
               if (updateCallCount === 2) {
@@ -230,6 +231,7 @@ describe('decideRestOfRunHandler error logging', () => {
         }
         return stmt;
       },
+      transaction: db.transaction.bind(db),
     };
 
     const result = await approveRestOfRunHandler(wrappedDb, 'run-err-approve');
@@ -268,6 +270,7 @@ describe('decideRestOfRunHandler error logging', () => {
         if (sql.includes('SET status = ?')) {
           return {
             all: (...params: unknown[]) => stmt.all(...params),
+            get: (...params: unknown[]) => stmt.get(...params),
             run: (...params: unknown[]) => {
               updateCallCount++;
               if (updateCallCount === 2) {
@@ -279,6 +282,7 @@ describe('decideRestOfRunHandler error logging', () => {
         }
         return stmt;
       },
+      transaction: db.transaction.bind(db),
     };
 
     const result = await rejectRestOfRunHandler(wrappedDb, 'run-err-reject');

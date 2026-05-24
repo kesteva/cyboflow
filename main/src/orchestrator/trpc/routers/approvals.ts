@@ -25,6 +25,7 @@ import type { Approval, ApproveRestOfRunResult, RejectRestOfRunResult } from '..
 import { ApprovalRouter, ApprovalNotFoundError } from '../../approvalRouter';
 import { selectPendingApprovals } from '../../approvalListing';
 import { withLock } from '../../../utils/mutex';
+import type { DatabaseLike } from '../../types';
 
 // ---------------------------------------------------------------------------
 // approveRestOfRunHandler / rejectRestOfRunHandler
@@ -36,14 +37,6 @@ import { withLock } from '../../../utils/mutex';
 // tree (deleted in TASK-717).  They now live here — the canonical orchestrator
 // router — so the orchestrator subtree has no cross-tree dependency.
 // ---------------------------------------------------------------------------
-
-/** Narrow DatabaseLike surface required by the handlers below. */
-type DatabaseLike = {
-  prepare: (sql: string) => {
-    all: (...params: unknown[]) => unknown[];
-    run: (...params: unknown[]) => void;
-  };
-};
 
 /**
  * Shared implementation for approve/reject-rest-of-run.
