@@ -10,16 +10,14 @@
  *  (a) Happy path: stuck run + pending approval + 15 raw events → returns
  *      correct shaped result with 10 most recent events.
  *  (b) Unknown runId → TRPCError NOT_FOUND.
- *  (c) Non-'local' userId → TRPCError FORBIDDEN.
  *  (d) Missing ctx.db → TRPCError PRECONDITION_FAILED.
  *
  * runs.list (TASK-710 — wrapper-layer guard coverage):
- *  Tests exercise the tRPC FORBIDDEN/PRECONDITION_FAILED guards that sit around
+ *  Tests exercise the tRPC PRECONDITION_FAILED guard that sits around
  *  the listRunsHandler call. Handler-level behavior (ordering, scoping,
  *  policy_json exclusion) is covered in
  *  main/src/orchestrator/__tests__/listRunsHandler.test.ts.
  *  (a) Happy path: seeded runs return the correct list for the given projectId.
- *  (b) Non-'local' userId → TRPCError FORBIDDEN.
  *  (c) Missing ctx.db → TRPCError PRECONDITION_FAILED.
  *
  * runs.start (TASK-712 — procedure-level guard + delegation coverage):
@@ -29,7 +27,6 @@
  *  the procedure's own conditional branches.
  *  (a) Happy path: project found → launch called → { runId, worktreePath, branchName } returned.
  *  (b) Project not found → TRPCError NOT_FOUND.
- *  (c) Non-'local' userId → TRPCError FORBIDDEN.
  *  (d) Deps not wired → TRPCError METHOD_NOT_SUPPORTED (also covered in router.test.ts).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -161,28 +158,6 @@ describe('cyboflow.runs.getStuckInspection', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (c) Non-'local' userId → FORBIDDEN
-  // -------------------------------------------------------------------------
-  it('(c) non-local userId → TRPCError FORBIDDEN', async () => {
-    const adapter = dbAdapter(db);
-    // Bypass createContext by constructing the context object directly so we
-    // can inject a non-'local' userId. The type cast is required because
-    // createContext always returns userId: 'local' — here we test the guard.
-    const ctx = {
-      userId: 'someone-else' as 'local',
-      setDockBadge: () => undefined,
-      db: adapter,
-    };
-    const caller = appRouter.createCaller(ctx);
-
-    await expect(
-      caller.cyboflow.runs.getStuckInspection({ runId: 'any-run-id' }),
-    ).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'FORBIDDEN',
-    );
-  });
-
-  // -------------------------------------------------------------------------
   // (d) Missing ctx.db → PRECONDITION_FAILED
   // -------------------------------------------------------------------------
   it('(d) missing ctx.db → TRPCError PRECONDITION_FAILED', async () => {
@@ -237,27 +212,6 @@ describe('cyboflow.runs.list', () => {
     for (const row of result) {
       expect(Object.keys(row)).not.toContain('policy_json');
     }
-  });
-
-  // -------------------------------------------------------------------------
-  // (b) Non-'local' userId → FORBIDDEN
-  // -------------------------------------------------------------------------
-  it('(b) non-local userId → TRPCError FORBIDDEN', async () => {
-    const adapter = dbAdapter(db);
-    // Bypass createContext to inject a non-'local' userId; the type cast
-    // mirrors the pattern used in the getStuckInspection FORBIDDEN test.
-    const ctx = {
-      userId: 'someone-else' as 'local',
-      setDockBadge: () => undefined,
-      db: adapter,
-    };
-    const caller = appRouter.createCaller(ctx);
-
-    await expect(
-      caller.cyboflow.runs.list({ projectId: 1 }),
-    ).rejects.toSatisfy(
-      (err: unknown) => err instanceof TRPCError && err.code === 'FORBIDDEN',
-    );
   });
 
   // -------------------------------------------------------------------------
@@ -364,40 +318,6 @@ describe('cyboflow.runs.start', () => {
       );
 
       // launch must NOT be called when the project lookup fails.
-      expect(launchMock).not.toHaveBeenCalled();
-    } finally {
-      setStartRunDeps({
-        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
-        sessionManager: { getProjectById: () => undefined },
-      });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // (c) Non-'local' userId → FORBIDDEN
-  // -------------------------------------------------------------------------
-  it('(c) non-local userId → TRPCError FORBIDDEN', async () => {
-    const launchMock = vi.fn();
-    setStartRunDeps({
-      runLauncher: { launch: launchMock },
-      sessionManager: { getProjectById: () => ({ path: '/projects/x' }) },
-    });
-
-    try {
-      // Bypass createContext to inject a non-'local' userId.
-      const ctx = {
-        userId: 'someone-else' as 'local',
-        setDockBadge: () => undefined,
-      };
-      const caller = appRouter.createCaller(ctx);
-
-      await expect(
-        caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 1 }),
-      ).rejects.toSatisfy(
-        (err: unknown) => err instanceof TRPCError && err.code === 'FORBIDDEN',
-      );
-
-      // launch must NOT be called when the request is forbidden.
       expect(launchMock).not.toHaveBeenCalled();
     } finally {
       setStartRunDeps({

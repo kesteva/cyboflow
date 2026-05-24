@@ -88,9 +88,6 @@ export const runsRouter = router({
   list: protectedProcedure
     .input(z.object({ projectId: z.number().int().positive() }))
     .query(({ ctx, input }): WorkflowRunListRow[] => {
-      if (ctx.userId !== 'local') {
-        throw new TRPCError({ code: 'FORBIDDEN' });
-      }
       if (!ctx.db) {
         throw new TRPCError({
           code: 'PRECONDITION_FAILED',
@@ -106,10 +103,7 @@ export const runsRouter = router({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
     }))
-    .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
-      if (ctx.userId !== 'local') {
-        throw new TRPCError({ code: 'FORBIDDEN' });
-      }
+    .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
@@ -165,11 +159,7 @@ export const runsRouter = router({
    */
   cancelAndRestart: protectedProcedure
     .input(z.object({ runId: z.string() }))
-    .mutation(async ({ ctx, input }): Promise<{ newRunId: string } | { noOp: true; reason: string }> => {
-      if (ctx.userId !== 'local') {
-        throw new TRPCError({ code: 'FORBIDDEN' });
-      }
-
+    .mutation(async ({ input }): Promise<{ newRunId: string } | { noOp: true; reason: string }> => {
       if (!cancelAndRestartDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
@@ -183,17 +173,10 @@ export const runsRouter = router({
   /**
    * Return diagnostic data for a stuck run: stuck reason, pending approval
    * payload, and the latest 10 raw_events rows.
-   *
-   * Principal scoping: v1 uses userId === 'local' for all runs. The guard
-   * is structurally present for forward compatibility when the v2 team-tier
-   * swap introduces real per-user scoping.
    */
   getStuckInspection: protectedProcedure
     .input(z.object({ runId: z.string() }))
     .query(async ({ ctx, input }): Promise<StuckInspectionResult> => {
-      if (ctx.userId !== 'local') {
-        throw new TRPCError({ code: 'FORBIDDEN' });
-      }
       if (!ctx.db) {
         throw new TRPCError({
           code: 'PRECONDITION_FAILED',
