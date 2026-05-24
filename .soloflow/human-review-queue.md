@@ -1,9 +1,9 @@
 ---
-pending_count: 27
+pending_count: 28
 buckets:
   decisions: 0
   actions: 1
-  testing: 21
+  testing: 22
   deferred_visual: 5
 items: []
 ---
@@ -276,6 +276,16 @@ _No items._
   blocked_checks:
     - AC6 — manual smoke for WorkflowPicker tRPC cutover + MCP health-dot polling cadence
   level: requirements
+  severity: medium
+
+- task: TASK-716
+  type: action_required
+  bucket: testing
+  plan_ref: .soloflow/active/plans/trpc-cutover-and-legacy-tree-cleanup/TASK-716-plan.md
+  action: "Run pnpm dev and exercise the four migrated surfaces (project tree expand → workflow picker, start a run, MCP sidebar dot) to confirm no regressions after raw-IPC handler deletion. DevTools console should show zero \"unhandled invoke cyboflow:listWorkflows|listRuns|startRun|mcp-health\" errors. The renderer was cut over to tRPC in TASK-714 + TASK-715 and is verified to no longer reference the removed channels (grep returned 0 invocation matches); manual smoke is the final guardrail. Visual verification via Playwright is non-functional in this project (renderer cannot bootstrap without Electron preload — see CLAUDE.md / docs/VISUAL-VERIFICATION-SETUP.md) and visual_macos via Peekaboo is currently blocked by FIND-SPRINT-035-13 (per-binary Screen Recording grant missing for the dev-time Electron binary)."
+  blocked_checks:
+    - "AC7: Manual smoke — pnpm dev boots without errors; runs list, workflow picker, run-start, and MCP sidebar dot continue to work via tRPC"
+  level: visual
   severity: medium
 
 ## Deferred Visual

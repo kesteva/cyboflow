@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
-pending_count: 10
-last_updated: "2026-05-24T00:11:39.190Z"
+pending_count: 13
+last_updated: "2026-05-24T00:45:00.000Z"
 ---
 # Findings Queue
 
@@ -76,11 +76,11 @@ last_updated: "2026-05-24T00:11:39.190Z"
 - **source:** TASK-713 (code-reviewer)
 - **type:** cleanup
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/ipc/types.ts:44-53 and main/src/index.ts:650
 - **description:** TASK-713 added `orchestratorHealth?: OrchestratorHealth` to `AppServices.cyboflow` and assigns it in `initializeServices()` (line 650), but no code reads `services.cyboflow.orchestratorHealth` anywhere — both the raw-IPC handler (`main/src/ipc/cyboflow.ts:189-195`) and the tRPC procedure (`main/src/orchestrator/trpc/routers/health.ts:55-60`) reach the singleton via the module-level `_health` set by `setHealthProvider`/read by `getHealthProvider`. The plan's AC3 listed two tactics — (a) read via `AppServices`, or (b) defer the singleton until TASK-716 — and the implementation chose a hybrid: singleton-as-truth PLUS a dead carrier field on `AppServices`. The dead field forces `main/src/ipc/types.ts` to import `OrchestratorHealth` from `main/src/orchestrator/health.ts`, adding coupling for no consumer benefit. Either (1) drop the field + import (singleton is the only path), or (2) switch the raw-IPC handler to read via `services.cyboflow.orchestratorHealth?.getMcpServerStatus() ?? HEALTH_STARTING` and drop the `getHealthProvider` export — the latter removes `main/src/ipc/cyboflow.ts`'s dependency on the tRPC router module, a cleaner architecture. Natural pickup for TASK-716 (which already plans `setCyboflowHealth` shim cleanup) — note that TASK-716 will delete the IPC handler entirely, so option (1) becomes the right answer at that point.
 - **suggested_action:** In TASK-716, after the raw-IPC `cyboflow:mcp-health` handler is deleted, also remove the now-orphaned `orchestratorHealth?: OrchestratorHealth` field from `main/src/ipc/types.ts:44-53` and drop the `import type { OrchestratorHealth } from '../orchestrator/health';` line, plus the `orchestratorHealth` field from the services assembly in `main/src/index.ts:650`. The module-level `_orchestratorHealth` local and `setHealthProvider(orchestratorHealth)` call (`main/src/index.ts:759`) stay — they remain the canonical wire-up for the tRPC procedure.
-- **resolved_by:** 
+- **resolved_by:** TASK-716
 
 ## FIND-SPRINT-035-9
 - **source:** TASK-713 (code-reviewer)
@@ -120,7 +120,7 @@ last_updated: "2026-05-24T00:11:39.190Z"
 - **location:** frontend/src/components/__tests__/DraggableProjectTreeView.runs.test.tsx:44,49,53
 - **description:** Executor's stated rationale was "required to meet AC5: grep for cyboflowApi.*startRun must return 0 matches" but the AC5 grep is line-based and the original `startRun: vi.fn()` lines (inside the multi-line `cyboflowApi: { … }` block) do NOT match `cyboflowApi.*startRun` on a single line — so AC5 returned 0 matches BEFORE this edit. The edit is defensible cleanup (removes mock entries pointing at a now-deleted export) but is not strictly AC-prescribed and is not in TASK-715's `files_owned`. Tests still pass either way. Verifier-classified as a genuine scope deviation per the plan-prescribed-scope rules.
 - **suggested_action:** Future tasks: if a test file outside `files_owned` ships stale mock entries that are functionally dead (no test reads them), prefer to log a separate cleanup FIND for the next plan to pick up rather than claim the file mid-task. Where the cleanup is in-scope-by-AC, cite the specific AC, not the grep that already returns 0.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-035-13
 - **type:** claude-md
@@ -130,3 +130,61 @@ last_updated: "2026-05-24T00:11:39.190Z"
 - **location:** docs/VISUAL-VERIFICATION-SETUP.md
 - **description:** Peekaboo MCP image() capture against the running Cyboflow Electron window (PID 80782) failed again this task with "Failed to start stream due to audio/video capture failure" on capture_focus=auto, plus "No displays available for capture" on screen:0. This is a recurrence of the SPRINT-033/SPRINT-034 gap already documented under dedup_key=visual_macos_unavailable in the review queue. Project CLAUDE.md and docs/VISUAL-VERIFICATION-SETUP.md describe the per-binary Screen Recording grant requirement, but the gap re-blocks every visual_macos verification attempt because Cyboflow.app (production binary) gets the grant while the dev-time Electron binary at node_modules/electron/dist/Electron.app/Contents/MacOS/Electron does not inherit it.
 - **suggested_action:** Compounder: consider adding a one-time bootstrap step or a developer-side post-install script that programmatically grants Screen Recording to the dev-time Electron binary (or documents the exact System Settings path users must follow on first dev launch). Alternatively, document an explicit "skip visual_macos for tRPC-cutover/observability-only tasks" guidance so verifiers don’t spend cycles probing a known-broken path. Either way, the recurrence count is high enough that an ergonomic fix is warranted.
+
+## FIND-SPRINT-035-14
+- **type:** scope_deviation
+- **source:** TASK-716 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/ipc/types.ts:44-53
+- **description:** required to meet AC: FIND-SPRINT-035-8 natural pickup — removing dead orchestratorHealth? field and its import from types.ts since the mcp-health handler is deleted in this task, making the field truly orphaned.
+- **resolved_by:** verifier — not actually a scope deviation: `main/src/ipc/types.ts` is listed in TASK-716's `files_owned` (line 9 of plan). The executor mislabeled an in-scope edit as a deviation. The edit is also FIND-SPRINT-035-8 pickup, which the finding's suggested_action explicitly assigned to TASK-716 ("In TASK-716, after the raw-IPC `cyboflow:mcp-health` handler is deleted, also remove the now-orphaned `orchestratorHealth?: OrchestratorHealth` field from `main/src/ipc/types.ts`"). Same misclassification pattern as FIND-SPRINT-035-5, -7, -10 — strong reinforcement signal for the executor-prompt fix proposed in FIND-SPRINT-035-10.
+
+## FIND-SPRINT-035-15
+- **type:** scope_deviation
+- **source:** TASK-716 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/index.ts
+- **description:** required to meet AC: FIND-SPRINT-035-8 natural pickup — removing dead orchestratorHealth assignment in initializeServices() from main/src/index.ts since the mcp-health handler is deleted and the field is removed from types.ts.
+- **resolved_by:** verifier — not actually a scope deviation: `main/src/index.ts` is listed in TASK-716's `files_owned` (line 10 of plan). The executor mislabeled an in-scope edit as a deviation. The edit is also AC-prescribed: with `orchestratorHealth?` dropped from `AppServices.cyboflow` (FIND-SPRINT-035-8 pickup), leaving the assignment would cause a typecheck failure (excess-property error), so AC `pnpm typecheck exits 0` mandates the consumer-site cleanup.
+
+## FIND-SPRINT-035-16
+- **source:** TASK-716 (verifier)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/health.ts:31-35 and main/src/orchestrator/trpc/routers/health.ts:35
+- **description:** Two docstring blocks still reference the raw-IPC `cyboflow:mcp-health` handler that TASK-716 just deleted. `main/src/orchestrator/health.ts:31-35` shows a Usage example "`ipcMain.handle('cyboflow:mcp-health', () => health.getMcpServerStatus());`" in `main/src/ipc/cyboflow.ts` — that file no longer exists as described; the example should be updated to show wiring via `setHealthProvider` + the tRPC `cyboflow.health.mcpServer` procedure. `main/src/orchestrator/trpc/routers/health.ts:35` says "Used by the raw-IPC `cyboflow:mcp-health` handler in main/src/ipc/cyboflow.ts so that both the IPC and tRPC surfaces read from the SAME singleton" — only the tRPC surface remains, so the "both surfaces" framing is now stale. Neither block is a TASK-716 AC violation (the plan's grep ACs are scoped to `main/src/ipc/cyboflow.ts`, the test file, and `frontend/src`), but the doc drift is real. Natural pickup for TASK-717 (legacy-tree deletion already plans docstring refresh per FIND-SPRINT-035-1), which already touches the `main/src/orchestrator/trpc/routers/health.ts` neighborhood.
+- **suggested_action:** In TASK-717, rewrite the Usage block in `main/src/orchestrator/health.ts:28-39` to show the `setHealthProvider(orchestratorHealth)` wire-up from `main/src/index.ts` and drop the `ipcMain.handle('cyboflow:mcp-health', ...)` example. In `main/src/orchestrator/trpc/routers/health.ts:32-37`, drop the "both the IPC and tRPC surfaces" framing — only the tRPC surface remains.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-17
+- **source:** TASK-716 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/trpc/routers/health.ts:28-41
+- **description:** After TASK-716 deleted the raw-IPC `cyboflow:mcp-health` handler — the only consumer of `getHealthProvider` — the exported helper `getHealthProvider(): OrchestratorHealth | null` is now dead code (zero call sites across `main/src` and `frontend/src`). The matching `_health` module-local is still legitimately written by `setHealthProvider` and read directly inside the `mcpServer` procedure (line 56), so only the public getter is orphaned. Outside TASK-716's `files_owned` (`main/src/orchestrator/trpc/routers/health.ts` is read-only context), but mechanically discoverable now that the IPC handler is gone. Verification: `grep -rn "getHealthProvider" main/src frontend/src` returns exactly 1 hit — the declaration itself.
+- **suggested_action:** Drop the `export function getHealthProvider` declaration from `main/src/orchestrator/trpc/routers/health.ts` and inline `_health` reads (already done inside the procedure). Natural pickup for TASK-717 since it already touches the orchestrator tRPC neighborhood and FIND-SPRINT-035-16 already plans a docstring refresh for the same file.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-18
+- **source:** TASK-716 (code-reviewer)
+- **type:** cleanup
+- **severity:** medium
+- **status:** open
+- **location:** docs/ARCHITECTURE.md:125-131, 152, 327-338
+- **description:** `docs/ARCHITECTURE.md` still documents the four migrated channels — `cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:listRuns`, `cyboflow:mcp-health` — as live raw-IPC channels in three places. (a) Lines 125-129 list them under the IPC section as the current transport. (b) Line 131 says `cyboflow:mcp-health` has a "typed counterpart" in tRPC implying the raw channel is still live. (c) Lines 327-338 describe the renderer "currently mixes raw `electron.invoke` for `cyboflow:listWorkflows`, `cyboflow:startRun`, `cyboflow:listRuns`, `cyboflow:mcp-health` with the typed `cyboflow.*`" — TASK-714/715/716 just completed the migration that this paragraph predicts. Severity raised to medium because ARCHITECTURE.md is the canonical onboarding doc and incoming agents will read the wrong transport mapping. TASK-717's AC7 only updates the *legacy `main/src/trpc/` tree* note — it does NOT touch these channel docs.
+- **suggested_action:** During TASK-717 (or a follow-up doc refresh), rewrite lines 125-131 to show only `cyboflow:approveRun` (stub, epic 7) under raw-IPC, with a note that the four read/write channels migrated to `cyboflow.workflows.list`, `cyboflow.runs.list`, `cyboflow.runs.start`, `cyboflow.health.mcpServer`. Update line 152 to drop the "typed counterpart of raw `cyboflow:listRuns`" framing — there is no longer a raw counterpart. Rewrite lines 327-338 to describe the renderer as fully cut over to tRPC except for the `cyboflow:stream:<runId>` push channel and the `cyboflow:approveRun` stub.
+- **resolved_by:** 
+
+## FIND-SPRINT-035-19
+- **source:** TASK-716 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** docs/CODE-PATTERNS.md:254
+- **description:** The `validateInput` canonical example in `docs/CODE-PATTERNS.md:254` uses `'cyboflow:listRuns'` as the channel label argument — that channel no longer exists after TASK-716. The example is correct mechanically (the third argument is just a string used in error messages), but using a deleted channel name in onboarding documentation is misleading. Compare with `main/src/ipc/__tests__/validateInput.test.ts` which uses the same channel names — those are pure error-message labels and unaffected.
+- **suggested_action:** Update the example in `docs/CODE-PATTERNS.md:254` to use a still-live channel label, e.g. `'cyboflow:approveRun'` or any of the surviving raw-IPC channels in the codebase. Optionally also update the `validateInput.test.ts` fixtures for consistency, though tests pass regardless.
+- **resolved_by:** 
