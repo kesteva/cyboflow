@@ -150,6 +150,30 @@ describe('CyboflowRoot', () => {
     });
   });
 
+  it('Start Run button is disabled while the mutation is in-flight (prevents double-submission)', async () => {
+    // Use a never-resolving promise so the button stays in the "starting" state
+    vi.mocked(trpc.cyboflow.runs.start.mutate).mockReturnValue(new Promise(() => {/* never resolves */}));
+
+    render(<CyboflowRoot projectId={1} />);
+
+    // Open the picker modal
+    fireEvent.click(screen.getByRole('button', { name: 'Choose a workflow' }));
+
+    // Wait for workflows to load and the Start Run button to appear
+    const startRunBtn = await screen.findByRole('button', { name: 'Start Run' });
+
+    // Button should be enabled before clicking
+    expect(startRunBtn).not.toBeDisabled();
+
+    // Click Start Run — mutation is now in-flight (never resolves)
+    fireEvent.click(startRunBtn);
+
+    // Button must immediately become disabled
+    await waitFor(() => {
+      expect(startRunBtn).toBeDisabled();
+    });
+  });
+
   it('modal closes automatically after a successful run start', async () => {
     vi.mocked(trpc.cyboflow.runs.start.mutate).mockResolvedValue({
       runId: 'run-auto-close',
