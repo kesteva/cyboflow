@@ -13,7 +13,7 @@
  * AC8: cancel ordering: clearPendingForRun -> executor.cancel -> DB write.
  *
  * Test strategy:
- *   - Real in-memory better-sqlite3 with REGISTRY_SCHEMA.
+ *   - Real in-memory better-sqlite3 via the canonical createTestDb fixture (GATE_SCHEMA).
  *   - Transition helpers imported directly — no tRPC wrapper needed.
  *   - cancelHandler imported directly for ordering/return-value tests.
  */
