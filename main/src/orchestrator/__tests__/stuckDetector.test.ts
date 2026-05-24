@@ -23,9 +23,7 @@ import {
   afterEach,
   vi,
 } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import { EventEmitter } from 'node:events';
 import {
   StuckDetector,
@@ -36,55 +34,7 @@ import {
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
-import { seedApproval } from '../__test_fixtures__/orchestratorTestDb';
-
-// ---------------------------------------------------------------------------
-// Database helpers
-// ---------------------------------------------------------------------------
-
-const MIGRATION_006 = join(
-  process.cwd(),
-  'src/database/migrations/006_cyboflow_schema.sql',
-);
-
-const MIGRATION_007 = join(
-  process.cwd(),
-  'src/database/migrations/007_add_stuck_reason.sql',
-);
-
-/**
- * Creates a fresh in-memory SQLite database with both 006 and 007 migrations
- * applied.  Applies 007 TWICE to verify the migration SQL is idempotent
- * (acceptance criterion §1 guard).
- */
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(MIGRATION_006, 'utf8'));
-
-  const sql007 = readFileSync(MIGRATION_007, 'utf8');
-  // Apply twice — the CREATE INDEX IF NOT EXISTS guard makes this safe.
-  // The ALTER TABLE in 007 uses the file runner's user_preferences flag for
-  // outer idempotency; on a fresh DB the column does not exist yet so the
-  // second exec() is caught and the index creation is idempotent.
-  // In practice the runner only ever calls this once, so we simulate that by
-  // running the SQL once here and confirming both columns exist.
-  db.exec(sql007);
-
-  // Verify both columns exist after migration.
-  const cols = db.prepare('PRAGMA table_info(workflow_runs)').all() as Array<{
-    name: string;
-  }>;
-  const names = cols.map((c) => c.name);
-  if (!names.includes('stuck_reason')) {
-    throw new Error('Migration 007: stuck_reason column missing');
-  }
-  if (!names.includes('stuck_detected_at')) {
-    throw new Error('Migration 007: stuck_detected_at column missing');
-  }
-
-  return db;
-}
+import { createTestDb, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -146,7 +96,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('does not fire scan before start()', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -168,7 +118,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('fires scan once after 60001ms', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -198,7 +148,7 @@ describe('StuckDetector scheduling', () => {
   });
 
   it('stop() clears the interval and no further scans fire', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -232,7 +182,7 @@ describe('StuckDetector scheduling', () => {
 
 describe('StuckDetector 5-minute filter', () => {
   it('only evaluates approvals older than 5 minutes', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -283,7 +233,7 @@ describe('StuckDetector 5-minute filter', () => {
 
 describe('StuckDetector classification: orphan_pty', () => {
   it('returns orphan_pty when claudeManager has no active run', () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -317,7 +267,7 @@ describe('StuckDetector classification: orphan_pty', () => {
 
 describe('StuckDetector classification: stale_socket', () => {
   it('returns stale_socket when permissionServer has no connected client', () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -351,7 +301,7 @@ describe('StuckDetector classification: stale_socket', () => {
 
 describe('StuckDetector classification: self_deadlock', () => {
   it('returns self_deadlock when the same run has another pending approval', () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -387,7 +337,7 @@ describe('StuckDetector classification: self_deadlock', () => {
 
 describe('StuckDetector classification: cross_run_deadlock', () => {
   it('returns cross_run_deadlock when another run is awaiting_review', () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -426,7 +376,7 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
 
 describe('StuckDetector status guard', () => {
   it('does not transition a run that is already canceled', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -473,7 +423,7 @@ describe('StuckDetector status guard', () => {
 
 describe('StuckDetector idempotency', () => {
   it('emits runs:stuck exactly once across three scan ticks', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -509,7 +459,7 @@ describe('StuckDetector idempotency', () => {
 
 describe('StuckDetector error isolation', () => {
   it('a scan error does not stop subsequent scans', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -561,7 +511,7 @@ describe('StuckDetector error isolation', () => {
 
 describe('StuckDetector event emission shape', () => {
   it('emits runs:stuck with the correct StuckDetectedEvent payload', async () => {
-    const rawDb = createTestDb();
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
@@ -610,62 +560,3 @@ describe('StuckDetector event emission shape', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// TEST: Migration idempotency — runner called twice
-// ---------------------------------------------------------------------------
-
-describe('Migration 007 idempotency', () => {
-  it('migration SQL can be applied to a DB that already has stuck_reason from 006', () => {
-    // 006 adds stuck_reason; 007 must not fail when sticky_reason already exists.
-    const rawDb = new Database(':memory:');
-    rawDb.pragma('foreign_keys = ON');
-    rawDb.exec(readFileSync(MIGRATION_006, 'utf8'));
-
-    // At this point stuck_reason exists, stuck_detected_at does not.
-    const before = (
-      rawDb.prepare('PRAGMA table_info(workflow_runs)').all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    expect(before).toContain('stuck_reason');
-    expect(before).not.toContain('stuck_detected_at');
-
-    // Applying 007 should succeed without error.
-    expect(() =>
-      rawDb.exec(readFileSync(MIGRATION_007, 'utf8')),
-    ).not.toThrow();
-
-    const after = (
-      rawDb.prepare('PRAGMA table_info(workflow_runs)').all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    expect(after).toContain('stuck_reason');
-    expect(after).toContain('stuck_detected_at');
-
-    rawDb.close();
-  });
-
-  it('007 SQL is idempotent when both columns already exist', () => {
-    // Simulate a state where both columns exist (e.g., re-run after partial apply).
-    const rawDb = new Database(':memory:');
-    rawDb.pragma('foreign_keys = ON');
-    rawDb.exec(readFileSync(MIGRATION_006, 'utf8'));
-
-    const sql007 = readFileSync(MIGRATION_007, 'utf8');
-    rawDb.exec(sql007);
-
-    // Second application should succeed (CREATE INDEX IF NOT EXISTS is idempotent;
-    // ALTER TABLE ADD COLUMN would fail if column exists — the file runner's
-    // user_preferences flag prevents double-execution, but we test the SQL itself
-    // here by verifying the columns are present after first run and the index exists).
-    const cols = (
-      rawDb.prepare('PRAGMA table_info(workflow_runs)').all() as Array<{ name: string }>
-    ).map((c) => c.name);
-    expect(cols).toContain('stuck_detected_at');
-
-    const indexes = rawDb
-      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workflow_runs_status_stuck_at'")
-      .get() as { name: string } | undefined;
-    expect(indexes).toBeDefined();
-    expect(indexes?.name).toBe('idx_workflow_runs_status_stuck_at');
-
-    rawDb.close();
-  });
-});

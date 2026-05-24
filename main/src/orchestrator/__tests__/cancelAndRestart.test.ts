@@ -25,29 +25,13 @@
  *     wiring the full tRPC context).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import type { DatabaseLike } from '../types';
 import { cancelAndRestartHandler, type CancelAndRestartDeps as HandlerDeps } from '../cancelAndRestartHandler';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-
-// ---------------------------------------------------------------------------
-// DB helpers
-// ---------------------------------------------------------------------------
-
-const SCHEMA_006 = join(process.cwd(), 'src/database/migrations/006_cyboflow_schema.sql');
-const SCHEMA_007 = join(process.cwd(), 'src/database/migrations/007_add_stuck_reason.sql');
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(readFileSync(SCHEMA_006, 'utf8'));
-  db.exec(readFileSync(SCHEMA_007, 'utf8'));
-  return db;
-}
+import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -132,7 +116,7 @@ describe('cancelAndRestartHandler', () => {
   let runQueues: RunQueueRegistry;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createTestDb({ includeStuckDetectedAt: true });
     spy = makeOrderSpy();
     runQueues = new RunQueueRegistry();
     vi.clearAllMocks();

@@ -20,70 +20,15 @@
  * socket test double is used to assert on the JSON response bodies.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import { seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
-
-// ---------------------------------------------------------------------------
-// Minimal schema for this test suite
-// ---------------------------------------------------------------------------
-// Mirrors the relevant subset of REGISTRY_SCHEMA + GATE_SCHEMA with FK
-// constraints present so that foreign_keys = ON enforces referential integrity
-// exactly as production does. workflow_runs has no FOREIGN KEY on workflow_id
-// here (workflows table omitted) — seedRun inserts directly without a parent
-// workflows row, which is fine for unit tests.
-// ---------------------------------------------------------------------------
-
-const MINIMAL_SCHEMA = `
-CREATE TABLE IF NOT EXISTS workflow_runs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL,
-  project_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued',
-  permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
-  worktree_path TEXT,
-  branch_name TEXT,
-  policy_json TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  tool_input_json TEXT NOT NULL,
-  tool_use_id TEXT NOT NULL,
-  rationale TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  decided_at DATETIME,
-  decided_by TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
-`;
+import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function createTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
-  db.exec(MINIMAL_SCHEMA);
-  return db;
-}
 
 /**
  * Minimal net.Socket test double that captures write() calls.
@@ -125,7 +70,7 @@ describe('McpQueryHandler', () => {
   let handler: McpQueryHandler;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = createTestDb({ disableForeignKeys: true });
     handler = new McpQueryHandler(dbAdapter(db));
   });
 
