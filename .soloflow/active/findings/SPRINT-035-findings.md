@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-035
 pending_count: 13
-last_updated: "2026-05-24T01:10:00.000Z"
+last_updated: "2026-05-24T01:21:47.233Z"
 ---
 # Findings Queue
 
@@ -211,10 +211,10 @@ last_updated: "2026-05-24T01:10:00.000Z"
 - **type:** cleanup
 - **source:** TASK-717 (executor)
 - **severity:** low
-- **status:** open
+- **status:** resolved
 - **location:** main/src/orchestrator/__tests__/runLifecycle.test.ts:32
 - **description:** AC2 verification grep catches `from ..+/trpc/(routers|...)` in this file at line 32. The import resolves to main/src/orchestrator/trpc/routers/runs.ts (the canonical orchestrator file, not the deleted legacy tree), so the AC intent is satisfied and typecheck passes. The grep pattern cannot distinguish intra-orchestrator relative imports from cross-tree imports. File owned by TASK-733 which may update this import as part of its createTestDb consolidation work.
-- **resolved_by:** 
+- **resolved_by:** TASK-733
 
 ## FIND-SPRINT-035-23
 - **type:** cleanup
@@ -272,3 +272,29 @@ last_updated: "2026-05-24T01:10:00.000Z"
 - **location:** main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
 - **description:** Required cross-file edit outside original files_owned to eliminate last INSERT INTO approvals in test files. Deleted local seedPendingApproval helper and replaced call with shared seedApproval from orchestratorTestDb fixture. Same pattern as FIND-SPRINT-035-14/15.
 - **resolved_by:** verifier — AC-prescribed: TASK-732's AC5 mandates `grep -rn 'INSERT INTO approvals' main/src --include='*.test.ts'` return 0 matches. The 7th site in runs.test.ts (introduced by sibling TASK-709/710 during this sprint, after TASK-732's plan was written) was the only remaining blocker; the cross-file edit was explicitly directed by FIND-SPRINT-035-27's prior NEEDS_CHANGES and is the only way to satisfy AC5's invariant. Same pattern as FIND-SPRINT-035-14/15 (also AC-prescribed cross-file sweeps).
+
+## FIND-SPRINT-035-29
+- **type:** cleanup
+- **source:** TASK-733 (verifier)
+- **severity:** low
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts:78 and main/src/orchestrator/trpc/routers/__tests__/runs.test.ts:53
+- **description:** After TASK-733 swept the 11 files listed in its files_owned, two local function createTestDb declarations remain in the main test tree — both introduced after TASK-733 was planned. (a) main/src/services/panels/claude/__tests__/claudeCodeManager.composeMcpServers.test.ts:78 (commit c7378581, 2026-05-23 12:50 PT — before the TASK-733 plan was finalized). (b) main/src/orchestrator/trpc/routers/__tests__/runs.test.ts:53 (commit 42539f08, 2026-05-23 15:34 PT — TASK-709). Both are outside TASK-733s files_owned so they were correctly left untouched, but the consolidation goal (single canonical fixture for orchestrator-style test bootstrapping) is not yet fully achieved codebase-wide. A small follow-on sweep would migrate these two sites to import createTestDb from main/src/orchestrator/__test_fixtures__/orchestratorTestDb and delete the locals — same pattern as the 11 already migrated.
+- **suggested_action:** Open a follow-on cleanup task scoped to these two files: (1) replace the local function createTestDb in claudeCodeManager.composeMcpServers.test.ts:78 with import { createTestDb } from ../../../../orchestrator/__test_fixtures__/orchestratorTestDb; (2) replace the local function createTestDb in main/src/orchestrator/trpc/routers/__tests__/runs.test.ts:53 with import { createTestDb } from ../../../__test_fixtures__/orchestratorTestDb. Inspect each file for stale REGISTRY_SCHEMA / SCHEMA_PATH / readFileSync imports to remove after the local is deleted, then re-run pnpm --filter main test.
+
+## FIND-SPRINT-035-30
+- **type:** cleanup
+- **source:** TASK-733 (verifier)
+- **severity:** low
+- **location:** main/src/orchestrator/__tests__/runLifecycle.test.ts:16
+- **description:** Doc-comment drift after TASK-733 consolidation. The file-header docblock at line 16 still says "Real in-memory better-sqlite3 with REGISTRY_SCHEMA." — but the file now imports createTestDb from the canonical orchestratorTestDb fixture, which uses GATE_SCHEMA (per the plans Hardest Decision section: REGISTRY_SCHEMA-only test files were upgraded to GATE_SCHEMA in TASK-733). Same pattern as FIND-SPRINT-035-1 (stale handler-location docblock in shared/types/stuckInspection.ts) — not a code defect, but the comment now misleads onboarding readers.
+- **suggested_action:** In the next task that touches this file, update line 16 from "Real in-memory better-sqlite3 with REGISTRY_SCHEMA." to "Real in-memory better-sqlite3 via the canonical createTestDb fixture (GATE_SCHEMA)."
+
+## FIND-SPRINT-035-31
+- **source:** TASK-733 (code-reviewer)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/stuckDetector.test.ts (deleted lines 562-611 of pre-commit file) — coverage gap, no live code site
+- **description:** TASK-733's executor deleted the entire `describe('Migration 007 idempotency', ...)` block (two test cases, ~60 lines) when the plan's step 9 only authorized deleting "the now-redundant column-presence sanity checks" (singular inline `if (!names.includes('stuck_detected_at'))` checks inside the local helper). The two deleted tests exercised the actual `main/src/database/migrations/007_add_stuck_reason.sql` file from disk — verifying (a) its SQL applies cleanly on top of 006, and (b) the `idx_workflow_runs_status_stuck_at` index gets created. The commit message justified the deletion as "redundant now that TASK-732's canonical option is itself unit-tested," but the canonical option in `orchestratorTestDb.ts:57` uses an **inline** `ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER` — it does **NOT** read or exercise `007_add_stuck_reason.sql`, and it does NOT create the index. Verification: `grep -rn 'idx_workflow_runs_status_stuck_at' main/src --include='*.test.ts'` returns 0 matches after the commit; `grep -rn '007_add_stuck_reason' main/src --include='*.test.ts'` returns 0 matches. The generic `fileMigrationRunner.test.ts` only tests the runner against fixture files (998_/999_), not against `007_add_stuck_reason.sql` specifically. Net effect: future edits to `007_add_stuck_reason.sql` (typos, dropped index, changed column type) would not be caught by any test until the app runs against a real DB. Severity medium because (i) the migration is small and currently stable, but (ii) the executor went beyond what the plan authorized and (iii) the stated justification in the commit message is factually incorrect about what the canonical option covers.
+- **suggested_action:** Open a follow-on task to restore migration-007 file-level coverage in a more appropriate location (e.g. `main/src/database/__tests__/migration007.test.ts` or a new section of `cyboflowSchema.test.ts`). The restored test should: (1) read `007_add_stuck_reason.sql` from disk, (2) apply it on top of a fresh `006_cyboflow_schema.sql` DB, (3) assert the `stuck_detected_at` INTEGER column is added to `workflow_runs`, and (4) assert the `idx_workflow_runs_status_stuck_at` index exists via `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_workflow_runs_status_stuck_at'`. The original test block in the commit diff (deleted from stuckDetector.test.ts) can be lifted near-verbatim.
+- **resolved_by:** 

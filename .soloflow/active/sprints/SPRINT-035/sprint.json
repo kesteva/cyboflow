@@ -5,14 +5,7 @@
     "started": "2026-05-23T12:00:00.000Z",
     "execution_mode": "serial"
   },
-  "tasks": {
-    "TASK-733": {
-      "status": "pending",
-      "depends_on": [
-        "TASK-732"
-      ]
-    }
-  },
+  "tasks": {},
   "playwright_target": {
     "kind": "electron",
     "evidence": "electron in package.json",
