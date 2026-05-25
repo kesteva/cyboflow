@@ -5,12 +5,7 @@
     "started": "2026-05-25T00:00:00.000Z",
     "execution_mode": "serial"
   },
-  "tasks": {
-    "TASK-750": {
-      "status": "pending",
-      "depends_on": []
-    }
-  },
+  "tasks": {},
   "run": {
     "branch": "soloflow/run-20260525-125344-SPRINT-037",
     "base_branch": "main",
