@@ -352,24 +352,29 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         claudeConfig: request.claudeConfig
       });
 
-      // Await the session row by listening for the one-shot session-created event
-      // that TaskQueue emits after sessionManager.createSession completes.
+      // Await the session row by listening for session-created events on the
+      // SessionManager. Concurrent sessions:create-quick calls share the same
+      // emitter, so we filter by worktreePath: TaskQueue's ensureUniqueNames may
+      // append a `-<counter>` suffix to resolve same-second name collisions, so
+      // accept both `/{branchName}` and `/{branchName}-<n>` tails. Non-matching
+      // events are ignored — the listener is left in place via `on` (not `once`)
+      // until the matching session arrives or the timeout fires.
       const session = await new Promise<import('../types/session').Session>((resolve, reject) => {
+        const suffixed = new RegExp(`/${branchName}-\\d+$`);
+        const onCreated = (createdSession: import('../types/session').Session) => {
+          const wt = createdSession.worktreePath ?? '';
+          const matches = wt.endsWith(`/${branchName}`) || suffixed.test(wt);
+          if (!matches) return;
+          clearTimeout(timeout);
+          sessionManager.removeListener('session-created', onCreated);
+          resolve(createdSession);
+        };
         const timeout = setTimeout(() => {
           sessionManager.removeListener('session-created', onCreated);
           reject(new Error('Timed out waiting for quick session to be created'));
         }, 30_000);
 
-        const onCreated = (createdSession: import('../types/session').Session) => {
-          // The session row created by this job will be the first session-created
-          // event that fires after the job was enqueued. We match on worktreePath
-          // containing the branchName since the queue may suffix it for uniqueness.
-          clearTimeout(timeout);
-          sessionManager.removeListener('session-created', onCreated);
-          resolve(createdSession);
-        };
-
-        sessionManager.once('session-created', onCreated);
+        sessionManager.on('session-created', onCreated);
       });
 
       return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath } };
