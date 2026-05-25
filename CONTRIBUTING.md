@@ -29,8 +29,11 @@ Crystal is an open source project created by [Stravu](https://stravu.com/?utm_so
 # Run the Electron app in development mode
 pnpm run electron-dev
 
-# Run tests
-pnpm test
+# Run unit tests (fast local feedback loop)
+pnpm test:unit
+
+# Run E2E tests (requires Electron — see CLAUDE.md for bootstrap prerequisites)
+pnpm test:e2e
 
 # Type checking
 pnpm typecheck

@@ -49,7 +49,7 @@
     "electron:rebuild": "pnpm exec electron-rebuild -f -w better-sqlite3 -m ./main",
     "setup": "pnpm install && pnpm run electron:rebuild && pnpm run build:main",
     "smoke:sdk": "tsx scripts/sdk-smoke-probe.ts",
-    "test": "playwright test",
+    "test:e2e": "sh -c 'while [ \"$1\" = \"--\" ]; do shift; done; playwright test \"$@\"' --",
     "test:ci": "playwright test --config=playwright.ci.config.ts",
     "test:ci:minimal": "playwright test --config=playwright.ci.minimal.config.ts",
     "test:ui": "playwright test --ui",

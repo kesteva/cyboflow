@@ -10,7 +10,7 @@
 - Build all: `pnpm build` (frontend, main, then electron package).
 - Package (examples): `pnpm build:mac`, `pnpm build:linux`.
 - Lint: `pnpm lint`; Type-check: `pnpm typecheck` (runs per package).
-- Tests (E2E): `pnpm test`, `pnpm test:ui`, CI configs in `playwright.ci*.config.ts`.
+- Tests (E2E): `pnpm test:e2e`, `pnpm test:ui`, CI configs in `playwright.ci*.config.ts`.
 - Main unit tests (if added): `pnpm --filter main test`, coverage: `pnpm --filter main run test:coverage`.
 
 ## Coding Style & Naming Conventions
@@ -20,7 +20,7 @@
 - Run `pnpm lint && pnpm typecheck` before sending PRs.
 
 ## Testing Guidelines
-- E2E tests live in `tests/*.spec.ts` (Playwright). Example: `pnpm test -- tests/smoke.spec.ts`.
+- E2E tests live in `tests/*.spec.ts` (Playwright). Example: `pnpm test:e2e -- tests/smoke.spec.ts`.
 - Add Playwright tests for user-visible flows; mock external services where possible.
 - For backend logic in `main/`, use Vitest colocated under `main/src/**/__tests__` or `*.spec.ts`.
 

@@ -88,23 +88,8 @@ export function PromptHistoryModal({ isOpen, onClose }: PromptHistoryModalProps)
       
       // Switch to the session
       setActiveSession(promptItem.sessionId);
-      
-      // Get the prompt marker information
-      try {
-        const response = await API.prompts.getByPromptId(promptItem.id);
-        if (response.success && response.data) {
-          window.dispatchEvent(new CustomEvent('navigateToPrompt', {
-            detail: {
-              sessionId: promptItem.sessionId,
-              promptMarker: response.data
-            }
-          }));
-        }
-      } catch (error) {
-        console.error('Error getting prompt details:', error);
-      }
-      
-      // Close the modal after navigation
+
+      // Close the modal after switching to the session
       onClose();
     } else {
       // Session no longer exists, show a message or handle appropriately

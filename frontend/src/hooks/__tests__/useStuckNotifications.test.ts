@@ -39,7 +39,7 @@ function emitStuck(event: StuckDetectedEvent) {
 // Note: reviewQueueSlice's subscribeToStuckEvents action is never called by the
 // hook under test — the hook only reads slice state. The mock is a stub to
 // satisfy the module import, not to drive any test behavior.
-vi.mock('../../utils/trpcClient', () => {
+vi.mock('../../trpc/client', () => {
   const noopSubscription = { unsubscribe: vi.fn() };
   const noopSubscribable = { subscribe: vi.fn().mockReturnValue(noopSubscription) };
   return {

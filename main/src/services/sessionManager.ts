@@ -693,10 +693,6 @@ export class SessionManager extends EventEmitter {
     this.emit('session-output', fullOutput);
   }
 
-  getSessionOutput(id: string, limit?: number): SessionOutput[] {
-    return this.getSessionOutputs(id, limit);
-  }
-
   getSessionOutputs(id: string, limit?: number): SessionOutput[] {
     const dbOutputs = this.db.getSessionOutputs(id, limit);
     return dbOutputs.map(dbOutput => ({
@@ -1049,11 +1045,6 @@ export class SessionManager extends EventEmitter {
       // Emit event for the Claude Code manager to handle
       this.emit('conversation-continue', { sessionId: id, message: userMessage });
     });
-  }
-
-  clearConversation(id: string): void {
-    this.db.clearConversationMessages(id);
-    this.db.clearSessionOutputs(id);
   }
 
   markSessionAsViewed(id: string): void {
