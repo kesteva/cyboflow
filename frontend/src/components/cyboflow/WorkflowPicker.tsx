@@ -11,7 +11,7 @@
  * `panelApi.createPanel`, and navigate via `setActiveQuickSession`.
  */
 import { useState, useEffect } from 'react';
-import { trpc } from '../../utils/trpcClient';
+import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { panelApi } from '../../services/panelApi';
 import type { WorkflowRow } from '../../../../shared/types/workflows';

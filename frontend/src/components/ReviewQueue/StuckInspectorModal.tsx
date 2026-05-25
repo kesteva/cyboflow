@@ -14,7 +14,7 @@
  */
 import React, { useState } from 'react';
 import { Modal, ModalHeader, ModalBody } from '../ui/Modal';
-import { trpc } from '../../utils/trpcClient';
+import { trpc } from '../../trpc/client';
 import type { StuckInspectionResult } from '../../../../shared/types/stuckInspection';
 
 // ---------------------------------------------------------------------------

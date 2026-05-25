@@ -89,7 +89,7 @@ vi.mock('../../../services/panelApi', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
-import { trpc } from '../../../utils/trpcClient';
+import { trpc } from '../../../trpc/client';
 
 // ---------------------------------------------------------------------------
 // Setup

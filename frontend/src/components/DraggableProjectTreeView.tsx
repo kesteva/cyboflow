@@ -7,7 +7,7 @@ import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
-import { trpc } from '../utils/trpcClient';
+import { trpc } from '../trpc/client';
 import type { WorkflowRunListRow } from '../../../shared/types/workflows';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
