@@ -52,9 +52,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     setIsQuickModePickerOpen(false);
     if (projectId === null) return;
     try {
-      await window.electronAPI.sessions.createQuick({ prompt: '', projectId, toolType });
+      const result = await window.electronAPI.sessions.createQuick({ prompt: '', projectId, toolType });
+      if (!result.success || !result.data) {
+        console.error('[CyboflowRoot] createQuick failed', result.error);
+        return;
+      }
     } catch (err) {
-      console.error('[CyboflowRoot] createQuick failed', err);
+      console.error('[CyboflowRoot] createQuick threw', err);
     }
   }, [projectId]);
 
