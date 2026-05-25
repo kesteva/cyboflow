@@ -321,6 +321,87 @@ describe('McpQueryHandler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Quick-session / NULL-run regression tests (TASK-745)
+  // -------------------------------------------------------------------------
+
+  describe('quick-session NULL-tolerance', () => {
+    /**
+     * mcp-get-run for a runId that does not exist in workflow_runs (e.g. a
+     * quick-session id that has no workflow_runs row) returns ok:false with
+     * error='not_found' and does NOT throw.
+     *
+     * This pins the existing 'not_found' branch as the correct behaviour for
+     * quick-session ids — no special handling is needed in McpQueryHandler.
+     */
+    it('mcp-get-run returns not_found for a quick-session id (no matching workflow_runs row)', async () => {
+      // Deliberately do NOT seed a workflow_runs row — simulates a quick-session id.
+      const quickSessionId = 'quick-session-abc123';
+
+      const { socket, writes } = makeSocketDouble();
+      const msg: McpQueryMessage = {
+        type: 'mcp-get-run',
+        requestId: 'req-qs-1',
+        runId: 'run-caller',
+        targetRunId: quickSessionId,
+      };
+
+      // Must not throw.
+      await expect(handler.handleMessage(msg, socket)).resolves.toBeUndefined();
+
+      const response = parseLastWrite(writes);
+      expect(response.type).toBe('mcp-query-response');
+      expect(response.requestId).toBe('req-qs-1');
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('not_found');
+    });
+
+    /**
+     * mcp-submit-checkpoint for a runId that does not exist in workflow_runs
+     * (e.g. a quick-session id) surfaces as caught error (FK violation), not a crash.
+     *
+     * The raw_events table has run_id TEXT NOT NULL with a FK to workflow_runs(id)
+     * ON DELETE CASCADE (migration 006).  When FK enforcement is on, trying to INSERT
+     * with a non-existent run_id throws a FOREIGN KEY constraint error.
+     * McpQueryHandler's outer try/catch must convert this into an ok:false response.
+     */
+    it('mcp-submit-checkpoint returns ok:false for a quick-session id (FK violation, not a crash)', async () => {
+      // Deliberately do NOT seed a workflow_runs row — simulates a quick-session id.
+      const quickSessionId = 'quick-session-xyz789';
+
+      // Enable FK enforcement so the INSERT actually fails.
+      // (createTestDb disables FKs by default for general fixture use; we need them on here.)
+      db.pragma('foreign_keys = ON');
+
+      const { socket, writes } = makeSocketDouble();
+      const msg: McpQueryMessage = {
+        type: 'mcp-submit-checkpoint',
+        requestId: 'req-qs-2',
+        runId: quickSessionId,
+        label: 'should-fail-fk',
+        note: 'quick session has no workflow_runs row',
+      };
+
+      // Must not throw — the FK error is caught and returned as ok:false.
+      await expect(handler.handleMessage(msg, socket)).resolves.toBeUndefined();
+
+      const response = parseLastWrite(writes);
+      expect(response.type).toBe('mcp-query-response');
+      expect(response.requestId).toBe('req-qs-2');
+      expect(response.ok).toBe(false);
+      // The error message comes from the SQLite exception — it contains 'FOREIGN KEY'
+      // or similar; we just need to confirm ok is false and something was returned.
+      expect(typeof response.error).toBe('string');
+      expect(response.error!.length).toBeGreaterThan(0);
+
+      // No raw_events row must have been written.
+      const rows = db
+        .prepare(`SELECT id FROM raw_events WHERE run_id = ?`)
+        .all(quickSessionId);
+      expect(rows).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // 4. Unknown message type
   // -------------------------------------------------------------------------
 

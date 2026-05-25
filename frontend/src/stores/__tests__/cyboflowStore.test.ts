@@ -153,6 +153,91 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
   });
 
+  // -------------------------------------------------------------------------
+  // Quick-session tests (TASK-745 / IDEA-024)
+  // -------------------------------------------------------------------------
+
+  it('(8) setActiveQuickSession sets activeQuickSessionId and clears activeRunId', () => {
+    // Start from a state where a run is active.
+    useCyboflowStore.getState().setActiveRun('run-workflow');
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow');
+
+    useCyboflowStore.getState().setActiveQuickSession('quick-session-001');
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeQuickSessionId).toBe('quick-session-001');
+    expect(state.activeRunId).toBeNull();
+  });
+
+  it('(9) setActiveQuickSession does NOT call subscribeToStreamEvents', () => {
+    mockSubscribe.mockClear();
+    useCyboflowStore.getState().setActiveQuickSession('quick-session-002');
+
+    // Quick sessions have no workflow_runs row — no subscription should start.
+    expect(mockSubscribe).not.toHaveBeenCalled();
+  });
+
+  it('(10) setActiveQuickSession tears down any prior stream subscription', () => {
+    const unsub = vi.fn();
+    mockSubscribe.mockReturnValueOnce(unsub);
+
+    // Start a workflow-run subscription first.
+    useCyboflowStore.getState().setActiveRun('run-workflow');
+    expect(unsub).not.toHaveBeenCalled();
+
+    // Switching to a quick session must tear it down.
+    useCyboflowStore.getState().setActiveQuickSession('quick-session-003');
+    expect(unsub).toHaveBeenCalledOnce();
+  });
+
+  it('(11) setActiveRun after setActiveQuickSession clears activeQuickSessionId', () => {
+    useCyboflowStore.getState().setActiveQuickSession('quick-session-004');
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('quick-session-004');
+
+    useCyboflowStore.getState().setActiveRun('run-workflow-after-qs');
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeRunId).toBe('run-workflow-after-qs');
+    expect(state.activeQuickSessionId).toBeNull();
+  });
+
+  it('(12) clearActiveQuickSession clears activeQuickSessionId without touching activeRunId', () => {
+    // Manually put the store in a state with both null (after clearActiveRun cleared runId).
+    // Then call clearActiveQuickSession — runId must remain null (untouched).
+    useCyboflowStore.getState().setActiveQuickSession('quick-session-005');
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('quick-session-005');
+
+    useCyboflowStore.getState().clearActiveQuickSession();
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeQuickSessionId).toBeNull();
+    // activeRunId was not set in this test — must remain null.
+    expect(state.activeRunId).toBeNull();
+    // No subscription changes.
+    expect(mockSubscribe).not.toHaveBeenCalled();
+  });
+
+  it('(13) mutual-exclusion: exactly one of activeRunId / activeQuickSessionId is non-null', () => {
+    // Initially both null.
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+
+    // Set a run.
+    useCyboflowStore.getState().setActiveRun('run-mutex');
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-mutex');
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+
+    // Switch to quick session.
+    useCyboflowStore.getState().setActiveQuickSession('qs-mutex');
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('qs-mutex');
+
+    // Switch back to run.
+    useCyboflowStore.getState().setActiveRun('run-mutex-2');
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-mutex-2');
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+  });
+
   it('(7) after rapid A→B switch, new subscription onEvent routes to current store state (not stale closure)', () => {
     // Capture the onEvent callbacks for both subscriptions.
     const capturedOnEvents: Array<(e: StreamEvent) => void> = [];
