@@ -29,6 +29,7 @@ export interface Session {
   baseBranch?: string;
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
+  runId?: string | null;
 }
 
 export interface GitStatus {
