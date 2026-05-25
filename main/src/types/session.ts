@@ -71,6 +71,8 @@ export interface CreateSessionRequest {
     permissionMode?: 'approve' | 'ignore';
     ultrathink?: boolean;
   };
+  quickSession?: boolean;
+  branchName?: string;
 }
 
 export interface SessionUpdate {
