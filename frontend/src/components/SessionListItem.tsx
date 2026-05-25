@@ -428,6 +428,14 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
               {!!session.isMainRepo && (
                 <span className="ml-1 text-xs text-interactive">(main)</span>
               )}
+              {session.runId == null && (
+                <span
+                  className="ml-1 text-xs text-text-tertiary"
+                  title="Quick session — not linked to a workflow run"
+                >
+                  Quick
+                </span>
+              )}
             </span>
           )}
           {!isEditing && (isRunning || isClosing) && (
