@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
