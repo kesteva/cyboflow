@@ -157,10 +157,10 @@ export class RunExecutor {
    * 9. Call onLifecycleTransition(runId, 'post_spawn').
    * 10. Call teardownRun(runId) in a finally block to dispose the bridge.
    *
-   * Quick-session boundary (IDEA-024 / TASK-743): this executor runs WORKFLOW
-   * runs. Quick sessions (sessions with null run_id) MUST NOT be passed as
+   * quick session boundary (IDEA-024 / TASK-743): this executor runs WORKFLOW
+   * runs. A quick session (a session with null run_id) MUST NOT be passed as
    * runId — call sites are guarded by the session_id ↔ run_id linkage in
-   * TASK-744's IPC handler.  If a quick-session id is nonetheless passed here,
+   * TASK-744's IPC handler.  If a quick session id is nonetheless passed here,
    * step 1 above throws `workflow_runs row not found for runId=…`, which is the
    * intended loud-failure mode.
    */
