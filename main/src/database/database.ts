@@ -2118,6 +2118,34 @@ export class DatabaseService {
     return this.db.prepare('SELECT * FROM sessions WHERE project_id = ? AND is_main_repo = 1 AND (archived = 0 OR archived IS NULL)').get(projectId) as Session | undefined;
   }
 
+  // ---------------------------------------------------------------------------
+  // NULL-tolerance audit note (IDEA-024 / TASK-743 / TASK-745):
+  //   migration 009_sessions_run_id.sql adds sessions.run_id TEXT (nullable).
+  //   All existing SELECT * FROM sessions queries in this file are already
+  //   NULL-tolerant — they do not JOIN workflow_runs and do not assert run_id
+  //   IS NOT NULL.  No changes are required to those queries.
+  //   getQuickSessions() below is the only helper that explicitly filters on
+  //   run_id IS NULL, targeting the quick-session feature.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns active (non-archived, non-main-repo) sessions that have no linked
+   * workflow run (run_id IS NULL).  These are "quick sessions" created outside
+   * any flow (IDEA-024).
+   *
+   * @param projectId — when provided, limits results to that project.
+   */
+  getQuickSessions(projectId?: number): Session[] {
+    if (projectId !== undefined) {
+      return this.db.prepare(
+        "SELECT * FROM sessions WHERE project_id = ? AND run_id IS NULL AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
+      ).all(projectId) as Session[];
+    }
+    return this.db.prepare(
+      "SELECT * FROM sessions WHERE run_id IS NULL AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
+    ).all() as Session[];
+  }
+
   checkSessionNameExists(name: string): boolean {
     const result = this.db.prepare('SELECT id FROM sessions WHERE (name = ? OR worktree_name = ?) LIMIT 1').get(name, name);
     return result !== undefined;
