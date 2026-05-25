@@ -22,8 +22,8 @@ let mockSubscribe: ReturnType<typeof vi.fn>;
 
 // Mock trpc-electron/renderer before any reviewQueueStore import so the
 // module evaluates without the Electron IPC bridge.
-// Path is relative to this test file: ../../utils/trpcClient resolves to
-// frontend/src/utils/trpcClient.ts (two dirs up from __tests__, then utils/).
+// Path is relative to this test file: ../../trpc/client resolves to
+// frontend/src/trpc/client.ts (canonical renderer-side tRPC client).
 vi.mock('../../trpc/client', () => {
   // These factory functions defer to the outer-scope mutable references so
   // that replacing the references in beforeEach affects each test.

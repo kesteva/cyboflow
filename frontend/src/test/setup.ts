@@ -6,7 +6,7 @@ afterEach(() => { cleanup(); });
 // ---------------------------------------------------------------------------
 // Global tRPC stub — prevents "Could not find `electronTRPC` global" crash
 // when a test file renders a component that imports trpc/client without
-// providing its own vi.mock('…/trpcClient').  Individual test files that
+// providing its own vi.mock('…/trpc/client').  Individual test files that
 // need specific tRPC behaviour override this with their own vi.mock calls.
 // ---------------------------------------------------------------------------
 
