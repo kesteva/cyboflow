@@ -162,7 +162,7 @@ All procedures are consumed by their respective Zustand stores and React compone
     differentiator).
 - **`utils/api.ts`** — Thin IPC call wrapper used by all frontend components for raw IPC.
 - **`utils/cyboflowApi.ts`** — Helper for the raw `cyboflow:*` channels.
-- **`utils/trpcClient.ts`** *(via `trpc-electron` client)* — Typed entry point for
+- **`trpc/client.ts`** *(via `trpc-electron` client)* — Typed entry point for
   `cyboflow.*` procedures defined in `main/src/orchestrator/trpc/routers/`.
 
 ### Shared Types (`shared/types/`)
@@ -175,7 +175,7 @@ cross-package concern.
   `mcpHealth.ts`, `stuckDetection.ts`, `stuckInspection.ts`, `claudeStream.ts`,
   `unifiedMessage.ts`.
 - **Transport contract:** `trpc.ts` re-exports the inferred `AppRouter` type from
-  `main/src/orchestrator/trpc/router.ts` so the renderer's `trpcClient` is fully typed
+  `main/src/orchestrator/trpc/router.ts` so the renderer's `trpc/client.ts` is fully typed
   without importing main-process code.
 
 ## Frameworks & External Dependencies

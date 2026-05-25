@@ -31,7 +31,7 @@ graph TB
                 CyboflowStores[Cyboflow-era<br/>cyboflowStore / mcpHealthStore /<br/>reviewQueueStore + Slice]
             end
             RawAPI[utils/api.ts +<br/>utils/cyboflowApi.ts<br/>Raw IPC wrapper]
-            TrpcClient[utils/trpcClient.ts<br/>typed tRPC client]
+            TrpcClient[trpc/client.ts<br/>typed tRPC client]
 
             App --> Panels
             App --> Stores
