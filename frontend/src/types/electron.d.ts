@@ -204,7 +204,6 @@ interface ElectronAPI {
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
   prompts: {
     getAll: () => Promise<IPCDataResponse<unknown[]>>;
-    getByPromptId: (promptId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
   // File operations
