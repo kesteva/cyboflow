@@ -359,8 +359,7 @@ see `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts`.
 
 ### Mock tRPC at the canonical import path
 
-`vi.mock(...)` must target the canonical client (e.g. `'../../trpc/client'`) — the same
-specifier every SUT now uses after the `utils/trpcClient` shim was deleted. The global
+`vi.mock(...)` must target the canonical client (e.g. `'../../trpc/client'`). The global
 setup in `frontend/src/test/setup.ts` pre-stubs it; individual specs override with
 their own `vi.mock('../…/trpc/client', …)` calls when they need specific behaviour.
 Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:27`.
