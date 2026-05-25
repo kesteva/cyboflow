@@ -1,7 +1,7 @@
 ---
 id: TASK-750
 idea: SPRINT-036-compound
-status: ready
+status: in-flight
 created: "2026-05-24T00:00:00Z"
 files_owned:
   - frontend/src/utils/trpcClient.ts
@@ -25,7 +25,7 @@ files_readonly:
   - .soloflow/active/compound/SPRINT-036-proposal.md
   - CLAUDE.md
 acceptance_criteria:
-  - criterion: "The shim file frontend/src/utils/trpcClient.ts is deleted."
+  - criterion: The shim file frontend/src/utils/trpcClient.ts is deleted.
     verification: "test ! -e frontend/src/utils/trpcClient.ts"
   - criterion: "No file under frontend/src imports from '../utils/trpcClient' or any depth-variant relative path of it."
     verification: "grep -rnE \"from ['\\\"][.][./]*utils/trpcClient['\\\"]\" frontend/src --include='*.ts' --include='*.tsx' returns 0 matches (exit code 1)."
@@ -35,10 +35,10 @@ acceptance_criteria:
     verification: "grep -n 'utils/trpcClient' frontend/src/trpc/client.ts frontend/src/test/setup.ts frontend/src/stores/__tests__/reviewQueueStore.test.ts returns 0 matches."
   - criterion: "Docs (CODE-PATTERNS.md, ARCHITECTURE.md, ARCHITECTURE-diagram.md) reflect frontend/src/trpc/client.ts as the canonical tRPC client path with no stale references."
     verification: "grep -n 'utils/trpcClient' docs/CODE-PATTERNS.md docs/ARCHITECTURE.md docs/ARCHITECTURE-diagram.md returns 0 matches."
-  - criterion: "Frontend vitest suite is green after the migration."
+  - criterion: Frontend vitest suite is green after the migration.
     verification: "pnpm --filter frontend test exits 0; passing count >= 322."
-  - criterion: "Typecheck and lint pass across all workspaces."
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0."
+  - criterion: Typecheck and lint pass across all workspaces.
+    verification: pnpm typecheck exits 0; pnpm lint exits 0.
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
