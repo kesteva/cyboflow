@@ -34,7 +34,7 @@ const {
     mockCancelAndRestartMutate: vi.fn().mockResolvedValue({ newRunId: 'new-run-id' }),
   }));
 
-vi.mock('../../../utils/trpcClient', () => ({
+vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       approvals: {

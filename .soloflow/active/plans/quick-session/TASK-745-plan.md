@@ -2,7 +2,7 @@
 id: TASK-745
 idea: IDEA-024
 status: ready
-created: 2026-05-23T00:00:00Z
+created: "2026-05-23T00:00:00Z"
 files_owned:
   - main/src/orchestrator/mcpServer/mcpQueryHandler.ts
   - main/src/orchestrator/runExecutor.ts
@@ -46,11 +46,12 @@ acceptance_criteria:
     verification: "grep -n 'getQuickSessions' main/src/database/database.ts returns at least one match; grep -nE 'NULL-tolerance|null run_id' main/src/database/database.ts returns at least one match."
   - criterion: "`cyboflowStore.ts` gains an `activeQuickSessionId: string | null` field with `setActiveQuickSession(sessionId: string)` and `clearActiveQuickSession()` actions. `setActiveQuickSession` clears `activeRunId` and tears down any active stream subscription; `setActiveRun` clears `activeQuickSessionId`."
     verification: "grep -nE 'activeQuickSessionId|setActiveQuickSession|clearActiveQuickSession' frontend/src/stores/cyboflowStore.ts returns at least 4 matches; new unit tests pass."
-  - criterion: "All four sibling test files gain at least one new test case covering the null-run / quick-session path AND continue to pass green."
+  - criterion: All four sibling test files gain at least one new test case covering the null-run / quick-session path AND continue to pass green.
     verification: "pnpm --filter main test -- mcpQueryHandler runExecutor cyboflowSchema && pnpm --filter frontend test -- cyboflowStore both exit 0."
   - criterion: "The verifier AC gate `pnpm test:unit` exits 0."
     verification: "pnpm test:unit exits 0."
-depends_on: [TASK-743]
+depends_on:
+  - TASK-743
 estimated_complexity: high
 epic: quick-session
 test_strategy:
@@ -58,22 +59,21 @@ test_strategy:
   justification: "Audit task that hardens 4 production files; each file has a sibling test directory, and each NULL-tolerance/quick-session contract added must be pinned by a regression test so future edits cannot silently re-introduce the run-must-exist assumption."
   targets:
     - behavior: "mcp-get-run for a runId that does not exist (e.g. a quick session id) returns ok:false with error='not_found' and does not throw"
-      test_file: "main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts"
+      test_file: main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts
       type: unit
     - behavior: "mcp-submit-checkpoint for a runId that does not exist in workflow_runs returns ok:false (FK violation surfaces as caught error, not crash)"
-      test_file: "main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts"
+      test_file: main/src/orchestrator/mcpServer/__tests__/mcpQueryHandler.test.ts
       type: unit
     - behavior: "RunExecutor.execute throws a clear 'workflow_runs row not found for runId=' error when given a quick-session id"
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: unit
-    - behavior: "database.getQuickSessions(projectId) returns only sessions with run_id IS NULL for that project; database.getAllSessions(projectId) returns BOTH null-run and non-null-run sessions"
-      test_file: "main/src/database/__tests__/cyboflowSchema.test.ts"
+    - behavior: database.getQuickSessions(projectId) returns only sessions with run_id IS NULL for that project; database.getAllSessions(projectId) returns BOTH null-run and non-null-run sessions
+      test_file: main/src/database/__tests__/cyboflowSchema.test.ts
       type: unit
     - behavior: "cyboflowStore.setActiveQuickSession(sid) sets activeQuickSessionId=sid, clears activeRunId, and does NOT call subscribeToStreamEvents; setActiveRun(rid) AFTER setActiveQuickSession clears activeQuickSessionId; clearActiveQuickSession() clears activeQuickSessionId without touching activeRunId"
-      test_file: "frontend/src/stores/__tests__/cyboflowStore.test.ts"
+      test_file: frontend/src/stores/__tests__/cyboflowStore.test.ts
       type: unit
 ---
-
 # Audit and NULL-harden all run-aware query surfaces
 
 ## Objective

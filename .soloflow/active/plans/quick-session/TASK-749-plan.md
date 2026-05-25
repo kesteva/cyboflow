@@ -2,7 +2,7 @@
 id: TASK-749
 idea: IDEA-024
 status: ready
-created: 2026-05-23T00:00:00Z
+created: "2026-05-23T00:00:00Z"
 files_owned:
   - frontend/src/components/SessionListItem.tsx
   - frontend/src/components/__tests__/SessionListItem.test.tsx
@@ -31,33 +31,34 @@ acceptance_criteria:
   - criterion: "The Quick badge uses the same visual idiom as the existing '(main)' marker — a small inline span with a muted text size."
     verification: "grep -n 'Quick' frontend/src/components/SessionListItem.tsx shows the badge rendered as a <span> sibling of the existing isMainRepo span, with classNames in the same family."
   - criterion: "No untyped 'any' is introduced."
-    verification: "pnpm --filter frontend lint exits 0; pnpm --filter frontend typecheck exits 0."
+    verification: pnpm --filter frontend lint exits 0; pnpm --filter frontend typecheck exits 0.
   - criterion: "Test file invokes the verifier's unit chain successfully."
-    verification: "pnpm --filter frontend test -- --run SessionListItem exits 0 and all five SessionListItem tests are reported as passing."
-depends_on: [TASK-745, TASK-746]
+    verification: pnpm --filter frontend test -- --run SessionListItem exits 0 and all five SessionListItem tests are reported as passing.
+depends_on:
+  - TASK-745
+  - TASK-746
 estimated_complexity: medium
 epic: quick-session
 test_strategy:
   needed: true
   justification: "This task adds new conditional UI (the Quick badge) and verifies three context-menu actions remain correct on null-run sessions. No sibling tests exist for SessionListItem today, so creating the file is the only way to lock the new behavior."
   targets:
-    - behavior: "Quick badge is rendered when session.runId is null"
-      test_file: "frontend/src/components/__tests__/SessionListItem.test.tsx"
+    - behavior: Quick badge is rendered when session.runId is null
+      test_file: frontend/src/components/__tests__/SessionListItem.test.tsx
       type: component
-    - behavior: "Quick badge is NOT rendered when session.runId is a non-null string"
-      test_file: "frontend/src/components/__tests__/SessionListItem.test.tsx"
+    - behavior: Quick badge is NOT rendered when session.runId is a non-null string
+      test_file: frontend/src/components/__tests__/SessionListItem.test.tsx
       type: component
-    - behavior: "Archive button on a null-runId session invokes API.sessions.delete(session.id) after the user confirms in the ConfirmDialog"
-      test_file: "frontend/src/components/__tests__/SessionListItem.test.tsx"
+    - behavior: Archive button on a null-runId session invokes API.sessions.delete(session.id) after the user confirms in the ConfirmDialog
+      test_file: frontend/src/components/__tests__/SessionListItem.test.tsx
       type: component
     - behavior: "Rename action (triggered via inline edit, Enter key) on a null-runId session invokes API.sessions.rename(session.id, newName)"
-      test_file: "frontend/src/components/__tests__/SessionListItem.test.tsx"
+      test_file: frontend/src/components/__tests__/SessionListItem.test.tsx
       type: component
-    - behavior: "Favorite button on a null-runId session invokes API.sessions.toggleFavorite(session.id)"
-      test_file: "frontend/src/components/__tests__/SessionListItem.test.tsx"
+    - behavior: Favorite button on a null-runId session invokes API.sessions.toggleFavorite(session.id)
+      test_file: frontend/src/components/__tests__/SessionListItem.test.tsx
       type: component
 ---
-
 # Add Quick badge to SessionListItem and verify session list actions on null-run sessions
 
 ## Objective

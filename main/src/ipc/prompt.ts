@@ -23,13 +23,4 @@ export function registerPromptHandlers(ipcMain: IpcMain, { sessionManager }: App
     }
   });
 
-  ipcMain.handle('prompts:get-by-id', async (_event, promptId: string) => {
-    try {
-      const promptMarker = sessionManager.getPromptById(promptId);
-      return { success: true, data: promptMarker };
-    } catch (error) {
-      console.error('Failed to get prompt by id:', error);
-      return { success: false, error: 'Failed to get prompt by id' };
-    }
-  });
 } 

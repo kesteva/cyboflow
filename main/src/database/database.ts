@@ -1595,9 +1595,22 @@ export class DatabaseService {
         });
         console.log(`[Database] Applied file migration: ${name}`);
       } catch (err) {
-        // Match Cyboflow's existing tolerance pattern (try/catch around 004/005):
-        // log + continue so a single broken file does not brick the app boot.
-        console.error(`[Database] Migration ${name} failed:`, err);
+        // Detect idempotent ALTER TABLE failures (e.g. "duplicate column name: X").
+        // SQLite does not support ADD COLUMN IF NOT EXISTS; when a migration that only
+        // adds a column is re-executed after the ledger marker was erased (e.g. in tests
+        // that selectively reset the migration ledger), the column already exists and
+        // SQLite throws "SqliteError: duplicate column name: <col>".  Treat this as a
+        // successful idempotent application: record the ledger marker so subsequent
+        // initialize() calls skip cleanly, and log at warn (not error).
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes('duplicate column name:')) {
+          insertApplied.run(key);
+          console.warn(`[Database] Migration ${name} column already exists (idempotent ok): ${errMsg}`);
+        } else {
+          // Match Cyboflow's existing tolerance pattern (try/catch around 004/005):
+          // log + continue so a single broken file does not brick the app boot.
+          console.error(`[Database] Migration ${name} failed:`, err);
+        }
       }
     }
   }

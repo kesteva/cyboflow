@@ -364,6 +364,26 @@ not the canonical client file it re-exports from. Mocking the re-export target w
 by accident of ESM hoisting and breaks silently if the shim direction is ever flipped.
 Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:22`.
 
+### `pnpm test:e2e` MUST keep its sh-wrapper
+
+`package.json`'s `"test:e2e"` script is:
+
+```json
+"test:e2e": "sh -c 'while [ \"$1\" = \"--\" ]; do shift; done; playwright test \"$@\"' --"
+```
+
+Do NOT simplify to `"test:e2e": "playwright test"`. pnpm injects a literal
+`--` separator between the script body and the user's args (so
+`pnpm test:e2e -- tests/smoke.spec.ts --list` becomes
+`playwright test -- tests/smoke.spec.ts --list`). After `--`, Playwright
+treats every remaining argument as a file glob — `--list` becomes a bogus
+glob, the runner executes the matching tests, and the verifier's "list
+without executing" assertion fails. The wrapper strips leading `--`
+separators so Playwright's flag parser sees them as flags.
+
+Same idiom should be used for any future `pnpm` script that wraps a CLI
+with its own flag parser (e.g. `vitest`, `cypress`).
+
 ### vitest config must wire `setupFiles` and `globals: true`
 
 Both workspace `vitest.config.ts` files set `globals: true` + `setupFiles:

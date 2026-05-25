@@ -223,6 +223,78 @@ describe('runFileBasedMigrations', () => {
     warnSpy.mockRestore();
   });
 
+  it('treats duplicate-column-name as idempotent: records marker and warns instead of errors', () => {
+    // Scenario: ledger marker is absent but the column already exists (e.g. a
+    // previous run applied the migration then the marker was erased).  The runner
+    // must record the marker and log at console.warn — NOT console.error.
+    //
+    // Setup:
+    //   001_create_base.sql  — creates a table with one column
+    //   002_add_col.sql      — ALTER TABLE ... ADD COLUMN (the column we'll collide on)
+
+    writeFileSync(
+      join(migrationsDir, '001_create_base.sql'),
+      'CREATE TABLE dup_col_target (id INTEGER PRIMARY KEY);'
+    );
+    writeFileSync(
+      join(migrationsDir, '002_add_col.sql'),
+      'ALTER TABLE dup_col_target ADD COLUMN label TEXT;'
+    );
+
+    // First initialize: both migrations apply cleanly.
+    const svc1 = new DatabaseService(dbPath);
+    svc1.setMigrationsDirForTesting(migrationsDir);
+    svc1.initialize();
+
+    // Erase only the 002 ledger marker so the runner will try to re-apply it.
+    const BetterSqlite = require('better-sqlite3');
+    const rawDb = new BetterSqlite(dbPath);
+    rawDb
+      .prepare("DELETE FROM user_preferences WHERE key = 'file_migration_applied:002_add_col.sql'")
+      .run();
+    rawDb.close();
+
+    // Second initialize: 001 is still marked (skipped); 002 marker is gone so
+    // the runner attempts the ALTER — SQLite throws "duplicate column name: label".
+    // The runner must catch it, record the marker, and warn (not error).
+    const warnSpy = vi.spyOn(console, 'warn');
+    const errorSpy = vi.spyOn(console, 'error');
+
+    const svc2 = new DatabaseService(dbPath);
+    svc2.setMigrationsDirForTesting(migrationsDir);
+    expect(() => svc2.initialize()).not.toThrow();
+
+    // Marker must be re-recorded after the duplicate-column path.
+    const db = new BetterSqlite(dbPath);
+    const row = db
+      .prepare("SELECT value FROM user_preferences WHERE key = 'file_migration_applied:002_add_col.sql'")
+      .get() as { value: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row?.value).toBe('true');
+
+    // console.warn must have been called mentioning the file or "duplicate column".
+    const warnMentions = warnSpy.mock.calls.some((args) =>
+      args.some(
+        (arg) =>
+          typeof arg === 'string' &&
+          (arg.includes('002_add_col.sql') || arg.toLowerCase().includes('duplicate column'))
+      )
+    );
+    expect(warnMentions).toBe(true);
+
+    // console.error must NOT have been called for the duplicate-column case.
+    const errorMentions = errorSpy.mock.calls.some((args) =>
+      args.some(
+        (arg) => typeof arg === 'string' && arg.includes('002_add_col.sql')
+      )
+    );
+    expect(errorMentions).toBe(false);
+
+    db.close();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
   it('applies files in numeric prefix order, not lexicographic order', () => {
     // If sorted lexicographically, '010' < '009' is false but '010' < '9' IS false —
     // more critically '010'.localeCompare('9') < 0 in some locales. The runner must
