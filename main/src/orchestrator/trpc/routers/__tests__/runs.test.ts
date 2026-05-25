@@ -228,19 +228,6 @@ describe('cyboflow.runs.list', () => {
 // ---------------------------------------------------------------------------
 
 describe('cyboflow.runs.start', () => {
-  afterEach(() => {
-    // Reset module-level startRunDeps between tests so guards are back to
-    // their unwired state. We do this by wiring a sentinel that throws, then
-    // the next test sets its own deps in beforeEach as needed. Alternatively
-    // we could patch the module variable directly, but going through the
-    // public API is cleaner and mirrors how index.ts uses it.
-    //
-    // For the METHOD_NOT_SUPPORTED test we simply don't call setStartRunDeps
-    // at all (never wired) — afterEach from a preceding test must have reset
-    // it. We use a separate describe level so the afterEach only runs after
-    // tests that did wire deps.
-  });
-
   // -------------------------------------------------------------------------
   // (a) Happy path — project found, launch called, response shape matches AC1
   // -------------------------------------------------------------------------
