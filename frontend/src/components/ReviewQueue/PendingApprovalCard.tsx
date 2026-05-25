@@ -16,7 +16,7 @@
 import React, { useState } from 'react';
 import { Button } from '../ui/Button';
 import { formatAge, truncatePayload } from '../../utils/approvalFormatters';
-import { trpc } from '../../utils/trpcClient';
+import { trpc } from '../../trpc/client';
 import type { Approval } from '../../../../shared/types/approvals';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { WorkflowRunStatus } from '../../../../shared/types/stuckInspection';
