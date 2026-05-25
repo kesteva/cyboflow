@@ -300,4 +300,24 @@ describe('CyboflowRoot — Quick Session', () => {
     expect(createQuickMock).toHaveBeenCalledTimes(1);
     expect(createQuickMock).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'none' });
   });
+
+  it('IPC failure envelope is logged via console.error and the picker still dismisses', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    createQuickMock.mockResolvedValueOnce({ success: false, error: 'project not found' });
+
+    render(<CyboflowRoot projectId={42} />);
+
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-chat'));
+    });
+
+    expect(createQuickMock).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith('[CyboflowRoot] createQuick failed', 'project not found');
+    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+
+    errorSpy.mockRestore();
+  });
 });
