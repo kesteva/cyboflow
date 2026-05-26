@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-039
-pending_count: 6
-last_updated: "2026-05-26T23:30:00.000Z"
+pending_count: 9
+last_updated: "2026-05-27T00:32:00.000Z"
 ---
 # Findings Queue
 
@@ -103,7 +103,7 @@ last_updated: "2026-05-26T23:30:00.000Z"
 - **location:** frontend/src/components/cyboflow/RunChatView.tsx:241-252 (mergedTimeline)
 - **description:** RunChatView's mergedTimeline concatenates `historicalMessages` (from `cyboflow.runs.listMessages`) with `streamEvents.filter(e => e.runId === runId)` with no deduplication. Both feeds derive from raw_events: listMessages returns a snapshot of all assistant-text + user-text turns at query time, while streamEvents accumulates from `setActiveRun(runId)` onward (the store resets streamEvents on setActiveRun). Any event that arrived between the setActiveRun call and listMessages query resolution will appear in BOTH arrays, rendering twice in the chat view. The plan explicitly acknowledged this as an accepted low-cost tradeoff ("Hardest Decision" section), but in practice every time a user opens the Chat tab for an actively-streaming run, the overlap window is non-empty — so duplicate bubbles are the expected steady-state UX, not the edge case. Worth resolving before users notice and report it.
 - **suggested_action:** When merging, dedupe by stable identity: ChatMessage rows have `id` (raw_events row id or assistant message id); StreamEvent assistant events expose `payload.message.id` and user events expose `payload.message` content with `tool_use_id`. Drop any streamEvent whose underlying message id is already present in historicalMessages, OR (simpler) only mix in streamEvents whose timestamp postdates the latest historicalMessages.createdAt. Add a test asserting overlap dedup. Coordinate with TASK-759 owner if a stronger id-correlation contract is needed on the wire shape.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-039-12
 - **source:** TASK-761 (code-reviewer)
@@ -113,4 +113,24 @@ last_updated: "2026-05-26T23:30:00.000Z"
 - **location:** frontend/src/components/cyboflow/RunChatView.tsx:86-95 + frontend/src/components/cyboflow/RunView.tsx:117-127
 - **description:** Light duplication between RunChatView's non-AskUserQuestion tool_use rendering branch (`renderAssistantBlock`) and RunView's `AssistantEventRow` tool_use branch. The plan explicitly chose to mirror RunView's shape ("same compact `tool: <name>` + JSON-stringified input box that RunView's AssistantEventRow renders") so the duplication is intentional, but the snippet is now in two places. Extracting a tiny `ToolUseBlockRow` shared component (or a `renderToolUseBlock(block)` helper) would let both call sites share output, and would also localize any future styling change. Not a blocker — small surface, both copies are short — but worth considering when the next tool-block UI tweak lands.
 - **suggested_action:** Extract `renderToolUseBlock(block: ToolUseBlock): ReactElement` to a small shared module under `frontend/src/components/cyboflow/` (e.g. `eventBlockRenderers.tsx`) and call from both RunView's AssistantEventRow and RunChatView's renderAssistantBlock. Re-run frontend tests; both files should shrink by ~8 lines each.
-- **resolved_by:**
+- **resolved_by:** 
+
+## FIND-SPRINT-039-13
+- **type:** scope_deviation
+- **source:** TASK-762 (executor)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/questionStore.ts
+- **description:** TASK-760 did not ship an "Other"-text bus setter (confirmed by reading the file). TASK-762 plan explicitly anticipated this gap in its Lowest Confidence Area section and pre-authorized Option A: adding otherText: Record<string, string> keyed by questionId plus setOtherText/clearOtherText reducers. This minimal extension keeps ChatInput dumb and AskUserQuestionCard the sole submit authority — required to meet AC4 (workflow-question mode forwards to questionStore, not tRPC).
+- **suggested_action:** No action needed — extension is intentional and pre-authorized by TASK-762 plan orchestrator note.
+- **resolved_by:** 
+
+## FIND-SPRINT-039-14
+- **source:** TASK-762 (verifier)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx:216-218 (and frontend/src/stores/questionStore.ts:52-100, frontend/src/components/cyboflow/ChatInput.tsx:106-114)
+- **description:** The `otherText` bus added by TASK-762 to `questionStore` is currently a write-only sink — ChatInput populates `questionStore.otherText[questionId]` via `setOtherText` in workflow-question mode, but AskUserQuestionCard maintains its own LOCAL `useState<string[]>` for "Other" text (line 216) and never imports or subscribes to `useQuestionStore` for that field. Result: typing in the bottom-bar ChatInput in workflow-question mode silently writes to a store nothing reads. The user sees their text disappear from the textarea (ChatInput clears on send) but the card's "Other" field stays empty. From the user's perspective the bottom-bar input is a no-op in workflow-question mode. This breaks the epic's stated success signal ("when a question is pending, typing forwards the text as the 'Other' answer", per EPIC-per-run-chat-surface.md line 14 and line 34). TASK-762's literal AC4 passes (ChatInput calls setOtherText and not trpc.answer.mutate; both unit tests assert this), but the consumer-side wiring was never planned: TASK-760 didn't ship a reader (its plan predates the bus), TASK-762's plan focused on ChatInput only, and the epic has no third task. The plan's "Hardest Decision" justified the forwarding pattern on the assumption that AskUserQuestionCard would read from the bus — that assumption was never realized in code. Recommend a follow-up task to (a) make AskUserQuestionCard subscribe to questionStore.otherText keyed by item.id, prefer the bus value over local state in the "Other" text input, fall back to local state when bus value is undefined, and (b) decide on bus semantics for multi-sub-question cards (currently keyed by questionId not (questionId, subIndex), so multi-sub-question cards would stomp each other on the otherText[item.id] slot). Also unused: the `clearOtherText` reducer has no callers in the codebase.
+- **suggested_action:** Open a follow-up task (suggest TASK-772 against the per-run-chat-surface epic, or roll into a future ask-user-question-roundtrip fix) to wire AskUserQuestionCard to read `questionStore.otherText[item.id]` and use it to prefill the per-question "Other" input. Also clarify keying semantics for multi-sub-question cards (extend the bus to `Record<string, Record<number, string>>` keyed by `(questionId, subIndex)`, or document that the bus is question-level only and the card distributes the text to all sub-questions' Other fields uniformly). Call `clearOtherText(questionId)` from AskUserQuestionCard's submit handler so the bus value doesn't leak across question instances.
+- **resolved_by:** 
