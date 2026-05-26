@@ -107,7 +107,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
 
       <button
         onClick={handleStartRun}
-        disabled={selectedId === null || isLoading || isStarting}
+        disabled={selectedId === null || isLoading || isStarting || quickSession.isStarting !== null}
         className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         Start Run

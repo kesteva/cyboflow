@@ -261,6 +261,21 @@ describe('WorkflowPicker — Quick Chat / Quick Terminal', () => {
     });
   });
 
+  it('Start Run button is disabled while a quick session is in flight', async () => {
+    mockCreateQuick.mockReturnValue(new Promise(() => { /* never resolves */ }));
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const quickChatBtn = await screen.findByTestId('quick-chat-button');
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+
+    fireEvent.click(quickChatBtn);
+
+    await waitFor(() => {
+      expect(startRunBtn).toBeDisabled();
+    });
+  });
+
   it('Quick Chat surfaces IPC error and does not navigate or call panelApi.createPanel', async () => {
     const onWorkflowStarted = vi.fn();
     mockCreateQuick.mockResolvedValue({ success: false, error: 'IPC error: quota exceeded' });
