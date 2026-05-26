@@ -35,7 +35,7 @@
 import { create } from 'zustand';
 import type { McpServerHealth, McpHealthUiStatus } from '../../../shared/types/mcpHealth';
 import { toUiStatus } from '../../../shared/types/mcpHealth';
-import { trpc } from '../utils/trpcClient';
+import { trpc } from '../trpc/client';
 
 // ---------------------------------------------------------------------------
 // Store status enum (three-value UI-level status)

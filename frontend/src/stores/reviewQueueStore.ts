@@ -26,7 +26,7 @@ import { useState, useEffect } from 'react';
 import type { Approval } from '../../../shared/types/approvals';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
 import { selectQueueView } from '../utils/reviewQueueSelectors';
-import { trpc } from '../utils/trpcClient';
+import { trpc } from '../trpc/client';
 
 // ---------------------------------------------------------------------------
 // Types

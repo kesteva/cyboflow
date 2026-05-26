@@ -9,7 +9,7 @@ originating_ideas: [IDEA-023]
 
 ## Objective
 
-The renderer currently mixes raw-IPC `electron.invoke` calls (via `frontend/src/utils/cyboflowApi.ts`) with the typed tRPC client (via `frontend/src/utils/trpcClient.ts`). Four live `cyboflow:*` channels (`listWorkflows`, `startRun`, `listRuns`, `mcp-health`) have no fully-wired tRPC counterparts yet: two are stubs (`runs.start`, `runs.list`, `workflows.list`), one is implemented but unbooted (`health.mcpServer`), and one has no counterpart at all. The mixed surface doubles the audit cost of every IPC change and blocks the standalone-orchestrator extraction planned in ROADMAP-001 §6.3 (raw `ipcMain` handlers are Electron-bound). This epic wires the missing counterparts, cuts all renderer call sites onto the typed transport, deletes the migrated raw-IPC handlers, and deletes the unwired legacy `main/src/trpc/` tree.
+The renderer currently mixes raw-IPC `electron.invoke` calls (via `frontend/src/utils/cyboflowApi.ts`) with the typed tRPC client (via `frontend/src/trpc/client.ts`). Four live `cyboflow:*` channels (`listWorkflows`, `startRun`, `listRuns`, `mcp-health`) have no fully-wired tRPC counterparts yet: two are stubs (`runs.start`, `runs.list`, `workflows.list`), one is implemented but unbooted (`health.mcpServer`), and one has no counterpart at all. The mixed surface doubles the audit cost of every IPC change and blocks the standalone-orchestrator extraction planned in ROADMAP-001 §6.3 (raw `ipcMain` handlers are Electron-bound). This epic wires the missing counterparts, cuts all renderer call sites onto the typed transport, deletes the migrated raw-IPC handlers, and deletes the unwired legacy `main/src/trpc/` tree.
 
 ## Scope
 

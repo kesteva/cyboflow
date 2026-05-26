@@ -31,7 +31,7 @@
  */
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { trpc } from '../utils/trpcClient';
+import { trpc } from '../trpc/client';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 import type { StuckDetectedEvent, StuckReason } from '../../../shared/types/stuckDetection';
 
