@@ -505,3 +505,237 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-758: toolConfig + routeAskUserQuestion hook wiring
+// ---------------------------------------------------------------------------
+
+describe('TASK-758: AskUserQuestion wiring', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+
+  beforeEach(() => {
+    capturedQueryOptions = null;
+    db = createTestDb();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    const qf = makeQueueFactory();
+    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  // ─── toolConfig.askUserQuestion.previewFormat='markdown' is present ───────
+
+  it('buildSdkOptions includes toolConfig.askUserQuestion.previewFormat=markdown unconditionally', async () => {
+    // permissionMode:'ignore' skips the PreToolUse hook but toolConfig is set
+    // unconditionally before the hooks conditional spread — verify it lands.
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-toolconfig',
+      sessionId: 'session-toolconfig',
+      worktreePath: '/tmp/test',
+      prompt: 'test toolConfig present',
+      permissionMode: 'ignore',
+    });
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    expect(capturedQueryOptions).not.toBeNull();
+    // Cast to access the full runtime shape — TypeScript narrowing on
+    // capturedQueryOptions is intentionally conservative.
+    const opts = capturedQueryOptions as unknown as {
+      toolConfig?: { askUserQuestion?: { previewFormat?: string } };
+    };
+    expect(opts.toolConfig?.askUserQuestion?.previewFormat).toBe('markdown');
+  });
+
+  // ─── routeAskUserQuestion happy path: updatedInput shape ─────────────────
+
+  it('makePreToolUseHook routes AskUserQuestion to QuestionRouter and returns updatedInput payload', async () => {
+    // Stub QuestionRouter.getInstance().requestQuestion to resolve immediately
+    // so the hook does not block waiting for a real user answer.
+    const fakeAnswer = { answers: { 'Which approach?': 'TDD' } };
+    vi.spyOn(QuestionRouter, 'getInstance').mockReturnValue({
+      requestQuestion: vi.fn().mockResolvedValue(fakeAnswer),
+    } as unknown as QuestionRouter);
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    // Extract the hook callback via private access — makePreToolUseHook is the
+    // factory; we call it directly and invoke the resulting callback.
+    const mgrPrivate = mgr as unknown as {
+      makePreToolUseHook: (panelId: string) => (
+        input: unknown,
+        toolUseId: string,
+        ctx: unknown,
+      ) => Promise<unknown>;
+    };
+    const hook = mgrPrivate.makePreToolUseHook('panel-ask-user');
+
+    const fakeQuestions = [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        multiSelect: false,
+        options: [{ label: 'TDD', description: 'Test-driven' }],
+      },
+    ];
+
+    const fakePreToolInput = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_use_id: 'tool-use-ask-001',
+      tool_input: { questions: fakeQuestions },
+      session_id: 'test-session',
+      transcript_path: '/tmp/test.jsonl',
+      cwd: '/tmp',
+    };
+
+    const result = await hook(fakePreToolInput, 'tool-use-ask-001', null);
+    const output = result as {
+      hookSpecificOutput: {
+        hookEventName: string;
+        permissionDecision: string;
+        updatedInput?: { questions: unknown; answers: unknown };
+      };
+    };
+
+    expect(output.hookSpecificOutput.hookEventName).toBe('PreToolUse');
+    expect(output.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(output.hookSpecificOutput.updatedInput).toEqual({
+      questions: fakeQuestions,
+      answers: fakeAnswer.answers,
+    });
+  });
+
+  // ─── routeAskUserQuestion error path: deny on QuestionRouter throw ────────
+
+  it('makePreToolUseHook returns permissionDecision:deny when QuestionRouter.requestQuestion throws', async () => {
+    vi.spyOn(QuestionRouter, 'getInstance').mockReturnValue({
+      requestQuestion: vi.fn().mockRejectedValue(new Error('run not running')),
+    } as unknown as QuestionRouter);
+
+    const sessionManager = createMockSessionManager();
+    // Pass undefined logger so makeLoggerLike falls back to the console shim
+    // (which has .error()). The prod spy only has warn/info/verbose, and the
+    // error path in routeAskUserQuestion calls loggerLike.error().
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      undefined,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    const mgrPrivate = mgr as unknown as {
+      makePreToolUseHook: (panelId: string) => (
+        input: unknown,
+        toolUseId: string,
+        ctx: unknown,
+      ) => Promise<unknown>;
+    };
+    const hook = mgrPrivate.makePreToolUseHook('panel-ask-error');
+
+    const fakePreToolInput = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'AskUserQuestion',
+      tool_use_id: 'tool-use-ask-002',
+      tool_input: { questions: [] },
+      session_id: 'test-session',
+      transcript_path: '/tmp/test.jsonl',
+      cwd: '/tmp',
+    };
+
+    const result = await hook(fakePreToolInput, 'tool-use-ask-002', null);
+    const output = result as {
+      hookSpecificOutput: {
+        hookEventName: string;
+        permissionDecision: string;
+        permissionDecisionReason?: string;
+      };
+    };
+
+    expect(output.hookSpecificOutput.hookEventName).toBe('PreToolUse');
+    expect(output.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(output.hookSpecificOutput.permissionDecisionReason).toContain('Internal question-router error');
+  });
+
+  // ─── Non-AskUserQuestion tools still delegate to ApprovalRouter ───────────
+
+  it('makePreToolUseHook delegates non-AskUserQuestion tools to ApprovalRouter', async () => {
+    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    const mgrPrivate = mgr as unknown as {
+      makePreToolUseHook: (panelId: string) => (
+        input: unknown,
+        toolUseId: string,
+        ctx: unknown,
+      ) => Promise<unknown>;
+    };
+    const hook = mgrPrivate.makePreToolUseHook('panel-bash');
+
+    const fakePreToolInput = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-use-bash-001',
+      tool_input: { command: 'ls' },
+      session_id: 'test-session',
+      transcript_path: '/tmp/test.jsonl',
+      cwd: '/tmp',
+    };
+
+    const result = await hook(fakePreToolInput, 'tool-use-bash-001', null);
+    const output = result as {
+      hookSpecificOutput: {
+        hookEventName: string;
+        permissionDecision: string;
+      };
+    };
+
+    expect(output.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(requestApproval).toHaveBeenCalledOnce();
+    expect(requestApproval).toHaveBeenCalledWith('panel-bash', 'Bash', { command: 'ls' }, expect.any(Function));
+  });
+});
