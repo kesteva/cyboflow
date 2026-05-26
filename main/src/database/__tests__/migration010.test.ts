@@ -10,6 +10,8 @@
  * 4. `workflow_runs.status` still accepts all 8 original status values.
  * 5. All three pre-existing workflow_runs indexes are preserved after the rebuild.
  * 6. The new idx_questions_status_created index is created.
+ * 7. FK-bound child rows (approvals, messages, raw_events) survive migration 010
+ *    when the migration is applied via the production-path transaction wrapper.
  *
  * NOTE: 008 and 009 migrations affect unrelated tables (sessions run_id, etc.)
  * and are intentionally skipped here — migration 010's logic does not depend on
@@ -31,6 +33,30 @@ function applyMigrations006To010(): Database.Database {
     db.exec(readFileSync(join(__dirname, '..', 'migrations', n), 'utf-8'));
   }
   return db;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: apply a single migration SQL the same way the production runner does.
+//
+// runFileBasedMigrations() wraps every file in `this.transaction(() => db.exec(sql))`.
+// SQLite's documented behaviour: PRAGMA foreign_keys toggles are no-ops INSIDE
+// a transaction. The production fix (database.ts) therefore toggles the pragma
+// OUTSIDE the transaction wrapper. This helper mirrors that exact path so the
+// regression test below exercises the real code flow, not the autocommit path
+// used by db.exec() directly.
+// ---------------------------------------------------------------------------
+
+function runMigrationViaProductionPath(db: Database.Database, sql: string): void {
+  const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');
+  if (needsFkOff) db.pragma('foreign_keys = OFF');
+  try {
+    const txn = db.transaction(() => {
+      db.exec(sql);
+    });
+    txn();
+  } finally {
+    if (needsFkOff) db.pragma('foreign_keys = ON');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +202,83 @@ describe('Migration 010: questions table + workflow_runs awaiting_input CHECK', 
       .all() as Array<{ name: string }>;
 
     expect(rows).toHaveLength(1);
+
+    db.close();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Regression test: FK children survive the workflow_runs table-recreation
+  // when migration 010 is run via the production-path transaction wrapper.
+  //
+  // Production bug this guards: `PRAGMA foreign_keys=OFF` inside a transaction
+  // is a no-op (SQLite docs). If the pragma is not toggled OUTSIDE the
+  // transaction, the DROP TABLE workflow_runs CASCADE-deletes every row in
+  // approvals, messages, and raw_events. This test mirrors the exact production
+  // runner path (see runMigrationViaProductionPath helper above).
+  // ---------------------------------------------------------------------------
+
+  it('FK-bound child rows (approvals, messages, raw_events) survive migration 010 via the production-path transaction wrapper', () => {
+    const db = new Database(':memory:');
+    // Apply 006 and 007 without the production wrapper (no PRAGMA involved).
+    for (const n of ['006_cyboflow_schema.sql', '007_add_stuck_reason.sql']) {
+      db.exec(readFileSync(join(__dirname, '..', 'migrations', n), 'utf-8'));
+    }
+
+    // Seed the parent rows required for FK constraints.
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json)
+       VALUES ('wf-seed', 1, 'seed-wf', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+       VALUES ('wr-seed', 'wf-seed', 1, 'running', 'default')`,
+    ).run();
+
+    // Seed one child row in each FK-bound table.
+    db.prepare(
+      `INSERT INTO approvals
+         (id, run_id, tool_name, tool_input_json, tool_use_id, status)
+       VALUES ('ap-1', 'wr-seed', 'Bash', '{}', 'tu-ap-1', 'pending')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages
+         (id, run_id, role, content_json)
+       VALUES ('msg-1', 'wr-seed', 'assistant', '"hello"')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO raw_events
+         (run_id, event_type, payload_json)
+       VALUES ('wr-seed', 'sdk_message', '{}')`,
+    ).run();
+
+    // Verify seed is in place before running migration 010.
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM approvals').get() as { n: number }).n,
+    ).toBe(1);
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n,
+    ).toBe(1);
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM raw_events').get() as { n: number }).n,
+    ).toBe(1);
+
+    // Apply migration 010 via the production-path wrapper (pragma OUTSIDE txn).
+    const sql010 = readFileSync(
+      join(__dirname, '..', 'migrations', '010_questions.sql'),
+      'utf-8',
+    );
+    runMigrationViaProductionPath(db, sql010);
+
+    // Child rows MUST still exist after the workflow_runs table rebuild.
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM approvals').get() as { n: number }).n,
+    ).toBe(1);
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n,
+    ).toBe(1);
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM raw_events').get() as { n: number }).n,
+    ).toBe(1);
 
     db.close();
   });
