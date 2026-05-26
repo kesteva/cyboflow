@@ -2,7 +2,7 @@
 --
 -- Two parts inside a single transaction:
 --   (1) New `questions` table — stores AskUserQuestion gates analogous to `approvals`.
---   (2) workflow_runs CHECK-constraint update — adds 'awaiting_input' via the
+--   (2) workflow_runs CHECK-constraint update — adds a 9th status value via the
 --       SQLite table-recreation recipe (no ALTER TABLE for CHECK constraints).
 --
 -- Risk 2 in .soloflow/active/research/IDEA-025-research.md documents the
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS questions (
 CREATE INDEX IF NOT EXISTS idx_questions_status_created ON questions(status, created_at);
 
 -- ---------------------------------------------------------------------------
--- Part 2: workflow_runs CHECK-constraint update — add 'awaiting_input'.
+-- Part 2: workflow_runs CHECK-constraint update — widen the status enum to 9 values.
 --
 -- SQLite has no ALTER TABLE … DROP/ADD CONSTRAINT. We use the canonical
 -- create-new-table + copy + DROP + RENAME recipe. FK on approvals.run_id and
