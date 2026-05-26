@@ -1,8 +1,8 @@
 ---
 id: TASK-751
 idea: SPRINT-037-compound
-status: ready
-created: 2026-05-25T00:00:00Z
+status: in-flight
+created: "2026-05-25T00:00:00Z"
 files_owned:
   - main/src/database/models.ts
   - main/src/services/sessionManager.ts
@@ -21,11 +21,11 @@ acceptance_criteria:
   - criterion: "convertDbSessionToSession in main/src/services/sessionManager.ts maps DbSession.run_id onto the returned Session.runId field, coalescing undefined to null"
     verification: "grep -n 'runId:' main/src/services/sessionManager.ts shows `runId: dbSession.run_id ?? null` inside the returned object literal of convertDbSessionToSession (around lines 191-221)"
   - criterion: "Regression test asserts: a DbSession with run_id='flow-001' round-trips to Session.runId='flow-001'; a DbSession with run_id=null round-trips to Session.runId=null; a DbSession with run_id undefined round-trips to Session.runId=null"
-    verification: "pnpm --filter main test -- sessionManagerRunIdMapping passes; the test file at main/src/services/__tests__/sessionManagerRunIdMapping.test.ts exists and contains all three cases"
-  - criterion: "pnpm typecheck succeeds with the new field"
-    verification: "pnpm typecheck exits 0"
-  - criterion: "Existing main test suite still passes (no regression in sessionManager.mainRepoPermission.test.ts)"
-    verification: "pnpm --filter main test exits 0"
+    verification: pnpm --filter main test -- sessionManagerRunIdMapping passes; the test file at main/src/services/__tests__/sessionManagerRunIdMapping.test.ts exists and contains all three cases
+  - criterion: pnpm typecheck succeeds with the new field
+    verification: pnpm typecheck exits 0
+  - criterion: Existing main test suite still passes (no regression in sessionManager.mainRepoPermission.test.ts)
+    verification: pnpm --filter main test exits 0
 depends_on: []
 estimated_complexity: low
 epic: quick-session
@@ -34,16 +34,15 @@ test_strategy:
   justification: "FIND-SPRINT-037-1 documents a silent inversion of the Quick badge in production (SessionListItem.tsx:431 reads session.runId, which was always undefined → badge fired for every session). The bug shipped because TASK-749 had no test exercising the mapper. A round-trip mapper test is the cheapest, most direct regression guard."
   targets:
     - behavior: "convertDbSessionToSession copies run_id='flow-001' to runId='flow-001' (flow-owned session)"
-      test_file: "main/src/services/__tests__/sessionManagerRunIdMapping.test.ts"
+      test_file: main/src/services/__tests__/sessionManagerRunIdMapping.test.ts
       type: unit
-    - behavior: "convertDbSessionToSession copies run_id=null to runId=null (quick session — expected Quick badge)"
-      test_file: "main/src/services/__tests__/sessionManagerRunIdMapping.test.ts"
+    - behavior: convertDbSessionToSession copies run_id=null to runId=null (quick session — expected Quick badge)
+      test_file: main/src/services/__tests__/sessionManagerRunIdMapping.test.ts
       type: unit
-    - behavior: "convertDbSessionToSession copies run_id=undefined (missing column on legacy row) to runId=null (defensive null-coalescing)"
-      test_file: "main/src/services/__tests__/sessionManagerRunIdMapping.test.ts"
+    - behavior: convertDbSessionToSession copies run_id=undefined (missing column on legacy row) to runId=null (defensive null-coalescing)
+      test_file: main/src/services/__tests__/sessionManagerRunIdMapping.test.ts
       type: unit
 ---
-
 # Wire run_id through DbSession → Session mapper so Quick badge is accurate
 
 ## Objective

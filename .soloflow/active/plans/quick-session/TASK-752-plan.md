@@ -1,8 +1,8 @@
 ---
 id: TASK-752
 idea: SPRINT-037-compound
-status: ready
-created: 2026-05-25T00:00:00Z
+status: in-flight
+created: "2026-05-25T00:00:00Z"
 files_owned:
   - frontend/src/hooks/useQuickSession.ts
   - frontend/src/hooks/__tests__/useQuickSession.test.tsx
@@ -26,18 +26,18 @@ acceptance_criteria:
     verification: "grep -n 'export function useQuickSession' frontend/src/hooks/useQuickSession.ts returns a match"
   - criterion: "useQuickSession routes through API.sessions.createQuick (TASK-746 wrapper), then panelApi.createPanel, then setActiveQuickSession"
     verification: "grep -n 'API.sessions.createQuick\\|panelApi.createPanel\\|setActiveQuickSession' frontend/src/hooks/useQuickSession.ts returns three or more matches"
-  - criterion: "WorkflowPicker.tsx no longer references window.electronAPI.sessions.createQuick"
+  - criterion: WorkflowPicker.tsx no longer references window.electronAPI.sessions.createQuick
     verification: "grep -n 'window.electronAPI.sessions.createQuick' frontend/src/components/cyboflow/WorkflowPicker.tsx returns 0 matches"
-  - criterion: "CyboflowRoot.tsx no longer references window.electronAPI.sessions.createQuick"
+  - criterion: CyboflowRoot.tsx no longer references window.electronAPI.sessions.createQuick
     verification: "grep -n 'window.electronAPI.sessions.createQuick' frontend/src/components/cyboflow/CyboflowRoot.tsx returns 0 matches"
-  - criterion: "Both call sites import and use useQuickSession"
+  - criterion: Both call sites import and use useQuickSession
     verification: "grep -n 'useQuickSession' frontend/src/components/cyboflow/WorkflowPicker.tsx frontend/src/components/cyboflow/CyboflowRoot.tsx returns at least two matches"
-  - criterion: "CyboflowRoot regression tests assert panelApi.createPanel called AND activeQuickSessionId set after picker selection (both Chat and Terminal)"
-    verification: "pnpm --filter frontend test -- CyboflowRoot exits 0; new it() blocks for chat-full-lifecycle and terminal-full-lifecycle present"
-  - criterion: "useQuickSession unit test covers success and failure paths"
-    verification: "pnpm --filter frontend test -- useQuickSession exits 0"
-  - criterion: "Existing WorkflowPicker Quick Chat / Quick Terminal tests still pass"
-    verification: "pnpm --filter frontend test -- WorkflowPicker exits 0"
+  - criterion: CyboflowRoot regression tests assert panelApi.createPanel called AND activeQuickSessionId set after picker selection (both Chat and Terminal)
+    verification: pnpm --filter frontend test -- CyboflowRoot exits 0; new it() blocks for chat-full-lifecycle and terminal-full-lifecycle present
+  - criterion: useQuickSession unit test covers success and failure paths
+    verification: pnpm --filter frontend test -- useQuickSession exits 0
+  - criterion: Existing WorkflowPicker Quick Chat / Quick Terminal tests still pass
+    verification: pnpm --filter frontend test -- WorkflowPicker exits 0
   - criterion: "pnpm typecheck && pnpm lint exit 0"
     verification: "pnpm typecheck && pnpm lint exit 0"
 depends_on: []
@@ -48,19 +48,18 @@ test_strategy:
   justification: "FIND-SPRINT-037-3 documents that CyboflowRoot's Quick button silently produces orphan worktrees because handlePickQuickMode skips panelApi.createPanel and setActiveQuickSession. The existing CyboflowRoot Quick Session tests assert the createQuick call but NOT the full lifecycle — that gap is exactly what let the bug ship. New regression tests close that gap. The new hook is non-trivial shared logic that warrants dedicated unit tests."
   targets:
     - behavior: "useQuickSession success path: createQuick resolves → panelApi.createPanel called with correct args → setActiveQuickSession called → onSuccess invoked → isStarting returns to null"
-      test_file: "frontend/src/hooks/__tests__/useQuickSession.test.tsx"
+      test_file: frontend/src/hooks/__tests__/useQuickSession.test.tsx
       type: unit
     - behavior: "useQuickSession failure path: createQuick returns { success: false, error } → error state populated; setActiveQuickSession NOT called; panelApi.createPanel NOT called"
-      test_file: "frontend/src/hooks/__tests__/useQuickSession.test.tsx"
+      test_file: frontend/src/hooks/__tests__/useQuickSession.test.tsx
       type: unit
     - behavior: "CyboflowRoot Chat pick: panelApi.createPanel called with type='claude' AND activeQuickSessionId set"
-      test_file: "frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
       type: component
     - behavior: "CyboflowRoot Terminal pick: panelApi.createPanel called with type='terminal' and initialState.cwd=worktreePath AND activeQuickSessionId set"
-      test_file: "frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
       type: component
 ---
-
 # Extract useQuickSession hook + complete CyboflowRoot lifecycle wiring
 
 ## Objective
