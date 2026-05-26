@@ -5,6 +5,8 @@
  */
 import { useState } from 'react';
 import { RunView } from './RunView';
+import { RunChatView } from './RunChatView';
+import { useCyboflowStore } from '../../stores/cyboflowStore';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,6 +69,7 @@ const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
 
 export function RunBottomPane() {
   const [activeTab, setActiveTab] = useState<TabId>('data-stream');
+  const activeRunId = useCyboflowStore((s) => s.activeRunId);
 
   return (
     <div className="flex h-full flex-col">
@@ -81,14 +84,7 @@ export function RunBottomPane() {
             Terminal — coming soon
           </div>
         )}
-        {activeTab === 'chat' && (
-          <div
-            data-testid="run-bottom-pane-chat-placeholder"
-            className="p-4 text-sm text-text-secondary"
-          >
-            Chat — coming soon
-          </div>
-        )}
+        {activeTab === 'chat' && <RunChatView runId={activeRunId} />}
       </div>
     </div>
   );
