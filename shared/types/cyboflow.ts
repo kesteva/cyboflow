@@ -10,7 +10,8 @@ export type WorkflowRunStatus =
   | 'stuck'
   | 'completed'
   | 'failed'
-  | 'canceled';
+  | 'canceled'
+  | 'awaiting_input';
 
 /**
  * Terminal workflow_runs statuses — runs in these states cannot transition

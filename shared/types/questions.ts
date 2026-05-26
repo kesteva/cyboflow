@@ -1,0 +1,77 @@
+/**
+ * Shared Question types for the ask-user-question-roundtrip UI (IDEA-025).
+ *
+ * These are the UI-facing wire types that flow from the tRPC
+ * `cyboflow.questions.listPending` query and the
+ * `cyboflow.questions.onQuestionCreated` subscription to the renderer.
+ *
+ * Invariants:
+ *  - Pure type module: NO runtime imports.
+ *  - Modeled after `shared/types/approvals.ts` — same structural constraints.
+ *  - Field shapes are wire-stable: changing them is a breaking change to the
+ *    question-answer UI and every component that imports from this module.
+ */
+
+/** A single AskUserQuestion entry as carried in the SDK's AskUserQuestionInput.questions array. */
+export interface QuestionPayload {
+  /** The full question text. Doubles as the key in QuestionAnswer.answers. */
+  question: string;
+  /** Short chip-style label, ≤12 chars per Anthropic SDK contract. */
+  header: string;
+  /** Whether the user may pick multiple options. */
+  multiSelect: boolean;
+  /** 2–4 options per the SDK constraint. */
+  options: ReadonlyArray<{
+    label: string;
+    description?: string;
+    /** Markdown when toolConfig.askUserQuestion.previewFormat === 'markdown'. Absent unless that option is set. */
+    preview?: string;
+  }>;
+}
+
+/**
+ * A single question gate as seen by the renderer.
+ * Populated from the `questions` DB table via `cyboflow.questions.listPending`.
+ */
+export interface Question {
+  /** UUID — matches `questions.id` in the database. */
+  id: string;
+  /** Foreign key to `workflow_runs.id`. */
+  runId: string;
+  /** SDK tool_use_id that produced this question — used to correlate the answer back to the tool call. */
+  toolUseId: string;
+  /** The 1–4 questions in this AskUserQuestion call. */
+  questions: ReadonlyArray<QuestionPayload>;
+  /** Current lifecycle state. */
+  status: 'pending' | 'answered' | 'timed_out';
+  /** ISO-8601 UTC timestamp when the question gate was created. */
+  createdAt: string;
+  /** ISO-8601 timestamp of the answer, or null while pending. */
+  answeredAt: string | null;
+  /** Serialized QuestionAnswer once answered, or null while pending. */
+  answerJson: string | null;
+}
+
+/**
+ * The shape the renderer sends back when answering. Mirrors the SDK's
+ * AskUserQuestionOutput (sdk-tools.d.ts:2620 — cited in IDEA-025-research).
+ *
+ * Keys of `answers` are the full question text (NOT the header). Values are
+ * the selected option's `label`. For multi-select, comma-join labels.
+ * The implicit "Other" free-text answer is also a label string here.
+ */
+export interface QuestionAnswer {
+  answers: Record<string, string>;
+  annotations?: Record<string, { preview?: string; notes?: string }>;
+}
+
+/** Emitted on `cyboflow.questions.onQuestionCreated`. */
+export interface QuestionCreatedEvent {
+  question: Question;
+}
+
+/** Emitted on `cyboflow.questions.onQuestionAnswered`. */
+export interface QuestionAnsweredEvent {
+  questionId: string;
+  status: 'answered' | 'timed_out';
+}
