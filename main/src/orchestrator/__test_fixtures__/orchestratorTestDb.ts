@@ -37,6 +37,13 @@ export interface CreateTestDbOptions {
    * not support that clause). Do not pass this option twice on the same DB.
    */
   includeStuckDetectedAt?: boolean;
+  /**
+   * If true, additionally apply migration 010 (questions table + workflow_runs
+   * status='awaiting_input'). Implemented as additive SQL on top of
+   * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test
+   * in __tests__/orchestratorTestDb.test.ts will drift.
+   */
+  includeQuestionsTable?: boolean;
 }
 
 /**
@@ -56,6 +63,22 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
+  if (options?.includeQuestionsTable) {
+    // Migration 010 references stuck_detected_at (added in migration 007) in the
+    // workflow_runs reconstruction SELECT. Apply it first if not already present.
+    if (!options?.includeStuckDetectedAt) {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
+    }
+    // Read and apply migration 010 verbatim — single source of truth for the
+    // questions schema and the workflow_runs CHECK-constraint recreate.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('node:path') as typeof import('path');
+    const migration010Path = path.resolve(__dirname, '../../database/migrations/010_questions.sql');
+    const sql = fs.readFileSync(migration010Path, 'utf8');
+    db.exec(sql);
+  }
   return db;
 }
 
@@ -67,7 +90,7 @@ export interface SeedRunOverrides {
   /** Override the workflow_run id (defaults to a generated uuid-like string). */
   id?: string;
   /** Override the run status (defaults to 'running'). */
-  status?: 'queued' | 'starting' | 'running' | 'awaiting_review' | 'stuck' | 'completed' | 'failed' | 'canceled';
+  status?: 'queued' | 'starting' | 'running' | 'awaiting_review' | 'awaiting_input' | 'stuck' | 'completed' | 'failed' | 'canceled';
   /** Override the workflow id (defaults to `workflow-${runId}`). */
   workflowId?: string;
   /** Override the project_id FK (defaults to 1). */
@@ -153,6 +176,52 @@ export function seedApproval(db: Database.Database, overrides: SeedApprovalOverr
        (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, overrides.runId, toolName, toolInputJson, toolUseId, status, createdAt);
+
+  return id;
+}
+
+/**
+ * Optional overrides for seedQuestion. `runId` is required (no phantom rows).
+ * All other fields are optional; defaults produce a minimal valid pending row.
+ *
+ * Requires the test DB to have been created with `includeQuestionsTable: true`.
+ */
+export interface SeedQuestionOverrides {
+  /** The question id. Defaults to a generated unique string. */
+  id?: string;
+  /** The workflow_run id this question belongs to (required). */
+  runId: string;
+  /** The tool_use_id. Defaults to the question id. */
+  toolUseId?: string;
+  /** The questions_json. Defaults to '[]'. */
+  questionsJson?: string;
+  /** The question status. Defaults to 'pending'. */
+  status?: 'pending' | 'answered' | 'timed_out';
+  /** The created_at ISO string. Defaults to the current time. */
+  createdAt?: string;
+}
+
+/**
+ * Seeds one questions row with sensible defaults and optional overrides.
+ *
+ * The caller must have already called `seedRun(db, { id: runId })` (or
+ * equivalent) before this function — `runId` is a NOT NULL FK and inserting
+ * without a parent row will fail the FK constraint.
+ *
+ * @returns The inserted question id.
+ */
+export function seedQuestion(db: Database.Database, overrides: SeedQuestionOverrides): string {
+  const id = overrides.id ?? `question-${Math.random().toString(36).slice(2)}`;
+  const toolUseId = overrides.toolUseId ?? id;
+  const questionsJson = overrides.questionsJson ?? '[]';
+  const status = overrides.status ?? 'pending';
+  const createdAt = overrides.createdAt ?? new Date().toISOString();
+
+  db.prepare(
+    `INSERT INTO questions
+       (id, run_id, tool_use_id, questions_json, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, overrides.runId, toolUseId, questionsJson, status, createdAt);
 
   return id;
 }
