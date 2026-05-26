@@ -1,9 +1,9 @@
 ---
-pending_count: 28
+pending_count: 29
 buckets:
   decisions: 0
   actions: 1
-  testing: 22
+  testing: 23
   deferred_visual: 5
 items: []
 ---
@@ -289,6 +289,23 @@ _No items._
     - "AC7: Manual smoke — pnpm dev boots without errors; runs list, workflow picker, run-start, and MCP sidebar dot continue to work via tRPC"
   level: visual
   severity: medium
+
+- task: SPRINT-038
+  type: action_required
+  bucket: testing
+  dedup_key: sprint_038_quick_session_visual_flow
+  plan_ref: .soloflow/active/sprints/SPRINT-038/sprint.json
+  action: "End-of-sprint visual smoke for SPRINT-038 quick-session epic. Start `pnpm dev` (full Electron — Vite alone on :4521 cannot bootstrap without preload-injected electronTRPC; see CLAUDE.md). Then exercise three flows against the running renderer: (1) WorkflowPicker Quick button → click 'Quick' on an existing project → confirm a new session is created, a panel is created, the session is set as the active quick-session for that project, AND a Quick badge renders next to the session in the sidebar (`SessionListItem.tsx:431` driven by `session.runId != null` — TASK-751 mapper fix). (2) CyboflowRoot top-level Quick button (sidebar/header) → click → confirm SAME full lifecycle (createQuick → createPanel → setActiveQuickSession) AND no orphan worktree is left behind (FIND-SPRINT-037-3, TASK-752 hook unification). (3) Sidebar Quick-badge regression — open an existing session whose run_id is null in DB → confirm NO Quick badge; open one whose run_id is non-null → confirm Quick badge present (TASK-751 round-trip mapper). Per-task unit tests cover each at the component/hook level (frontend 28 files / 375 tests pass; main 72 files / 659 tests pass — see Pass 2 below), but no E2E execution was possible because the Electron main process was not running during the verifier window and the Vite renderer at :4521 cannot bootstrap standalone. Recurrence of dedup_key=visual_web_electron_unreachable."
+  blocked_checks:
+    - "Pass 1 visual_macos — three Quick-session flows (WorkflowPicker, CyboflowRoot, badge mapping) not exercised end-to-end against live Electron"
+  level: sprint
+  severity: medium
+  created_at: "2026-05-25T21:30:00.000Z"
+  affected_tasks:
+    - TASK-751
+    - TASK-752
+    - TASK-753
+  updated_at: "2026-05-26T04:40:34.343Z"
 
 ## Deferred Visual
 
