@@ -338,4 +338,100 @@ describe('runFileBasedMigrations', () => {
 
     db.close();
   });
+
+  it('FK-toggle path: child rows survive a PRAGMA foreign_keys=OFF table-recreation migration run through DatabaseService', () => {
+    // This test exercises the exact needsFkOff branch in runFileBasedMigrations()
+    // (database.ts lines 1597-1624): when a migration SQL contains the literal
+    // "PRAGMA foreign_keys=OFF", the runner must toggle the pragma OUTSIDE the
+    // this.transaction() wrapper so the DROP TABLE does not CASCADE-delete child rows.
+    //
+    // The fixture uses a minimal self-contained schema so this test does not depend
+    // on real migration files (006/007/010). It proves the DatabaseService code path —
+    // complementing migration010.test.ts test 7 which tests the same SQLite semantics
+    // via a local helper that mirrors (but does not call) the production runner.
+
+    // Migration A: create a parent table and a child table with FK ON DELETE CASCADE.
+    const migrationA = `
+CREATE TABLE fk_parent (
+  id TEXT PRIMARY KEY
+);
+CREATE TABLE fk_child (
+  id TEXT PRIMARY KEY,
+  parent_id TEXT NOT NULL,
+  FOREIGN KEY (parent_id) REFERENCES fk_parent(id) ON DELETE CASCADE
+);
+`;
+
+    // Migration B: rebuild fk_parent via the table-recreation recipe with FK off.
+    // The rebuilt table is identical — the point is that the DROP + RENAME must NOT
+    // cascade-delete the child rows. This mirrors the migration 010 recipe exactly.
+    const migrationB = `
+PRAGMA foreign_keys=OFF;
+CREATE TABLE fk_parent_new (
+  id TEXT PRIMARY KEY,
+  extra TEXT
+);
+INSERT INTO fk_parent_new (id) SELECT id FROM fk_parent;
+DROP TABLE fk_parent;
+ALTER TABLE fk_parent_new RENAME TO fk_parent;
+PRAGMA foreign_keys=ON;
+`;
+
+    writeFileSync(join(migrationsDir, '001_fk_setup.sql'), migrationA);
+    writeFileSync(join(migrationsDir, '002_fk_rebuild.sql'), migrationB);
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(migrationsDir);
+    svc.initialize();
+
+    // Seed rows: must be done after initialize() since the runner creates the tables.
+    // Open the raw DB directly to insert parent + child rows.
+    const BetterSqlite = require('better-sqlite3');
+    const rawDb = new BetterSqlite(dbPath);
+    rawDb.pragma('foreign_keys = ON');
+    rawDb.prepare("INSERT INTO fk_parent (id) VALUES ('p-1')").run();
+    rawDb.prepare("INSERT INTO fk_child (id, parent_id) VALUES ('c-1', 'p-1')").run();
+    rawDb.close();
+
+    // Now initialize again — the second initialize is a no-op for 001 and 002
+    // (already marked applied). This confirms idempotency doesn't break the test,
+    // but the real assertion is about the DATA surviving the first migration run.
+    //
+    // Instead, simulate re-running migration B's SQL directly via a third migration
+    // that uses the same pragma pattern against the already-seeded data.
+    const migrationC = `
+PRAGMA foreign_keys=OFF;
+CREATE TABLE fk_parent_v2 (
+  id TEXT PRIMARY KEY,
+  extra TEXT,
+  v2_col TEXT
+);
+INSERT INTO fk_parent_v2 (id) SELECT id FROM fk_parent;
+DROP TABLE fk_parent;
+ALTER TABLE fk_parent_v2 RENAME TO fk_parent;
+PRAGMA foreign_keys=ON;
+`;
+    writeFileSync(join(migrationsDir, '003_fk_rebuild_v2.sql'), migrationC);
+
+    const svc2 = new DatabaseService(dbPath);
+    svc2.setMigrationsDirForTesting(migrationsDir);
+    svc2.initialize();
+
+    // Child rows MUST survive the DROP TABLE fk_parent in migration C.
+    const db = new BetterSqlite(dbPath);
+    const childCount = (db.prepare('SELECT COUNT(*) AS n FROM fk_child').get() as { n: number }).n;
+    expect(childCount).toBe(1);
+
+    // The child row's parent_id still correctly references the rebuilt parent.
+    const parentCount = (db.prepare("SELECT COUNT(*) AS n FROM fk_parent WHERE id = 'p-1'").get() as { n: number }).n;
+    expect(parentCount).toBe(1);
+
+    // Both migrations C's ledger marker is recorded.
+    const markerC = db
+      .prepare("SELECT value FROM user_preferences WHERE key = 'file_migration_applied:003_fk_rebuild_v2.sql'")
+      .get() as { value: string } | undefined;
+    expect(markerC?.value).toBe('true');
+
+    db.close();
+  });
 });
