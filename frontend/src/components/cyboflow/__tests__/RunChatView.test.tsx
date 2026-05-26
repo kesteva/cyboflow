@@ -389,4 +389,96 @@ describe('RunChatView', () => {
     expect(screen.getByText('No active run')).toBeInTheDocument();
     expect(mockListMessages).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // is_error branch: tool_result block with is_error=true shows red "error" badge
+  // -------------------------------------------------------------------------
+
+  it('renders a red "error" badge for user tool_result blocks where is_error is true', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-err');
+    });
+
+    const event: StreamEvent = {
+      runId: 'run-err',
+      type: 'user',
+      payload: {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_err001',
+              content: 'Command failed with exit code 1.',
+              is_error: true,
+            },
+          ],
+        },
+      },
+      timestamp: '2026-05-26T01:00:00Z',
+    };
+
+    act(() => {
+      useCyboflowStore.getState().appendStreamEvent(event);
+    });
+
+    render(<RunChatView runId="run-err" />);
+
+    await waitFor(() => {
+      // The red badge text must be visible
+      expect(screen.getByText('error')).toBeInTheDocument();
+      // The tool result content must also be visible
+      expect(screen.getByText(/Command failed with exit code 1/)).toBeInTheDocument();
+    });
+
+    // The badge element must carry the red background class
+    const badge = screen.getByText('error');
+    expect(badge.className).toMatch(/bg-red-600/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Race condition: aborted flag prevents stale state from a slow first fetch
+  // landing after runId has already changed
+  // -------------------------------------------------------------------------
+
+  it('ignores the result of a stale listMessages fetch when runId changes before it resolves', async () => {
+    // Give the first fetch a deferred promise so it resolves only after we
+    // change the runId — this is the exact scenario the `aborted` flag guards.
+    let resolveFirstFetch!: (v: never[]) => void;
+    const firstFetchPromise = new Promise<never[]>((resolve) => {
+      resolveFirstFetch = resolve;
+    });
+
+    mockListMessages
+      .mockImplementationOnce(() => firstFetchPromise) // run-stale: hangs
+      .mockImplementationOnce(async () => []);          // run-fresh: resolves immediately
+
+    const { rerender } = render(<RunChatView runId="run-stale" />);
+
+    // Confirm the first fetch was kicked off
+    await waitFor(() => expect(mockListMessages).toHaveBeenCalledTimes(1));
+
+    // Change runId before the first fetch resolves — this triggers the cleanup
+    // returning `aborted = true` for the first effect
+    act(() => {
+      rerender(<RunChatView runId="run-fresh" />);
+    });
+
+    // Second fetch resolves immediately; wait for it
+    await waitFor(() => expect(mockListMessages).toHaveBeenCalledTimes(2));
+
+    // Now let the first (stale) fetch resolve — it must NOT update state
+    act(() => {
+      resolveFirstFetch([]);
+    });
+
+    // Neither a loading indicator (from the stale fetch re-setting isLoadingHistory)
+    // nor an error should appear — the component should be in the settled state
+    // for run-fresh, not re-enter loading for the stale run-stale fetch.
+    await waitFor(() => {
+      expect(screen.queryByText('Loading history...')).not.toBeInTheDocument();
+      expect(screen.queryByText(/Error loading history/)).not.toBeInTheDocument();
+    });
+  });
 });
