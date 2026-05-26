@@ -20,10 +20,14 @@
  *    it from inside a PreToolUse hook would self-deadlock (see
  *    runQueueRegistry.ts §no-recursive-enqueue rule).
  *
- * 4. The deny path updates approvals.status='rejected' and does NOT touch
- *    workflow_runs.status — Claude will receive the deny on the socket, emit
- *    a tool-result error, and the run remains in awaiting_review until Claude
- *    yields (§5.7 of the design doc).
+ * 4. The deny path mirrors the allow path's workflow_runs transition: a
+ *    guarded UPDATE awaiting_review → running. The user denied this specific
+ *    tool call, not the entire run, so Claude is free to retry with a
+ *    different tool. Each subsequent PreToolUse opens a fresh approval gate.
+ *
+ * 5. Approvals do NOT auto-expire. A pending approval remains in the queue
+ *    until the user decides (approve / reject) or the run is canceled. This
+ *    matches the product invariant "workflow pauses until the human triages."
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*.
@@ -43,13 +47,6 @@ import type { DatabaseLike } from './types';
 // as its import path; that path remains backward-compatible by design.
 import type { ApprovalRequest, ApprovalDecision } from '../../../shared/types/approval';
 export type { ApprovalRequest, ApprovalDecision };
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** v1 default per ROADMAP-001 §5.7. Adjustable post-MVP via config. */
-export const APPROVAL_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -80,8 +77,6 @@ interface PendingEntry {
   /** Resolves or rejects the Promise returned from requestApproval. */
   resolve: (decision: ApprovalDecision) => void;
   reject: (err: unknown) => void;
-  /** Handle for the 60-minute auto-expiry timer. Cleared by respond() to avoid leaks. */
-  timeoutHandle: NodeJS.Timeout;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,17 +246,11 @@ export class ApprovalRouter extends EventEmitter {
       // Execute the transaction — throws RunNotRunningError on guard failure.
       (txn as () => void)();
 
-      // Schedule the 60-minute auto-expiry timer per ROADMAP-001 §5.7.
-      const timeoutHandle = setTimeout(() => {
-        void this.expireApproval(approvalId);
-      }, APPROVAL_TIMEOUT_MS);
-
       this.pending.set(approvalId, {
         request,
         socketReply,
         resolve: resolveDecision,
         reject: rejectDecision,
-        timeoutHandle,
       });
 
       // Notify renderer subscribers (e.g. the review queue UI).
@@ -281,10 +270,10 @@ export class ApprovalRouter extends EventEmitter {
    *  - If changes > 0, marks approval as 'approved' and invokes socketReply.
    *
    * For `deny`:
-   *  - Marks approval as 'rejected'.  Does NOT touch workflow_runs.status
-   *    (Claude will receive the deny on the socket and the run remains in
-   *    awaiting_review until Claude yields — §5.7).
-   *  - Invokes socketReply.
+   *  - Runs a guarded UPDATE awaiting_review → running so the agent can retry
+   *    with a different tool/approach. If the run was concurrently canceled,
+   *    the guarded UPDATE is a no-op and the run stays canceled.
+   *  - Marks approval as 'rejected' and invokes socketReply.
    *
    * @param approvalId - The UUID of the in-flight approval row.
    * @param decision   - The user's (or policy's) decision.
@@ -295,10 +284,6 @@ export class ApprovalRouter extends EventEmitter {
     if (!peek) {
       throw new ApprovalNotFoundError(approvalId);
     }
-
-    // Cancel the auto-expiry timer before entering the queue so the timer
-    // cannot fire concurrently while respond() is processing.
-    clearTimeout(peek.timeoutHandle);
 
     // The authoritative reservation happens INSIDE the queue so that two
     // concurrent respond() calls for the same approvalId (same runId queue)
@@ -356,7 +341,15 @@ export class ApprovalRouter extends EventEmitter {
         socketReply(decision);
         this.emit('approvalDecided', { approvalId, decision: 'approved' });
       } else {
-        // deny: update approvals only, do NOT touch workflow_runs.
+        // deny: transition workflow_runs back to 'running' so the agent can
+        // retry with a different tool/approach. The user denied this specific
+        // call, not the entire run. Guarded UPDATE so a concurrent cancel
+        // wins — if the run is no longer awaiting_review, it stays where it is.
+        this.db.prepare(
+          `UPDATE workflow_runs SET status = 'running', updated_at = ?
+           WHERE id = ? AND status = 'awaiting_review'`,
+        ).run(now, request.runId);
+
         this.db.prepare(
           `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'user'
            WHERE id = ?`,
@@ -366,46 +359,6 @@ export class ApprovalRouter extends EventEmitter {
         socketReply(decision);
         this.emit('approvalDecided', { approvalId, decision: 'rejected' });
       }
-    });
-  }
-
-  /**
-   * Called by the 60-minute auto-expiry timer when a pending approval has not
-   * been resolved by a human or policy decision within the timeout window.
-   *
-   * Submits work through the per-run queue so expiry is serialized with any
-   * concurrent respond() call for the same run.  If respond() beat the timer
-   * to the entry (entry is already gone from this.pending), this is a no-op.
-   *
-   * Sets approvals.status = 'timed_out' and sends a deny decision on the
-   * bridge socket.  Does NOT touch workflow_runs.status — Claude receives the
-   * deny on the socket and the run remains in awaiting_review until Claude
-   * yields (§5.7).
-   */
-  private async expireApproval(approvalId: string): Promise<void> {
-    const entry = this.pending.get(approvalId);
-    if (!entry) return;
-
-    await this.getApprovalQueue(entry.request.runId).add(async () => {
-      const entryNow = this.pending.get(approvalId);
-      if (!entryNow) return; // respond() beat the timer inside the queue.
-
-      this.pending.delete(approvalId);
-
-      const now = new Date().toISOString();
-      this.db.prepare(
-        `UPDATE approvals SET status = 'timed_out', decided_at = ?, decided_by = 'timeout'
-         WHERE id = ?`,
-      ).run(now, approvalId);
-
-      const denyDecision: ApprovalDecision = {
-        behavior: 'deny',
-        message: 'Approval timed out after 60 minutes',
-      };
-      entryNow.socketReply(denyDecision);
-      entryNow.resolve(denyDecision);
-      this.emit('approvalExpired', approvalId);
-      this.emit('approvalDecided', { approvalId, decision: 'expired' });
     });
   }
 
@@ -442,8 +395,6 @@ export class ApprovalRouter extends EventEmitter {
     }
 
     for (const { approvalId, entry } of toClose) {
-      // Cancel the auto-expiry timer before removing the entry.
-      clearTimeout(entry.timeoutHandle);
       this.pending.delete(approvalId);
 
       try {

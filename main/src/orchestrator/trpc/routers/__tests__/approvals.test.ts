@@ -197,11 +197,12 @@ describe('cyboflow.approvals.reject', () => {
       .get(approvalId) as { status: string };
     expect(dbRow.status).toBe('rejected');
 
-    // workflow_runs should remain in awaiting_review (deny does not touch it).
+    // workflow_runs transitions back to 'running' so the agent can retry with
+    // a different tool — denial is per-tool, not per-run.
     const runStatus = db
       .prepare(`SELECT status FROM workflow_runs WHERE id = ?`)
       .get('run-reject') as { status: string };
-    expect(runStatus.status).toBe('awaiting_review');
+    expect(runStatus.status).toBe('running');
   });
 
   it('reject(unknownId) throws TRPCError code=NOT_FOUND', async () => {
