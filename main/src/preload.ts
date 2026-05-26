@@ -202,6 +202,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getArchivedWithProjects: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-archived-with-projects'),
     get: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get', sessionId),
     create: (request: CreateSessionRequest): Promise<IPCResponse> => ipcRenderer.invoke('sessions:create', request),
+    createQuick: (request: CreateSessionRequest): Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string }>> =>
+      ipcRenderer.invoke('sessions:create-quick', request),
     delete: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:delete', sessionId),
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
     continue: (sessionId: string, prompt?: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:continue', sessionId, prompt, model),

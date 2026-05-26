@@ -714,6 +714,113 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
   });
 });
 
+// ---------------------------------------------------------------------------
+// 8. Quick-session / NULL-run regression tests (TASK-745)
+//
+// Seeds both a null-run (quick) session and a non-null-run (flow) session into
+// an in-memory DB that has migration 009_sessions_run_id.sql applied.
+// Verifies:
+//   - getAllSessions returns BOTH rows
+//   - getQuickSessions returns ONLY the null-run row
+// ---------------------------------------------------------------------------
+
+describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', () => {
+  let tmpDbDir009: string;
+
+  afterEach(() => {
+    if (tmpDbDir009) {
+      rmSync(tmpDbDir009, { recursive: true, force: true });
+    }
+  });
+
+  it('getQuickSessions(projectId) returns only sessions with run_id IS NULL; getAllSessions returns both', () => {
+    tmpDbDir009 = mkdtempSync(join(tmpdir(), 'cyboflow-qs-'));
+    const dbPath = join(tmpDbDir009, 'test.db');
+    const realMigrationsDir = join(__dirname, '..', 'migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    const rawDb = new Database(dbPath);
+
+    // Seed a project so sessions can reference it.
+    rawDb.prepare(
+      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
+    ).run();
+    const project = rawDb.prepare("SELECT id FROM projects LIMIT 1").get() as { id: number };
+
+    // Seed a "flow" session — has a non-null run_id.
+    rawDb.prepare(`
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, run_id)
+      VALUES ('flow-session-1', 'Flow Session', 'do work', 'flow-1', '/tmp/flow-1', 'completed', ?, 'run-abc')
+    `).run(project.id);
+
+    // Seed a "quick" session — run_id IS NULL.
+    rawDb.prepare(`
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
+      VALUES ('quick-session-1', 'Quick Session', 'ask something', 'quick-1', '/tmp/quick-1', 'idle', ?)
+    `).run(project.id);
+
+    rawDb.close();
+
+    // getAllSessions must return both rows.
+    const allSessions = svc.getAllSessions(project.id);
+    const allIds = allSessions.map((s) => s.id);
+    expect(allIds).toContain('flow-session-1');
+    expect(allIds).toContain('quick-session-1');
+    expect(allSessions).toHaveLength(2);
+
+    // getQuickSessions must return ONLY the null-run row.
+    const quickSessions = svc.getQuickSessions(project.id);
+    const quickIds = quickSessions.map((s) => s.id);
+    expect(quickIds).toContain('quick-session-1');
+    expect(quickIds).not.toContain('flow-session-1');
+    expect(quickSessions).toHaveLength(1);
+  });
+
+  it('getQuickSessions() without projectId returns all quick sessions across projects', () => {
+    tmpDbDir009 = mkdtempSync(join(tmpdir(), 'cyboflow-qs-global-'));
+    const dbPath = join(tmpDbDir009, 'test.db');
+    const realMigrationsDir = join(__dirname, '..', 'migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    const rawDb = new Database(dbPath);
+
+    // Two projects, one quick session each.
+    rawDb.prepare("INSERT INTO projects (name, path, active) VALUES ('proj-a', '/tmp/a', 1)").run();
+    rawDb.prepare("INSERT INTO projects (name, path, active) VALUES ('proj-b', '/tmp/b', 0)").run();
+    const projA = rawDb.prepare("SELECT id FROM projects WHERE name = 'proj-a'").get() as { id: number };
+    const projB = rawDb.prepare("SELECT id FROM projects WHERE name = 'proj-b'").get() as { id: number };
+
+    rawDb.prepare(`
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
+      VALUES ('qs-proj-a', 'QS A', 'ask a', 'qa', '/tmp/qa', 'idle', ?)
+    `).run(projA.id);
+    rawDb.prepare(`
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
+      VALUES ('qs-proj-b', 'QS B', 'ask b', 'qb', '/tmp/qb', 'idle', ?)
+    `).run(projB.id);
+    // Flow session — must NOT appear in getQuickSessions().
+    rawDb.prepare(`
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, run_id)
+      VALUES ('flow-proj-a', 'Flow A', 'do', 'fa', '/tmp/fa', 'completed', ?, 'run-xyz')
+    `).run(projA.id);
+
+    rawDb.close();
+
+    const quickSessions = svc.getQuickSessions();
+    const ids = quickSessions.map((s) => s.id);
+    expect(ids).toContain('qs-proj-a');
+    expect(ids).toContain('qs-proj-b');
+    expect(ids).not.toContain('flow-proj-a');
+    expect(quickSessions.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe('006_cyboflow_schema — EXPLAIN QUERY PLAN uses idx_raw_events_run_id', () => {
   it('EXPLAIN QUERY PLAN for the canonical raw_events tail-read uses idx_raw_events_run_id', () => {
     // Use an in-memory DB with the migration applied directly — no need for

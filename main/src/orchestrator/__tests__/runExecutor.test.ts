@@ -108,6 +108,27 @@ beforeEach(() => vi.clearAllMocks());
 // ---------------------------------------------------------------------------
 
 describe('RunExecutor.execute — missing rows', () => {
+  /**
+   * Quick-session boundary regression test (IDEA-024 / TASK-743 / TASK-745).
+   *
+   * When a quick-session id (no matching workflow_runs row) is passed to
+   * execute(), the executor MUST throw a clear 'workflow_runs row not found'
+   * error.  This is the intended loud-failure mode — it surfaces a broken
+   * call site rather than silently no-oping.
+   */
+  it('(a0) throws "workflow_runs row not found" when given a quick-session id (no workflow_runs row)', async () => {
+    const quickSessionId = 'quick-session-0000';
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(null), // no workflow_runs row
+      getById: vi.fn().mockReturnValue(null),
+    };
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
+
+    await expect(executor.execute(quickSessionId)).rejects.toThrow(
+      `workflow_runs row not found for runId=${quickSessionId}`,
+    );
+  });
+
   it('(a) throws when workflow_runs row is missing', async () => {
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(null),

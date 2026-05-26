@@ -87,6 +87,25 @@ export function projectStoredOutputs(
   return result;
 }
 
+/**
+ * Generate a UTC-based worktree branch name for quick sessions.
+ *
+ * Format: `quick-YYYYMMDD-HHmmss` (all UTC components, zero-padded).
+ * The `now` parameter exists so callers and tests can inject a fixed Date
+ * for deterministic output; the default is the wall-clock instant at call
+ * time.
+ */
+export function generateQuickWorktreeBranchName(now: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const y = now.getUTCFullYear();
+  const mo = pad(now.getUTCMonth() + 1);
+  const d = pad(now.getUTCDate());
+  const h = pad(now.getUTCHours());
+  const mi = pad(now.getUTCMinutes());
+  const s = pad(now.getUTCSeconds());
+  return `quick-${y}${mo}${d}-${h}${mi}${s}`;
+}
+
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
     sessionManager,
@@ -265,6 +284,119 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         }
 
         // Include git output if available
+        if (gitError.gitOutput) {
+          errorDetails = gitError.gitOutput;
+        } else if (gitError.stderr) {
+          errorDetails = gitError.stderr;
+        }
+      }
+
+      return {
+        success: false,
+        error: errorMessage,
+        details: errorDetails,
+        command: command
+      };
+    }
+  });
+
+  /**
+   * sessions:create-quick — Create a worktree session without a flow or initial prompt.
+   *
+   * Architectural notes:
+   * (a) Delegates to `TaskQueue.createSession` with `prompt: ''` to keep worktree +
+   *     session lifecycle single-sourced in the queue processor.
+   * (b) `prompt === ''` causes TaskQueue to skip prompt-related setup (conversation
+   *     message, prompt marker, Claude panel auto-start) — the user's first message
+   *     via `sessions:input` will bootstrap the Claude panel on demand.
+   * (c) `db.createSession` omits `run_id` from its INSERT column list, so the row
+   *     naturally gets `run_id = NULL` via TASK-743's migration default.
+   * (d) Second-precision branch-name collisions (two quick sessions in the same
+   *     second) are resolved by `TaskQueue.ensureUniqueNames`, which appends a
+   *     `-<counter>` suffix.
+   *
+   * Returns `{ success: true, data: { jobId, sessionId, worktreePath } }` so
+   * frontend slices (TASK-747, TASK-748) can navigate and bootstrap a panel
+   * without a follow-up IPC round trip.
+   */
+  ipcMain.handle('sessions:create-quick', async (_event, request: CreateSessionRequest) => {
+    try {
+      if (!request.projectId) {
+        return { success: false, error: 'No project specified. Quick sessions require a projectId.' };
+      }
+
+      if (!taskQueue) {
+        console.error('[IPC] Task queue not initialized');
+        return { success: false, error: 'Task queue not initialized' };
+      }
+
+      const targetProject = databaseService.getProject(request.projectId);
+      if (!targetProject) {
+        return { success: false, error: 'Project not found' };
+      }
+
+      const branchName = request.branchName ?? generateQuickWorktreeBranchName();
+      const toolType: 'claude' | 'none' = request.toolType ?? 'claude';
+
+      const job = await taskQueue.createSession({
+        prompt: '',
+        worktreeTemplate: branchName,
+        permissionMode: request.permissionMode,
+        projectId: targetProject.id,
+        folderId: request.folderId,
+        baseBranch: request.baseBranch,
+        autoCommit: request.autoCommit,
+        toolType,
+        commitMode: request.commitMode,
+        commitModeSettings: request.commitModeSettings,
+        claudeConfig: request.claudeConfig
+      });
+
+      // Await the session row by listening for session-created events on the
+      // SessionManager. Concurrent sessions:create-quick calls share the same
+      // emitter, so we filter by worktreePath: TaskQueue's ensureUniqueNames may
+      // append a `-<counter>` suffix to resolve same-second name collisions, so
+      // accept both `/{branchName}` and `/{branchName}-<n>` tails. Non-matching
+      // events are ignored — the listener is left in place via `on` (not `once`)
+      // until the matching session arrives or the timeout fires.
+      const session = await new Promise<import('../types/session').Session>((resolve, reject) => {
+        const suffixed = new RegExp(`/${branchName}-\\d+$`);
+        const onCreated = (createdSession: import('../types/session').Session) => {
+          const wt = createdSession.worktreePath ?? '';
+          const matches = wt.endsWith(`/${branchName}`) || suffixed.test(wt);
+          if (!matches) return;
+          clearTimeout(timeout);
+          sessionManager.removeListener('session-created', onCreated);
+          resolve(createdSession);
+        };
+        const timeout = setTimeout(() => {
+          sessionManager.removeListener('session-created', onCreated);
+          reject(new Error('Timed out waiting for quick session to be created'));
+        }, 30_000);
+
+        sessionManager.on('session-created', onCreated);
+      });
+
+      return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath } };
+    } catch (error) {
+      console.error('[IPC] Failed to create quick session:', error);
+      console.error('[IPC] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
+
+      let errorMessage = 'Failed to create quick session';
+      let errorDetails = '';
+      let command = '';
+
+      if (error instanceof Error) {
+        errorMessage = error.message;
+        errorDetails = error.stack || error.toString();
+
+        const gitError = error as Error & { gitCommand?: string; cmd?: string; gitOutput?: string; stderr?: string };
+        if (gitError.gitCommand) {
+          command = gitError.gitCommand;
+        } else if (gitError.cmd) {
+          command = gitError.cmd;
+        }
+
         if (gitError.gitOutput) {
           errorDetails = gitError.gitOutput;
         } else if (gitError.stderr) {

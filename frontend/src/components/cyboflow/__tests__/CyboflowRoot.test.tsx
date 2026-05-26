@@ -9,7 +9,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi — keeps only the entries that WorkflowPicker/RunView still
@@ -89,7 +89,7 @@ vi.mock('../../../services/panelApi', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
-import { trpc } from '../../../utils/trpcClient';
+import { trpc } from '../../../trpc/client';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -201,5 +201,123 @@ describe('CyboflowRoot', () => {
 
     // RunView should now be rendered (activeRunId was set by the store)
     expect(screen.getByText('run-auto-close')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quick Session tests
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — Quick Session', () => {
+  const createQuickMock = vi.fn();
+
+  beforeEach(() => {
+    createQuickMock.mockReset();
+    createQuickMock.mockResolvedValue({ success: true, data: { jobId: 'job-1', sessionId: 'sess-1', worktreePath: '/tmp/qs' } });
+    // Stub window.electronAPI.sessions.createQuick
+    Object.defineProperty(window, 'electronAPI', {
+      value: {
+        sessions: {
+          createQuick: createQuickMock,
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+    });
+  });
+
+  it('renders Quick Session button disabled with tooltip when projectId is null', () => {
+    render(<CyboflowRoot projectId={null} />);
+    const btn = screen.getByTestId('open-quick-session-picker');
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', 'Select a project to start a quick session');
+
+    // Clicking disabled button must not open picker and not invoke createQuick
+    fireEvent.click(btn);
+    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
+    expect(createQuickMock).not.toHaveBeenCalled();
+  });
+
+  it('clicking Quick Session opens Chat/Terminal picker; Escape dismisses without invoking createQuick', async () => {
+    render(<CyboflowRoot projectId={1} />);
+
+    const btn = screen.getByTestId('open-quick-session-picker');
+    expect(btn).not.toBeDisabled();
+
+    // Click to open picker
+    fireEvent.click(btn);
+    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
+    expect(screen.getByTestId('quick-mode-terminal')).toBeInTheDocument();
+
+    // Press Escape to dismiss
+    act(() => {
+      fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
+    });
+
+    expect(createQuickMock).not.toHaveBeenCalled();
+  });
+
+  it('selecting Chat invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'claude\' }', async () => {
+    render(<CyboflowRoot projectId={42} />);
+
+    // Open picker
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
+
+    // Click Chat
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-chat'));
+    });
+
+    expect(createQuickMock).toHaveBeenCalledTimes(1);
+    expect(createQuickMock).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'claude' });
+  });
+
+  it('selecting Terminal invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'none\' }', async () => {
+    render(<CyboflowRoot projectId={42} />);
+
+    // Open picker
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    expect(screen.getByTestId('quick-mode-terminal')).toBeInTheDocument();
+
+    // Click Terminal
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-terminal'));
+    });
+
+    expect(createQuickMock).toHaveBeenCalledTimes(1);
+    expect(createQuickMock).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'none' });
+  });
+
+  it('IPC failure envelope is logged via console.error and the picker still dismisses', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    createQuickMock.mockResolvedValueOnce({ success: false, error: 'project not found' });
+
+    render(<CyboflowRoot projectId={42} />);
+
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-chat'));
+    });
+
+    expect(createQuickMock).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith('[CyboflowRoot] createQuick failed', 'project not found');
+    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+
+    errorSpy.mockRestore();
   });
 });

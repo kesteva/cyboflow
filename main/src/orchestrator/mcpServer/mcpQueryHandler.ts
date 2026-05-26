@@ -20,6 +20,15 @@
  *                status, created_at
  *   workflow_runs — all columns selected via *
  *   raw_events — id (AUTOINCREMENT), run_id, event_type, payload_json, created_at
+ *
+ * Quick-session invariant (IDEA-024 / TASK-743):
+ *   This handler reads from `approvals` and `workflow_runs` only — it does NOT
+ *   JOIN or SELECT from `sessions`.  Therefore it is already NULL-tolerant with
+ *   respect to the TASK-743 nullable sessions.run_id column: quick sessions
+ *   (sessions with run_id IS NULL) have no corresponding workflow_runs row, so
+ *   any mcp-get-run request for a quick-session id will take the existing
+ *   'not_found' branch and return ok:false — the intended behaviour.  No logic
+ *   changes are required here for quick-session support.
  */
 import * as net from 'net';
 import type { DatabaseLike } from '../types';

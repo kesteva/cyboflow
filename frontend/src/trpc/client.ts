@@ -21,12 +21,10 @@
  * SINGLE SOURCE RULE: Do NOT create a second createTRPCProxyClient instance.
  * tRPC v11 subscriptions register IPC listeners per client instance — a second
  * instance causes duplicate event delivery. All renderer code must import
- * `trpc` from this module (or via the re-export at utils/trpcClient.ts).
+ * `trpc` from this module.
  *
  * Import:
- *   import { trpc } from '@/trpc/client';
- *   // or via backwards-compat shim:
- *   import { trpc } from '@/utils/trpcClient';
+ *   import { trpc } from '<relative>/trpc/client';
  */
 import { createTRPCProxyClient } from '@trpc/client';
 import { ipcLink } from 'trpc-electron/renderer';

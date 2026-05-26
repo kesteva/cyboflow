@@ -79,6 +79,7 @@ interface ElectronAPI {
     getArchivedWithProjects: () => Promise<IPCResponse<unknown[]>>;
     get: (sessionId: string) => Promise<IPCResponse<Session>>;
     create: (request: CreateSessionRequest) => Promise<IPCResponse<Session>>;
+    createQuick: (request: CreateSessionRequest) => Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string }>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;

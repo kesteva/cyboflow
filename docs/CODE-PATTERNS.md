@@ -75,11 +75,11 @@ to a canonical example — read those for the actual implementation.
   deepen its surface — extend `api.ts` (`API.cyboflow.*`) or wait for the tRPC routers.
   Once epic 6 lands, `cyboflowApi.ts` is deleted or replaced by a tRPC client wrapper.
 
-### `frontend/src/utils/trpcClient`
+### `frontend/src/trpc/client`
 
-- **Path:** `frontend/src/utils/trpcClient.ts`
-- **Use it for:** All tRPC calls from the renderer. Import as `import { trpc } from '<relative>/utils/trpcClient'`.
-- **Why single-source:** tRPC v11 subscriptions register IPC listeners per `createTRPCProxyClient` instance — a second instance (or re-export shim) causes duplicate event delivery.
+- **Path:** `frontend/src/trpc/client.ts`
+- **Use it for:** All tRPC calls from the renderer. Import as `import { trpc } from '<relative>/trpc/client'`.
+- **Why single-source:** tRPC v11 subscriptions register IPC listeners per `createTRPCProxyClient` instance — a second instance causes duplicate event delivery.
 - **Canonical example:** `frontend/src/stores/reviewQueueStore.ts`
 
 ### `frontend/src/utils/migrateLocalStorageKey`
@@ -357,12 +357,12 @@ accumulate across tests (test N fires N handlers per key press). Do NOT remove t
 line. Hooks with global listeners should include a multi-render regression test —
 see `frontend/src/hooks/__tests__/useReviewQueueKeyboard.test.ts`.
 
-### Mock tRPC at the SUT's own import path
+### Mock tRPC at the canonical import path
 
-`vi.mock(...)` must use the exact specifier the SUT imports (e.g. `'../../utils/trpcClient'`),
-not the canonical client file it re-exports from. Mocking the re-export target works only
-by accident of ESM hoisting and breaks silently if the shim direction is ever flipped.
-Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:22`.
+`vi.mock(...)` must target the canonical client (e.g. `'../../trpc/client'`). The global
+setup in `frontend/src/test/setup.ts` pre-stubs it; individual specs override with
+their own `vi.mock('../…/trpc/client', …)` calls when they need specific behaviour.
+Canonical example: `frontend/src/stores/__tests__/reviewQueueStore.test.ts:27`.
 
 ### `pnpm test:e2e` MUST keep its sh-wrapper
 
