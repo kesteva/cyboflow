@@ -1,11 +1,17 @@
 /**
- * CyboflowRoot component tests (TASK-688).
+ * CyboflowRoot component tests (TASK-688, TASK-752).
  *
  * Behaviors verified:
  *   1. Renders "Choose a workflow to start" empty state when activeRunId is null.
  *   2. Renders RunView when activeRunId is set and hides the empty-state CTA.
  *   3. Opening and closing the workflow picker modal toggles its visibility.
  *   4. Modal closes automatically after a successful run start (onWorkflowStarted fires).
+ *   5. Quick Session button disabled with tooltip when projectId is null.
+ *   6. Escape key dismisses the inline mode picker.
+ *   7. Selecting Chat invokes createQuick with the correct payload.
+ *   8. Selecting Terminal invokes createQuick with the correct payload.
+ *   9. (TASK-752) Chat full lifecycle: panelApi.createPanel called AND activeQuickSessionId set.
+ *  10. (TASK-752) Terminal full lifecycle: panelApi.createPanel called with terminal args AND activeQuickSessionId set.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
@@ -71,17 +77,31 @@ vi.mock('../../../utils/api', () => ({
   API: {
     sessions: {
       getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: null }),
+      createQuick: vi.fn().mockResolvedValue({
+        success: true,
+        data: { jobId: 'job-1', sessionId: 'sess-qs-1', worktreePath: '/tmp/qs' },
+      }),
     },
   },
 }));
 
 // Mock panelApi so the loadPanelsForSession call (gated on mainRepoSessionId) does not
 // cause errors if it somehow fires, and to silence unhandled-promise warnings.
+// createPanel returns a resolved promise so the hook's await doesn't throw.
 vi.mock('../../../services/panelApi', () => ({
   panelApi: {
     loadPanelsForSession: vi.fn().mockResolvedValue([]),
     setActivePanel: vi.fn().mockResolvedValue(undefined),
-    createPanel: vi.fn(),
+    createPanel: vi.fn().mockResolvedValue({
+      id: 'panel-qs-1',
+      sessionId: 'sess-qs-1',
+      type: 'claude',
+      title: 'Claude',
+      state: { isActive: true },
+      createdAt: '',
+      lastActiveAt: '',
+      position: 0,
+    }),
     deletePanel: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -90,6 +110,8 @@ vi.mock('../../../services/panelApi', () => ({
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { trpc } from '../../../trpc/client';
+import { panelApi } from '../../../services/panelApi';
+import { API } from '../../../utils/api';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -98,7 +120,10 @@ import { trpc } from '../../../trpc/client';
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
+    useCyboflowStore.getState().clearActiveQuickSession();
   });
+  vi.mocked(panelApi.createPanel).mockClear();
+  vi.mocked(API.sessions.createQuick).mockClear();
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
   // useEffect does not throw when RunView is mounted inside CyboflowRoot.
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -209,26 +234,10 @@ describe('CyboflowRoot', () => {
 // ---------------------------------------------------------------------------
 
 describe('CyboflowRoot — Quick Session', () => {
-  const createQuickMock = vi.fn();
-
-  beforeEach(() => {
-    createQuickMock.mockReset();
-    createQuickMock.mockResolvedValue({ success: true, data: { jobId: 'job-1', sessionId: 'sess-1', worktreePath: '/tmp/qs' } });
-    // Stub window.electronAPI.sessions.createQuick
-    Object.defineProperty(window, 'electronAPI', {
-      value: {
-        sessions: {
-          createQuick: createQuickMock,
-        },
-      },
-      writable: true,
-      configurable: true,
-    });
-  });
-
   afterEach(() => {
     act(() => {
       useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
     });
   });
 
@@ -242,7 +251,7 @@ describe('CyboflowRoot — Quick Session', () => {
     fireEvent.click(btn);
     expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
     expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
-    expect(createQuickMock).not.toHaveBeenCalled();
+    expect(API.sessions.createQuick).not.toHaveBeenCalled();
   });
 
   it('clicking Quick Session opens Chat/Terminal picker; Escape dismisses without invoking createQuick', async () => {
@@ -266,7 +275,7 @@ describe('CyboflowRoot — Quick Session', () => {
       expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
     });
 
-    expect(createQuickMock).not.toHaveBeenCalled();
+    expect(API.sessions.createQuick).not.toHaveBeenCalled();
   });
 
   it('selecting Chat invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'claude\' }', async () => {
@@ -281,8 +290,8 @@ describe('CyboflowRoot — Quick Session', () => {
       fireEvent.click(screen.getByTestId('quick-mode-chat'));
     });
 
-    expect(createQuickMock).toHaveBeenCalledTimes(1);
-    expect(createQuickMock).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'claude' });
+    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
+    expect(API.sessions.createQuick).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'claude' });
   });
 
   it('selecting Terminal invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'none\' }', async () => {
@@ -297,13 +306,12 @@ describe('CyboflowRoot — Quick Session', () => {
       fireEvent.click(screen.getByTestId('quick-mode-terminal'));
     });
 
-    expect(createQuickMock).toHaveBeenCalledTimes(1);
-    expect(createQuickMock).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'none' });
+    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
+    expect(API.sessions.createQuick).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'none' });
   });
 
-  it('IPC failure envelope is logged via console.error and the picker still dismisses', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    createQuickMock.mockResolvedValueOnce({ success: false, error: 'project not found' });
+  it('IPC failure does not set activeQuickSessionId and does not call panelApi.createPanel', async () => {
+    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({ success: false, error: 'project not found' });
 
     render(<CyboflowRoot projectId={42} />);
 
@@ -314,10 +322,65 @@ describe('CyboflowRoot — Quick Session', () => {
       fireEvent.click(screen.getByTestId('quick-mode-chat'));
     });
 
-    expect(createQuickMock).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith('[CyboflowRoot] createQuick failed', 'project not found');
-    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
+    expect(panelApi.createPanel).not.toHaveBeenCalled();
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+  });
 
-    errorSpy.mockRestore();
+  it('Chat full lifecycle: panelApi.createPanel called with type=\'claude\' AND activeQuickSessionId set', async () => {
+    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({
+      success: true,
+      data: { jobId: 'job-chat', sessionId: 'sess-chat-1', worktreePath: '/tmp/chat-wt' },
+    });
+
+    render(<CyboflowRoot projectId={42} />);
+
+    // Open picker and click Chat
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-chat'));
+    });
+
+    // panelApi.createPanel must be called with the claude panel type
+    expect(panelApi.createPanel).toHaveBeenCalledTimes(1);
+    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'sess-chat-1', type: 'claude' });
+
+    // Store must reflect the new quick session ID
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-chat-1');
+    });
+    // Mutual-exclusion invariant: activeRunId must remain null
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
+  });
+
+  it('Terminal full lifecycle: panelApi.createPanel called with type=\'terminal\' and cwd=worktreePath AND activeQuickSessionId set', async () => {
+    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({
+      success: true,
+      data: { jobId: 'job-term', sessionId: 'sess-term-1', worktreePath: '/tmp/term-wt' },
+    });
+
+    render(<CyboflowRoot projectId={42} />);
+
+    // Open picker and click Terminal
+    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-mode-terminal'));
+    });
+
+    // panelApi.createPanel must be called with the terminal panel type including cwd
+    expect(panelApi.createPanel).toHaveBeenCalledTimes(1);
+    expect(panelApi.createPanel).toHaveBeenCalledWith({
+      sessionId: 'sess-term-1',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/term-wt' },
+    });
+
+    // Store must reflect the new quick session ID
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-term-1');
+    });
+    // Mutual-exclusion invariant: activeRunId must remain null
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
 });
