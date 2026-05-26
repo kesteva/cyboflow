@@ -1,11 +1,11 @@
 /**
- * RunBottomPane component tests (TASK-756).
+ * RunBottomPane component tests (TASK-756, updated TASK-761).
  *
  * Behaviors verified:
  *   1. Renders three tab buttons with labels Chat, Terminal, Data Stream.
  *   2. Data Stream is the default active tab; RunView is mounted on first render.
  *   3. Clicking Terminal tab shows the "Terminal — coming soon" placeholder and hides RunView.
- *   4. Clicking Chat tab shows the inline chat placeholder and hides RunView.
+ *   4. Clicking Chat tab mounts RunChatView (mocked) and hides RunView.
  *   5. Clicking Data Stream tab after switching away restores RunView.
  */
 import '@testing-library/jest-dom';
@@ -22,6 +22,14 @@ vi.mock('../../../utils/cyboflowApi', () => ({
     subscribeToStreamEvents: vi.fn(() => vi.fn()),
     approveRun: vi.fn(),
   },
+}));
+
+// ---------------------------------------------------------------------------
+// Mock RunChatView so the Chat tab test does not require tRPC / stores
+// ---------------------------------------------------------------------------
+
+vi.mock('../RunChatView', () => ({
+  RunChatView: () => <div data-testid="run-chat-view-mock">RunChatView</div>,
 }));
 
 // Import after mocks so vi.mock hoisting is in effect
@@ -80,7 +88,7 @@ describe('RunBottomPane', () => {
     expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
 
-  it('clicking Chat tab shows the inline chat placeholder and hides RunView', () => {
+  it('clicking Chat tab mounts RunChatView and hides RunView', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
@@ -92,8 +100,8 @@ describe('RunBottomPane', () => {
     // Click Chat tab
     fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
 
-    // Chat placeholder is visible
-    expect(screen.getByTestId('run-bottom-pane-chat-placeholder')).toBeInTheDocument();
+    // RunChatView (mocked) is visible
+    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
     // RunView content gone
     expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
