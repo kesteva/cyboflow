@@ -9,11 +9,12 @@
  * Also provides "Quick Chat" and "Quick Terminal" buttons that create a quick
  * session via `sessions:create-quick` IPC, bootstrap the appropriate panel via
  * `panelApi.createPanel`, and navigate via `setActiveQuickSession`.
+ * Quick session logic is delegated to the `useQuickSession` hook.
  */
 import { useState, useEffect } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { panelApi } from '../../services/panelApi';
+import { useQuickSession } from '../../hooks/useQuickSession';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 
 interface WorkflowPickerProps {
@@ -26,8 +27,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [isQuickStarting, setIsQuickStarting] = useState<null | 'claude' | 'none'>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const quickSession = useQuickSession({ projectId, onSuccess: onWorkflowStarted });
 
   // Load workflows on mount (or when projectId changes)
   useEffect(() => {
@@ -74,35 +76,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     }
   };
 
-  const handleQuickStart = async (toolType: 'claude' | 'none') => {
-    if (isQuickStarting !== null || isStarting) return;
-    setError(null);
-    setIsQuickStarting(toolType);
-    try {
-      const result = await window.electronAPI.sessions.createQuick({ prompt: '', projectId, toolType });
-      if (!result.success || !result.data) {
-        throw new Error(result.error ?? 'Failed to create quick session');
-      }
-      const { sessionId, worktreePath } = result.data;
-      if (toolType === 'claude') {
-        await panelApi.createPanel({ sessionId, type: 'claude' });
-      } else {
-        await panelApi.createPanel({
-          sessionId,
-          type: 'terminal',
-          title: 'Terminal',
-          initialState: { cwd: worktreePath },
-        });
-      }
-      useCyboflowStore.getState().setActiveQuickSession(sessionId);
-      onWorkflowStarted?.(sessionId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create quick session');
-    } finally {
-      setIsQuickStarting(null);
-    }
-  };
-
   return (
     <div className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold text-text-primary">Workflow</h2>
@@ -126,9 +99,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         </select>
       )}
 
-      {error && (
+      {(error ?? quickSession.error) && (
         <p className="text-xs text-red-500" role="alert">
-          {error}
+          {error ?? quickSession.error}
         </p>
       )}
 
@@ -144,16 +117,16 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
         <div className="flex gap-2">
           <button
-            onClick={() => handleQuickStart('claude')}
-            disabled={isQuickStarting !== null || isStarting}
+            onClick={() => { void quickSession.start('claude'); }}
+            disabled={quickSession.isStarting !== null || isStarting}
             className="flex-1 rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="quick-chat-button"
           >
             Quick Chat
           </button>
           <button
-            onClick={() => handleQuickStart('none')}
-            disabled={isQuickStarting !== null || isStarting}
+            onClick={() => { void quickSession.start('none'); }}
+            disabled={quickSession.isStarting !== null || isStarting}
             className="flex-1 rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="quick-terminal-button"
           >
