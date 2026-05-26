@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-039
-pending_count: 3
-last_updated: "2026-05-26T22:30:00.000Z"
+pending_count: 5
+last_updated: "2026-05-26T23:15:00.000Z"
 ---
 # Findings Queue
 
@@ -67,3 +67,21 @@ last_updated: "2026-05-26T22:30:00.000Z"
 - **description:** In `respond`'s `info.changes === 0` cancel-race fallback, the `UPDATE questions SET status='timed_out', answered_at=? WHERE id=?` is unguarded (no `AND status='pending'` filter). If `clearPendingForRun(runId)` has already run and set `status='timed_out'` with a prior timestamp, this UPDATE clobbers `answered_at` to a later value — minor audit-trail noise but inconsistent with `clearPendingForRun`'s guarded pattern (questionRouter.ts:374-376) and ApprovalRouter's idempotency conventions. Idempotent in the steady state but the lack of guard hides any future double-write bug.
 - **suggested_action:** Change line 314-315 to `WHERE id = ? AND status = 'pending'` for parity with clearPendingForRun and ApprovalRouter's clear path.
 - **resolved_by:**
+
+## FIND-SPRINT-039-8
+- **source:** TASK-760 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/stores/reviewQueueStore.ts:225-239 (and now mirrored in frontend/src/stores/questionStore.ts:194-209)
+- **description:** Cross-cutting onError closure-cleanup asymmetry: in both reviewQueueStore.ts and the freshly-ported questionStore.ts, the FIRST subscription's onError handler clears `initialized = false` and `cachedUnsubscribe = null` so a subsequent init() re-subscribes, but the SECOND subscription's onError handler only sets connectionStatus to 'disconnected'. If the second (decided/answered) subscription drops independently of the first, the store is "still initialized" by the closure flag → init() returns the cached unsubscribe → user is stuck on a disconnected store with no path to recover. TASK-760 faithfully ports this pattern from the upstream reviewQueueStore (per plan), so this is NOT a new defect in TASK-760's diff — it is a latent issue in the shared pattern across both stores.
+- **suggested_action:** In a follow-up task, make the second subscription's onError mirror the first: unsubscribe both subscriptions, reset `initialized = false`, clear `cachedUnsubscribe = null`. Apply to both reviewQueueStore.ts:236-239 and questionStore.ts:205-208. Add a unit test asserting that triggering the second subscription's onError allows a subsequent init() to re-subscribe.
+
+## FIND-SPRINT-039-9
+- **source:** TASK-760 (code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx:335-345 (matches frontend/src/components/ReviewQueue/PendingApprovalCard.tsx:261-275)
+- **description:** Silent submit-failure UX: when `trpc.cyboflow.questions.answer.mutate` rejects, the card swallows the error in `.catch(() => {})` and only re-enables the button — there is no toast, no inline error, no console message visible to the user. The same pattern exists in PendingApprovalCard.tsx for approve/reject. Re-clicking submit may continue to fail with no indication of what went wrong (network drop, server validation, NOT_FOUND on a stale questionId). TASK-760 faithfully ports the PendingApprovalCard idiom per plan step 6, so this is NOT a TASK-760-introduced defect — it's a cross-cutting UX gap in the action-card pattern. TASK-761's wiring task is a natural place to introduce a shared error-toast utility consumed by both card families.
+- **suggested_action:** Add a shared toast/snackbar utility (or surface to an existing error sink in cyboflowStore) and call it from both PendingApprovalCard's approve/reject handlers and AskUserQuestionCard's submit handler. Include the underlying error message and the actionable id so users can recover.
