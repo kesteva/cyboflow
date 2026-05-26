@@ -143,6 +143,63 @@ describe('cyboflow.questions.answer', () => {
     expect(dbRow.status).toBe('answered');
   });
 
+  /**
+   * Regression test for the "annotations don't traverse" contract (TASK-759 code-review
+   * finding). The Zod input schema for `answer` accepts only `answers` (a flat
+   * Record<string, string | string[]>) and deliberately omits `annotations`.
+   * Any annotations the renderer might send are stripped at the Zod boundary and
+   * never forwarded to QuestionRouter.respond() nor written to `questions.answer_json`.
+   *
+   * This test documents the current contract so that TASK-760 (which will add
+   * annotations support) has a clear before/after baseline and avoids silently
+   * regressing the "answers still resolve correctly without annotations" path.
+   */
+  it('answer: annotations field is silently dropped — answer_json contains only { answers }', async () => {
+    const db = createTestDb({ includeQuestionsTable: true });
+    const adapter = dbAdapter(db);
+    const registry = new RunQueueRegistry();
+    QuestionRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    const qr = QuestionRouter.getInstance();
+
+    seedRun(db, { id: 'run-annotations', status: 'running' });
+
+    const answerPromise = qr.requestQuestion(
+      'run-annotations',
+      'tool-use-id-annotations',
+      [{ question: 'Pick one', header: 'Pick', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }],
+      () => undefined,
+    );
+
+    const row = db
+      .prepare(`SELECT id FROM questions WHERE run_id = ? LIMIT 1`)
+      .get('run-annotations') as { id: string } | undefined;
+    expect(row).toBeDefined();
+    const questionId = row!.id;
+
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    // The tRPC caller API only accepts `answers` — there is no `annotations` field
+    // in the Zod schema. Any annotations from the renderer are stripped before this
+    // call reaches the mutation handler.
+    const result = await caller.cyboflow.questions.answer({
+      questionId,
+      answers: { 'Pick one': 'A' },
+    });
+    expect(result).toEqual({ success: true });
+
+    // The answerPromise resolves with only { answers } — no annotations key.
+    const resolved = await answerPromise;
+    expect(resolved).toEqual({ answers: { 'Pick one': 'A' } });
+    expect(Object.keys(resolved)).not.toContain('annotations');
+
+    // The DB row's answer_json also has no annotations key.
+    const dbRow = db
+      .prepare(`SELECT answer_json FROM questions WHERE id = ?`)
+      .get(questionId) as { answer_json: string };
+    const persisted = JSON.parse(dbRow.answer_json) as Record<string, unknown>;
+    expect(Object.keys(persisted)).not.toContain('annotations');
+    expect(persisted).toEqual({ answers: { 'Pick one': 'A' } });
+  });
+
   it('answer(unknownId) throws TRPCError code=NOT_FOUND', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
