@@ -37,6 +37,20 @@ export interface QuestionStoreState {
   /** Connection status of the tRPC subscription to the question event stream. */
   connectionStatus: ConnectionStatus;
 
+  /**
+   * "Other"-text bus — keyed by questionId.
+   *
+   * The bottom-bar ChatInput (TASK-762) writes typed text here for the active
+   * pending question; AskUserQuestionCard reads it and pre-fills its "Other"
+   * free-text field. This keeps ChatInput dumb (knows only about transport)
+   * and AskUserQuestionCard the sole submit authority (owns the full answers
+   * payload).
+   *
+   * Supports the 1–4 sub-questions case: each sub-question has its own
+   * questionId so multiple cards can coexist without stomping each other.
+   */
+  otherText: Record<string, string>;
+
   // -- Reducers (pure / synchronous) ---------------------------------------
 
   /**
@@ -68,6 +82,22 @@ export interface QuestionStoreState {
 
   /** Update the tRPC connection status for display in the UI. */
   setConnectionStatus: (status: ConnectionStatus) => void;
+
+  /**
+   * Set the "Other" free-text for a specific question (by questionId).
+   *
+   * Called by ChatInput when the user types in workflow-question mode.
+   * AskUserQuestionCard reads this value to pre-fill its "Other" input.
+   */
+  setOtherText: (questionId: string, text: string) => void;
+
+  /**
+   * Clear the "Other" free-text for a specific question (by questionId).
+   *
+   * Called by AskUserQuestionCard after the user submits the answer, or by
+   * ChatInput after the textarea is cleared on a successful send.
+   */
+  clearOtherText: (questionId: string) => void;
 
   // -- Actions (async / side-effectful) ------------------------------------
 
@@ -102,6 +132,7 @@ export const useQuestionStore = create<QuestionStoreState>((set, get) => {
   return {
     queue: [],
     connectionStatus: 'idle',
+    otherText: {},
 
     // -- Reducers -------------------------------------------------------------
 
@@ -126,6 +157,18 @@ export const useQuestionStore = create<QuestionStoreState>((set, get) => {
 
     setConnectionStatus: (status) => {
       set({ connectionStatus: status });
+    },
+
+    setOtherText: (questionId, text) => {
+      set((s) => ({ otherText: { ...s.otherText, [questionId]: text } }));
+    },
+
+    clearOtherText: (questionId) => {
+      set((s) => {
+        const next = { ...s.otherText };
+        delete next[questionId];
+        return { otherText: next };
+      });
     },
 
     // -- Actions --------------------------------------------------------------
