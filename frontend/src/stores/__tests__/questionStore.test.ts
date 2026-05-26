@@ -73,7 +73,7 @@ beforeEach(() => {
   // Reset the store's Zustand state. The closure-private `initialized` flag
   // resets only via the unsubscribe path — each init() test manages its own
   // cleanup via afterEach(activeUnsub) as in reviewQueueStore.test.ts.
-  useQuestionStore.setState({ queue: [], connectionStatus: 'idle' });
+  useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
 });
 
 // ---------------------------------------------------------------------------
@@ -425,5 +425,83 @@ describe('onQuestionAnswered event triggers removeQuestion', () => {
     capturedOnData!(null);
 
     expect(useQuestionStore.getState().queue).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// otherText bus — setOtherText / clearOtherText reducers (TASK-762)
+// ---------------------------------------------------------------------------
+
+describe('setOtherText', () => {
+  it('sets text for a new questionId', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'hello');
+    expect(useQuestionStore.getState().otherText['q-1']).toBe('hello');
+  });
+
+  it('overwrites text for an existing questionId', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'first');
+    useQuestionStore.getState().setOtherText('q-1', 'second');
+    expect(useQuestionStore.getState().otherText['q-1']).toBe('second');
+  });
+
+  it('sets text for multiple distinct questionIds independently', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'alpha');
+    useQuestionStore.getState().setOtherText('q-2', 'beta');
+    const { otherText } = useQuestionStore.getState();
+    expect(otherText['q-1']).toBe('alpha');
+    expect(otherText['q-2']).toBe('beta');
+  });
+
+  it('does not mutate other keys when setting one key', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'alpha');
+    useQuestionStore.getState().setOtherText('q-2', 'beta');
+    // Overwrite q-1 only
+    useQuestionStore.getState().setOtherText('q-1', 'updated');
+    const { otherText } = useQuestionStore.getState();
+    expect(otherText['q-1']).toBe('updated');
+    expect(otherText['q-2']).toBe('beta');
+  });
+});
+
+describe('clearOtherText', () => {
+  it('removes the key for a given questionId', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'some text');
+    useQuestionStore.getState().clearOtherText('q-1');
+    expect(useQuestionStore.getState().otherText['q-1']).toBeUndefined();
+    expect('q-1' in useQuestionStore.getState().otherText).toBe(false);
+  });
+
+  it('is a no-op for a questionId that was never set — does not throw', () => {
+    expect(() => {
+      useQuestionStore.getState().clearOtherText('nonexistent');
+    }).not.toThrow();
+    expect(useQuestionStore.getState().otherText).toEqual({});
+  });
+
+  it('does not affect other keys when clearing one key', () => {
+    useQuestionStore.getState().setOtherText('q-1', 'keep');
+    useQuestionStore.getState().setOtherText('q-2', 'remove');
+    useQuestionStore.getState().clearOtherText('q-2');
+    const { otherText } = useQuestionStore.getState();
+    expect(otherText['q-1']).toBe('keep');
+    expect('q-2' in otherText).toBe(false);
+  });
+});
+
+describe('otherText — initial state and replaceAll interaction', () => {
+  it('otherText is empty on store initialisation', () => {
+    expect(useQuestionStore.getState().otherText).toEqual({});
+  });
+
+  it('replaceAll (queue resync) does NOT clear otherText — text survives an init() cycle', () => {
+    // Simulate ChatInput having set other text before a store resync
+    useQuestionStore.getState().setOtherText('q-sticky', 'typed text');
+
+    // replaceAll replaces only the queue; otherText must be preserved
+    useQuestionStore.getState().replaceAll([Q_A, Q_B]);
+
+    expect(useQuestionStore.getState().queue).toHaveLength(2);
+    // The key regression assertion: otherText survives the queue replacement
+    expect(useQuestionStore.getState().otherText['q-sticky']).toBe('typed text');
   });
 });
