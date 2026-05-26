@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
+import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
@@ -140,10 +141,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
   });
 
   afterEach(() => {
     ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
     db.close();
     vi.clearAllMocks();
   });
@@ -393,10 +396,12 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
   });
 
   afterEach(() => {
     ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
     db.close();
     vi.clearAllMocks();
   });

@@ -11,6 +11,8 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
+import { QuestionRouter } from '../../../orchestrator/questionRouter';
+import type { QuestionPayload } from '../../../orchestrator/questionRouter';
 import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
@@ -384,9 +386,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
     } finally {
       this.cleanupPipeline(panelId);
-      // Clear pending approvals under panelId — the same id passed to requestApproval().
-      // cleanupCliResources takes sessionId (abstract contract) so we call the router directly here.
+      // Clear pending approvals and questions under panelId — the same id passed to
+      // requestApproval() / requestQuestion(). cleanupCliResources takes sessionId
+      // (abstract contract) so we call the routers directly here.
       ApprovalRouter.getInstance().clearPendingForRun(panelId);
+      QuestionRouter.getInstance().clearPendingForRun(panelId);
       this.processes.delete(panelId);
       this.sdkRuns.delete(panelId);
       this.emit('exit', {
@@ -420,6 +424,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // route every tool through ApprovalRouter regardless of user prefs.
       // 'project' is retained so CLAUDE.md in the worktree still loads.
       settingSources: ['project'],
+      // Enable markdown previews for AskUserQuestion option items. The model emits
+      // the `preview` field on each option when this is set; the renderer uses it
+      // to display rich content alongside each choice. Unconditional — even when
+      // permissionMode='ignore' (no PreToolUse hook), the SDK's built-in
+      // AskUserQuestion handler is the consumer and benefits from the config.
+      toolConfig: {
+        askUserQuestion: {
+          previewFormat: 'markdown' as const,
+        },
+      },
       // When permissionMode is 'ignore', omit PreToolUse entirely so every tool call
       // is auto-allowed by the SDK — matching the pre-SDK "skip the bridge" behavior.
       ...(options.permissionMode !== 'ignore' ? {
@@ -517,10 +531,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /**
    * Build the PreToolUse hook callback that routes tool-use permission
-   * decisions through ApprovalRouter and translates to SDK hookSpecificOutput.
+   * decisions through ApprovalRouter (or QuestionRouter for AskUserQuestion)
+   * and translates to SDK hookSpecificOutput.
    *
-   * Delegates to routePreToolUseThroughApprovalRouter so the allow/deny/error
-   * semantics are maintained in a single place alongside permissionModeMapper.
+   * AskUserQuestion is intercepted before reaching ApprovalRouter — it is a
+   * user-question gate, not a permission gate, and its answer flows back via
+   * `updatedInput: { questions, answers }` rather than allow/deny.
+   *
+   * All other tools delegate to routePreToolUseThroughApprovalRouter so the
+   * allow/deny/error semantics are maintained in a single place alongside
+   * permissionModeMapper.
    *
    * A deny may originate from clearPendingForRun() when the run is terminated
    * mid-approval (e.g., user cancels the run while awaiting a PreToolUse
@@ -531,8 +551,59 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const loggerLike = makeLoggerLike(this.logger);
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
+      if (pretool.tool_name === 'AskUserQuestion') {
+        return this.routeAskUserQuestion(pretool, panelId, loggerLike);
+      }
       return routePreToolUseThroughApprovalRouter(pretool, panelId, 'ClaudeCodeManager', loggerLike);
     };
+  }
+
+  /**
+   * Route an AskUserQuestion PreToolUse hook through QuestionRouter.
+   *
+   * Awaits the user's answer from QuestionRouter.requestQuestion, then
+   * returns an SDK hookSpecificOutput with updatedInput: { questions, answers }
+   * so the SDK synthesizes the tool_result from the user's selections.
+   *
+   * On error (e.g. RunNotRunningError, DB failure), returns a deny output so
+   * the SDK receives a well-formed response instead of a thrown exception.
+   */
+  private async routeAskUserQuestion(
+    pretool: PreToolUseHookInput,
+    panelId: string,
+    loggerLike: ReturnType<typeof makeLoggerLike>,
+  ): Promise<import('@anthropic-ai/claude-agent-sdk').HookJSONOutput> {
+    try {
+      const input = pretool.tool_input as { questions: QuestionPayload[] };
+      const answer = await QuestionRouter.getInstance().requestQuestion(
+        panelId,
+        pretool.tool_use_id,
+        input.questions,
+        () => {},
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'allow' as const,
+          updatedInput: {
+            questions: input.questions,
+            answers: answer.answers,
+            ...(answer.annotations ? { annotations: answer.annotations } : {}),
+          },
+        },
+      };
+    } catch (err) {
+      loggerLike.error(
+        `[ClaudeCodeManager] AskUserQuestion hook failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: 'Internal question-router error',
+        },
+      };
+    }
   }
 
   // ---------------------------------------------------------------------------
