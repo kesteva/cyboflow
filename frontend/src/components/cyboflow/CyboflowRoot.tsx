@@ -11,7 +11,7 @@
  */
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
-import { RunView } from './RunView';
+import { RunBottomPane } from './RunBottomPane';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { usePanelSurface } from '../../hooks/usePanelSurface';
@@ -134,7 +134,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       {/* Main content area */}
       <div className="flex-1 overflow-auto p-4">
         {activeRunId !== null ? (
-          <RunView />
+          <RunBottomPane />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-4">
             <p className="text-sm text-text-secondary">Choose a workflow to start</p>
