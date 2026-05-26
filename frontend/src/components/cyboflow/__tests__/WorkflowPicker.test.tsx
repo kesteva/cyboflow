@@ -88,16 +88,28 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// ---------------------------------------------------------------------------
+// Mock the API wrapper — aligns with sibling tests (useQuickSession.test.tsx,
+// CyboflowRoot.test.tsx). Routes through the typed wrapper so any future
+// pre-flight validation or normalisation in API.sessions.createQuick is
+// exercised here too (FIND-SPRINT-038-8).
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../utils/api', () => ({
+  API: {
+    sessions: {
+      createQuick: vi.fn(),
+    },
+  },
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { WorkflowPicker } from '../WorkflowPicker';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { panelApi } from '../../../services/panelApi';
+import { API } from '../../../utils/api';
 
-// ---------------------------------------------------------------------------
-// Setup electronAPI mock
-// ---------------------------------------------------------------------------
-
-const mockCreateQuick = vi.fn();
+const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 
 beforeEach(() => {
   // Reset store state
@@ -122,16 +134,6 @@ beforeEach(() => {
   mockCreateQuick.mockResolvedValue({
     success: true,
     data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt' },
-  });
-
-  // Install electronAPI mock on window
-  Object.defineProperty(window, 'electronAPI', {
-    writable: true,
-    value: {
-      sessions: {
-        createQuick: mockCreateQuick,
-      },
-    },
   });
 });
 
