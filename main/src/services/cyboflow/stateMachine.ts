@@ -9,7 +9,7 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
  * once a run reaches a terminal state, NO further transitions are legal —
  * not even same-status no-ops (e.g. completed -> completed is rejected).
  *
- * Rationale: the database CHECK constraint enforces "status is one of 8
+ * Rationale: the database CHECK constraint enforces "status is one of 9
  * values" but cannot enforce "this transition from A to B is legal".
  * This table is the in-process source of truth.
  */
