@@ -67,6 +67,7 @@ export interface Session {
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
   commit_mode_settings?: string; // JSON string of CommitModeSettings
   skip_continue_next?: boolean;
+  run_id?: string | null;
 }
 
 export interface SessionOutput {
