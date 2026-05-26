@@ -37,6 +37,7 @@ import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { approvalEvents } from './orchestrator/trpc/routers/events';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
+import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
 import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
@@ -716,6 +717,10 @@ app.whenReady().then(async () => {
       const event = buildApprovalCreatedEvent(request, db);
       approvalEvents.emit('created', event);
       console.log('[Main] Bridged approvalCreated → approvalEvents.emit(created) for approvalId=', request.id);
+    });
+    ApprovalRouter.getInstance().on('approvalDecided', (event: ApprovalDecidedEvent) => {
+      approvalEvents.emit('decided', event);
+      console.log('[Main] Bridged approvalDecided → approvalEvents.emit(decided) for approvalId=', event.approvalId, 'decision=', event.decision);
     });
     console.log('[Main] ApprovalRouter → approvalEvents bridge wired');
     console.log('[Main] ApprovalRouter initialized');
