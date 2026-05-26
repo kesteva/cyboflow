@@ -7,12 +7,13 @@ import {
   IllegalTransitionError,
 } from '../stateMachine';
 
-// All 8 statuses — used for the terminal-state lockdown sweep.
+// All 9 statuses — used for the terminal-state lockdown sweep.
 const ALL_STATUSES: readonly WorkflowRunStatus[] = [
   'queued',
   'starting',
   'running',
   'awaiting_review',
+  'awaiting_input',
   'stuck',
   'completed',
   'failed',
@@ -30,8 +31,8 @@ describe('(a) positive sweep — every allowed transition returns true', () => {
       readonly WorkflowRunStatus[],
     ][];
 
-    // Guard: ensure we have all 8 states
-    expect(entries).toHaveLength(8);
+    // Guard: ensure we have all 9 states
+    expect(entries).toHaveLength(9);
 
     // Confirm each allowed (from, to) pair is accepted
     for (const [from, targets] of entries) {
@@ -88,6 +89,18 @@ describe('(a) positive sweep — every allowed transition returns true', () => {
   it('stuck -> failed is allowed', () => {
     expect(isTransitionAllowed('stuck', 'failed')).toBe(true);
   });
+
+  it('running -> awaiting_input is allowed', () => {
+    expect(isTransitionAllowed('running', 'awaiting_input')).toBe(true);
+  });
+
+  it('awaiting_input -> running is allowed', () => {
+    expect(isTransitionAllowed('awaiting_input', 'running')).toBe(true);
+  });
+
+  it('awaiting_input -> canceled is allowed', () => {
+    expect(isTransitionAllowed('awaiting_input', 'canceled')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -133,6 +146,18 @@ describe('(b) negative sweep — explicit forbidden transitions return false', (
 
   it('stuck -> awaiting_review is forbidden', () => {
     expect(isTransitionAllowed('stuck', 'awaiting_review')).toBe(false);
+  });
+
+  it('awaiting_input -> completed is forbidden (must return to running first)', () => {
+    expect(isTransitionAllowed('awaiting_input', 'completed')).toBe(false);
+  });
+
+  it('awaiting_input -> stuck is forbidden (awaiting_input is exempt from stuck classification)', () => {
+    expect(isTransitionAllowed('awaiting_input', 'stuck')).toBe(false);
+  });
+
+  it('awaiting_input -> awaiting_review is forbidden', () => {
+    expect(isTransitionAllowed('awaiting_input', 'awaiting_review')).toBe(false);
   });
 });
 
