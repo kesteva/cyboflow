@@ -26,16 +26,18 @@ _No items._
     - Level 2 visual_macos verification for TASK-715 WorkflowPicker + mcpHealthStore tRPC cutover
     - Level 2 visual verification for macOS
     - Level 2 visual_macos verification of RunBottomPane tab bar rendered output (Chat / Terminal / Data Stream three buttons + Data Stream default panel containing RunView)
+    - Level 2 visual verification of RunChatView Chat tab rendering
   level: visual
   severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-26T21:27:09.509Z"
+  updated_at: "2026-05-26T23:13:57.893Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
   affected_tasks:
     - TASK-655
     - TASK-715
     - TASK-752
     - TASK-756
+    - TASK-761
 
 - task: TASK-756
   type: config_issue

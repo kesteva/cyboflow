@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-039
-pending_count: 5
-last_updated: "2026-05-26T23:15:00.000Z"
+pending_count: 6
+last_updated: "2026-05-26T23:30:00.000Z"
 ---
 # Findings Queue
 
@@ -56,7 +56,7 @@ last_updated: "2026-05-26T23:15:00.000Z"
 - **location:** main/src/orchestrator/questionRouter.ts:24-30
 - **description:** Header-comment §4 and §5 are near-duplicates — both state "Questions do NOT auto-expire ... workflow pauses until the human (responds|triages)". Looks like a paraphrase artifact from copying ApprovalRouter's invariant list. The ApprovalRouter header has §1–§5 with no duplication; QuestionRouter's §5 should be deleted (it adds no information beyond §4) and the trailing §6 renumbered to §5, keeping parity with ApprovalRouter.
 - **suggested_action:** Delete questionRouter.ts lines 28–31 (§5 paragraph + blank-line separator); renumber existing §6 to §5.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-039-7
 - **source:** TASK-758 (code-reviewer)
@@ -66,7 +66,7 @@ last_updated: "2026-05-26T23:15:00.000Z"
 - **location:** main/src/orchestrator/questionRouter.ts:312-316
 - **description:** In `respond`'s `info.changes === 0` cancel-race fallback, the `UPDATE questions SET status='timed_out', answered_at=? WHERE id=?` is unguarded (no `AND status='pending'` filter). If `clearPendingForRun(runId)` has already run and set `status='timed_out'` with a prior timestamp, this UPDATE clobbers `answered_at` to a later value — minor audit-trail noise but inconsistent with `clearPendingForRun`'s guarded pattern (questionRouter.ts:374-376) and ApprovalRouter's idempotency conventions. Idempotent in the steady state but the lack of guard hides any future double-write bug.
 - **suggested_action:** Change line 314-315 to `WHERE id = ? AND status = 'pending'` for parity with clearPendingForRun and ApprovalRouter's clear path.
-- **resolved_by:**
+- **resolved_by:** 
 
 ## FIND-SPRINT-039-8
 - **source:** TASK-760 (code-reviewer)
@@ -85,3 +85,32 @@ last_updated: "2026-05-26T23:15:00.000Z"
 - **location:** frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx:335-345 (matches frontend/src/components/ReviewQueue/PendingApprovalCard.tsx:261-275)
 - **description:** Silent submit-failure UX: when `trpc.cyboflow.questions.answer.mutate` rejects, the card swallows the error in `.catch(() => {})` and only re-enables the button — there is no toast, no inline error, no console message visible to the user. The same pattern exists in PendingApprovalCard.tsx for approve/reject. Re-clicking submit may continue to fail with no indication of what went wrong (network drop, server validation, NOT_FOUND on a stale questionId). TASK-760 faithfully ports the PendingApprovalCard idiom per plan step 6, so this is NOT a TASK-760-introduced defect — it's a cross-cutting UX gap in the action-card pattern. TASK-761's wiring task is a natural place to introduce a shared error-toast utility consumed by both card families.
 - **suggested_action:** Add a shared toast/snackbar utility (or surface to an existing error sink in cyboflowStore) and call it from both PendingApprovalCard's approve/reject handlers and AskUserQuestionCard's submit handler. Include the underlying error message and the actionable id so users can recover.
+
+## FIND-SPRINT-039-10
+- **type:** scope_deviation
+- **source:** TASK-761 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** frontend/src/components/cyboflow/__tests__/RunBottomPane.test.tsx
+- **description:** RunBottomPane.test.tsx references data-testid run-bottom-pane-chat-placeholder which was removed by this tasks RunBottomPane.tsx edit (AC8). The Chat tab test needs updating to assert RunChatView renders instead. Required to meet AC typecheck gate.
+- **resolved_by:** TASK-761
+
+## FIND-SPRINT-039-11
+- **source:** TASK-761 (code-reviewer)
+- **type:** bug
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/cyboflow/RunChatView.tsx:241-252 (mergedTimeline)
+- **description:** RunChatView's mergedTimeline concatenates `historicalMessages` (from `cyboflow.runs.listMessages`) with `streamEvents.filter(e => e.runId === runId)` with no deduplication. Both feeds derive from raw_events: listMessages returns a snapshot of all assistant-text + user-text turns at query time, while streamEvents accumulates from `setActiveRun(runId)` onward (the store resets streamEvents on setActiveRun). Any event that arrived between the setActiveRun call and listMessages query resolution will appear in BOTH arrays, rendering twice in the chat view. The plan explicitly acknowledged this as an accepted low-cost tradeoff ("Hardest Decision" section), but in practice every time a user opens the Chat tab for an actively-streaming run, the overlap window is non-empty — so duplicate bubbles are the expected steady-state UX, not the edge case. Worth resolving before users notice and report it.
+- **suggested_action:** When merging, dedupe by stable identity: ChatMessage rows have `id` (raw_events row id or assistant message id); StreamEvent assistant events expose `payload.message.id` and user events expose `payload.message` content with `tool_use_id`. Drop any streamEvent whose underlying message id is already present in historicalMessages, OR (simpler) only mix in streamEvents whose timestamp postdates the latest historicalMessages.createdAt. Add a test asserting overlap dedup. Coordinate with TASK-759 owner if a stronger id-correlation contract is needed on the wire shape.
+- **resolved_by:**
+
+## FIND-SPRINT-039-12
+- **source:** TASK-761 (code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/cyboflow/RunChatView.tsx:86-95 + frontend/src/components/cyboflow/RunView.tsx:117-127
+- **description:** Light duplication between RunChatView's non-AskUserQuestion tool_use rendering branch (`renderAssistantBlock`) and RunView's `AssistantEventRow` tool_use branch. The plan explicitly chose to mirror RunView's shape ("same compact `tool: <name>` + JSON-stringified input box that RunView's AssistantEventRow renders") so the duplication is intentional, but the snippet is now in two places. Extracting a tiny `ToolUseBlockRow` shared component (or a `renderToolUseBlock(block)` helper) would let both call sites share output, and would also localize any future styling change. Not a blocker — small surface, both copies are short — but worth considering when the next tool-block UI tweak lands.
+- **suggested_action:** Extract `renderToolUseBlock(block: ToolUseBlock): ReactElement` to a small shared module under `frontend/src/components/cyboflow/` (e.g. `eventBlockRenderers.tsx`) and call from both RunView's AssistantEventRow and RunChatView's renderAssistantBlock. Re-run frontend tests; both files should shrink by ~8 lines each.
+- **resolved_by:**
