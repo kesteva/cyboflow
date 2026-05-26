@@ -54,6 +54,8 @@ export interface GitStatus {
   totalCommits?: number;
 }
 
+// NOTE: keep this interface in sync with frontend/src/types/session.ts CreateSessionRequest
+// until shared/types/ipc.ts consolidates IPC request shapes. See FIND-SPRINT-037-5.
 export interface CreateSessionRequest {
   prompt: string;
   worktreeTemplate?: string;
@@ -72,7 +74,6 @@ export interface CreateSessionRequest {
     permissionMode?: 'approve' | 'ignore';
     ultrathink?: boolean;
   };
-  quickSession?: boolean;
   branchName?: string;
 }
 
