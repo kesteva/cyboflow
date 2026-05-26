@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-039
-pending_count: 1
-last_updated: "2026-05-26T21:42:56.727Z"
+pending_count: 3
+last_updated: "2026-05-26T22:30:00.000Z"
 ---
 # Findings Queue
 
@@ -20,3 +20,50 @@ last_updated: "2026-05-26T21:42:56.727Z"
 - **summary:** pnpm test:unit fails with 4 errors in frontend/src/stores/__tests__/reviewQueueStore.test.ts (TypeError at trpc.cyboflow.events.onApprovalDecided.subscribe). Confirmed pre-existing baseline via git stash against pre-TASK-757 state. Root cause is trpc-shim removal in TASK-750 (SPRINT-038, commits 9927ca8 + 1127800).
 - **files:** frontend/src/stores/__tests__/reviewQueueStore.test.ts
 - **action:** Open a follow-up task to update reviewQueueStore.test.ts mocks for the post-TASK-750 trpc surface.
+
+## FIND-SPRINT-039-3
+- **type:** scope_deviation
+- **source:** TASK-758 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** shared/types/questions.ts
+- **description:** QuestionRequest type missing from shared/types/questions.ts (file was files_readonly in plan). Required to meet AC: questionRouter.ts imports QuestionRequest and QuestionAnswer from this module per plan step 2, and questionCreatedBridge.ts buildQuestionCreatedEvent(request: QuestionRequest) also imports it. Added QuestionRequest interface to the shared types file.
+- **resolved_by:** verifier — AC-prescribed: plan step 2 explicitly imports QuestionRequest from this module and AC14 requires both questionRouter.ts and questionCreatedBridge.ts to typecheck standalone; AC6 requires workflowName on the returned event. TASK-757's commit b28c084 did not export QuestionRequest nor workflowName on Question, so the additive edit is the only path to satisfy the ACs (planning oversight, not over-reach).
+
+## FIND-SPRINT-039-4
+- **type:** scope_deviation
+- **source:** TASK-758 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts
+- **description:** required to meet AC: claudeCodeManager.runSdkQuery finally block now calls QuestionRouter.getInstance().clearPendingForRun(panelId), which throws if QuestionRouter is not initialized. The existing wiring tests initialize ApprovalRouter but not QuestionRouter; they fail with QuestionRouter not initialized error. Updated wiring test to also initialize/reset QuestionRouter in each describe block that exercises runSdkQuery.
+- **resolved_by:** verifier — not actually a scope deviation: the file is in files_owned (plan frontmatter line 17). The init/reset additions are AC-prescribed by AC8 + AC14 (test:unit) — without them the suite throws "QuestionRouter not initialized" at runtime.
+
+## FIND-SPRINT-039-5
+- **type:** scope_deviation
+- **source:** TASK-758 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** main/src/services/panels/claude/__tests__/claudeCodeManager.killProcess.test.ts
+- **description:** required to meet AC: claudeCodeManager.runSdkQuery finally block now calls QuestionRouter.getInstance().clearPendingForRun(panelId). The existing killProcess tests initialize ApprovalRouter but not QuestionRouter, causing failures. Updated to also initialize/reset QuestionRouter.
+- **resolved_by:** verifier — not actually a scope deviation: the file is in files_owned (plan frontmatter line 18). The init/reset additions are AC-prescribed by AC8 + AC14 (test:unit) — without them the suite throws "QuestionRouter not initialized" at runtime.
+
+## FIND-SPRINT-039-6
+- **source:** TASK-758 (code-reviewer)
+- **type:** cleanup
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/questionRouter.ts:24-30
+- **description:** Header-comment §4 and §5 are near-duplicates — both state "Questions do NOT auto-expire ... workflow pauses until the human (responds|triages)". Looks like a paraphrase artifact from copying ApprovalRouter's invariant list. The ApprovalRouter header has §1–§5 with no duplication; QuestionRouter's §5 should be deleted (it adds no information beyond §4) and the trailing §6 renumbered to §5, keeping parity with ApprovalRouter.
+- **suggested_action:** Delete questionRouter.ts lines 28–31 (§5 paragraph + blank-line separator); renumber existing §6 to §5.
+- **resolved_by:**
+
+## FIND-SPRINT-039-7
+- **source:** TASK-758 (code-reviewer)
+- **type:** anti-pattern
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/questionRouter.ts:312-316
+- **description:** In `respond`'s `info.changes === 0` cancel-race fallback, the `UPDATE questions SET status='timed_out', answered_at=? WHERE id=?` is unguarded (no `AND status='pending'` filter). If `clearPendingForRun(runId)` has already run and set `status='timed_out'` with a prior timestamp, this UPDATE clobbers `answered_at` to a later value — minor audit-trail noise but inconsistent with `clearPendingForRun`'s guarded pattern (questionRouter.ts:374-376) and ApprovalRouter's idempotency conventions. Idempotent in the steady state but the lack of guard hides any future double-write bug.
+- **suggested_action:** Change line 314-315 to `WHERE id = ? AND status = 'pending'` for parity with clearPendingForRun and ApprovalRouter's clear path.
+- **resolved_by:**
