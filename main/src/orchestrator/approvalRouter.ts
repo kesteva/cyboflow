@@ -342,6 +342,7 @@ export class ApprovalRouter extends EventEmitter {
           // Resolve the requestApproval promise with a synthetic deny so the
           // awaiting caller is not left hanging.
           resolve({ behavior: 'deny', message: 'Run was canceled before approval could be processed' });
+          this.emit('approvalDecided', { approvalId, decision: 'rejected' });
           return;
         }
 
@@ -353,6 +354,7 @@ export class ApprovalRouter extends EventEmitter {
 
         resolve(decision);
         socketReply(decision);
+        this.emit('approvalDecided', { approvalId, decision: 'approved' });
       } else {
         // deny: update approvals only, do NOT touch workflow_runs.
         this.db.prepare(
@@ -362,6 +364,7 @@ export class ApprovalRouter extends EventEmitter {
 
         resolve(decision);
         socketReply(decision);
+        this.emit('approvalDecided', { approvalId, decision: 'rejected' });
       }
     });
   }
@@ -402,6 +405,7 @@ export class ApprovalRouter extends EventEmitter {
       entryNow.socketReply(denyDecision);
       entryNow.resolve(denyDecision);
       this.emit('approvalExpired', approvalId);
+      this.emit('approvalDecided', { approvalId, decision: 'expired' });
     });
   }
 
@@ -459,6 +463,7 @@ export class ApprovalRouter extends EventEmitter {
 
       // Resolve the awaiting Promise — do NOT invoke socketReply.
       entry.resolve(denyDecision);
+      this.emit('approvalDecided', { approvalId, decision: 'rejected' });
     }
   }
 

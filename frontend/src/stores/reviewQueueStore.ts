@@ -169,7 +169,7 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
       // during the same tick sees the guard and returns early.
       initialized = true;
 
-      const { addApproval, replaceAll, setConnectionStatus } = get();
+      const { addApproval, removeApproval, replaceAll, setConnectionStatus } = get();
 
       setConnectionStatus('connecting');
 
@@ -219,9 +219,30 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
         },
       });
 
+      // Subscribe to decided events so the item leaves the queue once the user
+      // approves/rejects or the gate times out. The full-state listPending sync
+      // remains the source of truth on reconnect; deltas are an optimisation.
+      const decidedSubscription = trpc.cyboflow.events.onApprovalDecided.subscribe(undefined, {
+        onData: (evt: unknown) => {
+          if (
+            typeof evt === 'object' &&
+            evt !== null &&
+            'approvalId' in evt &&
+            typeof (evt as Record<string, unknown>).approvalId === 'string'
+          ) {
+            removeApproval((evt as { approvalId: string }).approvalId);
+          }
+        },
+        onError: (err: unknown) => {
+          console.error('[reviewQueueStore] onApprovalDecided subscription error:', err);
+          setConnectionStatus('disconnected');
+        },
+      });
+
       // Build the unsubscribe function, cache it, and return it.
       const unsubscribe = () => {
         subscription.unsubscribe();
+        decidedSubscription.unsubscribe();
         initialized = false;
         cachedUnsubscribe = null;
       };
