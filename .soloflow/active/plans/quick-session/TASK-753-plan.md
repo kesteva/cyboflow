@@ -1,8 +1,8 @@
 ---
 id: TASK-753
 idea: SPRINT-037-compound
-status: ready
-created: 2026-05-25T00:00:00Z
+status: in-flight
+created: "2026-05-25T00:00:00Z"
 files_owned:
   - main/src/types/session.ts
   - frontend/src/types/session.ts
@@ -21,9 +21,9 @@ acceptance_criteria:
     verification: "grep -n 'branchName' frontend/src/types/session.ts returns at least one match inside the CreateSessionRequest interface block"
   - criterion: "main/src/types/session.ts CreateSessionRequest still declares branchName?: string"
     verification: "grep -n 'branchName' main/src/types/session.ts returns at least one match inside the CreateSessionRequest interface block"
-  - criterion: "Both CreateSessionRequest declarations carry a sync-warning comment referencing shared/types/ipc.ts"
+  - criterion: Both CreateSessionRequest declarations carry a sync-warning comment referencing shared/types/ipc.ts
     verification: "grep -n 'shared/types/ipc' main/src/types/session.ts frontend/src/types/session.ts returns at least two matches"
-  - criterion: "Production code does not read CreateSessionRequest.quickSession"
+  - criterion: Production code does not read CreateSessionRequest.quickSession
     verification: "grep -rn 'quickSession' --include='*.ts' --include='*.tsx' main/src frontend/src returns 0 matches for the field-name reference"
   - criterion: "pnpm typecheck && pnpm lint exit 0"
     verification: "pnpm typecheck && pnpm lint exit 0"
@@ -32,14 +32,13 @@ estimated_complexity: low
 epic: quick-session
 test_strategy:
   needed: false
-  justification: "Pure type-surface change. No runtime behavior changes. Verification is `pnpm typecheck` (catches any accidental consumer of `quickSession`) plus AC-level grep. main/src/types/ and frontend/src/types/ have no sibling tests (pure type declarations). Component tests in CyboflowRoot.test.tsx and WorkflowPicker.test.tsx do not import CreateSessionRequest and do not reference quickSession — both call sites send hard-coded payloads."
+  justification: Pure type-surface change. No runtime behavior changes. Verification is `pnpm typecheck` (catches any accidental consumer of `quickSession`) plus AC-level grep. main/src/types/ and frontend/src/types/ have no sibling tests (pure type declarations). Component tests in CyboflowRoot.test.tsx and WorkflowPicker.test.tsx do not import CreateSessionRequest and do not reference quickSession — both call sites send hard-coded payloads.
 prerequisites:
   - check: "grep -rn 'quickSession' --include='*.ts' --include='*.tsx' main/src frontend/src | grep -vE 'quick-session|quickSessionId|quickSessions|quickSession-session'"
     fix: "If matches outside main/src/types/session.ts appear, audit — a production consumer may have been added since SPRINT-037; do NOT delete the field; escalate"
-    description: "Sanity check that nothing in production reads CreateSessionRequest.quickSession before pruning the type"
+    description: Sanity check that nothing in production reads CreateSessionRequest.quickSession before pruning the type
     blocking: true
 ---
-
 # Prune dead CreateSessionRequest.quickSession + add missing branchName to frontend type
 
 ## Objective
