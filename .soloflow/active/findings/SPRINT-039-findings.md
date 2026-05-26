@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-039
-pending_count: 9
-last_updated: "2026-05-27T00:32:00.000Z"
+pending_count: 15
+last_updated: "2026-05-26T23:47:20.908Z"
 ---
 # Findings Queue
 
@@ -133,4 +133,129 @@ last_updated: "2026-05-27T00:32:00.000Z"
 - **location:** frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx:216-218 (and frontend/src/stores/questionStore.ts:52-100, frontend/src/components/cyboflow/ChatInput.tsx:106-114)
 - **description:** The `otherText` bus added by TASK-762 to `questionStore` is currently a write-only sink — ChatInput populates `questionStore.otherText[questionId]` via `setOtherText` in workflow-question mode, but AskUserQuestionCard maintains its own LOCAL `useState<string[]>` for "Other" text (line 216) and never imports or subscribes to `useQuestionStore` for that field. Result: typing in the bottom-bar ChatInput in workflow-question mode silently writes to a store nothing reads. The user sees their text disappear from the textarea (ChatInput clears on send) but the card's "Other" field stays empty. From the user's perspective the bottom-bar input is a no-op in workflow-question mode. This breaks the epic's stated success signal ("when a question is pending, typing forwards the text as the 'Other' answer", per EPIC-per-run-chat-surface.md line 14 and line 34). TASK-762's literal AC4 passes (ChatInput calls setOtherText and not trpc.answer.mutate; both unit tests assert this), but the consumer-side wiring was never planned: TASK-760 didn't ship a reader (its plan predates the bus), TASK-762's plan focused on ChatInput only, and the epic has no third task. The plan's "Hardest Decision" justified the forwarding pattern on the assumption that AskUserQuestionCard would read from the bus — that assumption was never realized in code. Recommend a follow-up task to (a) make AskUserQuestionCard subscribe to questionStore.otherText keyed by item.id, prefer the bus value over local state in the "Other" text input, fall back to local state when bus value is undefined, and (b) decide on bus semantics for multi-sub-question cards (currently keyed by questionId not (questionId, subIndex), so multi-sub-question cards would stomp each other on the otherText[item.id] slot). Also unused: the `clearOtherText` reducer has no callers in the codebase.
 - **suggested_action:** Open a follow-up task (suggest TASK-772 against the per-run-chat-surface epic, or roll into a future ask-user-question-roundtrip fix) to wire AskUserQuestionCard to read `questionStore.otherText[item.id]` and use it to prefill the per-question "Other" input. Also clarify keying semantics for multi-sub-question cards (extend the bus to `Record<string, Record<number, string>>` keyed by `(questionId, subIndex)`, or document that the bus is question-level only and the card distributes the text to all sub-questions' Other fields uniformly). Call `clearOtherText(questionId)` from AskUserQuestionCard's submit handler so the bus value doesn't leak across question instances.
+- **resolved_by:** 
+
+## FIND-SPRINT-039-15
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/cancelAndRestartHandler.ts:126
+- **description:** cancelAndRestartHandler clears pending approvals but not pending questions — symmetry violation across the new awaiting_input gate.
+- **suggested_action:** In cancelAndRestartHandler.ts, immediately after the approvalRouter.clearPendingForRun call at line 126 add `questionRouter.clearPendingForRun(runId)` with the same ordering rationale comment. Extend CancelAndRestartDeps to require a `questionRouter: Pick<QuestionRouter, clearPendingForRun>` field and inject in main/src/index.ts setCancelAndRestartDeps(). Add a regression test that asserts both routers are called before claudeManagerStop.
+- **resolved_by:** 
+
+
+
+
+
+
+cancelAndRestartHandler.ts:126 calls only `approvalRouter.clearPendingForRun(runId)` before `claudeManagerStop(runId)`. After TASK-757 added the `awaiting_input` run status and TASK-758 added `QuestionRouter`, a run paused on an AskUserQuestion gate that is `cancelAndRestart`d:
+  1. Will NOT have its in-process `QuestionRouter.pending` Map entry cleared until the SDK abort fires.
+  2. Loses the documented ordering rationale from cancelAndRestart AC5 (send deny BEFORE PTY kill) for the question path — the question Promise only resolves AFTER `claudeManagerStop` reaches the runSdkQuery `finally` block at claudeCodeManager.ts:391.
+
+Practically benign today because the finally-block cleanup is idempotent (both clears can race without corruption), but the symmetry is broken and any future direct cancel-without-claude-stop path would leak.
+
+Suspected tasks: TASK-757 (added awaiting_input), TASK-758 (added QuestionRouter + finally cleanup) — neither owns cancelAndRestartHandler.ts and the cross-task gap was not noticed.
+
+## FIND-SPRINT-039-16
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/questionRouter.ts (vs main/src/orchestrator/approvalRouter.ts)
+- **description:** Significant cross-task duplication between QuestionRouter and ApprovalRouter — extraction candidate.
+- **suggested_action:** Open a follow-up cleanup task that extracts a shared `GateRouter` abstraction. Concrete shape: parameterize on (tableName, parentAwaitingStatus, parentRunningStatus, gateInsertColumns, gateChildStatusOnTimeOut). Move the shared transaction-and-PQueue scaffolding into `gateRouterCore.ts`. Approval and question routers become thin shells delegating to the core. Bridges merge into `buildGateCreatedEvent<TGate>` parameterized by table + projection. Add a parity test that exercises the same race-condition matrix against both router instances.
+- **resolved_by:** 
+
+
+
+
+
+The pair is structurally identical for ~70%+ of their public surface:
+  - Singleton pattern with identical initialize/getInstance/_resetForTesting (questionRouter.ts:140-162 vs approvalRouter.ts:140-162).
+  - Per-run PQueue map with identical lazy getQueue helper, identical no-recursive-enqueue docstring (questionRouter.ts:96-115 vs approvalRouter.ts:96-114).
+  - `requestX` shape: same db.transaction wrapping a guarded UPDATE workflow_runs (status=running guard) + INSERT into the gate table; same `RunNotRunningError` (questionRouter.ts:222-255 vs approvalRouter.ts:222-258).
+  - `respond` shape: same enqueue-then-recheck dance, same guarded UPDATE, same auto-superseded path (questionRouter.ts:272-335 vs approvalRouter.ts:281-363).
+  - `clearPendingForRun`: identical shape including the guarded UPDATE for idempotency and the swallow-on-shutdown comment (questionRouter.ts:355-388 vs approvalRouter.ts:383-419).
+  - `recoverStaleAwaiting{Input,Review}`: nearly identical FK-cascade-style transitions on parent + child rows (questionRouter.ts:398-424 vs approvalRouter.ts:430-456).
+  - The two createdBridge files (approvalCreatedBridge.ts, questionCreatedBridge.ts) share the same JOIN-at-bridge / workflowName fallback / console.warn-on-missing pattern with only the table name and event payload shape differing.
+
+TASK-758 cloned ApprovalRouter to build QuestionRouter — the per-task code-reviewer (FIND-SPRINT-039-6 / -7) caught individual drift but only a sprint-level view sees that the whole pair is begging for a shared `GateRouter<TRequest, TResponse, TStatus>` base. Future gate types (e.g. policy-violation gates, IDEA-013 shell hooks) will compound the duplication.
+
+Suspected tasks: TASK-758 (whole-cloth clone) — but the extraction must happen across both routers, so this is sprint-level work, not a TASK-758 callback.
+
+## FIND-SPRINT-039-17
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** main/src/orchestrator/__tests__/stuckDetector.test.ts:51-99
+- **description:** Cross-task test-fixture drift: stuckDetector.test.ts inlines the migration 010 table-recreation SQL via a private `widenWorkflowRunsCheckToNineStatuses` helper instead of using the shared `createTestDb({ includeQuestionsTable: true })` extension TASK-757 added to orchestratorTestDb.ts:66-81.
+- **suggested_action:** Replace the inline `widenWorkflowRunsCheckToNineStatuses` body in stuckDetector.test.ts with a call to `createTestDb({ includeQuestionsTable: true })`. Re-run vitest. Add a comment in orchestratorTestDb.ts:46 noting that this option is the single source of truth for the post-010 schema in tests.
+- **resolved_by:** 
+
+
+
+
+Both helpers do the exact same thing — recreate workflow_runs with the 9-status CHECK constraint — by copy-pasting the schema literal. If migration 011 (or any subsequent CHECK widening) lands, BOTH copies must be updated in lockstep or the test silently runs against a stale CHECK.
+
+The shared helper exists in this very sprint (TASK-757); the divergence is an integration miss. The stuckDetector test was modified by TASK-757 (to seed `awaiting_input` runs in TEST 8) but the test author chose to inline rather than parameterize createTestDb. Per-task review only saw one file at a time; only sprint scope catches the duplication.
+
+Suspected tasks: TASK-757 (added both the helper and the inline copy).
+
+## FIND-SPRINT-039-18
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/services/panels/claude/claudeCodeManager.ts:551-590 vs main/src/orchestrator/preToolUseHookHelper.ts
+- **description:** AskUserQuestion PreToolUse routing duplicates the shape of routePreToolUseThroughApprovalRouter without using the shared helper.
+- **suggested_action:** Add `routePreToolUseThroughQuestionRouter(pretool, callerId, callerLabel, logger)` to a new file `main/src/orchestrator/preToolUseQuestionHookHelper.ts` (or extend preToolUseHookHelper.ts with both routes). Inline the AskUserQuestion-specific updatedInput shape there. Update claudeCodeManager.makePreToolUseHook to dispatch via the routed pair. Mirror the approval helper test (preToolUseHookHelper.test.ts) for the question variant.
+- **resolved_by:** 
+
+
+
+The approval path (preToolUseHookHelper.ts) provides a `routePreToolUseThroughApprovalRouter(pretool, callerId, callerLabel, logger)` helper that wraps the try/catch + hookSpecificOutput shape, callable from both permissionModeMapper and claudeCodeManager. TASK-758 added an analogous `routeAskUserQuestion` method INSIDE claudeCodeManager.ts (lines 561-590) instead of extracting a sibling helper.
+
+Results:
+  - The two routes have hard-coded log labels (`[ClaudeCodeManager]` baked into the literal at line 583) vs the parameterized `[${callerLabel}]` pattern in the approval helper.
+  - Question routing cannot be invoked from any other caller (e.g. a future permissionModeMapper analogue) without further duplication.
+  - The `updatedInput: { questions, answers, ...annotations }` shape is hand-rolled and would diverge from a future shared shape.
+
+Cross-task: TASK-758 owned both files but the existing helper convention (preToolUseHookHelper.ts predates this sprint) was not extended; per-task code-reviewer accepted the inline implementation.
+
+Suspected tasks: TASK-758.
+
+## FIND-SPRINT-039-19
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/questionListing.ts vs main/src/orchestrator/approvalListing.ts
+- **description:** Duplicated SELECT-JOIN-with-renaming pattern across listing modules.
+- **suggested_action:** Extract a `selectPendingGate<TRow, TGate>(db, opts: { table; payloadColumn; mapRow: (row) => TGate })` helper in a new `main/src/orchestrator/gateListing.ts`. Both questionListing and approvalListing become thin wrappers. Add a unit test confirming the JSON.parse failure path returns the gate with an empty payload (mirroring the current questionListing behavior).
+- **resolved_by:** 
+
+
+questionListing.ts:42-82 and approvalListing.ts have the same shape: SELECT JOIN workflow_runs JOIN workflows with `column AS camelCaseColumn` aliasing, JSON.parse of a payload column inside the row-mapping loop with a try/catch + console.warn on parse failure, ORDER BY created_at ASC. Only the table name and the projection shape differ.
+
+With two listings already cloned, a third gate-table addition (e.g. policy violations, shell hooks) will compound the duplication. Worth extracting now while the pattern is fresh.
+
+Suspected tasks: TASK-759 (cloned approvalListing.ts) — the per-task reviewer would not flag this since approvalListing.ts is outside the task scope.
+
+## FIND-SPRINT-039-20
+- **source:** SPRINT-039 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** low
+- **status:** open
+- **location:** main/src/orchestrator/questionRouter.ts:123-128 (and main/src/orchestrator/approvalRouter.ts:123-128)
+- **description:** Dead constructor parameter pattern propagated across both routers.
+
+Both ApprovalRouter and QuestionRouter accept _getQueueForRun as a constructor parameter and explicitly mark it unused via underscore prefix and jsdoc note. Both routers operate their own per-router PQueue map internally. The parameter exists for parity with prior callers and tests.
+
+This is a cross-task code smell: a misleading API surface that suggests dependency injection and tests do inject a queue factory while the implementation ignores the input. New router additions are likely to copy the same dead-parameter dance.
+
+Suspected tasks: TASK-758 propagated the pattern from approvalRouter.ts.
+- **suggested_action:** Drop the unused parameter from both constructor signatures and update the initialize static method to a 1-arg form. Update all call sites in main/src/index.ts and tests. Add a comment in the constructor explaining why per-router PQueues are intentional - no recursive-enqueue with RunQueueRegistry.
 - **resolved_by:** 
