@@ -1,7 +1,7 @@
 ---
 id: TASK-759
 idea: IDEA-025
-status: approved
+status: ready
 created: "2026-05-26T00:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/questions.ts

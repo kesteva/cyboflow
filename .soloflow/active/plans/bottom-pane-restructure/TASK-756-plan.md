@@ -1,7 +1,7 @@
 ---
 id: TASK-756
 idea: IDEA-025
-status: approved
+status: ready
 created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/RunBottomPane.tsx
