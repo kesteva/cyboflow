@@ -23,6 +23,7 @@ import { useAddTerminalShortcut } from '../../hooks/useAddTerminalShortcut';
 import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../../hooks/useAddClaudeShortcut';
 import { useAddQuickSessionShortcut } from '../../hooks/useAddQuickSessionShortcut';
+import { useQuickSession } from '../../hooks/useQuickSession';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -48,19 +49,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   useAddTerminalShortcut(handleAddTerminal);
   useAddClaudeShortcut(ensureClaudePanel);
 
-  const handlePickQuickMode = useCallback(async (toolType: 'claude' | 'none') => {
-    setIsQuickModePickerOpen(false);
-    if (projectId === null) return;
-    try {
-      const result = await window.electronAPI.sessions.createQuick({ prompt: '', projectId, toolType });
-      if (!result.success || !result.data) {
-        console.error('[CyboflowRoot] createQuick failed', result.error);
-        return;
-      }
-    } catch (err) {
-      console.error('[CyboflowRoot] createQuick threw', err);
-    }
-  }, [projectId]);
+  const quickSession = useQuickSession({ projectId });
 
   const handleOpenQuickPicker = useCallback(() => {
     if (projectId === null) return;
@@ -124,14 +113,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           {isQuickModePickerOpen && (
             <div className="absolute left-0 top-full z-10 mt-1 flex flex-col gap-1 rounded border border-border-primary bg-bg-primary p-2 shadow-md">
               <button
-                onClick={() => { void handlePickQuickMode('claude'); }}
+                onClick={() => { setIsQuickModePickerOpen(false); void quickSession.start('claude'); }}
                 className="rounded px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary"
                 data-testid="quick-mode-chat"
               >
                 Chat
               </button>
               <button
-                onClick={() => { void handlePickQuickMode('none'); }}
+                onClick={() => { setIsQuickModePickerOpen(false); void quickSession.start('none'); }}
                 className="rounded px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary"
                 data-testid="quick-mode-terminal"
               >

@@ -49,6 +49,29 @@ silently blocked. If `visual_macos` returns screenshots but clicks/keystrokes
 do nothing, check Accessibility first. After granting either permission, quit
 and relaunch the host process.
 
+### Pre-flight: confirm the Electron renderer is actually running
+
+`pnpm dev`'s `concurrently` + `wait-on` parents can survive in `ps` after the
+Electron renderer has exited — `pgrep -lf "electron"` then matches the
+`concurrently` command line and falsely suggests a live window. A capture
+attempt against a windowless run fails with `-3811` audio/video errors or
+returns 0 windows.
+
+Before any `mcp__peekaboo__image` call, confirm the renderer is up:
+
+1. CDP port is listening (only true when the Electron renderer is alive):
+   ```bash
+   lsof -i :9223     # must show an `electron` LISTEN entry
+   ```
+2. Peekaboo sees a Cyboflow window:
+   ```
+   mcp__peekaboo__list(application_windows, app="Electron")
+   # or app="Cyboflow" — window count must be ≥ 1
+   ```
+
+If either check fails, restart `pnpm dev` and wait for the renderer to load
+before retrying. (FIND-SPRINT-038-1; reproduces SPRINT-029/031 verifier patterns.)
+
 ### Troubleshooting: "audio/video capture failure" despite grants showing clean
 
 If `mcp__peekaboo__image` against the Cyboflow Electron window returns

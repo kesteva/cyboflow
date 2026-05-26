@@ -1,12 +1,8 @@
 import { create } from 'zustand';
-import type { Session, SessionOutput, GitStatus, ClaudeJsonMessage } from '../types/session';
+import type { Session, SessionOutput, GitStatus, ClaudeJsonMessage, CreateSessionRequest } from '../types/session';
 import { API } from '../utils/api';
 
-interface CreateSessionRequest {
-  prompt: string;
-  worktreeTemplate: string;
-  count: number;
-}
+type CreateSessionInput = Pick<CreateSessionRequest, 'prompt' | 'worktreeTemplate' | 'count'>;
 
 interface SessionStore {
   sessions: Session[];
@@ -35,7 +31,7 @@ interface SessionStore {
   addTerminalOutput: (output: { sessionId: string; type: 'stdout' | 'stderr'; data: string }) => void;
   clearTerminalOutput: (sessionId: string) => void;
   getTerminalOutput: (sessionId: string) => string[];
-  createSession: (request: CreateSessionRequest) => Promise<void>;
+  createSession: (request: CreateSessionInput) => Promise<void>;
   markSessionAsViewed: (sessionId: string) => Promise<void>;
   
   setDeletingSessionIds: (ids: string[]) => void;
