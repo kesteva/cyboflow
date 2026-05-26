@@ -16,6 +16,7 @@
  *  - runId null + activeQuickSessionId null: "No active run" placeholder
  */
 import { useEffect, useRef, useMemo, useState, type ReactElement } from 'react';
+import { ChatInput } from './ChatInput';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useReviewQueueStore } from '../../stores/reviewQueueStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -311,6 +312,8 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
           </div>
         </div>
       )}
+
+      <ChatInput runId={runId} />
     </div>
   );
 }
