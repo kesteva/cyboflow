@@ -1,16 +1,30 @@
 /**
- * WorkflowCanvas component tests (TASK-769).
+ * WorkflowCanvas component tests (TASK-769, TASK-780).
  *
  * Behaviors verified:
  *   1. Meta row: workflow title, run label, elapsed, tokens, running pill all present when isRunning=true.
  *   2. Column count: one phase column per phase in WorkflowDefinition, 138px width, gap=14px.
  *   3. State derivation — currentStepId='step-b': step-a → done, step-b → running, step-c → pending.
  *   4. State derivation — currentStepId=null: all steps pending.
- *   5. No SVG edge layer or requestAnimationFrame: neither <svg> nor rAF call present.
+ *   5. WorkflowCanvasEdges overlay present when currentStepId is supplied.
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// ResizeObserver shim for jsdom
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (typeof global.ResizeObserver === 'undefined') {
+    global.ResizeObserver = vi.fn().mockImplementation(() => ({
+      observe: vi.fn(),
+      unobserve: vi.fn(),
+      disconnect: vi.fn(),
+    }));
+  }
+});
 import { WorkflowCanvas } from '../WorkflowCanvas';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 
@@ -143,31 +157,20 @@ describe('WorkflowCanvas', () => {
     expect(cardA).not.toHaveStyle({ outlineStyle: 'solid' });
   });
 
-  it('does not render an SVG edge layer or animated token (no canvas-level svg)', () => {
-    // Use a definition with no human/done steps so no inline SVG glyphs appear.
-    const simpleDef: WorkflowDefinition = {
-      id: 'sprint',
-      phases: [
-        {
-          id: 'phase-x',
-          label: 'Plan',
-          color: '#3b6dd6',
-          steps: [
-            { id: 'step-x1', name: 'Step X1', agent: 'planner', mcps: [], retries: 0 },
-          ],
-        },
-      ],
-    };
-
+  it('mounts the WorkflowCanvasEdges overlay when a currentStepId is supplied', () => {
     const { container } = render(
       <WorkflowCanvas
-        definition={simpleDef}
-        currentStepId={null}
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        isRunning={true}
       />,
     );
 
-    // No <svg> element rendered — SVG edge overlay deferred to TASK-770.
-    // (step-x1 is pending, so no check/human-badge SVG glyphs appear either.)
-    expect(container.querySelector('svg')).toBeNull();
+    // The edges overlay wrapper is present
+    expect(screen.getByTestId('workflow-canvas-edges-overlay')).toBeInTheDocument();
+
+    // WorkflowCanvasEdges always renders an <svg> (even when containerRect is null
+    // in jsdom and no paths are resolved), because the svg element is unconditional.
+    expect(container.querySelectorAll('svg').length).toBeGreaterThan(0);
   });
 });

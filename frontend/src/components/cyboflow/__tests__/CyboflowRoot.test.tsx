@@ -1,5 +1,5 @@
 /**
- * CyboflowRoot component tests (TASK-688, TASK-752).
+ * CyboflowRoot component tests (TASK-688, TASK-752, TASK-780).
  *
  * Behaviors verified:
  *   1. Renders "Choose a workflow to start" empty state when activeRunId is null.
@@ -12,10 +12,26 @@
  *   8. Selecting Terminal invokes createQuick with the correct payload.
  *   9. (TASK-752) Chat full lifecycle: panelApi.createPanel called AND activeQuickSessionId set.
  *  10. (TASK-752) Terminal full lifecycle: panelApi.createPanel called with terminal args AND activeQuickSessionId set.
+ *  11. (TASK-780) Does not call getPhaseState.query when activeRunId is null.
+ *  12. (TASK-780) Mounts WorkflowCanvas above RunBottomPane when a run is active.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// ResizeObserver shim for jsdom
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (typeof global.ResizeObserver === 'undefined') {
+    global.ResizeObserver = vi.fn().mockImplementation(() => ({
+      observe: vi.fn(),
+      unobserve: vi.fn(),
+      disconnect: vi.fn(),
+    }));
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi — keeps only the entries that WorkflowPicker/RunView still
@@ -46,6 +62,28 @@ vi.mock('../../../trpc/client', () => ({
             worktreePath: '/tmp/wt',
             branchName: 'run/run-test-001',
           }),
+        },
+        getPhaseState: {
+          query: vi.fn().mockResolvedValue({
+            definition: {
+              id: 'sprint',
+              phases: [
+                {
+                  id: 'phase-1',
+                  label: 'Plan',
+                  color: '#3b6dd6',
+                  steps: [
+                    { id: 'step-a', name: 'Step A', agent: 'planner', mcps: [], retries: 0 },
+                  ],
+                },
+              ],
+            },
+            currentStepId: 'step-a',
+            stepStates: [{ stepId: 'step-a', status: 'running' }],
+          }),
+        },
+        onStepTransition: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
       },
       workflows: {
@@ -124,6 +162,8 @@ beforeEach(() => {
   });
   vi.mocked(panelApi.createPanel).mockClear();
   vi.mocked(API.sessions.createQuick).mockClear();
+  vi.mocked(trpc.cyboflow.runs.getPhaseState.query).mockClear();
+  vi.mocked(trpc.cyboflow.runs.onStepTransition.subscribe).mockClear();
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
   // useEffect does not throw when RunView is mounted inside CyboflowRoot.
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -140,7 +180,7 @@ describe('CyboflowRoot', () => {
     // CTA button is also present
     expect(screen.getByRole('button', { name: 'Choose a workflow' })).toBeInTheDocument();
     // RunRightRail is always rendered (layout shell)
-    expect(screen.getByTestId('run-right-rail-workflow-progress-placeholder')).toBeInTheDocument();
+    expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
   });
 
   it('renders RunView when activeRunId is set and hides the empty-state CTA', () => {
@@ -154,7 +194,9 @@ describe('CyboflowRoot', () => {
     // Empty-state CTA text is gone
     expect(screen.queryByText('Choose a workflow to start')).not.toBeInTheDocument();
     // RunRightRail is always rendered (layout shell)
-    expect(screen.getByTestId('run-right-rail-workflow-progress-placeholder')).toBeInTheDocument();
+    expect(screen.getByTestId('run-right-rail')).toBeInTheDocument();
+    // When activeRunId is set, the timeline mounts (not the empty state)
+    expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
   });
 
   it('opening and closing the workflow picker modal toggles its visibility', async () => {
@@ -230,6 +272,39 @@ describe('CyboflowRoot', () => {
 
     // RunView should now be rendered (activeRunId was set by the store)
     expect(screen.getByText('run-auto-close')).toBeInTheDocument();
+  });
+
+  it('does not call getPhaseState.query when activeRunId is null', () => {
+    // activeRunId is null (cleared in beforeEach)
+    render(<CyboflowRoot projectId={1} />);
+
+    // The empty-state CTA must be visible
+    expect(screen.getByText('Choose a workflow to start')).toBeInTheDocument();
+
+    // useWorkflowPhaseState calls onStepTransition.subscribe only when runId is non-null;
+    // getPhaseState.query must NOT have been called.
+    expect(vi.mocked(trpc.cyboflow.runs.getPhaseState.query)).not.toHaveBeenCalled();
+  });
+
+  it('mounts WorkflowCanvas above RunBottomPane when a run is active', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-canvas-test');
+    });
+
+    render(<CyboflowRoot projectId={1} />);
+
+    // RunView / RunBottomPane is rendered (run-bottom-pane-tab-* testids)
+    // The run-bottom-pane renders the RunView which has the run ID text
+    expect(screen.getByText('run-canvas-test')).toBeInTheDocument();
+
+    // After the getPhaseState query resolves, phaseState.definition is non-null
+    // and WorkflowCanvas mounts (data-testid="workflow-canvas")
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-canvas')).toBeInTheDocument();
+    });
+
+    // Both workflow-canvas AND the RunBottomPane content coexist
+    expect(screen.getByText('run-canvas-test')).toBeInTheDocument();
   });
 });
 
