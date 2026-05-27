@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-041
 pending_count: 3
-last_updated: "2026-05-27T04:57:41.418Z"
+last_updated: "2026-05-27T05:17:58.849Z"
 ---
 # Findings Queue
 
@@ -36,4 +36,23 @@ last_updated: "2026-05-27T04:57:41.418Z"
 - **location:** docs/VISUAL-VERIFICATION-SETUP.md
 - **description:** Peekaboo MCP reports Accessibility NOT granted for MCP host process binary while Screen Recording IS granted — recurring TCC.db host-process gap documented across SPRINT-031..SPRINT-039 and now SPRINT-041. CLAUDE.md already references docs/VISUAL-VERIFICATION-SETUP.md TCC diagnostic. Recurring across many sprints suggests the doc-fix that resolves once-for-all has not landed; compounder should propose elevating the TCC fix from doc-noted to a tracked setup task (or an automated tcc-check script).
 - **suggested_action:** Compounder: open a tracked task to either (a) script the TCC.db host-process check + remediation, OR (b) promote the existing doc walk-through into the project bootstrap / onboarding flow so it stops being a per-sprint resolution-loop.
-- **resolved_by:**
+- **resolved_by:** 
+
+## FIND-SPRINT-041-4
+- **type:** scope_deviation
+- **source:** TASK-777 (executor)
+- **severity:** low
+- **status:** resolved
+- **location:** tests/helpers/cyboflowTestHarness.ts:83-91
+- **description:** required to meet AC: typecheck gate failed because tests/helpers/cyboflowTestHarness.ts uses both `new ApprovalRouter(db, factory)` direct construction and `ApprovalRouter.initialize(db, factory)` — both must be narrowed to 1-arg to satisfy TypeScript after removing the dead parameter from the constructor signature.
+- **resolved_by:** verifier — AC-prescribed: AC7/AC8 require `pnpm typecheck` to exit 0; the harness's direct `new ApprovalRouter(dbLike, factory)` + `ApprovalRouter.initialize(dbLike, factory)` calls would have failed typecheck once the dead parameter was removed from the constructor and initialize signatures.
+
+## FIND-SPRINT-041-5
+- **source:** TASK-777 (code-reviewer)
+- **type:** cleanup
+- **severity:** medium
+- **status:** resolved
+- **location:** main/src/orchestrator/__tests__/approvalRouter.test.ts:38-51, 70/116/177/231/285/344/395/429/464/529/546-547/605/752/830/880
+- **description:** Asymmetric cleanup vs sibling questionRouter.test.ts. The 65af958 chore commit dropped `makeQueueFactory` from questionRouter.test.ts and rewrote all its `await qf.getOrCreate(runId).onIdle()` barriers to `await router['getQuestionQueue'](runId).onIdle()` (which observes the router's REAL internal queue). The same chore left approvalRouter.test.ts with 14 standalone `await qf.getOrCreate(runId).onIdle()` calls + 2 inside `await Promise.all([qf.getOrCreate(A).onIdle(), qf.getOrCreate(B).onIdle()])` (line 545-548) plus the unused `makeQueueFactory` helper at line 38-51. Since `qf` is no longer passed to `ApprovalRouter.initialize`, these queues have zero tasks enqueued and `onIdle()` resolves immediately — the comment at line 128 ("Wait for the queue to be idle so the transaction has committed") is now actively misleading. Tests still pass only because better-sqlite3 transactions are synchronous, so DB state is committed before the next microtask; the synchronization machinery is dead weight that survives only by accident.
+- **suggested_action:** Mirror the questionRouter.test.ts fix: replace every `qf.getOrCreate(runId).onIdle()` with `router['getApprovalQueue'](runId).onIdle()` (private-field bracket access), then delete the now-unused `makeQueueFactory` helper + `import PQueue from 'p-queue'`. Verify with `grep -n 'makeQueueFactory\|qf\.' main/src/orchestrator/__tests__/approvalRouter.test.ts` returning 0 matches.
+- **resolved_by:** TASK-777
