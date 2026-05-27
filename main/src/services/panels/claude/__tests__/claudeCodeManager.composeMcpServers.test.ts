@@ -148,7 +148,7 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
 
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
 
     mgr = new TestableClaudeCodeManager(
       createMockSessionManager(),

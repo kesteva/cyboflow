@@ -96,7 +96,7 @@ describe('cyboflow.approvals.approve', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    ApprovalRouter.initialize(adapter);
     const router = ApprovalRouter.getInstance();
 
     seedRun(db, { id: 'run-approve' });
@@ -147,7 +147,7 @@ describe('cyboflow.approvals.approve', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    ApprovalRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
 
@@ -162,7 +162,7 @@ describe('cyboflow.approvals.reject', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    ApprovalRouter.initialize(adapter);
     const approvalRouter = ApprovalRouter.getInstance();
 
     seedRun(db, { id: 'run-reject' });
@@ -209,7 +209,7 @@ describe('cyboflow.approvals.reject', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    ApprovalRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    ApprovalRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
 

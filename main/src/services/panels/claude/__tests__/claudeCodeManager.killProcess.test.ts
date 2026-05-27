@@ -161,8 +161,8 @@ describe('ClaudeCodeManager.killProcess', () => {
     db = createTestDb();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
     mgr = new ClaudeCodeManager(createMockSessionManager(), undefined, undefined, db);
     // Spy on clearPendingForRun to assert it is called from runSdkQuery's
     // finally block (single-sourced), not directly from killProcess.
