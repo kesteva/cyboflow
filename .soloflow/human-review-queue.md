@@ -32,7 +32,7 @@ _No items._
   level: visual
   severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-27T01:36:41.598Z"
+  updated_at: "2026-05-27T01:53:21.330Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
   affected_tasks:
     - TASK-655
@@ -41,6 +41,7 @@ _No items._
     - TASK-756
     - TASK-761
     - TASK-767
+    - TASK-768
 
 - task: TASK-756
   type: config_issue
