@@ -44,33 +44,9 @@ export function WorkflowCanvas({
   tokenCount,
   isRunning = false,
 }: WorkflowCanvasProps) {
-  // ── Flatten all steps for state derivation ────────────────────────────────
-  type FlatStep = {
-    phaseIndex: number;
-    stepIndex: number; // 1-based global
-    phase: (typeof definition.phases)[number];
-    step: (typeof definition.phases)[number]['steps'][number];
-  };
-
-  const allSteps: FlatStep[] = [];
-  let globalIdx = 0;
-  for (const phase of definition.phases) {
-    for (const step of phase.steps) {
-      globalIdx += 1;
-      allSteps.push({
-        phaseIndex: 0, // unused
-        stepIndex: globalIdx,
-        phase,
-        step,
-      });
-    }
-  }
-
-  // Index of the currently-running step (-1 if not found or null)
-  const currentIdx =
-    currentStepId != null
-      ? allSteps.findIndex((fs) => fs.step.id === currentStepId)
-      : -1;
+  // ── Flatten all step ids for state derivation ─────────────────────────────
+  const stepIds = definition.phases.flatMap((p) => p.steps.map((s) => s.id));
+  const currentIdx = currentStepId != null ? stepIds.indexOf(currentStepId) : -1;
 
   // Derive per-step status
   const statusFor = (flatIdx: number): StepStatus => {
@@ -235,11 +211,7 @@ export function WorkflowCanvas({
                 return (
                   <div
                     key={step.id}
-                    style={{
-                      height: ROW_H,
-                      position: 'relative',
-                      marginBottom: stepInPhase < phase.steps.length - 1 ? 0 : 0,
-                    }}
+                    style={{ height: ROW_H, position: 'relative' }}
                     data-testid={`step-wrapper-${step.id}`}
                   >
                     <WorkflowStepCard
