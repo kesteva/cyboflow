@@ -25,11 +25,7 @@
  *    until the user answers (or the run is canceled). This matches the product
  *    invariant "workflow pauses until the human responds."
  *
- * 5. Questions are NOT auto-expired. A pending question remains in the queue
- *    until the user answers (or the run is canceled). This matches the product
- *    invariant "workflow pauses until the human triages."
- *
- * 6. The user's answer flows back to the SDK through the PreToolUse hook's
+ * 5. The user's answer flows back to the SDK through the PreToolUse hook's
  *    `updatedInput: { questions, answers }` payload (NOT through an injected
  *    tool_result). See .soloflow/archive/ideas/IDEA-025-research.md "Answered
  *    Questions" for the SDK contract details: the SDK synthesizes the
