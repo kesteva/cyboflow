@@ -32,8 +32,25 @@
  * runs.listMessages (TASK-759 — wrapper-layer guard coverage):
  *  (a) Empty raw_events returns [].
  *  (b) Missing ctx.db → TRPCError PRECONDITION_FAILED.
+ *
+ * runs.getPhaseState (TASK-766):
+ *  (a) Returns correct WorkflowDefinition for known SoloFlowWorkflowName.
+ *  (b) Throws NOT_FOUND for unknown workflow name.
+ *  (c) Returns current_step_id verbatim (string and null cases).
+ *  (d) Computes stepStates correctly across four cases:
+ *        null currentStepId → all pending.
+ *        first-step running → first running, rest pending.
+ *        middle-step running → preceding done, matching running, trailing pending.
+ *        orphan id → all pending.
+ *  (e) Throws PRECONDITION_FAILED when ctx.db is missing.
+ *  (f) Throws NOT_FOUND when runId does not exist.
+ *
+ * runs.onStepTransition (TASK-766):
+ *  (a) Filters by runId server-side: emitting two events yields only the
+ *      matching runId event to a subscriber.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
 import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
@@ -41,6 +58,8 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { setStartRunDeps } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
+import { stepTransitionEvents } from '../events';
+import type { WorkflowStepTransitionEvent } from '../../../stepTransitionBridge';
 
 // ---------------------------------------------------------------------------
 // Seed helpers (inlined — small, out of scope to extract to shared fixture)
@@ -343,4 +362,303 @@ describe('cyboflow.runs.listMessages', () => {
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// runs.getPhaseState integration tests (TASK-766)
+//
+// Tests use createTestDb (GATE_SCHEMA + migration 007) plus migration 011
+// (current_step_id column) applied inline. The procedure's workflow JOIN
+// and WorkflowDefinition resolution logic are exercised against real SQLite.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a test DB with GATE_SCHEMA + migrations 007 and 011.
+ * Migration 011 adds current_step_id TEXT to workflow_runs.
+ */
+function createTestDbWithStepTracking(): Database.Database {
+  const db = createTestDb({ includeStuckDetectedAt: true });
+  // Apply migration 011 inline (single-source: 011_workflow_step_tracking.sql).
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');
+  return db;
+}
+
+/**
+ * Seeds a workflow row with the given name and a workflow_run row.
+ * Returns { workflowId, runId }.
+ */
+function seedPhaseRun(
+  db: Database.Database,
+  runId: string,
+  workflowName: string,
+  currentStepId: string | null = null,
+): { workflowId: string; runId: string } {
+  const workflowId = `wf-${runId}`;
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+  ).run(workflowId, workflowName);
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+     VALUES (?, ?, 1, '/tmp/test', 'running', '{}', ?)`,
+  ).run(runId, workflowId, currentStepId);
+
+  return { workflowId, runId };
+}
+
+describe('cyboflow.runs.getPhaseState', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDbWithStepTracking();
+  });
+
+  // -------------------------------------------------------------------------
+  // (a) Returns correct WorkflowDefinition for known SoloFlowWorkflowName
+  // -------------------------------------------------------------------------
+  it('(a) returns correct WorkflowDefinition for known workflow name (soloflow)', async () => {
+    const runId = 'run-gps-soloflow';
+    seedPhaseRun(db, runId, 'soloflow', null);
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition.id).toBe('soloflow');
+    expect(result.definition.phases.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // (b) Throws NOT_FOUND for unknown workflow name
+  // -------------------------------------------------------------------------
+  it('(b) throws NOT_FOUND for unknown workflow name', async () => {
+    const runId = 'run-gps-unknown-wf';
+    seedPhaseRun(db, runId, 'unknown-workflow-name', null);
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+
+    await expect(
+      caller.cyboflow.runs.getPhaseState({ runId }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // (c) Returns current_step_id verbatim — string case
+  // -------------------------------------------------------------------------
+  it('(c) returns current_step_id verbatim when set to a string', async () => {
+    const runId = 'run-gps-step-string';
+    // 'context' is the id of the first step in the soloflow 'plan' phase.
+    seedPhaseRun(db, runId, 'soloflow', 'context');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.currentStepId).toBe('context');
+  });
+
+  // -------------------------------------------------------------------------
+  // (c) Returns current_step_id verbatim — null case
+  // -------------------------------------------------------------------------
+  it('(c) returns null for current_step_id when column is NULL', async () => {
+    const runId = 'run-gps-step-null';
+    seedPhaseRun(db, runId, 'soloflow', null);
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.currentStepId).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) stepStates — null currentStepId → all pending
+  // -------------------------------------------------------------------------
+  it('(d) null currentStepId → all stepStates pending', async () => {
+    const runId = 'run-gps-allpending';
+    seedPhaseRun(db, runId, 'soloflow', null);
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.stepStates.length).toBeGreaterThan(0);
+    for (const ss of result.stepStates) {
+      expect(ss.status).toBe('pending');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) stepStates — first step running, rest pending
+  // -------------------------------------------------------------------------
+  it('(d) first-step currentStepId → first running, rest pending', async () => {
+    const runId = 'run-gps-first-step';
+    // 'context' is the first step of soloflow (plan.context).
+    seedPhaseRun(db, runId, 'soloflow', 'context');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const states = result.stepStates;
+    expect(states[0].status).toBe('running');
+    expect(states[0].stepId).toBe('context');
+    for (const ss of states.slice(1)) {
+      expect(ss.status).toBe('pending');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) stepStates — middle step running (done/running/pending split)
+  // -------------------------------------------------------------------------
+  it('(d) middle-step currentStepId → preceding done, matching running, trailing pending', async () => {
+    const runId = 'run-gps-middle-step';
+    // 'approve-idea' is the 3rd step (index 2) in soloflow plan phase.
+    // Steps in order: context(0), research(1), approve-idea(2), epics(3), tasks(4), ...
+    seedPhaseRun(db, runId, 'soloflow', 'approve-idea');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const states = result.stepStates;
+    const matchIdx = states.findIndex((s) => s.stepId === 'approve-idea');
+    expect(matchIdx).toBeGreaterThan(0);
+    expect(states[matchIdx].status).toBe('running');
+
+    for (let i = 0; i < matchIdx; i++) {
+      expect(states[i].status).toBe('done');
+    }
+    for (let i = matchIdx + 1; i < states.length; i++) {
+      expect(states[i].status).toBe('pending');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) stepStates — orphan id → all pending, no throw
+  // -------------------------------------------------------------------------
+  it('(d) orphan currentStepId (not in definition) → all pending, no throw', async () => {
+    const runId = 'run-gps-orphan';
+    seedPhaseRun(db, runId, 'soloflow', 'nonexistent.orphan-step');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.currentStepId).toBe('nonexistent.orphan-step');
+    expect(result.stepStates.length).toBeGreaterThan(0);
+    for (const ss of result.stepStates) {
+      expect(ss.status).toBe('pending');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (e) Missing ctx.db → PRECONDITION_FAILED
+  // -------------------------------------------------------------------------
+  it('(e) missing ctx.db → TRPCError PRECONDITION_FAILED', async () => {
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(
+      caller.cyboflow.runs.getPhaseState({ runId: 'any-run-id' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // (f) Non-existent runId → NOT_FOUND
+  // -------------------------------------------------------------------------
+  it('(f) non-existent runId → TRPCError NOT_FOUND', async () => {
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+
+    await expect(
+      caller.cyboflow.runs.getPhaseState({ runId: 'does-not-exist' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.onStepTransition integration tests (TASK-766)
+//
+// Tests emit directly on the stepTransitionEvents EventEmitter and assert
+// that the subscription correctly filters by runId.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.onStepTransition', () => {
+  afterEach(() => {
+    // Remove all 'transition' listeners to prevent cross-test leaks.
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  // -------------------------------------------------------------------------
+  // (a) RunId filter: two events emitted → only matching runId is yielded
+  // -------------------------------------------------------------------------
+  it('(a) filters events by runId: yields only the matching runId event', async () => {
+    const targetRunId = 'run-A';
+    const otherRunId = 'run-B';
+
+    const controller = new AbortController();
+
+    // Call the subscription procedure via callProcedure (createCaller doesn't
+    // support subscriptions in tRPC v11).
+    const result = await callProcedure({
+      router: appRouter,
+      ctx: createContext(),
+      path: 'cyboflow.runs.onStepTransition',
+      type: 'subscription',
+      getRawInput: async () => ({ runId: targetRunId }),
+      input: { runId: targetRunId },
+      signal: controller.signal,
+      batchIndex: 0,
+    });
+
+    expect(isAsyncIterable(result)).toBe(true);
+    const iterable = result as AsyncIterable<WorkflowStepTransitionEvent>;
+
+    const collected: WorkflowStepTransitionEvent[] = [];
+
+    // Emit events on the next tick so that the EventEmitter listener
+    // (registered inside eventToAsyncIterable's [Symbol.asyncIterator]) is
+    // already set up by the time the events arrive. Using setImmediate/Promise
+    // microtask: the for-await loop calls [Symbol.asyncIterator]() synchronously
+    // before the first await, which registers the listener — so emitting on
+    // queueMicrotask/Promise.resolve() is sufficient.
+    const evB: WorkflowStepTransitionEvent = {
+      runId: otherRunId,
+      stepId: 'execute.implement',
+      status: 'running',
+      timestamp: new Date().toISOString(),
+    };
+    const evA: WorkflowStepTransitionEvent = {
+      runId: targetRunId,
+      stepId: 'execute.implement',
+      status: 'running',
+      timestamp: new Date().toISOString(),
+    };
+
+    // Schedule emission and abort on a macrotask so the for-await iterator
+    // has time to register its listener and reach its awaiting state.
+    setTimeout(() => {
+      stepTransitionEvents.emit('transition', evB);
+      stepTransitionEvents.emit('transition', evA);
+    }, 0);
+
+    // Collect events; abort after receiving the first matching one to prevent
+    // the loop from hanging indefinitely.
+    for await (const ev of iterable) {
+      collected.push(ev);
+      // Abort after collecting the first matching event so the loop exits.
+      controller.abort();
+    }
+
+    expect(collected).toHaveLength(1);
+    expect(collected[0].runId).toBe(targetRunId);
+  }, 10000);
 });
