@@ -105,7 +105,7 @@ describe('cyboflow.questions.answer', () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    QuestionRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    QuestionRouter.initialize(adapter);
     const qr = QuestionRouter.getInstance();
 
     seedRun(db, { id: 'run-answer', status: 'running' });
@@ -158,7 +158,7 @@ describe('cyboflow.questions.answer', () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    QuestionRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    QuestionRouter.initialize(adapter);
     const qr = QuestionRouter.getInstance();
 
     seedRun(db, { id: 'run-annotations', status: 'running' });
@@ -204,7 +204,7 @@ describe('cyboflow.questions.answer', () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
     const registry = new RunQueueRegistry();
-    QuestionRouter.initialize(adapter, registry.getOrCreate.bind(registry));
+    QuestionRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
 

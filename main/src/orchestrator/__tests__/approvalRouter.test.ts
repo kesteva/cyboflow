@@ -70,7 +70,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const noopSocketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-001';
     seedRun(db, { id: runId, status: 'running' });
@@ -116,7 +116,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-002';
     seedRun(db, { id: runId, status: 'running' });
@@ -182,7 +182,7 @@ describe('ApprovalRouter', () => {
     // Wrap the prepare so we can spy on UPDATE workflow_runs calls.
     // We do this by creating two separate runs and confirming each finishes
     // before the next starts (via queue ordering).
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-003'; // Same runId for both requests.
     seedRun(db, { id: runId, status: 'running' });
@@ -231,7 +231,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-004';
     seedRun(db, { id: runId, status: 'running' });
@@ -285,7 +285,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-005';
     seedRun(db, { id: runId, status: 'running' });
@@ -344,7 +344,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-006';
     seedRun(db, { id: runId, status: 'running' });
@@ -395,7 +395,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-007';
     seedRun(db, { id: runId, status: 'running' });
@@ -429,7 +429,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-008';
     seedRun(db, { id: runId, status: 'running' });
@@ -464,7 +464,7 @@ describe('ApprovalRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-009';
     seedRun(db, { id: runId, status: 'running' });
@@ -512,7 +512,7 @@ describe('ApprovalRouter', () => {
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     // No entries in pending — clearPendingForRun must not throw and must be
     // a no-op (no DB writes, no errors).
@@ -531,7 +531,7 @@ describe('ApprovalRouter', () => {
     const socketReplyA = vi.fn<(decision: ApprovalDecision) => void>();
     const socketReplyB = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runIdA = 'run-101A';
     const runIdB = 'run-101B';
@@ -607,7 +607,7 @@ describe('ApprovalRouter', () => {
     const socketReply1 = vi.fn<(decision: ApprovalDecision) => void>();
     const socketReply2 = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-012';
     seedRun(db, { id: runId, status: 'running' });
@@ -672,7 +672,7 @@ describe('ApprovalRouter', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
     seedRun(db, { id: 'run-G2', status: 'awaiting_review' });
@@ -716,7 +716,7 @@ describe('ApprovalRouter', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-H1';
     seedRun(db, { id: runId, status: 'awaiting_review' });
@@ -774,7 +774,7 @@ describe('ApprovalRouter', () => {
         db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
     };
 
-    const router = ApprovalRouter.initialize(faultyAdapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(faultyAdapter);
 
     const runId = 'run-013';
     seedRun(db, { id: runId, status: 'running' });
@@ -833,7 +833,7 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'e2e-run-001';
     seedRun(db, { id: runId, status: 'running' });
@@ -883,7 +883,7 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'e2e-run-002';
     seedRun(db, { id: runId, status: 'running' });

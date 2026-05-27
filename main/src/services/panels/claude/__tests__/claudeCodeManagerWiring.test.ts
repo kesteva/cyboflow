@@ -140,8 +140,8 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
   });
 
   afterEach(() => {
@@ -395,8 +395,8 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
   });
 
   afterEach(() => {
@@ -520,8 +520,8 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
   });
 
   afterEach(() => {

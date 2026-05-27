@@ -70,7 +70,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const noopSocketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-001';
     seedRun(db, { id: runId, status: 'running' });
@@ -128,7 +128,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-002';
     seedRun(db, { id: runId, status: 'running' });
@@ -194,7 +194,7 @@ describe('QuestionRouter', () => {
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-003';
     seedRun(db, { id: runId, status: 'running' });
@@ -258,7 +258,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-004';
     seedRun(db, { id: runId, status: 'running' });
@@ -317,7 +317,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-005';
     seedRun(db, { id: runId, status: 'running' });
@@ -386,7 +386,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-006';
     seedRun(db, { id: runId, status: 'running' });
@@ -432,7 +432,7 @@ describe('QuestionRouter', () => {
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     const runId = 'qrun-007';
     seedRun(db, { id: runId, status: 'running' });
@@ -497,7 +497,7 @@ describe('QuestionRouter', () => {
         db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
     };
 
-    const router = QuestionRouter.initialize(faultyAdapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(faultyAdapter);
 
     const runId = 'qrun-008';
     seedRun(db, { id: runId, status: 'running' });
@@ -545,7 +545,7 @@ describe('QuestionRouter', () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
-    const router = QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = QuestionRouter.initialize(adapter);
 
     seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' });
     seedRun(db, { id: 'qrun-R2', status: 'awaiting_input' });
