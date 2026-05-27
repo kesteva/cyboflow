@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-040
-pending_count: 9
-last_updated: "2026-05-27T02:25:31.713Z"
+pending_count: 10
+last_updated: "2026-05-27T02:55:00.000Z"
 ---
 # Findings Queue
 
@@ -95,4 +95,14 @@ SPRINT-040 started with missing infra: docker; tests deferred (likely false posi
 - **location:** frontend/src/components/cyboflow/WorkflowCanvas.tsx
 - **description:** AC8 (WorkflowCanvas imports WorkflowCanvasEdges + useWorkflowTokenAnimation) cannot be self-verified by TASK-770 — WorkflowCanvas.tsx is files_readonly here. WorkflowCanvas does not yet contain the insertion contract slots (stepRects state, containerRect, WorkflowCanvasEdges import, useWorkflowTokenAnimation import). Same class as FIND-SPRINT-040-3 and FIND-SPRINT-040-5. WorkflowCanvasEdges and useWorkflowTokenAnimation are complete and tested in isolation; the wiring gap is expected to be closed by TASK-771 which owns the tRPC wiring pass.
 - **suggested_action:** TASK-771 (or a dedicated follow-up) should add the TASK-770 plan Insertion Contract slots to WorkflowCanvas.tsx: stepRects Map state, containerRect state, useLayoutEffect with ResizeObserver, useWorkflowTokenAnimation call, token coordinate interpolation, and <WorkflowCanvasEdges> mount. Verify AC8 greps pass after that wiring lands.
+- **resolved_by:** 
+
+## FIND-SPRINT-040-10
+- **source:** TASK-771 (code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** main/src/orchestrator/stepTransitionBridge.ts:62-68 + main/src/orchestrator/trpc/routers/runs.ts:286 + frontend/src/hooks/useWorkflowPhaseState.ts:75-81
+- **description:** StepId namespace mismatch across the workflow phase chain. The orchestrator emits and persists `current_step_id` in dot-notation `phase.step` form (e.g. `'execute.implement'`, `'compound.extract'` — see `TERMINAL_STEP_IDS` in stepTransitionBridge.ts and migration011 fixture `'execute.implement'`). However, `WORKFLOW_DEFINITIONS` in shared/types/workflows.ts declares `WorkflowStep.id` values as bare strings (e.g. `'implement'`, `'context'`, `'tasks'`, `'extract'`). The consumer chain compares dot-form against bare form: (a) the `getPhaseState` query handler does `flatSteps.findIndex((s) => s.id === currentStepId)` at runs.ts:286 — will always return -1 in production, producing all-`'pending'` stepStates; (b) the new `useWorkflowPhaseState` hook's `mergeTransition` does `orderedIds.indexOf(event.stepId)` at line 75-81, which will also return -1 in production and silently drop every real transition event via its defensive guard. TASK-771's unit tests pass because the fixture uses bare ids `'s1','s2','s3'`. The mismatch was inherited from TASK-766 (handler) and TASK-765 (bridge), so the hook is not the source — but TASK-771 makes the impact visible end-to-end (canvas will render but never update). This is the type of silent-drop pattern called out in CLAUDE.md (FIND-SPRINT-024-4 family).
+- **suggested_action:** Pick one canonical form and migrate the other side: either (a) prefix `WorkflowStep.id` with the phase id when serializing (and update `WORKFLOW_DEFINITIONS` lookup paths to match), or (b) change `TERMINAL_STEP_IDS` (and any caller of `buildStepTransitionEvent`) to emit bare step ids. Then update both `getPhaseState`'s lookup and the hook's `mergeTransition` to use the same key. Add an integration test that wires a real `WORKFLOW_DEFINITIONS` entry through `buildStepTransitionEvent` → `getPhaseState` → `useWorkflowPhaseState` to lock in the contract.
 - **resolved_by:** 
