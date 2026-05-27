@@ -337,8 +337,7 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
     });
   });
 
-  it('renders RunBottomPane when activeRunId is null but mainRepoSession is non-null', async () => {
-    // Override the getOrCreateMainRepoSession mock to return a real session
+  it('renders panel surface (not RunBottomPane) when activeRunId is null but mainRepoSession is non-null', async () => {
     vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({
       success: true,
       data: mockMainRepoSession,
@@ -346,14 +345,17 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
 
     render(<CyboflowRoot projectId={1} />);
 
-    // Empty-state CTA should NOT be present — RunBottomPane renders instead
+    // Empty-state CTA should NOT be present
     await waitFor(() => {
       expect(screen.queryByText('Choose a workflow to start')).not.toBeInTheDocument();
     });
 
-    // RunBottomPane renders its tab bar (data-stream tab is visible by default)
+    // RunBottomPane must NOT render — panel surface owns the session-alive view
+    expect(screen.queryByTestId('run-bottom-pane-tab-data-stream')).not.toBeInTheDocument();
+
+    // Panel surface renders its tab bar
     await waitFor(() => {
-      expect(screen.getByTestId('run-bottom-pane-tab-data-stream')).toBeInTheDocument();
+      expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
     });
   });
 

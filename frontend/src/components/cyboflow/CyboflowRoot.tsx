@@ -5,11 +5,9 @@
  *   header row     — thin bar with "Choose workflow" and "Quick Session" buttons
  *   main content   — three-branch left column:
  *                    1. activeRunId set   → WorkflowCanvas (when phaseState has definition) + RunBottomPane
- *                    2. mainRepoSession   → RunBottomPane (panels stay alive after run completion)
+ *                    2. mainRepoSession   → PanelTabBar + PanelContainer (session panels fill the area)
  *                    3. neither          → empty-state CTA
  *   right rail     — RunRightRail (always rendered, 296 px fixed)
- *   panel surface  — PanelTabBar + PanelContainer anchored below the left+right area
- *                    when a main-repo session exists (Option B)
  *   Modal overlay  — WorkflowPicker mounted inside Modal
  */
 import { useState, useCallback, useEffect } from 'react';
@@ -111,9 +109,26 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               </div>
             </>
           ) : mainRepoSession ? (
-            <div className="flex-1 overflow-hidden">
-              <RunBottomPane />
-            </div>
+            <SessionProvider session={mainRepoSession} projectName="">
+              <PanelTabBar
+                panels={sessionPanels}
+                activePanel={currentActivePanel}
+                onPanelSelect={handlePanelSelect}
+                onPanelClose={handlePanelClose}
+                context="project"
+                onAddTerminal={handleAddTerminal}
+                onAddClaude={ensureClaudePanel}
+              />
+              {currentActivePanel && (
+                <div className="flex-1 overflow-hidden relative">
+                  <PanelContainer
+                    panel={currentActivePanel}
+                    isActive
+                    isMainRepo={!!mainRepoSession?.isMainRepo}
+                  />
+                </div>
+              )}
+            </SessionProvider>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>
@@ -131,33 +146,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         {/* Right rail — always rendered as layout shell (296px fixed) */}
         <RunRightRail phaseState={phaseState} />
       </div>
-
-      {/* Panel surface — only when no active run (RunBottomPane owns the run view) */}
-      {mainRepoSession && activeRunId === null && (
-        <SessionProvider session={mainRepoSession} projectName="">
-          <PanelTabBar
-            panels={sessionPanels}
-            activePanel={currentActivePanel}
-            onPanelSelect={handlePanelSelect}
-            onPanelClose={handlePanelClose}
-            context="project"
-            onAddTerminal={handleAddTerminal}
-            onAddClaude={ensureClaudePanel}
-          />
-          {currentActivePanel && (
-            <div
-              className="flex-shrink-0 border-t border-border-primary relative"
-              style={{ minHeight: 200, maxHeight: '50vh', height: '40vh' }}
-            >
-              <PanelContainer
-                panel={currentActivePanel}
-                isActive
-                isMainRepo={!!mainRepoSession?.isMainRepo}
-              />
-            </div>
-          )}
-        </SessionProvider>
-      )}
 
       {/* WorkflowPicker modal — only rendered when projectId is a number */}
       {projectId !== null && (
