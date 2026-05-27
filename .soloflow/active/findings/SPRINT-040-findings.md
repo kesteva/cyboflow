@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-040
-pending_count: 10
-last_updated: "2026-05-27T02:55:00.000Z"
+pending_count: 13
+last_updated: "2026-05-27T02:52:05.254Z"
 ---
 # Findings Queue
 
@@ -105,4 +105,43 @@ SPRINT-040 started with missing infra: docker; tests deferred (likely false posi
 - **location:** main/src/orchestrator/stepTransitionBridge.ts:62-68 + main/src/orchestrator/trpc/routers/runs.ts:286 + frontend/src/hooks/useWorkflowPhaseState.ts:75-81
 - **description:** StepId namespace mismatch across the workflow phase chain. The orchestrator emits and persists `current_step_id` in dot-notation `phase.step` form (e.g. `'execute.implement'`, `'compound.extract'` — see `TERMINAL_STEP_IDS` in stepTransitionBridge.ts and migration011 fixture `'execute.implement'`). However, `WORKFLOW_DEFINITIONS` in shared/types/workflows.ts declares `WorkflowStep.id` values as bare strings (e.g. `'implement'`, `'context'`, `'tasks'`, `'extract'`). The consumer chain compares dot-form against bare form: (a) the `getPhaseState` query handler does `flatSteps.findIndex((s) => s.id === currentStepId)` at runs.ts:286 — will always return -1 in production, producing all-`'pending'` stepStates; (b) the new `useWorkflowPhaseState` hook's `mergeTransition` does `orderedIds.indexOf(event.stepId)` at line 75-81, which will also return -1 in production and silently drop every real transition event via its defensive guard. TASK-771's unit tests pass because the fixture uses bare ids `'s1','s2','s3'`. The mismatch was inherited from TASK-766 (handler) and TASK-765 (bridge), so the hook is not the source — but TASK-771 makes the impact visible end-to-end (canvas will render but never update). This is the type of silent-drop pattern called out in CLAUDE.md (FIND-SPRINT-024-4 family).
 - **suggested_action:** Pick one canonical form and migrate the other side: either (a) prefix `WorkflowStep.id` with the phase id when serializing (and update `WORKFLOW_DEFINITIONS` lookup paths to match), or (b) change `TERMINAL_STEP_IDS` (and any caller of `buildStepTransitionEvent`) to emit bare step ids. Then update both `getPhaseState`'s lookup and the hook's `mergeTransition` to use the same key. Add an integration test that wires a real `WORKFLOW_DEFINITIONS` entry through `buildStepTransitionEvent` → `getPhaseState` → `useWorkflowPhaseState` to lock in the contract.
+- **resolved_by:** 
+
+## FIND-SPRINT-040-11
+- **source:** SPRINT-040 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx:185-257 + frontend/src/hooks/useWorkflowPhaseState.ts:115-172
+- **description:** Cross-task duplication of the tRPC phase-state wiring pattern. WorkflowProgressTimeline (TASK-768) and useWorkflowPhaseState (TASK-771) each independently implement the same getPhaseState seed-query + onStepTransition subscription with delta-merge state semantics. The timeline declares its own PhaseState interface (line 28-32) mirroring the hooks UseWorkflowPhaseStateResult, manages its own isLoading/loadError, and re-implements the subscribe + setState merge. The hook was specifically designed in TASK-771 as the integration point for live phase state, but TASK-768 was completed before the hook existed and rolled its own. Both code paths will need to be kept in sync as the contract evolves (current/future step timestamps, error-shape, race rules).
+- **suggested_action:** Retrofit WorkflowProgressTimeline to consume useWorkflowPhaseState instead of its own seed-query+subscription effects. Replace the local phaseState/stepStates/isLoading/loadError state with `const { definition, currentStepId, stepStates, isLoading, error } = useWorkflowPhaseState(runId);` and drop the two useEffect blocks (lines 198-230 and 233-257). Keep the local streamEvents log projection — thats the timeline-specific concern.
+- **resolved_by:** 
+
+
+
+Suspected tasks: TASK-768, TASK-771
+
+## FIND-SPRINT-040-12
+- **source:** SPRINT-040 (sprint-code-reviewer)
+- **type:** improvement
+- **severity:** medium
+- **status:** open
+- **location:** frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx:198-257 vs frontend/src/hooks/useWorkflowPhaseState.ts:118-169
+- **description:** Inconsistent subscribe-vs-query race semantics across two consumers of the same tRPC contract. useWorkflowPhaseState (TASK-771) deliberately subscribes BEFORE awaiting trpc.cyboflow.runs.getPhaseState.query so no transition events are missed during the seed-query gap (hook line 130 comment: Subscribe BEFORE awaiting the query so no transition events are missed). WorkflowProgressTimeline (TASK-768) uses two independent useEffect blocks keyed on [runId]: the seed-query effect (line 199-230) and the subscription effect (line 233-257). Both fire on the same render tick, but the querys `.then()` overwrites setStepStates with the seed result regardless of whether the subscription has already applied any deltas — so transition events arriving during the query gap are silently overwritten when the query resolves. Net effect: the timeline can show a stale pending for a step the orchestrator already moved to running if the transition emit beat the query response. Same contract, two different race policies.
+- **suggested_action:** Settle on one race policy and apply it everywhere. The hooks subscribe-before-await policy is the safer one (no event loss). Either retrofit the timeline onto the hook (preferred — see FIND-SPRINT-040-11) which inherits the policy for free, or replicate the subscribe-before-query ordering and the merge-rather-than-overwrite semantics in the timelines own effects. Document the chosen policy in a comment on the tRPC contract definition (e.g. on onStepTransition in main/src/orchestrator/trpc/routers/runs.ts) so future consumers dont roll a third variant.
+- **resolved_by:** 
+
+
+Suspected tasks: TASK-768, TASK-771
+
+## FIND-SPRINT-040-13
+- **source:** SPRINT-040 (sprint-code-reviewer)
+- **type:** bug
+- **severity:** high
+- **status:** open
+- **location:** frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx:297-339
+- **description:** WorkflowProgressTimeline is a third casualty of the FIND-SPRINT-040-10 stepId namespace mismatch. Beyond the bridge (dot-form), the getPhaseState handler (bare-form lookup), and the useWorkflowPhaseState hook (bare-form lookup), the timeline also builds `stepStatusMap` from server-supplied `s.stepId` (dot-form in production because runs.ts:286 lookup returns matchIndex=-1 → all pending; subscription events carry dot-form) and then does `stepStatusMap.get(step.id)` with bare `step.id` from WORKFLOW_DEFINITIONS at line 339. Even if the seed-query bug is fixed at the handler level, subscription deltas would still arrive with dot-form stepIds and miss the bare-form map keys on the consumer side. This widens the impact surface of FIND-SPRINT-040-10 to a fourth file — any fix MUST land at all four sites simultaneously or one consumer will silently mis-render.
+
+Suspected tasks: TASK-768, TASK-771, TASK-766, TASK-765
+- **suggested_action:** Treat FIND-SPRINT-040-10s remediation as a chain-wide migration: pick one form, then update (1) TERMINAL_STEP_IDS / buildStepTransitionEvent in stepTransitionBridge.ts, (2) the migration 011 column comment, (3) getPhaseStates flatSteps.findIndex in runs.ts:286, (4) the hooks mergeTransition orderedIds.indexOf in useWorkflowPhaseState.ts:75-81, AND (5) the timelines stepStatusMap key derivation + lookup in WorkflowProgressTimeline.tsx:297-339. Add a single integration test that wires the production WORKFLOW_DEFINITIONS through buildStepTransitionEvent → getPhaseState → both consumers to lock in the contract.
 - **resolved_by:** 
