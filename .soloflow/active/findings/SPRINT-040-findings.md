@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-040
-pending_count: 8
-last_updated: "2026-05-27T02:30:00.000Z"
+pending_count: 9
+last_updated: "2026-05-27T02:25:31.713Z"
 ---
 # Findings Queue
 
@@ -85,4 +85,14 @@ SPRINT-040 started with missing infra: docker; tests deferred (likely false posi
 - **location:** frontend/src/components/cyboflow/WorkflowStepCard.tsx:222-234, 276-287
 - **description:** The decorative `<svg>` glyphs inside the human badge (person icon) and the done-state check circle do not have `aria-hidden="true"`. Their parent `<span>` carries the `aria-label` ("human step" / "completed"). Without `aria-hidden` on the SVG, screen readers may attempt to traverse into the SVG content (its `<circle>` / `<path>` children have no accessible names), causing inconsistent announcement across AT implementations. The canonical pattern is `aria-label` on the labeled wrapper plus `aria-hidden="true"` on the decorative SVG so AT treats the SVG as presentation.
 - **suggested_action:** Add `aria-hidden="true"` to both `<svg>` elements (lines 222 and 276 of WorkflowStepCard.tsx). The parent `<span>` aria-label remains the sole accessible name. No behavior change for sighted users.
+- **resolved_by:** 
+
+## FIND-SPRINT-040-9
+- **type:** claude-md
+- **source:** TASK-770 (executor)
+- **severity:** low
+- **status:** open
+- **location:** frontend/src/components/cyboflow/WorkflowCanvas.tsx
+- **description:** AC8 (WorkflowCanvas imports WorkflowCanvasEdges + useWorkflowTokenAnimation) cannot be self-verified by TASK-770 — WorkflowCanvas.tsx is files_readonly here. WorkflowCanvas does not yet contain the insertion contract slots (stepRects state, containerRect, WorkflowCanvasEdges import, useWorkflowTokenAnimation import). Same class as FIND-SPRINT-040-3 and FIND-SPRINT-040-5. WorkflowCanvasEdges and useWorkflowTokenAnimation are complete and tested in isolation; the wiring gap is expected to be closed by TASK-771 which owns the tRPC wiring pass.
+- **suggested_action:** TASK-771 (or a dedicated follow-up) should add the TASK-770 plan Insertion Contract slots to WorkflowCanvas.tsx: stepRects Map state, containerRect state, useLayoutEffect with ResizeObserver, useWorkflowTokenAnimation call, token coordinate interpolation, and <WorkflowCanvasEdges> mount. Verify AC8 greps pass after that wiring lands.
 - **resolved_by:** 
