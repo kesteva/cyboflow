@@ -17,8 +17,10 @@ import type { Approval } from '../../../../shared/types/approvals';
 
 // Mutable mock references — replaced in beforeEach so each test gets a fresh spy.
 let mockListPendingQuery: ReturnType<typeof vi.fn>;
-let mockSubscribeUnsubscribe: ReturnType<typeof vi.fn>;
-let mockSubscribe: ReturnType<typeof vi.fn>;
+let mockCreatedSubscribeUnsubscribe: ReturnType<typeof vi.fn>;
+let mockCreatedSubscribe: ReturnType<typeof vi.fn>;
+let mockDecidedSubscribeUnsubscribe: ReturnType<typeof vi.fn>;
+let mockDecidedSubscribe: ReturnType<typeof vi.fn>;
 
 // Mock trpc-electron/renderer before any reviewQueueStore import so the
 // module evaluates without the Electron IPC bridge.
@@ -37,7 +39,10 @@ vi.mock('../../trpc/client', () => {
         },
         events: {
           onApprovalCreated: {
-            get subscribe() { return mockSubscribe; },
+            get subscribe() { return mockCreatedSubscribe; },
+          },
+          onApprovalDecided: {
+            get subscribe() { return mockDecidedSubscribe; },
           },
           setBadgeCount: {
             mutate: vi.fn().mockResolvedValue(undefined),
@@ -61,8 +66,10 @@ import {
 
 beforeEach(() => {
   mockListPendingQuery = vi.fn().mockResolvedValue([]);
-  mockSubscribeUnsubscribe = vi.fn();
-  mockSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockSubscribeUnsubscribe });
+  mockCreatedSubscribeUnsubscribe = vi.fn();
+  mockCreatedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockCreatedSubscribeUnsubscribe });
+  mockDecidedSubscribeUnsubscribe = vi.fn();
+  mockDecidedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockDecidedSubscribeUnsubscribe });
 
   // Reset the store's closure-private `initialized` flag by calling the
   // returned unsubscribe from any prior init(), then resetting Zustand state.
@@ -210,8 +217,8 @@ describe('init() idempotency', () => {
     }
   });
 
-  it('double init() — listPending.query called exactly once and subscribe called exactly once', () => {
-    // First init — starts the subscription
+  it('double init() — listPending.query called exactly once and subscribe called exactly twice (once per subscription)', () => {
+    // First init — starts both subscriptions
     const unsub1 = useReviewQueueStore.getState().init();
     activeUnsub = unsub1;
 
@@ -219,41 +226,47 @@ describe('init() idempotency', () => {
     const unsub2 = useReviewQueueStore.getState().init();
 
     expect(mockListPendingQuery).toHaveBeenCalledTimes(1);
-    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    // Both subscriptions fire once on first init, and not again on second
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(1);
 
     // Both calls should return the same unsubscribe function
     expect(unsub1).toBe(unsub2);
   });
 
-  it('unsubscribe then init() re-subscribes — subscribe called twice', () => {
+  it('unsubscribe then init() re-subscribes — subscribe called twice per subscription', () => {
     // First init
     const unsub1 = useReviewQueueStore.getState().init();
-    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(1);
 
     // Unsubscribe — resets the initialized flag
     unsub1();
-    expect(mockSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockCreatedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
 
     // Second init after unsubscribe — should re-subscribe
     const unsub2 = useReviewQueueStore.getState().init();
     activeUnsub = unsub2;
 
-    expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(2);
     expect(mockListPendingQuery).toHaveBeenCalledTimes(2);
   });
 
-  it('onError resets closure state so a subsequent init() re-subscribes', () => {
-    // First init — captures the onError callback
+  it('onError on onApprovalCreated resets closure state so a subsequent init() re-subscribes', () => {
+    // First init — captures the onError callback for onApprovalCreated
+    // (the store wires closure-state reset only on the created subscription's onError)
     let capturedOnError: ((err: unknown) => void) | undefined;
-    mockSubscribe = vi.fn().mockImplementation((_input, handlers: { onError?: (err: unknown) => void }) => {
+    mockCreatedSubscribe = vi.fn().mockImplementation((_input: undefined, handlers: { onError?: (err: unknown) => void }) => {
       capturedOnError = handlers.onError;
-      return { unsubscribe: mockSubscribeUnsubscribe };
+      return { unsubscribe: mockCreatedSubscribeUnsubscribe };
     });
 
     const unsub1 = useReviewQueueStore.getState().init();
     activeUnsub = unsub1;
 
-    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
     expect(capturedOnError).toBeDefined();
 
     // Trigger the subscription error
@@ -261,24 +274,26 @@ describe('init() idempotency', () => {
 
     // The store should be disconnected and closure state cleared
     expect(useReviewQueueStore.getState().connectionStatus).toBe('disconnected');
-    expect(mockSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockCreatedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
 
     // Now a second init() should NOT be a no-op — it must re-subscribe
-    // Reset mockSubscribeUnsubscribe for the fresh subscription
-    mockSubscribeUnsubscribe = vi.fn();
-    mockSubscribe = vi.fn().mockImplementation((_input, handlers: { onError?: (err: unknown) => void }) => {
+    // Reset mocks for the fresh subscription
+    mockCreatedSubscribeUnsubscribe = vi.fn();
+    mockCreatedSubscribe = vi.fn().mockImplementation((_input: undefined, handlers: { onError?: (err: unknown) => void }) => {
       capturedOnError = handlers.onError;
-      return { unsubscribe: mockSubscribeUnsubscribe };
+      return { unsubscribe: mockCreatedSubscribeUnsubscribe };
     });
+    mockDecidedSubscribeUnsubscribe = vi.fn();
+    mockDecidedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockDecidedSubscribeUnsubscribe });
 
     const unsub2 = useReviewQueueStore.getState().init();
     activeUnsub = unsub2;
 
-    expect(mockSubscribe).toHaveBeenCalledTimes(1); // second subscribe call
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1); // second subscribe call
     expect(mockListPendingQuery).toHaveBeenCalledTimes(2); // listPending called again
   });
 
-  it('StrictMode double-invoke — exactly one live subscription after both mount effects settle', () => {
+  it('StrictMode double-invoke — exactly one live subscription set after both mount effects settle', () => {
     // React StrictMode in development invokes effects twice: mount → cleanup → mount.
     // Simulate: init() → unsubscribe() → init()
 
@@ -292,10 +307,12 @@ describe('init() idempotency', () => {
     const unsub2 = useReviewQueueStore.getState().init();
     activeUnsub = unsub2;
 
-    // After the StrictMode sequence there must be exactly ONE live subscription.
-    // subscribe was called twice (once per mount), but unsubscribe was called
+    // After the StrictMode sequence there must be exactly ONE live subscription set.
+    // Each subscribe was called twice (once per mount), but unsubscribe was called
     // once (for the first mount's cleanup), so exactly one live subscription remains.
-    expect(mockSubscribe).toHaveBeenCalledTimes(2);
-    expect(mockSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockCreatedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
   });
 });
