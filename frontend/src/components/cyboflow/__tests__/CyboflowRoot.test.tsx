@@ -87,6 +87,11 @@ vi.mock('../../../trpc/client', () => ({
       approvals: {
         listPending: { query: vi.fn().mockResolvedValue([]) },
       },
+      questions: {
+        listPending: { query: vi.fn().mockResolvedValue([]) },
+        onQuestionCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onQuestionAnswered: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
     },
   },
 }));
