@@ -5,7 +5,7 @@
  *   (a) Happy-path emit fires with correct event shape.
  *   (b) DB current_step_id is updated before emit.
  *   (c) Emit happens AFTER the UPDATE (write-then-emit ordering).
- *   (d) Unknown workflow name → resolveTerminalStepId returns null; no DB write/emit.
+ *   (d) Unknown workflow name → resolveInitialStepId returns null; no DB write/emit.
  *   (e) Missing workflow_runs row → logs warn, does NOT throw.
  */
 
@@ -15,7 +15,7 @@ import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
   buildStepTransitionEvent,
-  resolveTerminalStepId,
+  resolveInitialStepId,
 } from '../stepTransitionBridge';
 import type { WorkflowStepTransitionEvent } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
@@ -61,13 +61,13 @@ function seedForBridge(workflowName: string) {
 }
 
 // ---------------------------------------------------------------------------
-// resolveTerminalStepId
+// resolveInitialStepId
 // ---------------------------------------------------------------------------
 
-describe('resolveTerminalStepId', () => {
+describe('resolveInitialStepId', () => {
   it('returns a non-null string for every SOLOFLOW_WORKFLOW_NAMES entry', () => {
     for (const name of SOLOFLOW_WORKFLOW_NAMES) {
-      const stepId = resolveTerminalStepId(name);
+      const stepId = resolveInitialStepId(name);
       expect(stepId, `${name} should resolve to a step id`).not.toBeNull();
       expect(typeof stepId).toBe('string');
       expect(stepId!.length).toBeGreaterThan(0);
@@ -75,19 +75,19 @@ describe('resolveTerminalStepId', () => {
   });
 
   it('returns null for an unknown workflow name', () => {
-    expect(resolveTerminalStepId('nonexistent-workflow')).toBeNull();
+    expect(resolveInitialStepId('nonexistent-workflow')).toBeNull();
   });
 
   it('returns null for an empty string', () => {
-    expect(resolveTerminalStepId('')).toBeNull();
+    expect(resolveInitialStepId('')).toBeNull();
   });
 
-  it('returns stable bare step ids matching WORKFLOW_DEFINITIONS', () => {
-    expect(resolveTerminalStepId('soloflow')).toBe('implement');
-    expect(resolveTerminalStepId('planner')).toBe('tasks');
-    expect(resolveTerminalStepId('sprint')).toBe('implement');
-    expect(resolveTerminalStepId('compound')).toBe('extract');
-    expect(resolveTerminalStepId('prune')).toBe('scan');
+  it('returns stable bare step ids matching the first step of each WORKFLOW_DEFINITIONS entry', () => {
+    expect(resolveInitialStepId('soloflow')).toBe('context');
+    expect(resolveInitialStepId('planner')).toBe('context');
+    expect(resolveInitialStepId('sprint')).toBe('implement');
+    expect(resolveInitialStepId('compound')).toBe('load-sprint');
+    expect(resolveInitialStepId('prune')).toBe('scan');
   });
 });
 
@@ -177,17 +177,17 @@ describe('buildStepTransitionEvent — happy path', () => {
     const { db, runId } = seedForBridge('compound');
     const adapter = dbAdapter(db);
 
-    buildStepTransitionEvent(runId, 'extract', 'done', adapter);
+    buildStepTransitionEvent(runId, 'load-sprint', 'done', adapter);
 
     expect(emittedEvents).toHaveLength(1);
     expect(emittedEvents[0].status).toBe('done');
-    expect(emittedEvents[0].stepId).toBe('extract');
+    expect(emittedEvents[0].stepId).toBe('load-sprint');
 
     // Verify DB was also updated.
     const row = db
       .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
       .get(runId) as { current_step_id: string | null } | undefined;
-    expect(row?.current_step_id).toBe('extract');
+    expect(row?.current_step_id).toBe('load-sprint');
   });
 });
 
@@ -225,7 +225,7 @@ describe('buildStepTransitionEvent — unknown workflow name (no DB write/emit)'
     stepTransitionEvents.removeAllListeners('transition');
   });
 
-  it('(d) resolveTerminalStepId returns null for unknown workflow; caller skips DB write and emit', () => {
+  it('(d) resolveInitialStepId returns null for unknown workflow; caller skips DB write and emit', () => {
     const db = createTestDbWithCurrentStep();
 
     // Seed a run with an unknown workflow name.
@@ -238,7 +238,7 @@ describe('buildStepTransitionEvent — unknown workflow name (no DB write/emit)'
       `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status) VALUES (?, ?, 1, '/tmp/test', 'running')`,
     ).run(runId, workflowId);
 
-    const stepId = resolveTerminalStepId('unknown-workflow');
+    const stepId = resolveInitialStepId('unknown-workflow');
     expect(stepId).toBeNull();
 
     // When stepId is null, the caller (RunExecutor's emitStep adapter in index.ts)

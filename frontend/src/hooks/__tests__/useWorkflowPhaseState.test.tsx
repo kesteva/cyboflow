@@ -174,6 +174,30 @@ describe('useWorkflowPhaseState', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('subscription delta merge with status=done: ALL steps become done', async () => {
+    const { result } = renderHook(() => useWorkflowPhaseState('r1'));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const subscribeCallArgs = subscribeSpy.mock.calls[0] as [
+      { runId: string },
+      { onData: (event: { stepId: string; status: 'pending' | 'running' | 'done'; runId: string; timestamp: string }) => void; onError: (err: unknown) => void },
+    ];
+    const { onData } = subscribeCallArgs[1];
+
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's1', status: 'done', timestamp: '2026-01-01T00:00:00Z' });
+    });
+
+    expect(result.current.stepStates).toEqual([
+      { stepId: 's1', status: 'done' },
+      { stepId: 's2', status: 'done' },
+      { stepId: 's3', status: 'done' },
+    ]);
+  });
+
   it('unsubscribes on unmount', async () => {
     const { unmount } = renderHook(() => useWorkflowPhaseState('r1'));
 

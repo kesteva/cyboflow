@@ -300,15 +300,14 @@ export const runsRouter = router({
 
       const stepStates: WorkflowStepState[] = flatSteps.map((s, i) => {
         let status: WorkflowStepState['status'];
-        if (matchIndex === -1) {
-          // null currentStepId or orphan id → all pending.
+        if (runIsTerminal) {
+          status = 'done';
+        } else if (matchIndex === -1) {
           status = 'pending';
         } else if (i < matchIndex) {
           status = 'done';
         } else if (i === matchIndex) {
-          // Mark the current step as 'done' when the run has terminated —
-          // otherwise always 'running' (live run in progress).
-          status = runIsTerminal ? 'done' : 'running';
+          status = 'running';
         } else {
           status = 'pending';
         }

@@ -82,7 +82,9 @@ function mergeTransition(
 
   const newStates: WorkflowStepState[] = orderedIds.map((stepId, i) => {
     let status: WorkflowStepState['status'];
-    if (i < idx) {
+    if (event.status === 'done') {
+      status = 'done';
+    } else if (i < idx) {
       status = 'done';
     } else if (i === idx) {
       status = event.status;
