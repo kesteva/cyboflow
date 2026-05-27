@@ -2,29 +2,38 @@
  * RunRightRail — fixed-width right rail in the CyboflowRoot two-column layout.
  *
  * Contains three tabs:
- *   - Workflow Progress (default selected) — placeholder for TASK-768
+ *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
+ *     is non-null; neutral empty state otherwise.
  *   - File Explorer — placeholder
  *   - Diff — placeholder
  */
 import { useState } from 'react';
+import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
+import { useCyboflowStore } from '../../stores/cyboflowStore';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff';
 
-interface Tab {
-  id: TabId;
+interface WorkflowProgressTab {
+  id: 'workflow-progress';
+  label: string;
+  testid: string;
+}
+
+interface PlaceholderTab {
+  id: 'file-explorer' | 'diff';
   label: string;
   testid: string;
   panelTestid: string;
   placeholder: string;
 }
 
+type Tab = WorkflowProgressTab | PlaceholderTab;
+
 const TABS: Tab[] = [
   {
     id: 'workflow-progress',
     label: 'Workflow Progress',
     testid: 'run-right-rail-tab-workflow-progress',
-    panelTestid: 'run-right-rail-workflow-progress-placeholder',
-    placeholder: 'Workflow Progress — coming soon',
   },
   {
     id: 'file-explorer',
@@ -44,6 +53,7 @@ const TABS: Tab[] = [
 
 export function RunRightRail() {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
+  const activeRunId = useCyboflowStore((s) => s.activeRunId);
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
@@ -84,12 +94,25 @@ export function RunRightRail() {
         role="tabpanel"
         className="flex-1 overflow-y-auto"
       >
-        <div
-          data-testid={currentTab.panelTestid}
-          className="p-4 text-sm text-text-secondary"
-        >
-          {currentTab.placeholder}
-        </div>
+        {currentTab.id === 'workflow-progress' ? (
+          activeRunId !== null ? (
+            <WorkflowProgressTimeline runId={activeRunId} />
+          ) : (
+            <div
+              data-testid="run-right-rail-workflow-progress-empty"
+              className="p-4 text-sm text-text-secondary"
+            >
+              No active run
+            </div>
+          )
+        ) : (
+          <div
+            data-testid={currentTab.panelTestid}
+            className="p-4 text-sm text-text-secondary"
+          >
+            {currentTab.placeholder}
+          </div>
+        )}
       </div>
     </aside>
   );
