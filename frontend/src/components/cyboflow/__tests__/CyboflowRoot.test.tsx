@@ -139,6 +139,8 @@ describe('CyboflowRoot', () => {
     expect(screen.getByText('Choose a workflow to start')).toBeInTheDocument();
     // CTA button is also present
     expect(screen.getByRole('button', { name: 'Choose a workflow' })).toBeInTheDocument();
+    // RunRightRail is always rendered (layout shell)
+    expect(screen.getByTestId('run-right-rail-workflow-progress-placeholder')).toBeInTheDocument();
   });
 
   it('renders RunView when activeRunId is set and hides the empty-state CTA', () => {
@@ -151,6 +153,8 @@ describe('CyboflowRoot', () => {
     expect(screen.getByText('run-abc-999')).toBeInTheDocument();
     // Empty-state CTA text is gone
     expect(screen.queryByText('Choose a workflow to start')).not.toBeInTheDocument();
+    // RunRightRail is always rendered (layout shell)
+    expect(screen.getByTestId('run-right-rail-workflow-progress-placeholder')).toBeInTheDocument();
   });
 
   it('opening and closing the workflow picker modal toggles its visibility', async () => {

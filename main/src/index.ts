@@ -49,7 +49,8 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike, LifecycleTransitionsLike } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
+import { buildStepTransitionEvent, resolveTerminalStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
   transitionToCompleted,
@@ -588,9 +589,30 @@ async function initializeServices() {
     canceled: (runId) => transitionToCanceled(rawDb, { runId }),
   };
 
+  // StepTransitionEmitterLike adapter — delegates to buildStepTransitionEvent() +
+  // resolveTerminalStepId() while keeping RunExecutor free of bridge imports.
+  // If resolveTerminalStepId returns null (unknown workflow name), no DB write
+  // and no emit occurs.
+  const stepTransitionEmitter: StepTransitionEmitterLike = {
+    emit: (runId: string, status: 'pending' | 'running' | 'done') => {
+      // Resolve the workflow name to get the step id.
+      const runRow = rawDb.prepare(
+        `SELECT w.name AS workflowName
+         FROM workflow_runs r
+         JOIN workflows w ON w.id = r.workflow_id
+         WHERE r.id = ?`,
+      ).get(runId) as { workflowName: string } | undefined;
+      if (!runRow) return;
+      const stepId = resolveTerminalStepId(runRow.workflowName);
+      if (!stepId) return;
+      buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger);
+    },
+  };
+
   // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
-  // LifecycleTransitions adapter, streaming publisher + db for event bridging, and
-  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output').
+  // LifecycleTransitions adapter, streaming publisher + db for event bridging,
+  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output'),
+  // and the stepTransitionEmitter for lifecycle step-transition events (TASK-765).
   const runExecutor = new RunExecutor(
     spawnerAdapter,
     workflowRegistry,
@@ -600,6 +622,7 @@ async function initializeServices() {
     cyboflowPublisher,
     rawDb,
     defaultCliManager,
+    stepTransitionEmitter,
   );
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
