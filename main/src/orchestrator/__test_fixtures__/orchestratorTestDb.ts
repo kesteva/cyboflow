@@ -42,6 +42,11 @@ export interface CreateTestDbOptions {
    * status='awaiting_input'). Implemented as additive SQL on top of
    * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test
    * in __tests__/orchestratorTestDb.test.ts will drift.
+   *
+   * THIS IS THE SINGLE SOURCE OF TRUTH for the post-migration-010 workflow_runs
+   * 9-status CHECK constraint in tests. Do NOT inline the rebuild SQL elsewhere
+   * — tests that need awaiting_input acceptance must opt in via this flag so
+   * a future CHECK widening only has to update the canonical migration file.
    */
   includeQuestionsTable?: boolean;
 }

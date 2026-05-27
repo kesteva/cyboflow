@@ -48,56 +48,6 @@ function seedWorkflow(db: Database.Database, id: string): void {
   ).run(id);
 }
 
-/**
- * Rebuilds workflow_runs with the 9-status CHECK constraint including
- * 'awaiting_input'. Use this in tests that need to seed a run in
- * 'awaiting_input' status — the GATE_SCHEMA fixture uses the pre-010
- * 8-status CHECK and rejects 'awaiting_input' inserts without this helper.
- *
- * Do NOT modify GATE_SCHEMA or orchestratorTestDb.ts — those are shared
- * fixtures intentionally mirroring the pre-010 state.
- */
-function widenWorkflowRunsCheckToNineStatuses(db: Database.Database): void {
-  db.exec(`
-    PRAGMA foreign_keys=OFF;
-    CREATE TABLE workflow_runs_wide (
-      id TEXT PRIMARY KEY,
-      workflow_id TEXT NOT NULL,
-      project_id INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled', 'awaiting_input')),
-      permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
-      worktree_path TEXT,
-      branch_name TEXT,
-      policy_json TEXT,
-      stuck_at DATETIME,
-      stuck_reason TEXT,
-      stuck_detected_at INTEGER,
-      error_message TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      started_at DATETIME,
-      ended_at DATETIME,
-      FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-    );
-    INSERT INTO workflow_runs_wide (
-      id, workflow_id, project_id, status, permission_mode_snapshot,
-      worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
-      stuck_detected_at, error_message, created_at, updated_at, started_at, ended_at
-    )
-    SELECT
-      id, workflow_id, project_id, status, permission_mode_snapshot,
-      worktree_path, branch_name, policy_json, stuck_at, stuck_reason,
-      stuck_detected_at, error_message, created_at, updated_at, started_at, ended_at
-    FROM workflow_runs;
-    DROP TABLE workflow_runs;
-    ALTER TABLE workflow_runs_wide RENAME TO workflow_runs;
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_stuck_at ON workflow_runs(status, stuck_detected_at);
-    PRAGMA foreign_keys=ON;
-  `);
-}
-
 /** Insert a workflow_runs row. */
 function seedRun(
   db: Database.Database,
@@ -616,16 +566,18 @@ describe('StuckDetector event emission shape', () => {
 
 describe('StuckDetector awaiting_input exemption', () => {
   it('does NOT classify awaiting_input runs as stuck even when an associated approval is stale', async () => {
-    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    // includeQuestionsTable applies migration 010, which widens the
+    // workflow_runs CHECK constraint to accept 'awaiting_input'. This is the
+    // canonical post-010 schema for tests; see orchestratorTestDb.ts.
+    const rawDb = createTestDb({
+      includeStuckDetectedAt: true,
+      includeQuestionsTable: true,
+    });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
     const logger = makeSpyLogger();
     const events: StuckDetectedEvent[] = [];
     emitter.on('runs:stuck', (e: StuckDetectedEvent) => events.push(e));
-
-    // Widen the CHECK constraint to accept 'awaiting_input' — GATE_SCHEMA uses
-    // the pre-010 8-status CHECK and would reject the seedRun insert below.
-    widenWorkflowRunsCheckToNineStatuses(rawDb);
 
     // Seed an awaiting_input run + a stale pending approval.
     seedRun(rawDb, 'run-ai', 'awaiting_input');
