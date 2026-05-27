@@ -1,17 +1,19 @@
 /**
- * WorkflowProgressTimeline component tests (TASK-768).
+ * WorkflowProgressTimeline component tests (TASK-781 retrofit).
  *
  * Behaviors verified:
- *   1. On mount with non-null runId, calls getPhaseState.query once and re-calls on runId change.
- *   2. Opens onStepTransition subscription on mount; tears it down on unmount or runId change.
- *   3. Renders phase headers + step items with state-keyed border colors.
- *   4. Applies 1.4s pulse animation to running step bullet only.
- *   5. Projects log lines (degraded mode — window is null → empty log section).
- *   6. Incoming onStepTransition delta updates state; delta for different runId is ignored.
- *   7. runId=null renders placeholder and issues no tRPC calls.
+ *   1. Hook receives runId on every render; changing the prop forwards the new runId.
+ *   2. Renders phase headers + step items with state-keyed border colors.
+ *   3. Applies 1.4s pulse animation to running step bullet only.
+ *   4. Projects log lines (degraded mode — window is null → empty log section).
+ *   5. Delta-driven re-render: changing the hook return shape causes border updates.
+ *   6. runId=null renders placeholder, no hook phase-state consumed.
+ *   7. isLoading → 'Loading workflow state…' placeholder.
+ *   8. error !== null → 'Failed to load workflow state: <message>' placeholder.
+ *   9. definition === null (not loading, no error) → 'No workflow data' placeholder.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -27,34 +29,25 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// tRPC mock — capture query and subscribe spies
+// Mock useWorkflowPhaseState — component imports this hook for all phase state
 // ---------------------------------------------------------------------------
 
-const mockGetPhaseStateQuery = vi.fn();
-const mockUnsubscribe = vi.fn();
-const mockSubscribe = vi.fn();
+import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 
-// Captured onData from most recent subscribe call
-let capturedOnData: ((evt: unknown) => void) | null = null;
+const makeDefaultHookReturn = (): UseWorkflowPhaseStateResult => ({
+  definition: null,
+  currentStepId: null,
+  stepStates: [],
+  isLoading: false,
+  error: null,
+});
 
-vi.mock('../../../trpc/client', () => ({
-  trpc: {
-    cyboflow: {
-      runs: {
-        getPhaseState: {
-          query: (...args: Parameters<typeof mockGetPhaseStateQuery>) =>
-            mockGetPhaseStateQuery(...args),
-        },
-        onStepTransition: {
-          subscribe: (input: { runId: string }, callbacks: { onData: (evt: unknown) => void; onError: (err: unknown) => void }) => {
-            capturedOnData = callbacks.onData;
-            mockSubscribe(input, callbacks);
-            return { unsubscribe: mockUnsubscribe };
-          },
-        },
-      },
-    },
-  },
+let mockHookReturn: UseWorkflowPhaseStateResult = makeDefaultHookReturn();
+const useWorkflowPhaseStateMock = vi.fn((_runId: string | null) => mockHookReturn);
+
+vi.mock('../../../hooks/useWorkflowPhaseState', () => ({
+  useWorkflowPhaseState: (...args: Parameters<typeof useWorkflowPhaseStateMock>) =>
+    useWorkflowPhaseStateMock(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -72,11 +65,7 @@ import type { WorkflowDefinition, WorkflowStepState } from '../../../../../share
 function makePhaseState(overrides?: {
   currentStepId?: string | null;
   stepStatuses?: Record<string, WorkflowStepState['status']>;
-}): {
-  definition: WorkflowDefinition;
-  currentStepId: string | null;
-  stepStates: WorkflowStepState[];
-} {
+}): UseWorkflowPhaseStateResult {
   const definition: WorkflowDefinition = {
     id: 'sprint',
     phases: [
@@ -125,14 +114,12 @@ function makePhaseState(overrides?: {
     definition,
     currentStepId: overrides?.currentStepId ?? null,
     stepStates,
+    isLoading: false,
+    error: null,
   };
 }
 
-function makeTwoPhaseState(): {
-  definition: WorkflowDefinition;
-  currentStepId: string | null;
-  stepStates: WorkflowStepState[];
-} {
+function makeTwoPhaseState(): UseWorkflowPhaseStateResult {
   const definition: WorkflowDefinition = {
     id: 'sprint',
     phases: [
@@ -166,6 +153,8 @@ function makeTwoPhaseState(): {
       { stepId: 'sprint-verify', status: 'pending' },
       { stepId: 'human-review', status: 'pending' },
     ],
+    isLoading: false,
+    error: null,
   };
 }
 
@@ -193,13 +182,8 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveRun();
   });
 
-  mockGetPhaseStateQuery.mockClear();
-  mockSubscribe.mockClear();
-  mockUnsubscribe.mockClear();
-  capturedOnData = null;
-
-  // Default: getPhaseState resolves with a simple fixture
-  mockGetPhaseStateQuery.mockResolvedValue(makePhaseState());
+  mockHookReturn = makeDefaultHookReturn();
+  useWorkflowPhaseStateMock.mockClear();
 
   // jsdom does not implement scrollIntoView
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -211,232 +195,134 @@ beforeEach(() => {
 
 describe('WorkflowProgressTimeline', () => {
 
-  // ── AC1: Seed query lifecycle ─────────────────────────────────────────────
+  // ── AC1: Hook receives runId ──────────────────────────────────────────────
 
-  it('calls getPhaseState.query once on mount with { runId }', async () => {
+  it('passes runId to useWorkflowPhaseState on mount', () => {
+    mockHookReturn = makePhaseState();
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      expect(mockGetPhaseStateQuery).toHaveBeenCalledTimes(1);
-      expect(mockGetPhaseStateQuery).toHaveBeenCalledWith({ runId: 'run-A' });
-    });
+    expect(useWorkflowPhaseStateMock).toHaveBeenCalledWith('run-A');
   });
 
-  it('calls getPhaseState.query again when runId changes', async () => {
+  it('forwards the new runId to the hook when the prop changes', () => {
+    mockHookReturn = makePhaseState();
     const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => expect(mockGetPhaseStateQuery).toHaveBeenCalledTimes(1));
-
+    mockHookReturn = makePhaseState();
     act(() => {
       rerender(<WorkflowProgressTimeline runId="run-B" />);
     });
 
-    await waitFor(() => {
-      expect(mockGetPhaseStateQuery).toHaveBeenCalledTimes(2);
-      expect(mockGetPhaseStateQuery).toHaveBeenLastCalledWith({ runId: 'run-B' });
-    });
+    expect(useWorkflowPhaseStateMock).toHaveBeenLastCalledWith('run-B');
   });
 
-  // ── AC2: Subscription lifecycle ───────────────────────────────────────────
+  // ── AC2: State-keyed border colors ────────────────────────────────────────
 
-  it('opens onStepTransition subscription on mount with { runId }', async () => {
-    render(<WorkflowProgressTimeline runId="run-A" />);
-
-    await waitFor(() => {
-      expect(mockSubscribe).toHaveBeenCalledTimes(1);
-      expect(mockSubscribe.mock.calls[0][0]).toEqual({ runId: 'run-A' });
+  it('renders done step with border-status-success border class', () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
-  });
-
-  it('calls unsubscribe once when unmounted (runId → null)', async () => {
-    const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
-
-    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
-
-    act(() => {
-      rerender(<WorkflowProgressTimeline runId={null} />);
-    });
-
-    expect(mockUnsubscribe).toHaveBeenCalledTimes(1);
-    // No new subscription should be opened when runId is null
-    expect(mockSubscribe).toHaveBeenCalledTimes(1);
-  });
-
-  it('unsubscribes and resubscribes when runId changes to a new value', async () => {
-    const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
-
-    await waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(1));
-
-    act(() => {
-      rerender(<WorkflowProgressTimeline runId="run-B" />);
-    });
-
-    await waitFor(() => {
-      // Unsubscribe from run-A subscription
-      expect(mockUnsubscribe).toHaveBeenCalledTimes(1);
-      // New subscription for run-B
-      expect(mockSubscribe).toHaveBeenCalledTimes(2);
-      expect(mockSubscribe.mock.calls[1][0]).toEqual({ runId: 'run-B' });
-    });
-  });
-
-  // ── AC3: State-keyed border colors ────────────────────────────────────────
-
-  it('renders done step with border-status-success border class', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      const doneItem = screen.getByTestId('step-item-implement');
-      expect(doneItem.className).toContain('border-status-success');
-    });
+    const doneItem = screen.getByTestId('step-item-implement');
+    expect(doneItem.className).toContain('border-status-success');
   });
 
-  it('renders running step with border-status-error border class (fallback — status-running absent)', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
+  it('renders running step with border-status-error border class (fallback — status-running absent)', () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
+    });
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      const runningItem = screen.getByTestId('step-item-write-tests');
-      expect(runningItem.className).toContain('border-status-error');
-    });
+    const runningItem = screen.getByTestId('step-item-write-tests');
+    expect(runningItem.className).toContain('border-status-error');
   });
 
-  it('renders pending step with border-border-primary border class', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
+  it('renders pending step with border-border-primary border class', () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
+    });
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      const pendingItem = screen.getByTestId('step-item-task-verify');
-      expect(pendingItem.className).toContain('border-border-primary');
-    });
+    const pendingItem = screen.getByTestId('step-item-task-verify');
+    expect(pendingItem.className).toContain('border-border-primary');
   });
 
-  // ── AC4: Pulse animation on running bullet only ───────────────────────────
+  // ── AC3: Pulse animation on running bullet only ───────────────────────────
 
-  it("applies 1.4s infinite pulse animation to running step's bullet", async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
+  it("applies 1.4s infinite pulse animation to running step's bullet", () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
+    });
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      const runningBullet = screen.getByTestId('step-bullet-write-tests');
-      expect(runningBullet.style.animation).toContain('1.4s');
-      expect(runningBullet.style.animation).toContain('infinite');
-    });
+    const runningBullet = screen.getByTestId('step-bullet-write-tests');
+    expect(runningBullet.style.animation).toContain('1.4s');
+    expect(runningBullet.style.animation).toContain('infinite');
   });
 
-  it('does NOT apply pulse animation to done or pending step bullets', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
+  it('does NOT apply pulse animation to done or pending step bullets', () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
+    });
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      // done bullet
-      const doneBullet = screen.getByTestId('step-bullet-implement');
-      expect(doneBullet.style.animation ?? '').toBe('');
+    // done bullet
+    const doneBullet = screen.getByTestId('step-bullet-implement');
+    expect(doneBullet.style.animation ?? '').toBe('');
 
-      // pending bullet
-      const pendingBullet = screen.getByTestId('step-bullet-task-verify');
-      expect(pendingBullet.style.animation ?? '').toBe('');
-    });
+    // pending bullet
+    const pendingBullet = screen.getByTestId('step-bullet-task-verify');
+    expect(pendingBullet.style.animation ?? '').toBe('');
   });
 
-  // ── AC5: Log lines — degraded mode (window is null → no log lines) ────────
+  // ── AC4: Log lines — degraded mode (window is null → no log lines) ────────
 
-  it('renders no log lines for non-pending steps when time-window is unavailable (degraded mode)', async () => {
+  it('renders no log lines for non-pending steps when time-window is unavailable (degraded mode)', () => {
     // In v1 degraded mode, getStepTimeWindow always returns null — no log lines rendered.
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' } }),
-    );
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
+    });
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      // The step items should render without any log-line children (testid pattern log-line-*)
-      // done step: no log lines despite status !== pending
-      const allLogLines = document.querySelectorAll('[data-testid^="log-line-implement"]');
-      expect(allLogLines.length).toBe(0);
+    // done step: no log lines despite status !== pending
+    const allLogLines = document.querySelectorAll('[data-testid^="log-line-implement"]');
+    expect(allLogLines.length).toBe(0);
 
-      const runningLogLines = document.querySelectorAll('[data-testid^="log-line-write-tests"]');
-      expect(runningLogLines.length).toBe(0);
-    });
+    const runningLogLines = document.querySelectorAll('[data-testid^="log-line-write-tests"]');
+    expect(runningLogLines.length).toBe(0);
   });
 
-  // ── AC6: onStepTransition delta updates step state ────────────────────────
+  // ── AC5: Delta-driven re-render ───────────────────────────────────────────
 
-  it('updates step border to running when onStepTransition fires for active runId', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'pending', 'write-tests': 'pending', 'task-verify': 'pending' } }),
-    );
-
-    render(<WorkflowProgressTimeline runId="run-A" />);
-
-    // Wait for initial render with pending states
-    await waitFor(() => {
-      expect(screen.getByTestId('step-item-implement').className).toContain('border-border-primary');
+  it('updates step border when hook returns updated step states on rerender', () => {
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'pending', 'write-tests': 'pending', 'task-verify': 'pending' },
     });
 
-    // Fire a step transition event for the active runId
+    const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
+
+    expect(screen.getByTestId('step-item-implement').className).toContain('border-border-primary');
+
+    // Simulate delta arrival: hook now returns updated state
+    mockHookReturn = makePhaseState({
+      stepStatuses: { implement: 'running', 'write-tests': 'pending', 'task-verify': 'pending' },
+    });
+
     act(() => {
-      capturedOnData?.({
-        runId: 'run-A',
-        stepId: 'implement',
-        status: 'running',
-        timestamp: new Date().toISOString(),
-      });
+      rerender(<WorkflowProgressTimeline runId="run-A" />);
     });
 
-    // implement should now show running border
-    await waitFor(() => {
-      const item = screen.getByTestId('step-item-implement');
-      expect(item.className).toContain('border-status-error'); // fallback for running
-    });
+    expect(screen.getByTestId('step-item-implement').className).toContain('border-status-error');
   });
 
-  it('ignores onStepTransition delta for a different runId', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(
-      makePhaseState({ stepStatuses: { implement: 'pending', 'write-tests': 'pending', 'task-verify': 'pending' } }),
-    );
-
-    render(<WorkflowProgressTimeline runId="run-A" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('step-item-implement').className).toContain('border-border-primary');
-    });
-
-    // Fire event for a DIFFERENT runId — should be ignored
-    act(() => {
-      capturedOnData?.({
-        runId: 'run-DIFFERENT',
-        stepId: 'implement',
-        status: 'running',
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // implement should still be pending
-    await waitFor(() => {
-      const item = screen.getByTestId('step-item-implement');
-      expect(item.className).toContain('border-border-primary');
-      expect(item.className).not.toContain('border-status-error');
-    });
-  });
-
-  // ── AC7: runId=null renders placeholder, no tRPC calls ───────────────────
+  // ── AC6: runId=null renders placeholder ──────────────────────────────────
 
   it('renders "No active run" placeholder when runId is null', () => {
     render(<WorkflowProgressTimeline runId={null} />);
@@ -445,51 +331,76 @@ describe('WorkflowProgressTimeline', () => {
     expect(screen.getByText('No active run')).toBeInTheDocument();
   });
 
-  it('does not call getPhaseState.query when runId is null', () => {
+  it('passes null to the hook when runId is null', () => {
     render(<WorkflowProgressTimeline runId={null} />);
 
-    expect(mockGetPhaseStateQuery).not.toHaveBeenCalled();
+    expect(useWorkflowPhaseStateMock).toHaveBeenCalledWith(null);
   });
 
-  it('does not open onStepTransition subscription when runId is null', () => {
-    render(<WorkflowProgressTimeline runId={null} />);
+  // ── AC7: isLoading placeholder ────────────────────────────────────────────
 
-    expect(mockSubscribe).not.toHaveBeenCalled();
-  });
-
-  // ── AC6 (phase headers): phase headers render with swatch + label + count ─
-
-  it('renders phase headers with swatch background matching phase color, label text, and step count', async () => {
-    mockGetPhaseStateQuery.mockResolvedValue(makeTwoPhaseState());
+  it('renders "Loading workflow state…" placeholder when hook returns isLoading=true', () => {
+    mockHookReturn = { ...makeDefaultHookReturn(), isLoading: true };
 
     render(<WorkflowProgressTimeline runId="run-A" />);
 
-    await waitFor(() => {
-      // Phase 'execute' header
-      const execHeader = screen.getByTestId('phase-header-execute');
-      expect(execHeader).toBeInTheDocument();
+    expect(screen.getByText('Loading workflow state…')).toBeInTheDocument();
+  });
 
-      const execSwatch = screen.getByTestId('phase-swatch-execute');
-      // JSDOM normalizes hex to rgb() in style reads — compare against converted value
-      expect(execSwatch.style.background).toBe(hexToRgb('#c96442'));
+  // ── AC8: error placeholder ────────────────────────────────────────────────
 
-      // Phase label
-      expect(screen.getByText('Execute')).toBeInTheDocument();
-      // Step count — 2 steps in execute phase (both phases have 2, use getAllByText)
-      const stepCounts = screen.getAllByText('2 steps');
-      expect(stepCounts.length).toBeGreaterThanOrEqual(1);
+  it('renders "Failed to load workflow state:" placeholder when hook returns a non-null error', () => {
+    mockHookReturn = {
+      ...makeDefaultHookReturn(),
+      error: new Error('network timeout'),
+    };
 
-      // Phase 'verify' header
-      const verifyHeader = screen.getByTestId('phase-header-verify');
-      expect(verifyHeader).toBeInTheDocument();
+    render(<WorkflowProgressTimeline runId="run-A" />);
 
-      const verifySwatch = screen.getByTestId('phase-swatch-verify');
-      // JSDOM normalizes hex to rgb() in style reads — compare against converted value
-      expect(verifySwatch.style.background).toBe(hexToRgb('#a87a2c'));
+    expect(screen.getByText(/Failed to load workflow state:.*network timeout/)).toBeInTheDocument();
+  });
 
-      expect(screen.getByText('Sprint review')).toBeInTheDocument();
-      // Both phases have 2 steps — 2 step-count spans should be present
-      expect(screen.getAllByText('2 steps').length).toBe(2);
-    });
+  // ── AC9: null definition (not loading, no error) ──────────────────────────
+
+  it('renders "No workflow data" when hook returns null definition with no loading and no error', () => {
+    mockHookReturn = makeDefaultHookReturn(); // definition=null, isLoading=false, error=null
+
+    render(<WorkflowProgressTimeline runId="run-A" />);
+
+    expect(screen.getByText('No workflow data')).toBeInTheDocument();
+  });
+
+  // ── Phase headers ─────────────────────────────────────────────────────────
+
+  it('renders phase headers with swatch background matching phase color, label text, and step count', () => {
+    mockHookReturn = makeTwoPhaseState();
+
+    render(<WorkflowProgressTimeline runId="run-A" />);
+
+    // Phase 'execute' header
+    const execHeader = screen.getByTestId('phase-header-execute');
+    expect(execHeader).toBeInTheDocument();
+
+    const execSwatch = screen.getByTestId('phase-swatch-execute');
+    // JSDOM normalizes hex to rgb() in style reads — compare against converted value
+    expect(execSwatch.style.background).toBe(hexToRgb('#c96442'));
+
+    // Phase label
+    expect(screen.getByText('Execute')).toBeInTheDocument();
+    // Step count — 2 steps in execute phase (both phases have 2, use getAllByText)
+    const stepCounts = screen.getAllByText('2 steps');
+    expect(stepCounts.length).toBeGreaterThanOrEqual(1);
+
+    // Phase 'verify' header
+    const verifyHeader = screen.getByTestId('phase-header-verify');
+    expect(verifyHeader).toBeInTheDocument();
+
+    const verifySwatch = screen.getByTestId('phase-swatch-verify');
+    // JSDOM normalizes hex to rgb() in style reads — compare against converted value
+    expect(verifySwatch.style.background).toBe(hexToRgb('#a87a2c'));
+
+    expect(screen.getByText('Sprint review')).toBeInTheDocument();
+    // Both phases have 2 steps — 2 step-count spans should be present
+    expect(screen.getAllByText('2 steps').length).toBe(2);
   });
 });
