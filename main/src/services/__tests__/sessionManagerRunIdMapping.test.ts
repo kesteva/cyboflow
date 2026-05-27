@@ -8,8 +8,15 @@
  * flow-owned ones.
  *
  * Mocks match the pattern in sessionManager.mainRepoPermission.test.ts.
+ *
+ * The 'DB round-trip' describe block adds fixtures-DB integration cases that
+ * exercise the real SQLite INSERT/SELECT path — the original three mapper cases
+ * use mocks and could not catch a missing INSERT column (FIND-SPRINT-038-4 root cause).
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // ------------------------------------------------------------------
 // Module mocks — hoisted before SUT import.
@@ -40,6 +47,7 @@ vi.mock('../scriptExecutionTracker', () => ({
 // ------------------------------------------------------------------
 import { SessionManager } from '../sessionManager';
 import type { Session as DbSession } from '../../database/models';
+import { DatabaseService } from '../../database/database';
 
 // ------------------------------------------------------------------
 // Helpers
@@ -122,6 +130,112 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
 
     const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(dbSession);
 
+    expect(session.runId).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------------
+// DB round-trip tests — exercise the real SQLite INSERT/SELECT path.
+// These catch missing INSERT columns that mock-based tests cannot detect.
+// ------------------------------------------------------------------
+
+describe('DB round-trip — run_id INSERT persistence', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Case A: INSERT with run_id="flow-001" round-trips to runId="flow-001"', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-task754-a-'));
+    const dbPath = join(tmpDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '../../database/migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    // Seed a project row so the FK constraint is satisfied.
+    const rawDb = (() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const Database = require('better-sqlite3');
+      return new Database(dbPath) as import('better-sqlite3').Database;
+    })();
+    rawDb.prepare(
+      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
+    ).run();
+    const project = rawDb.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number };
+    rawDb.close();
+
+    // Insert via the real DatabaseService.createSession.
+    const dbSession = svc.createSession({
+      id: 'sess-flow-1',
+      name: 'Flow Session',
+      initial_prompt: 'do work',
+      worktree_name: 'flow-1',
+      worktree_path: '/tmp/flow-1',
+      project_id: project.id,
+      run_id: 'flow-001',
+    });
+
+    // Assert raw DB column persisted.
+    expect(dbSession.run_id).toBe('flow-001');
+
+    // Assert the mapper produces runId on a freshly-read row.
+    const readBack = svc.getSession('sess-flow-1');
+    expect(readBack).toBeDefined();
+    expect(readBack!.run_id).toBe('flow-001');
+
+    // Construct a minimal SessionManager via the mock pattern and assert the
+    // convertDbSessionToSession mapper correctly copies run_id → runId.
+    const dbMock = makeDbMock(readBack!);
+    const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
+    expect(session.runId).toBe('flow-001');
+  });
+
+  it('Case B: INSERT WITHOUT run_id round-trips to runId=null (default-NULL path)', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-task754-b-'));
+    const dbPath = join(tmpDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '../../database/migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    // Seed a project row.
+    const rawDb = (() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const Database = require('better-sqlite3');
+      return new Database(dbPath) as import('better-sqlite3').Database;
+    })();
+    rawDb.prepare(
+      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
+    ).run();
+    const project = rawDb.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number };
+    rawDb.close();
+
+    // Insert WITHOUT supplying run_id — the ?? null coalesce yields NULL.
+    const dbSession = svc.createSession({
+      id: 'sess-quick-1',
+      name: 'Quick Session',
+      initial_prompt: 'ask something',
+      worktree_name: 'quick-1',
+      worktree_path: '/tmp/quick-1',
+      project_id: project.id,
+      // run_id intentionally absent — same as every current caller
+    });
+
+    // Assert raw DB column is null/undefined (SQLite returns null).
+    expect(dbSession.run_id == null).toBe(true);
+
+    // Assert the mapper produces runId=null.
+    const readBack = svc.getSession('sess-quick-1');
+    expect(readBack).toBeDefined();
+
+    const dbMock = makeDbMock(readBack!);
+    const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
     expect(session.runId).toBeNull();
   });
 });
