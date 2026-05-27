@@ -89,10 +89,10 @@ describe('Migration 011: current_step_id column on workflow_runs', () => {
        VALUES ('wr-null', 'wf-1', 1, 'queued', 'default', NULL)`
     ).run();
 
-    // Insert a run with a concrete dotted-string step id
+    // Insert a run with a bare step id (matching WorkflowStep.id in WORKFLOW_DEFINITIONS)
     db.prepare(
       `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, current_step_id)
-       VALUES ('wr-step', 'wf-1', 1, 'running', 'default', 'execute.implement')`
+       VALUES ('wr-step', 'wf-1', 1, 'running', 'default', 'implement')`
     ).run();
 
     const rowNull = db
@@ -104,7 +104,7 @@ describe('Migration 011: current_step_id column on workflow_runs', () => {
       .get('wr-step') as { current_step_id: string | null };
 
     expect(rowNull.current_step_id).toBeNull();
-    expect(rowStep.current_step_id).toBe('execute.implement');
+    expect(rowStep.current_step_id).toBe('implement');
 
     db.close();
   });

@@ -1,7 +1,8 @@
 -- Migration 011: Add current_step_id column to workflow_runs (IDEA-026 / TASK-764).
 --
--- This column stores the dotted-string identifier of the workflow step
--- currently executing within a live run (e.g. 'plan.context', 'execute.implement').
+-- This column stores the bare WorkflowStep.id of the workflow step currently
+-- executing within a live run (e.g. 'context', 'implement'). These ids match
+-- the WorkflowStep.id values in WORKFLOW_DEFINITIONS in shared/types/workflows.ts.
 -- NULL means no step is currently active (run not started, completed, or failed).
 --
 -- Column added after error_message and before started_at to mirror the order
