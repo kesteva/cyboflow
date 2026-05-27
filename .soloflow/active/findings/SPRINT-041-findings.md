@@ -5,3 +5,4 @@ last_updated: null
 ---
 
 # Findings Queue
+- SPRINT-041 started with missing infra: docker; tests deferred.

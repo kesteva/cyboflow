@@ -6,18 +6,61 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-754": { "status": "pending", "depends_on": [] },
-    "TASK-755": { "status": "pending", "depends_on": [] },
-    "TASK-772": { "status": "pending", "depends_on": [] },
-    "TASK-773": { "status": "pending", "depends_on": [] },
-    "TASK-774": { "status": "pending", "depends_on": [] },
-    "TASK-775": { "status": "pending", "depends_on": ["TASK-773"] },
-    "TASK-776": { "status": "pending", "depends_on": [] },
-    "TASK-777": { "status": "pending", "depends_on": [] },
-    "TASK-778": { "status": "pending", "depends_on": [] },
-    "TASK-779": { "status": "pending", "depends_on": [] },
-    "TASK-780": { "status": "pending", "depends_on": ["TASK-779"] },
-    "TASK-781": { "status": "pending", "depends_on": ["TASK-779"] }
+    "TASK-754": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-755": {
+      "status": "blocked",
+      "depends_on": [],
+      "verdict_at": "2026-05-27T04:09:13.517Z"
+    },
+    "TASK-772": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-773": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-774": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-775": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-773"
+      ]
+    },
+    "TASK-776": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-777": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-778": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-779": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-780": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-779"
+      ]
+    },
+    "TASK-781": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-779"
+      ]
+    }
   },
   "run": {
     "branch": "soloflow/run-20260526-210555-SPRINT-041",
