@@ -1,8 +1,8 @@
 ---
 id: TASK-766
 idea: IDEA-026
-status: ready
-created: 2026-05-26T16:00:00Z
+status: in-flight
+created: "2026-05-26T16:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/runs.ts
   - main/src/orchestrator/trpc/routers/events.ts
@@ -27,31 +27,32 @@ acceptance_criteria:
     verification: "Vitest test seeds current_step_id='plan.idea-extract', asserts result.currentStepId === 'plan.idea-extract'. Second test with NULL asserts result.currentStepId === null."
   - criterion: "getPhaseState computes stepStates[] by walking WorkflowDefinition.phases[*].steps[] in declaration order: steps before currentStepId → 'done'; matching step → 'running'; after → 'pending'. When currentStepId is null OR not in definition (orphan id), all 'pending', no throw."
     verification: "Four-case vitest coverage: null → all pending; first step → first running, rest pending; middle step → preceding done, matching running, trailing pending; orphan id → all pending, no throw."
-  - criterion: "getPhaseState throws TRPCError PRECONDITION_FAILED when ctx.db is undefined (matching runs.list / runs.getStuckInspection guard pattern)."
-    verification: "Vitest test against context with no db asserts TRPCError PRECONDITION_FAILED."
-  - criterion: "getPhaseState throws TRPCError NOT_FOUND when the runId does not exist in workflow_runs."
-    verification: "Vitest test with non-existent runId asserts TRPCError NOT_FOUND."
+  - criterion: getPhaseState throws TRPCError PRECONDITION_FAILED when ctx.db is undefined (matching runs.list / runs.getStuckInspection guard pattern).
+    verification: Vitest test against context with no db asserts TRPCError PRECONDITION_FAILED.
+  - criterion: getPhaseState throws TRPCError NOT_FOUND when the runId does not exist in workflow_runs.
+    verification: Vitest test with non-existent runId asserts TRPCError NOT_FOUND.
   - criterion: "main/src/orchestrator/trpc/routers/runs.ts exports a cyboflow.runs.onStepTransition subscription whose input is z.object({ runId: z.string() }) and which yields WorkflowStepTransitionEvent payloads."
     verification: "grep -nE 'onStepTransition:\\s*protectedProcedure' main/src/orchestrator/trpc/routers/runs.ts returns 1 match; grep -n 'WorkflowStepTransitionEvent' main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match."
   - criterion: "onStepTransition consumes the stepTransitionEvents EventEmitter via eventToAsyncIterable<WorkflowStepTransitionEvent>(stepTransitionEvents, 'transition', abortSignal) — NOT the placeholder makePlaceholderAsyncIterator. The async generator filters server-side: if ev.runId !== input.runId continue."
     verification: "grep -n 'eventToAsyncIterable' main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match; grep -n 'makePlaceholderAsyncIterator' main/src/orchestrator/trpc/routers/runs.ts returns 0 matches; grep -nE 'if \\(ev\\.runId !== input\\.runId\\) continue' main/src/orchestrator/trpc/routers/runs.ts returns at least 1 match. Vitest test emits two events (runId='run-A' and 'run-B'), drains run-A subscription, asserts exactly one event received with runId='run-A'."
-  - criterion: "onStepTransition terminates cleanly when AbortSignal fires (parallel to existing onApprovalCreated abort test)."
+  - criterion: onStepTransition terminates cleanly when AbortSignal fires (parallel to existing onApprovalCreated abort test).
     verification: "Vitest test in router.test.ts calls callSubscription('cyboflow.runs.onStepTransition', ...), aborts before draining, asserts collected.length === 0 and the for-await loop completes."
-  - criterion: "eventToAsyncIterable is shared with events.ts (export-modifier change) — runs.ts does NOT redefine it. No circular import is introduced."
+  - criterion: eventToAsyncIterable is shared with events.ts (export-modifier change) — runs.ts does NOT redefine it. No circular import is introduced.
     verification: "grep -nE 'function eventToAsyncIterable|const eventToAsyncIterable' main/src/orchestrator/trpc/routers/runs.ts returns 0 matches; grep -nE 'export function eventToAsyncIterable' main/src/orchestrator/trpc/routers/events.ts returns 1 match. pnpm --filter main typecheck exits 0."
-  - criterion: "All existing tests in routers/__tests__/runs.test.ts and trpc/__tests__/router.test.ts continue to pass unchanged. New tests are additive only."
-    verification: "pnpm --filter main test -- --run trpc/routers/__tests__/runs.test.ts exits 0; pnpm --filter main test -- --run trpc/__tests__/router.test.ts exits 0."
-depends_on: [TASK-765]
+  - criterion: All existing tests in routers/__tests__/runs.test.ts and trpc/__tests__/router.test.ts continue to pass unchanged. New tests are additive only.
+    verification: pnpm --filter main test -- --run trpc/routers/__tests__/runs.test.ts exits 0; pnpm --filter main test -- --run trpc/__tests__/router.test.ts exits 0.
+depends_on:
+  - TASK-765
 estimated_complexity: medium
 epic: workflow-phase-model
 test_strategy:
   needed: true
   justification: "Two net-new tRPC procedures: a query with non-trivial logic (workflow lookup + WorkflowDefinition resolution + stepStates derivation with four edge cases) and a subscription consuming a real EventEmitter with server-side runId filtering. Sibling-test scan: runs.test.ts (canonical home for runs-router integration tests) and router.test.ts (subscription-abort contract tests). Both existing test files MUST gain additive tests."
   targets:
-    - behavior: "getPhaseState returns correct WorkflowDefinition for known SoloFlowWorkflowName; throws NOT_FOUND for unknown workflow name."
+    - behavior: getPhaseState returns correct WorkflowDefinition for known SoloFlowWorkflowName; throws NOT_FOUND for unknown workflow name.
       test_file: main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
       type: integration
-    - behavior: "getPhaseState returns currentStepId verbatim (string and null cases) from workflow_runs.current_step_id."
+    - behavior: getPhaseState returns currentStepId verbatim (string and null cases) from workflow_runs.current_step_id.
       test_file: main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
       type: integration
     - behavior: "getPhaseState computes stepStates[] correctly across four cases: null currentStepId, first-step, middle-step, orphan-id."
@@ -63,11 +64,10 @@ test_strategy:
     - behavior: "onStepTransition filters by runId server-side: emitting two events (run-A, run-B) yields only run-A for a run-A subscriber."
       test_file: main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
       type: integration
-    - behavior: "onStepTransition yields zero events and terminates cleanly when AbortSignal fires before any emit."
+    - behavior: onStepTransition yields zero events and terminates cleanly when AbortSignal fires before any emit.
       test_file: main/src/orchestrator/trpc/__tests__/router.test.ts
       type: integration
 ---
-
 # Expose getPhaseState query + onStepTransition subscription on the runs tRPC router
 
 ## Objective

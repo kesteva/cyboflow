@@ -1,8 +1,8 @@
 ---
 id: TASK-764
 idea: IDEA-026
-status: ready
-created: 2026-05-26T16:00:00Z
+status: in-flight
+created: "2026-05-26T16:00:00Z"
 files_owned:
   - main/src/database/migrations/011_workflow_step_tracking.sql
   - shared/types/workflows.ts
@@ -16,38 +16,38 @@ files_readonly:
   - main/src/database/__tests__/migration010.test.ts
   - main/src/orchestrator/runQueries.ts
 acceptance_criteria:
-  - criterion: "Migration file main/src/database/migrations/011_workflow_step_tracking.sql exists and contains an ALTER TABLE statement adding current_step_id TEXT to workflow_runs."
+  - criterion: Migration file main/src/database/migrations/011_workflow_step_tracking.sql exists and contains an ALTER TABLE statement adding current_step_id TEXT to workflow_runs.
     verification: "grep -n 'ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT' main/src/database/migrations/011_workflow_step_tracking.sql returns exactly 1 match."
-  - criterion: "The migration filename uses the 011_ numeric prefix matching the PREFIX_RE regex in database.ts so runFileBasedMigrations picks it up automatically."
-    verification: "ls main/src/database/migrations/011_workflow_step_tracking.sql succeeds (exit 0)."
-  - criterion: "Migration 011 does NOT contain BEGIN/COMMIT statements (the runFileBasedMigrations wrapper provides the transaction) and does NOT contain PRAGMA foreign_keys=OFF (pure ADD COLUMN)."
+  - criterion: The migration filename uses the 011_ numeric prefix matching the PREFIX_RE regex in database.ts so runFileBasedMigrations picks it up automatically.
+    verification: ls main/src/database/migrations/011_workflow_step_tracking.sql succeeds (exit 0).
+  - criterion: Migration 011 does NOT contain BEGIN/COMMIT statements (the runFileBasedMigrations wrapper provides the transaction) and does NOT contain PRAGMA foreign_keys=OFF (pure ADD COLUMN).
     verification: "grep -cE '^(BEGIN|COMMIT|PRAGMA foreign_keys)' main/src/database/migrations/011_workflow_step_tracking.sql returns 0."
   - criterion: "shared/types/workflows.ts WorkflowRunRow has a current_step_id?: string | null member."
     verification: "grep -nE 'current_step_id\\?:\\s*string\\s*\\|\\s*null' shared/types/workflows.ts returns exactly 1 match within the WorkflowRunRow interface block."
-  - criterion: "Applying migration 006 then migration 011 to an in-memory SQLite DB adds current_step_id TEXT to workflow_runs (verified by PRAGMA table_info)."
-    verification: "pnpm --filter main test -- --run main/src/database/__tests__/migration011.test.ts passes (exit 0)."
+  - criterion: Applying migration 006 then migration 011 to an in-memory SQLite DB adds current_step_id TEXT to workflow_runs (verified by PRAGMA table_info).
+    verification: pnpm --filter main test -- --run main/src/database/__tests__/migration011.test.ts passes (exit 0).
   - criterion: "Migration 011 is idempotent in the duplicate-column-name path: re-executing the SQL yields a SqliteError with message 'duplicate column name: current_step_id' (matching the runFileBasedMigrations idempotent regex)."
     verification: "migration011.test.ts asserts the second db.exec throws and the error message contains 'duplicate column name: current_step_id'."
-  - criterion: "Typecheck passes for the entire workspace after the WorkflowRunRow extension."
-    verification: "pnpm typecheck exits 0."
-depends_on: [TASK-763]
+  - criterion: Typecheck passes for the entire workspace after the WorkflowRunRow extension.
+    verification: pnpm typecheck exits 0.
+depends_on:
+  - TASK-763
 estimated_complexity: low
 epic: workflow-phase-model
 test_strategy:
   needed: true
-  justification: "The migrations directory has an established sibling-test convention (migration007.test.ts asserts column type via PRAGMA table_info; migration010.test.ts asserts table-recreation result). Migration 011 must follow the same pattern — lowest-cost safety net against a typo in the column name or type."
+  justification: The migrations directory has an established sibling-test convention (migration007.test.ts asserts column type via PRAGMA table_info; migration010.test.ts asserts table-recreation result). Migration 011 must follow the same pattern — lowest-cost safety net against a typo in the column name or type.
   targets:
-    - behavior: "Applying 006 then 011 against in-memory SQLite adds current_step_id TEXT to workflow_runs"
+    - behavior: Applying 006 then 011 against in-memory SQLite adds current_step_id TEXT to workflow_runs
       test_file: main/src/database/__tests__/migration011.test.ts
       type: integration
-    - behavior: "current_step_id column is nullable (default NULL) and accepts string values"
+    - behavior: current_step_id column is nullable (default NULL) and accepts string values
       test_file: main/src/database/__tests__/migration011.test.ts
       type: integration
     - behavior: "Re-executing 011 raises 'duplicate column name: current_step_id' SqliteError that runFileBasedMigrations catches as idempotent"
       test_file: main/src/database/__tests__/migration011.test.ts
       type: integration
 ---
-
 # TASK-764: Add current_step_id migration and extend WorkflowRunRow type
 
 ## Objective
