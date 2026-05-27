@@ -60,7 +60,7 @@ import { setStartRunDeps } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent } from '../../../../../../shared/types/workflows';
-import { buildStepTransitionEvent, resolveTerminalStepId } from '../../../stepTransitionBridge';
+import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -611,19 +611,9 @@ describe('cyboflow.runs.getPhaseState', () => {
     const caller = appRouter.createCaller(createContext({ db: adapter }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
 
-    // The current step must be 'done' because the run is completed.
-    const currentStep = result.stepStates.find((s) => s.stepId === 'context');
-    expect(currentStep, 'context step not found in stepStates').toBeDefined();
-    expect(currentStep!.status).toBe('done');
-
-    // Steps before 'context' (none in this case) must be 'done'.
-    // Steps after 'context' must be 'pending'.
-    const currentIdx = result.stepStates.findIndex((s) => s.stepId === 'context');
-    for (let i = 0; i < currentIdx; i++) {
-      expect(result.stepStates[i].status).toBe('done');
-    }
-    for (let i = currentIdx + 1; i < result.stepStates.length; i++) {
-      expect(result.stepStates[i].status).toBe('pending');
+    // ALL steps must be 'done' because the run is terminal.
+    for (const s of result.stepStates) {
+      expect(s.status, `step ${s.stepId} should be done`).toBe('done');
     }
   });
 
@@ -768,15 +758,15 @@ describe('cyboflow.runs.onStepTransition', () => {
 // WORKFLOW_DEFINITIONS — fixes namespace mismatch, FIND-SPRINT-040-10/13)
 //
 // For every SOLOFLOW_WORKFLOW_NAMES entry, calls buildStepTransitionEvent with
-// the resolveTerminalStepId output, then asserts getPhaseState returns a
+// the resolveInitialStepId output, then asserts getPhaseState returns a
 // stepStates entry with status='running' for that stepId. This locks the
 // contract against future namespace drift between the emitter and the consumer.
 // ---------------------------------------------------------------------------
 
-describe('end-to-end stepId contract parity (TERMINAL_STEP_IDS resolves into WORKFLOW_DEFINITIONS — fixes namespace mismatch)', () => {
+describe('end-to-end stepId contract parity (INITIAL_STEP_IDS resolves into WORKFLOW_DEFINITIONS — fixes namespace mismatch)', () => {
   for (const name of SOLOFLOW_WORKFLOW_NAMES) {
-    it(`${name}: buildStepTransitionEvent → getPhaseState yields status=running for the resolved terminal step`, async () => {
-      const stepId = resolveTerminalStepId(name);
+    it(`${name}: buildStepTransitionEvent → getPhaseState yields status=running for the resolved initial step`, async () => {
+      const stepId = resolveInitialStepId(name);
       expect(stepId).not.toBeNull();
 
       const db = createTestDbWithStepTracking();

@@ -50,7 +50,7 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
-import { buildStepTransitionEvent, resolveTerminalStepId } from './orchestrator/stepTransitionBridge';
+import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
   transitionToCompleted,
@@ -590,8 +590,8 @@ async function initializeServices() {
   };
 
   // StepTransitionEmitterLike adapter — delegates to buildStepTransitionEvent() +
-  // resolveTerminalStepId() while keeping RunExecutor free of bridge imports.
-  // If resolveTerminalStepId returns null (unknown workflow name), no DB write
+  // resolveInitialStepId() while keeping RunExecutor free of bridge imports.
+  // If resolveInitialStepId returns null (unknown workflow name), no DB write
   // and no emit occurs.
   const stepTransitionEmitter: StepTransitionEmitterLike = {
     emit: (runId: string, status: 'pending' | 'running' | 'done') => {
@@ -603,7 +603,7 @@ async function initializeServices() {
          WHERE r.id = ?`,
       ).get(runId) as { workflowName: string } | undefined;
       if (!runRow) return;
-      const stepId = resolveTerminalStepId(runRow.workflowName);
+      const stepId = resolveInitialStepId(runRow.workflowName);
       if (!stepId) return;
       buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger);
     },

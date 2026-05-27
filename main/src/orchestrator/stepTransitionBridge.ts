@@ -27,23 +27,17 @@ export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflow
 // ---------------------------------------------------------------------------
 
 /**
- * Maps each SoloFlowWorkflowName to its single representative step id (v1
- * single-step-per-workflow model). Step ids are bare WorkflowStep.id values
- * from WORKFLOW_DEFINITIONS — matching the lookup keys used by getPhaseState,
- * mergeTransition, and stepStatusMap.
- *
- * Mapping rationale:
- *  - soloflow  → implement  (execute phase primary step)
- *  - planner   → tasks      (main output of the planner workflow)
- *  - sprint    → implement  (per-task implementation step)
- *  - compound  → extract    (core learning-extraction step)
- *  - prune     → scan       (first meaningful pruner step)
+ * Maps each SoloFlowWorkflowName to its first step id (v1 single-step-per-
+ * workflow model). At run start, current_step_id is set to this step so only
+ * it shows "running" and everything after is "pending". When the run
+ * terminates, getPhaseState and mergeTransition mark ALL steps as "done"
+ * regardless of position.
  */
-const TERMINAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
-  soloflow: 'implement',
-  planner:  'tasks',
+const INITIAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
+  soloflow: 'context',
+  planner:  'context',
   sprint:   'implement',
-  compound: 'extract',
+  compound: 'load-sprint',
   prune:    'scan',
 } as const;
 
@@ -55,9 +49,9 @@ const TERMINAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
  *
  * @param workflowName - The `workflows.name` value from the database row.
  */
-export function resolveTerminalStepId(workflowName: string): string | null {
+export function resolveInitialStepId(workflowName: string): string | null {
   if ((SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(workflowName)) {
-    return TERMINAL_STEP_IDS[workflowName as SoloFlowWorkflowName];
+    return INITIAL_STEP_IDS[workflowName as SoloFlowWorkflowName];
   }
   return null;
 }
@@ -81,7 +75,7 @@ export function resolveTerminalStepId(workflowName: string): string | null {
  *
  * @param runId   The workflow_runs.id for the run being transitioned.
  * @param stepId  The step id to set as current_step_id. Caller resolves this
- *                via resolveTerminalStepId() before calling.
+ *                via resolveInitialStepId() before calling.
  * @param status  The new step status ('pending' | 'running' | 'done').
  * @param db      Narrow DatabaseLike interface.
  * @param logger  Optional LoggerLike for warn-level fallback logging.
