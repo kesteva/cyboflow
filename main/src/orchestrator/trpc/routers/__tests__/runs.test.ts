@@ -60,6 +60,8 @@ import { setStartRunDeps } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent } from '../../../stepTransitionBridge';
+import { buildStepTransitionEvent, resolveTerminalStepId } from '../../../stepTransitionBridge';
+import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Seed helpers (inlined — small, out of scope to extract to shared fixture)
@@ -632,13 +634,13 @@ describe('cyboflow.runs.onStepTransition', () => {
     // queueMicrotask/Promise.resolve() is sufficient.
     const evB: WorkflowStepTransitionEvent = {
       runId: otherRunId,
-      stepId: 'execute.implement',
+      stepId: 'implement',
       status: 'running',
       timestamp: new Date().toISOString(),
     };
     const evA: WorkflowStepTransitionEvent = {
       runId: targetRunId,
-      stepId: 'execute.implement',
+      stepId: 'implement',
       status: 'running',
       timestamp: new Date().toISOString(),
     };
@@ -661,4 +663,45 @@ describe('cyboflow.runs.onStepTransition', () => {
     expect(collected).toHaveLength(1);
     expect(collected[0].runId).toBe(targetRunId);
   }, 10000);
+});
+
+// ---------------------------------------------------------------------------
+// end-to-end stepId contract parity (TERMINAL_STEP_IDS resolves into
+// WORKFLOW_DEFINITIONS — fixes namespace mismatch, FIND-SPRINT-040-10/13)
+//
+// For every SOLOFLOW_WORKFLOW_NAMES entry, calls buildStepTransitionEvent with
+// the resolveTerminalStepId output, then asserts getPhaseState returns a
+// stepStates entry with status='running' for that stepId. This locks the
+// contract against future namespace drift between the emitter and the consumer.
+// ---------------------------------------------------------------------------
+
+describe('end-to-end stepId contract parity (TERMINAL_STEP_IDS resolves into WORKFLOW_DEFINITIONS — fixes namespace mismatch)', () => {
+  for (const name of SOLOFLOW_WORKFLOW_NAMES) {
+    it(`${name}: buildStepTransitionEvent → getPhaseState yields status=running for the resolved terminal step`, async () => {
+      const stepId = resolveTerminalStepId(name);
+      expect(stepId).not.toBeNull();
+
+      const db = createTestDbWithStepTracking();
+      const adapter = dbAdapter(db);
+      const caller = appRouter.createCaller(createContext({ db: adapter }));
+
+      // Seed a run with currentStepId=null so no step is pre-marked.
+      const runId = `run-contract-${name}`;
+      seedPhaseRun(db, runId, name, null);
+
+      // buildStepTransitionEvent writes current_step_id and emits on stepTransitionEvents.
+      buildStepTransitionEvent(runId, stepId!, 'running', adapter);
+
+      // getPhaseState reads current_step_id from DB and resolves stepStates.
+      const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+      const match = result.stepStates.find((s) => s.stepId === stepId);
+      expect(match, `No stepState found for stepId '${stepId}' in ${name} workflow`).toBeDefined();
+      expect(match!.status).toBe('running');
+    });
+  }
+
+  afterEach(() => {
+    stepTransitionEvents.removeAllListeners('transition');
+  });
 });

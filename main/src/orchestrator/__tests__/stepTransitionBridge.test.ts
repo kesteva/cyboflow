@@ -82,12 +82,12 @@ describe('resolveTerminalStepId', () => {
     expect(resolveTerminalStepId('')).toBeNull();
   });
 
-  it('returns stable dot-notation step ids for each known workflow', () => {
-    expect(resolveTerminalStepId('soloflow')).toBe('execute.implement');
-    expect(resolveTerminalStepId('planner')).toBe('refine.tasks');
-    expect(resolveTerminalStepId('sprint')).toBe('execute.implement');
-    expect(resolveTerminalStepId('compound')).toBe('compound.extract');
-    expect(resolveTerminalStepId('prune')).toBe('prune.scan');
+  it('returns stable bare step ids matching WORKFLOW_DEFINITIONS', () => {
+    expect(resolveTerminalStepId('soloflow')).toBe('implement');
+    expect(resolveTerminalStepId('planner')).toBe('tasks');
+    expect(resolveTerminalStepId('sprint')).toBe('implement');
+    expect(resolveTerminalStepId('compound')).toBe('extract');
+    expect(resolveTerminalStepId('prune')).toBe('scan');
   });
 });
 
@@ -114,11 +114,11 @@ describe('buildStepTransitionEvent — happy path', () => {
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
-    const event = buildStepTransitionEvent(runId, 'execute.implement', 'running', adapter, logger);
+    const event = buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
 
     expect(event).not.toBeNull();
     expect(event!.runId).toBe(runId);
-    expect(event!.stepId).toBe('execute.implement');
+    expect(event!.stepId).toBe('implement');
     expect(event!.status).toBe('running');
     expect(typeof event!.timestamp).toBe('string');
 
@@ -126,7 +126,7 @@ describe('buildStepTransitionEvent — happy path', () => {
     expect(emittedEvents).toHaveLength(1);
     expect(emittedEvents[0]).toMatchObject({
       runId,
-      stepId: 'execute.implement',
+      stepId: 'implement',
       status: 'running',
     });
   });
@@ -145,10 +145,10 @@ describe('buildStepTransitionEvent — happy path', () => {
       dbValueAtEmitTime = row?.current_step_id;
     });
 
-    buildStepTransitionEvent(runId, 'execute.implement', 'running', adapter, logger);
+    buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
 
     // The DB must have been updated BEFORE the event fired.
-    expect(dbValueAtEmitTime).toBe('execute.implement');
+    expect(dbValueAtEmitTime).toBe('implement');
   });
 
   it('(c) emit happens AFTER the UPDATE (write-then-emit ordering verified via event listener read)', () => {
@@ -163,11 +163,11 @@ describe('buildStepTransitionEvent — happy path', () => {
         .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
         .get(runId) as { current_step_id: string | null } | undefined;
       // Record whether the DB had the value when the listener fired.
-      callLog.push(row?.current_step_id === 'execute.implement' ? 'db-written-before-emit' : 'db-not-written');
+      callLog.push(row?.current_step_id === 'implement' ? 'db-written-before-emit' : 'db-not-written');
       callLog.push('emit-fired');
     });
 
-    buildStepTransitionEvent(runId, 'execute.implement', 'done', adapter);
+    buildStepTransitionEvent(runId, 'implement', 'done', adapter);
 
     expect(callLog[0]).toBe('db-written-before-emit');
     expect(callLog[1]).toBe('emit-fired');
@@ -177,17 +177,17 @@ describe('buildStepTransitionEvent — happy path', () => {
     const { db, runId } = seedForBridge('compound');
     const adapter = dbAdapter(db);
 
-    buildStepTransitionEvent(runId, 'compound.extract', 'done', adapter);
+    buildStepTransitionEvent(runId, 'extract', 'done', adapter);
 
     expect(emittedEvents).toHaveLength(1);
     expect(emittedEvents[0].status).toBe('done');
-    expect(emittedEvents[0].stepId).toBe('compound.extract');
+    expect(emittedEvents[0].stepId).toBe('extract');
 
     // Verify DB was also updated.
     const row = db
       .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
       .get(runId) as { current_step_id: string | null } | undefined;
-    expect(row?.current_step_id).toBe('compound.extract');
+    expect(row?.current_step_id).toBe('extract');
   });
 });
 
@@ -207,7 +207,7 @@ describe('buildStepTransitionEvent — missing row (fail-soft)', () => {
     // runId that does not exist in the DB.
     let result: WorkflowStepTransitionEvent | null | undefined;
     expect(() => {
-      result = buildStepTransitionEvent('nonexistent-run-id', 'execute.implement', 'running', adapter, logger);
+      result = buildStepTransitionEvent('nonexistent-run-id', 'implement', 'running', adapter, logger);
     }).not.toThrow();
 
     // Returns null — no event emitted.
