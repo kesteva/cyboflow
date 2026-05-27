@@ -15,30 +15,11 @@
  *
  * TASK-768 / IDEA-026
  */
-import { useEffect, useState, useRef, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { trpc } from '../../trpc/client';
 import type { WorkflowDefinition, WorkflowStepState } from '../../../../shared/types/workflows';
 import type { StreamEvent } from '../../utils/cyboflowApi';
-
-// ---------------------------------------------------------------------------
-// WorkflowStepTransitionEvent — frontend-side equivalent
-//
-// NOTE: The canonical type lives in main/src/orchestrator/stepTransitionBridge.ts
-// (FIND-SPRINT-040-2 tracks future relocation to shared/types). We declare a
-// frontend-local mirror so we don't cross the main/ boundary.
-// ---------------------------------------------------------------------------
-
-interface WorkflowStepTransitionEvent {
-  /** The workflow_runs.id this transition belongs to. */
-  runId: string;
-  /** The step identifier (e.g. 'execute.implement'). */
-  stepId: string;
-  /** New status of the step. */
-  status: 'pending' | 'running' | 'done';
-  /** ISO-8601 timestamp of the transition. */
-  timestamp: string;
-}
 
 // ---------------------------------------------------------------------------
 // PhaseState — shape returned by getPhaseState query
@@ -249,36 +230,17 @@ export function WorkflowProgressTimeline({ runId }: { runId: string | null }): R
   }, [runId]);
 
   // ── Subscription effect ────────────────────────────────────────────────────
-  // Keep a stable ref to the current runId for the onData guard
-  const runIdRef = useRef(runId);
-  runIdRef.current = runId;
-
   useEffect(() => {
     if (runId === null) return;
 
     const subscription = trpc.cyboflow.runs.onStepTransition.subscribe(
       { runId },
       {
-        onData: (evt: unknown) => {
-          // Runtime guard — ensure payload matches expected shape
-          if (
-            typeof evt !== 'object' ||
-            evt === null ||
-            !('runId' in evt) ||
-            !('stepId' in evt) ||
-            !('status' in evt)
-          ) {
-            return;
-          }
-          const event = evt as WorkflowStepTransitionEvent;
-
-          // Ignore events for a different runId (race condition guard)
-          if (event.runId !== runIdRef.current) return;
-
-          const newStatus = event.status;
+        onData: (event) => {
+          if (event.runId !== runId) return;
           setStepStates((prev) =>
             prev.map((s) =>
-              s.stepId === event.stepId ? { ...s, status: newStatus } : s,
+              s.stepId === event.stepId ? { ...s, status: event.status } : s,
             ),
           );
         },
@@ -386,6 +348,7 @@ export function WorkflowProgressTimeline({ runId }: { runId: string | null }): R
                   : projectLogLines(streamEvents, runId, window);
 
                 // Start timestamp for elapsed time calculation
+                // unreachable in v1 — kept for TASK-765 (window is always null until step timestamps land)
                 const windowStart = window?.start ?? Date.now();
 
                 return (
