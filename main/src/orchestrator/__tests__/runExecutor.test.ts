@@ -254,6 +254,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
 // ---------------------------------------------------------------------------
 
 import type { RunEventBridge } from '../runEventBridge';
+import type { StepTransitionEmitterLike } from '../runExecutor';
 
 describe('RunExecutor.execute — bridgeEvents handle is stored and teardown fires dispose', () => {
   it('(i) execute() stores a real RunEventBridge handle and disposes it on completion (teardownRun via finally)', async () => {
@@ -1312,5 +1313,101 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
     // raw_events row must also not exist.
     const cnt = countRawEvents(db, run.id);
     expect(cnt).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-765: stepEmitter lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+function makeStepEmitter(): StepTransitionEmitterLike & { calls: Array<{ runId: string; status: string }> } {
+  const calls: Array<{ runId: string; status: string }> = [];
+  const emit = vi.fn((runId: string, status: 'pending' | 'running' | 'done') => {
+    calls.push({ runId, status });
+  });
+  return { emit, calls };
+}
+
+describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => {
+  it('(step-1) stepEmitter.emit is called with running at run start and done at run end (happy path)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const stepEmitter = makeStepEmitter();
+
+    // TestableRunExecutor + stepEmitter as 9th arg
+    const executor = new TestableRunExecutor(
+      spawner, registry, makeSpyLogger(),
+      undefined, undefined, undefined, undefined, undefined,
+      stepEmitter,
+    );
+
+    await executor.execute(run.id);
+
+    // Should emit 'running' then 'done'
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
+    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
+  });
+
+  it('(step-2) stepEmitter.emit fires done on spawner failure path', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('sdk spawn failed'));
+    const stepEmitter = makeStepEmitter();
+
+    const executor = new TestableRunExecutor(
+      spawner, registry, makeSpyLogger(),
+      undefined, undefined, undefined, undefined, undefined,
+      stepEmitter,
+    );
+
+    await expect(executor.execute(run.id)).rejects.toThrow('sdk spawn failed');
+
+    // Should still emit 'running' then 'done' even on failure
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
+    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
+  });
+
+  it('(step-3) a throwing stepEmitter does not crash execute() — fail-soft, warn logged', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const spyLogger = makeSpyLogger();
+
+    const throwingStepEmitter: StepTransitionEmitterLike = {
+      emit: vi.fn(() => { throw new Error('step emitter exploded'); }),
+    };
+
+    const executor = new TestableRunExecutor(
+      spawner, registry, spyLogger,
+      undefined, undefined, undefined, undefined, undefined,
+      throwingStepEmitter,
+    );
+
+    // execute() must NOT throw even though stepEmitter throws.
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+
+    // logger.warn must have been called with the emitter error.
+    expect(spyLogger.warn).toHaveBeenCalled();
+    const warnCalls = (spyLogger.warn as ReturnType<typeof vi.fn>).mock.calls;
+    const stepEmitterWarn = warnCalls.find(
+      (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('stepEmitter.emit threw'),
+    );
+    expect(stepEmitterWarn).toBeDefined();
   });
 });

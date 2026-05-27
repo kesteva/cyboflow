@@ -65,6 +65,18 @@ export const stuckEvents = new EventEmitter();
  */
 export const questionEvents = new EventEmitter();
 
+/**
+ * Main-process EventEmitter for workflow step-transition events.
+ *
+ * stepTransitionBridge.ts emits on this emitter via:
+ *   stepTransitionEvents.emit('transition', event satisfies WorkflowStepTransitionEvent);
+ *
+ * The emitter is module-level (singleton) so both the executor lifecycle hooks
+ * and any future TASK-766 tRPC subscription can share the same instance without
+ * circular imports.
+ */
+export const stepTransitionEvents = new EventEmitter();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
