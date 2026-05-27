@@ -132,8 +132,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         <RunRightRail phaseState={phaseState} />
       </div>
 
-      {/* Panel surface — rendered below the run/empty-state area when a main-repo session exists (Option B) */}
-      {mainRepoSession && (
+      {/* Panel surface — only when no active run (RunBottomPane owns the run view) */}
+      {mainRepoSession && activeRunId === null && (
         <SessionProvider session={mainRepoSession} projectName="">
           <PanelTabBar
             panels={sessionPanels}
