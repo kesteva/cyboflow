@@ -288,6 +288,41 @@ EXISTS` must be a no-op after `schema.sql` runs. When adding a column to a shipp
 migration, also search every test file's INSERT/SELECT for the old column list — missing
 columns surface as runtime `undefined`, not typecheck errors.
 
+### SQLite migrations: `PRAGMA foreign_keys` must toggle OUTSIDE `db.transaction()`
+
+SQLite silently no-ops `PRAGMA foreign_keys` issued inside a transaction
+(https://sqlite.org/pragma.html#pragma_foreign_keys). When a migration needs to
+disable FK enforcement to DROP+RENAME a table that has FK children, the pragma
+toggle MUST be outside the `db.transaction(...)` wrapper, and the restore MUST
+run in a `finally`:
+
+```typescript
+// CORRECT — pragma outside the transaction:
+db.pragma('foreign_keys = OFF');
+try {
+  db.transaction(() => {
+    db.exec('DROP TABLE workflow_runs');
+    db.exec('ALTER TABLE workflow_runs_new RENAME TO workflow_runs');
+  })();
+} finally {
+  db.pragma('foreign_keys = ON');
+}
+
+// WRONG — pragma inside the transaction is silently ignored; DROP TABLE then
+// CASCADE-deletes every row in every FK child table:
+db.transaction(() => {
+  db.exec('PRAGMA foreign_keys=OFF; DROP TABLE workflow_runs');
+})();
+```
+
+Canonical implementation: `main/src/database/database.ts` `runFileBasedMigrations`
+(detects `PRAGMA foreign_keys=OFF` in the migration text and hoists the toggle
+above its own `this.transaction()` wrapper). Regression test:
+`main/src/database/__tests__/fileMigrationRunner.test.ts` `'FK-toggle path: …'`.
+TASK-757 added both after a code-reviewer caught that the inside-transaction
+variant would have CASCADE-deleted every row in `approvals`, `messages`, and
+`raw_events` during migration 010 development.
+
 ### Extract-shared-utility refactors: prove completeness
 
 Any task that extracts a shared fixture, helper, type, or constant MUST grep the
