@@ -229,4 +229,29 @@ describe('appRouter subscription placeholders', () => {
 
     expect(collected).toHaveLength(0);
   });
+
+  it('cyboflow.runs.onStepTransition yields zero events and terminates on abort', async () => {
+    const controller = new AbortController();
+
+    const result = await callSubscription(
+      'cyboflow.runs.onStepTransition',
+      { runId: 'run-abort-test' },
+      controller.signal,
+    );
+
+    expect(isAsyncIterable(result)).toBe(true);
+
+    const iterable = result as AsyncIterable<unknown>;
+    const collected: unknown[] = [];
+
+    // Abort immediately before draining — eventToAsyncIterable respects
+    // the abort signal and returns without yielding any event.
+    controller.abort();
+
+    for await (const ev of iterable) {
+      collected.push(ev);
+    }
+
+    expect(collected).toHaveLength(0);
+  });
 });

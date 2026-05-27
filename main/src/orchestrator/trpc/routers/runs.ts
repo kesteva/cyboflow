@@ -12,7 +12,9 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
-import type { WorkflowRunListRow } from '../../../../../shared/types/workflows';
+import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
+import { WORKFLOW_DEFINITIONS, SOLOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
+import type { WorkflowStepTransitionEvent } from '../../stepTransitionBridge';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
@@ -21,6 +23,7 @@ import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
 } from '../../cancelAndRestartHandler';
+import { stepTransitionEvents, eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
 // cancelAndRestart dependency bag
@@ -216,5 +219,116 @@ export const runsRouter = router({
         });
       }
       return result;
+    }),
+
+  /**
+   * Return the phase state for a workflow run: the resolved WorkflowDefinition,
+   * the current_step_id (null when no step is active), and a stepStates array
+   * that walks all steps in declaration order and assigns 'done' / 'running' /
+   * 'pending' status relative to currentStepId.
+   *
+   * Step state derivation rules:
+   *   - currentStepId is null OR not found in the definition → all 'pending'.
+   *   - currentStepId matches a step → that step 'running'; all before 'done';
+   *     all after 'pending'.
+   *
+   * Throws:
+   *   PRECONDITION_FAILED — ctx.db is undefined.
+   *   NOT_FOUND           — runId does not exist in workflow_runs.
+   *   NOT_FOUND           — workflow.name is not a recognized SoloFlowWorkflowName.
+   */
+  getPhaseState: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(({ ctx, input }): { definition: WorkflowDefinition; currentStepId: string | null; stepStates: WorkflowStepState[] } => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+
+      // JOIN workflow_runs with workflows to get the workflow name in one query.
+      const row = ctx.db
+        .prepare(
+          `SELECT wr.current_step_id, w.name AS workflow_name
+             FROM workflow_runs wr
+             JOIN workflows w ON wr.workflow_id = w.id
+            WHERE wr.id = ?`,
+        )
+        .get(input.runId) as { current_step_id: string | null; workflow_name: string } | undefined;
+
+      if (row === undefined) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Run ${input.runId} not found`,
+        });
+      }
+
+      // Narrow workflow name to SoloFlowWorkflowName.
+      if (!(SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(row.workflow_name)) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Workflow name '${row.workflow_name}' is not a recognized SoloFlowWorkflowName`,
+        });
+      }
+
+      // TypeScript narrowing: cast is safe because we validated membership above.
+      const workflowName = row.workflow_name as (typeof SOLOFLOW_WORKFLOW_NAMES)[number];
+      const definition = WORKFLOW_DEFINITIONS[workflowName];
+      const currentStepId = row.current_step_id;
+
+      // Flatten all steps across phases in declaration order.
+      const flatSteps = definition.phases.flatMap((p) => p.steps);
+
+      // Compute stepStates. If currentStepId is null or not found (orphan),
+      // all steps are 'pending'.
+      const matchIndex = currentStepId !== null
+        ? flatSteps.findIndex((s) => s.id === currentStepId)
+        : -1;
+
+      const stepStates: WorkflowStepState[] = flatSteps.map((s, i) => {
+        let status: WorkflowStepState['status'];
+        if (matchIndex === -1) {
+          // null currentStepId or orphan id → all pending.
+          status = 'pending';
+        } else if (i < matchIndex) {
+          status = 'done';
+        } else if (i === matchIndex) {
+          status = 'running';
+        } else {
+          status = 'pending';
+        }
+        return { stepId: s.id, status };
+      });
+
+      return { definition, currentStepId, stepStates };
+    }),
+
+  /**
+   * Subscribe to step-transition events for a specific run.
+   *
+   * Events are emitted by stepTransitionBridge.buildStepTransitionEvent() and
+   * filtered server-side by runId so clients only receive events for their run.
+   *
+   * No throttle — step transitions are infrequent boundary events (unlike
+   * high-throughput stream output) and must not be coalesced.
+   *
+   * Backed by the module-level `stepTransitionEvents` EventEmitter (declared in
+   * events.ts, wired in stepTransitionBridge.ts). The 'transition' event name
+   * matches the emit call in buildStepTransitionEvent.
+   */
+  onStepTransition: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .subscription(async function* ({ input, signal }): AsyncGenerator<WorkflowStepTransitionEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<WorkflowStepTransitionEvent>(
+        stepTransitionEvents,
+        'transition',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        if (ev.runId !== input.runId) continue;
+        yield ev;
+      }
     }),
 });
