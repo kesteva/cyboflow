@@ -42,7 +42,7 @@ Workspace `"test"` scripts that participate in a root multi-tier chain (e.g. `pn
 
 Visual verification of any frontend UI change requires `pnpm dev` (full Electron). The Vite renderer at `http://localhost:4521` cannot bootstrap standalone — it depends on `preload`-injected `electronTRPC` and will error without the main process. For headless validation when capture is unavailable, read `cyboflow-frontend-debug.log` (see below).
 
-The `visual_web` / Playwright MCP path is NON-FUNCTIONAL here (renderer cannot bootstrap without Electron `preload`). Use `visual_macos` via Peekaboo MCP with `pnpm dev` running. Both Screen Recording AND Accessibility grants are required — see `docs/VISUAL-VERIFICATION-SETUP.md`.
+The `visual_web` / Playwright MCP path is NON-FUNCTIONAL here (renderer cannot bootstrap without Electron `preload`). Use `visual_macos` via Peekaboo MCP with `pnpm dev` running. Both Screen Recording AND Accessibility grants must be held by the **MCP host process binary** (not only Cyboflow.app or Warp) — if `mcp__peekaboo__image` reports declined TCCs while `server_status` shows grants present, run the TCC.db host-process diagnostic in `docs/VISUAL-VERIFICATION-SETUP.md` (recurring failure across SPRINT-031..SPRINT-039).
 
 ## Frontend/Backend Debug Logs (dev mode)
 
