@@ -17,6 +17,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 
 // ------------------------------------------------------------------
 // Module mocks — hoisted before SUT import.
@@ -146,6 +147,16 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  function seedProject(dbPath: string): { id: number } {
+    const rawDb = new Database(dbPath);
+    rawDb.prepare(
+      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
+    ).run();
+    const project = rawDb.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number };
+    rawDb.close();
+    return project;
+  }
+
   it('Case A: INSERT with run_id="flow-001" round-trips to runId="flow-001"', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-task754-a-'));
     const dbPath = join(tmpDir, 'test.db');
@@ -155,17 +166,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 
-    // Seed a project row so the FK constraint is satisfied.
-    const rawDb = (() => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Database = require('better-sqlite3');
-      return new Database(dbPath) as import('better-sqlite3').Database;
-    })();
-    rawDb.prepare(
-      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
-    ).run();
-    const project = rawDb.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number };
-    rawDb.close();
+    const project = seedProject(dbPath);
 
     // Insert via the real DatabaseService.createSession.
     const dbSession = svc.createSession({
@@ -203,17 +204,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 
-    // Seed a project row.
-    const rawDb = (() => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Database = require('better-sqlite3');
-      return new Database(dbPath) as import('better-sqlite3').Database;
-    })();
-    rawDb.prepare(
-      "INSERT INTO projects (name, path, active) VALUES ('test-project', '/tmp/test-project', 1)"
-    ).run();
-    const project = rawDb.prepare('SELECT id FROM projects LIMIT 1').get() as { id: number };
-    rawDb.close();
+    const project = seedProject(dbPath);
 
     // Insert WITHOUT supplying run_id — the ?? null coalesce yields NULL.
     const dbSession = svc.createSession({
