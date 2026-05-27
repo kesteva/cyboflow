@@ -1,16 +1,20 @@
 /**
- * WorkflowProgressTimeline component tests (TASK-781 retrofit).
+ * WorkflowProgressTimeline component tests (TASK-781 retrofit, TASK-783 prop-drill).
+ *
+ * After TASK-783, WorkflowProgressTimeline accepts phaseState as a required prop
+ * instead of calling useWorkflowPhaseState internally.  Tests pass the fixture
+ * directly — no hook mock needed.
  *
  * Behaviors verified:
- *   1. Hook receives runId on every render; changing the prop forwards the new runId.
- *   2. Renders phase headers + step items with state-keyed border colors.
- *   3. Applies 1.4s pulse animation to running step bullet only.
- *   4. Projects log lines (degraded mode — window is null → empty log section).
- *   5. Delta-driven re-render: changing the hook return shape causes border updates.
- *   6. runId=null renders placeholder, no hook phase-state consumed.
- *   7. isLoading → 'Loading workflow state…' placeholder.
- *   8. error !== null → 'Failed to load workflow state: <message>' placeholder.
- *   9. definition === null (not loading, no error) → 'No workflow data' placeholder.
+ *   1. Renders phase headers + step items with state-keyed border colors.
+ *   2. Applies 1.4s pulse animation to running step bullet only.
+ *   3. Projects log lines (degraded mode — window is null → empty log section).
+ *   4. Delta-driven re-render: changing the phaseState prop causes border updates.
+ *   5. runId=null renders placeholder.
+ *   6. isLoading → 'Loading workflow state…' placeholder.
+ *   7. error !== null → 'Failed to load workflow state: <message>' placeholder.
+ *   8. definition === null (not loading, no error) → 'No workflow data' placeholder.
+ *   9. Phase headers: swatch color, label, step count.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act } from '@testing-library/react';
@@ -29,38 +33,25 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock useWorkflowPhaseState — component imports this hook for all phase state
-// ---------------------------------------------------------------------------
-
-import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
-
-const makeDefaultHookReturn = (): UseWorkflowPhaseStateResult => ({
-  definition: null,
-  currentStepId: null,
-  stepStates: [],
-  isLoading: false,
-  error: null,
-});
-
-let mockHookReturn: UseWorkflowPhaseStateResult = makeDefaultHookReturn();
-const useWorkflowPhaseStateMock = vi.fn((_runId: string | null) => mockHookReturn);
-
-vi.mock('../../../hooks/useWorkflowPhaseState', () => ({
-  useWorkflowPhaseState: (...args: Parameters<typeof useWorkflowPhaseStateMock>) =>
-    useWorkflowPhaseStateMock(...args),
-}));
-
-// ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
 
 import { WorkflowProgressTimeline } from '../WorkflowProgressTimeline';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Helpers — build minimal test fixtures
 // ---------------------------------------------------------------------------
+
+const EMPTY_PHASE_STATE: UseWorkflowPhaseStateResult = {
+  definition: null,
+  currentStepId: null,
+  stepStates: [],
+  isLoading: false,
+  error: null,
+};
 
 function makePhaseState(overrides?: {
   currentStepId?: string | null;
@@ -162,10 +153,6 @@ function makeTwoPhaseState(): UseWorkflowPhaseStateResult {
 // Helpers — hex → rgb conversion for JSDOM style assertions
 // ---------------------------------------------------------------------------
 
-/**
- * Convert a 7-char hex color (#rrggbb) to the rgb() string that JSDOM
- * produces when reading back an inline style with that background value.
- */
 function hexToRgb(hex: string): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -182,9 +169,6 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveRun();
   });
 
-  mockHookReturn = makeDefaultHookReturn();
-  useWorkflowPhaseStateMock.mockClear();
-
   // jsdom does not implement scrollIntoView
   HTMLElement.prototype.scrollIntoView = vi.fn();
 });
@@ -195,70 +179,49 @@ beforeEach(() => {
 
 describe('WorkflowProgressTimeline', () => {
 
-  // ── AC1: Hook receives runId ──────────────────────────────────────────────
-
-  it('passes runId to useWorkflowPhaseState on mount', () => {
-    mockHookReturn = makePhaseState();
-    render(<WorkflowProgressTimeline runId="run-A" />);
-
-    expect(useWorkflowPhaseStateMock).toHaveBeenCalledWith('run-A');
-  });
-
-  it('forwards the new runId to the hook when the prop changes', () => {
-    mockHookReturn = makePhaseState();
-    const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
-
-    mockHookReturn = makePhaseState();
-    act(() => {
-      rerender(<WorkflowProgressTimeline runId="run-B" />);
-    });
-
-    expect(useWorkflowPhaseStateMock).toHaveBeenLastCalledWith('run-B');
-  });
-
-  // ── AC2: State-keyed border colors ────────────────────────────────────────
+  // ── AC1: State-keyed border colors ────────────────────────────────────────
 
   it('renders done step with border-status-success border class', () => {
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
     const doneItem = screen.getByTestId('step-item-implement');
     expect(doneItem.className).toContain('border-status-success');
   });
 
   it('renders running step with border-status-error border class (fallback — status-running absent)', () => {
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
     const runningItem = screen.getByTestId('step-item-write-tests');
     expect(runningItem.className).toContain('border-status-error');
   });
 
   it('renders pending step with border-border-primary border class', () => {
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
     const pendingItem = screen.getByTestId('step-item-task-verify');
     expect(pendingItem.className).toContain('border-border-primary');
   });
 
-  // ── AC3: Pulse animation on running bullet only ───────────────────────────
+  // ── AC2: Pulse animation on running bullet only ───────────────────────────
 
   it("applies 1.4s infinite pulse animation to running step's bullet", () => {
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
     const runningBullet = screen.getByTestId('step-bullet-write-tests');
     expect(runningBullet.style.animation).toContain('1.4s');
@@ -266,11 +229,11 @@ describe('WorkflowProgressTimeline', () => {
   });
 
   it('does NOT apply pulse animation to done or pending step bullets', () => {
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
     // done bullet
     const doneBullet = screen.getByTestId('step-bullet-implement');
@@ -281,17 +244,15 @@ describe('WorkflowProgressTimeline', () => {
     expect(pendingBullet.style.animation ?? '').toBe('');
   });
 
-  // ── AC4: Log lines — degraded mode (window is null → no log lines) ────────
+  // ── AC3: Log lines — degraded mode (window is null → no log lines) ────────
 
   it('renders no log lines for non-pending steps when time-window is unavailable (degraded mode)', () => {
-    // In v1 degraded mode, getStepTimeWindow always returns null — no log lines rendered.
-    mockHookReturn = makePhaseState({
+    const phaseState = makePhaseState({
       stepStatuses: { implement: 'done', 'write-tests': 'running', 'task-verify': 'pending' },
     });
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
-    // done step: no log lines despite status !== pending
     const allLogLines = document.querySelectorAll('[data-testid^="log-line-implement"]');
     expect(allLogLines.length).toBe(0);
 
@@ -299,108 +260,94 @@ describe('WorkflowProgressTimeline', () => {
     expect(runningLogLines.length).toBe(0);
   });
 
-  // ── AC5: Delta-driven re-render ───────────────────────────────────────────
+  // ── AC4: Delta-driven re-render ───────────────────────────────────────────
 
-  it('updates step border when hook returns updated step states on rerender', () => {
-    mockHookReturn = makePhaseState({
+  it('updates step border when phaseState prop changes on rerender', () => {
+    const initialState = makePhaseState({
       stepStatuses: { implement: 'pending', 'write-tests': 'pending', 'task-verify': 'pending' },
     });
 
-    const { rerender } = render(<WorkflowProgressTimeline runId="run-A" />);
+    const { rerender } = render(
+      <WorkflowProgressTimeline runId="run-A" phaseState={initialState} />,
+    );
 
     expect(screen.getByTestId('step-item-implement').className).toContain('border-border-primary');
 
-    // Simulate delta arrival: hook now returns updated state
-    mockHookReturn = makePhaseState({
+    const updatedState = makePhaseState({
       stepStatuses: { implement: 'running', 'write-tests': 'pending', 'task-verify': 'pending' },
     });
 
     act(() => {
-      rerender(<WorkflowProgressTimeline runId="run-A" />);
+      rerender(<WorkflowProgressTimeline runId="run-A" phaseState={updatedState} />);
     });
 
     expect(screen.getByTestId('step-item-implement').className).toContain('border-status-error');
   });
 
-  // ── AC6: runId=null renders placeholder ──────────────────────────────────
+  // ── AC5: runId=null renders placeholder ──────────────────────────────────
 
   it('renders "No active run" placeholder when runId is null', () => {
-    render(<WorkflowProgressTimeline runId={null} />);
+    render(<WorkflowProgressTimeline runId={null} phaseState={EMPTY_PHASE_STATE} />);
 
     expect(screen.getByTestId('workflow-progress-timeline-empty')).toBeInTheDocument();
     expect(screen.getByText('No active run')).toBeInTheDocument();
   });
 
-  it('passes null to the hook when runId is null', () => {
-    render(<WorkflowProgressTimeline runId={null} />);
+  // ── AC6: isLoading placeholder ────────────────────────────────────────────
 
-    expect(useWorkflowPhaseStateMock).toHaveBeenCalledWith(null);
-  });
+  it('renders "Loading workflow state…" placeholder when phaseState.isLoading is true', () => {
+    const loadingState: UseWorkflowPhaseStateResult = { ...EMPTY_PHASE_STATE, isLoading: true };
 
-  // ── AC7: isLoading placeholder ────────────────────────────────────────────
-
-  it('renders "Loading workflow state…" placeholder when hook returns isLoading=true', () => {
-    mockHookReturn = { ...makeDefaultHookReturn(), isLoading: true };
-
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={loadingState} />);
 
     expect(screen.getByText('Loading workflow state…')).toBeInTheDocument();
   });
 
-  // ── AC8: error placeholder ────────────────────────────────────────────────
+  // ── AC7: error placeholder ────────────────────────────────────────────────
 
-  it('renders "Failed to load workflow state:" placeholder when hook returns a non-null error', () => {
-    mockHookReturn = {
-      ...makeDefaultHookReturn(),
+  it('renders "Failed to load workflow state:" placeholder when phaseState.error is non-null', () => {
+    const errorState: UseWorkflowPhaseStateResult = {
+      ...EMPTY_PHASE_STATE,
       error: new Error('network timeout'),
     };
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={errorState} />);
 
     expect(screen.getByText(/Failed to load workflow state:.*network timeout/)).toBeInTheDocument();
   });
 
-  // ── AC9: null definition (not loading, no error) ──────────────────────────
+  // ── AC8: null definition (not loading, no error) ──────────────────────────
 
-  it('renders "No workflow data" when hook returns null definition with no loading and no error', () => {
-    mockHookReturn = makeDefaultHookReturn(); // definition=null, isLoading=false, error=null
-
-    render(<WorkflowProgressTimeline runId="run-A" />);
+  it('renders "No workflow data" when phaseState.definition is null with no loading and no error', () => {
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={EMPTY_PHASE_STATE} />);
 
     expect(screen.getByText('No workflow data')).toBeInTheDocument();
   });
 
-  // ── Phase headers ─────────────────────────────────────────────────────────
+  // ── AC9: Phase headers ────────────────────────────────────────────────────
 
   it('renders phase headers with swatch background matching phase color, label text, and step count', () => {
-    mockHookReturn = makeTwoPhaseState();
+    const phaseState = makeTwoPhaseState();
 
-    render(<WorkflowProgressTimeline runId="run-A" />);
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
 
-    // Phase 'execute' header
     const execHeader = screen.getByTestId('phase-header-execute');
     expect(execHeader).toBeInTheDocument();
 
     const execSwatch = screen.getByTestId('phase-swatch-execute');
-    // JSDOM normalizes hex to rgb() in style reads — compare against converted value
     expect(execSwatch.style.background).toBe(hexToRgb('#c96442'));
 
-    // Phase label
     expect(screen.getByText('Execute')).toBeInTheDocument();
-    // Step count — 2 steps in execute phase (both phases have 2, use getAllByText)
     const stepCounts = screen.getAllByText('2 steps');
     expect(stepCounts.length).toBeGreaterThanOrEqual(1);
 
-    // Phase 'verify' header
     const verifyHeader = screen.getByTestId('phase-header-verify');
     expect(verifyHeader).toBeInTheDocument();
 
     const verifySwatch = screen.getByTestId('phase-swatch-verify');
-    // JSDOM normalizes hex to rgb() in style reads — compare against converted value
     expect(verifySwatch.style.background).toBe(hexToRgb('#a87a2c'));
 
     expect(screen.getByText('Sprint review')).toBeInTheDocument();
-    // Both phases have 2 steps — 2 step-count spans should be present
     expect(screen.getAllByText('2 steps').length).toBe(2);
   });
 });

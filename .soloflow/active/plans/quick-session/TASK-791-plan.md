@@ -1,7 +1,7 @@
 ---
 id: TASK-791
 idea: IDEA-027
-status: ready
+status: done
 created: "2026-05-27T17:00:00Z"
 files_owned:
   - frontend/src/hooks/useQuickSession.ts
@@ -9,6 +9,9 @@ files_owned:
   - frontend/src/components/cyboflow/WorkflowPicker.tsx
   - frontend/src/components/cyboflow/__tests__/WorkflowPicker.test.tsx
   - WorkflowPicker.tsx
+  - frontend/src/types/electron.d.ts
+  - frontend/src/components/cyboflow/CyboflowRoot.tsx
+  - frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
 files_readonly:
   - frontend/src/stores/cyboflowStore.ts
   - frontend/src/services/panelApi.ts

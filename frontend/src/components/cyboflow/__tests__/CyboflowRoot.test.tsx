@@ -1,19 +1,16 @@
 /**
- * CyboflowRoot component tests (TASK-688, TASK-752, TASK-780).
+ * CyboflowRoot component tests (TASK-688, TASK-752, TASK-780, TASK-790).
  *
  * Behaviors verified:
- *   1. Renders "Choose a workflow to start" empty state when activeRunId is null.
- *   2. Renders RunView when activeRunId is set and hides the empty-state CTA.
+ *   1. Renders "Choose a workflow to start" empty state when activeRunId is null and no session.
+ *   2. Renders RunView (via RunBottomPane) when activeRunId is set and hides the empty-state CTA.
  *   3. Opening and closing the workflow picker modal toggles its visibility.
  *   4. Modal closes automatically after a successful run start (onWorkflowStarted fires).
- *   5. Quick Session button disabled with tooltip when projectId is null.
- *   6. Escape key dismisses the inline mode picker.
- *   7. Selecting Chat invokes createQuick with the correct payload.
- *   8. Selecting Terminal invokes createQuick with the correct payload.
- *   9. (TASK-752) Chat full lifecycle: panelApi.createPanel called AND activeQuickSessionId set.
- *  10. (TASK-752) Terminal full lifecycle: panelApi.createPanel called with terminal args AND activeQuickSessionId set.
- *  11. (TASK-780) Does not call getPhaseState.query when activeRunId is null.
- *  12. (TASK-780) Mounts WorkflowCanvas above RunBottomPane when a run is active.
+ *   5. (TASK-790) Session alive: RunBottomPane renders when activeRunId is null but mainRepoSession exists.
+ *   6. (TASK-790) Quick Session button directly calls start() — no mode picker.
+ *   7. (TASK-790) Quick Session button disabled with tooltip when projectId is null.
+ *   8. (TASK-780) Does not call getPhaseState.query when activeRunId is null.
+ *   9. (TASK-780) Mounts WorkflowCanvas above RunBottomPane when a run is active.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
@@ -94,13 +91,13 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
-// Mock API.sessions so getOrCreateMainRepoSession returns data:null, keeping mainRepoSessionId null.
-// This means the new {mainRepoSessionId && …} panel surface block does NOT render, and
-// the four existing assertions about empty-state CTA / RunView / modal toggling pass unchanged.
+// Mock API.sessions — default: getOrCreateMainRepoSession returns data:null
+// so the panel surface does NOT render in the basic tests (no mainRepoSession).
+// Override per-test where the session-alive tests need a real session.
 vi.mock('../../../utils/api', () => ({
   API: {
     sessions: {
-      getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: null }),
+      getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: undefined }),
       createQuick: vi.fn().mockResolvedValue({
         success: true,
         data: { jobId: 'job-1', sessionId: 'sess-qs-1', worktreePath: '/tmp/qs' },
@@ -109,9 +106,7 @@ vi.mock('../../../utils/api', () => ({
   },
 }));
 
-// Mock panelApi so the loadPanelsForSession call (gated on mainRepoSessionId) does not
-// cause errors if it somehow fires, and to silence unhandled-promise warnings.
-// createPanel returns a resolved promise so the hook's await doesn't throw.
+// Mock panelApi — loadPanelsForSession returns [] so the panel surface stays dormant.
 vi.mock('../../../services/panelApi', () => ({
   panelApi: {
     loadPanelsForSession: vi.fn().mockResolvedValue([]),
@@ -130,26 +125,44 @@ vi.mock('../../../services/panelApi', () => ({
   },
 }));
 
+// Mock useQuickSession so we can spy on start() calls without hitting the real API
+const mockQuickSessionStart = vi.fn().mockResolvedValue(undefined);
+vi.mock('../../../hooks/useQuickSession', () => ({
+  useQuickSession: vi.fn(() => ({
+    start: mockQuickSessionStart,
+    isStarting: null,
+    error: null,
+  })),
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { trpc } from '../../../trpc/client';
-import { panelApi } from '../../../services/panelApi';
 import { API } from '../../../utils/api';
 
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
+// Convenience accessor for the tRPC mock's runs sub-tree, cast through unknown
+// to avoid TypeScript errors when the worktree's tRPC type predates the
+// getPhaseState / onStepTransition procedures added in later sprints.
+const tRpcRuns = (trpc.cyboflow.runs as unknown) as {
+  getPhaseState: { query: ReturnType<typeof vi.fn> };
+  onStepTransition: { subscribe: ReturnType<typeof vi.fn> };
+};
+
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
   });
-  vi.mocked(panelApi.createPanel).mockClear();
+  mockQuickSessionStart.mockClear();
   vi.mocked(API.sessions.createQuick).mockClear();
-  vi.mocked(trpc.cyboflow.runs.getPhaseState.query).mockClear();
-  vi.mocked(trpc.cyboflow.runs.onStepTransition.subscribe).mockClear();
+  vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({ success: true, data: undefined });
+  tRpcRuns.getPhaseState.query.mockClear();
+  tRpcRuns.onStepTransition.subscribe.mockClear();
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
   // useEffect does not throw when RunView is mounted inside CyboflowRoot.
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -160,7 +173,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('CyboflowRoot', () => {
-  it('renders Choose a workflow to start empty state when activeRunId is null', () => {
+  it('renders Choose a workflow to start empty state when activeRunId is null and no session', () => {
     render(<CyboflowRoot projectId={1} />);
     expect(screen.getByText('Choose a workflow to start')).toBeInTheDocument();
     // CTA button is also present
@@ -269,7 +282,7 @@ describe('CyboflowRoot', () => {
 
     // useWorkflowPhaseState calls onStepTransition.subscribe only when runId is non-null;
     // getPhaseState.query must NOT have been called.
-    expect(vi.mocked(trpc.cyboflow.runs.getPhaseState.query)).not.toHaveBeenCalled();
+    expect(tRpcRuns.getPhaseState.query).not.toHaveBeenCalled();
   });
 
   it('mounts WorkflowCanvas above RunBottomPane when a run is active', async () => {
@@ -295,10 +308,65 @@ describe('CyboflowRoot', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Quick Session tests
+// Session-alive tests (TASK-790)
 // ---------------------------------------------------------------------------
 
-describe('CyboflowRoot — Quick Session', () => {
+describe('CyboflowRoot — session-alive (TASK-790)', () => {
+  const mockMainRepoSession = {
+    id: 'sess-main-1',
+    name: 'main-repo',
+    projectId: 1,
+    // 'ready' is a valid Session status (see frontend/src/types/session.ts)
+    status: 'ready' as const,
+    isMainRepo: true,
+    worktreePath: '/repo/main',
+    prompt: '',
+    output: [],
+    jsonMessages: [],
+    createdAt: '',
+  };
+
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+    });
+  });
+
+  it('renders RunBottomPane when activeRunId is null but mainRepoSession is non-null', async () => {
+    // Override the getOrCreateMainRepoSession mock to return a real session
+    vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({
+      success: true,
+      data: mockMainRepoSession,
+    });
+
+    render(<CyboflowRoot projectId={1} />);
+
+    // Empty-state CTA should NOT be present — RunBottomPane renders instead
+    await waitFor(() => {
+      expect(screen.queryByText('Choose a workflow to start')).not.toBeInTheDocument();
+    });
+
+    // RunBottomPane renders its tab bar (data-stream tab is visible by default)
+    await waitFor(() => {
+      expect(screen.getByTestId('run-bottom-pane-tab-data-stream')).toBeInTheDocument();
+    });
+  });
+
+  it('renders empty-state CTA when both activeRunId and mainRepoSession are null', () => {
+    // Default mock: getOrCreateMainRepoSession returns data:null
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByText('Choose a workflow to start')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose a workflow' })).toBeInTheDocument();
+    expect(screen.queryByTestId('run-bottom-pane-tab-data-stream')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quick Session tests (TASK-790 — direct start, no mode picker)
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — Quick Session (TASK-790)', () => {
   afterEach(() => {
     act(() => {
       useCyboflowStore.getState().clearActiveRun();
@@ -308,144 +376,35 @@ describe('CyboflowRoot — Quick Session', () => {
 
   it('renders Quick Session button disabled with tooltip when projectId is null', () => {
     render(<CyboflowRoot projectId={null} />);
-    const btn = screen.getByTestId('open-quick-session-picker');
+    const btn = screen.getByTestId('start-quick-session');
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute('title', 'Select a project to start a quick session');
 
-    // Clicking disabled button must not open picker and not invoke createQuick
+    // Clicking disabled button must not invoke start
     fireEvent.click(btn);
+    expect(mockQuickSessionStart).not.toHaveBeenCalled();
+
+    // No mode-picker elements should be present (TASK-790 removes the mode picker)
     expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
     expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
-    expect(API.sessions.createQuick).not.toHaveBeenCalled();
   });
 
-  it('clicking Quick Session opens Chat/Terminal picker; Escape dismisses without invoking createQuick', async () => {
-    render(<CyboflowRoot projectId={1} />);
+  it('clicking Quick Session button directly calls start() without a mode picker', async () => {
+    render(<CyboflowRoot projectId={42} />);
 
-    const btn = screen.getByTestId('open-quick-session-picker');
+    const btn = screen.getByTestId('start-quick-session');
     expect(btn).not.toBeDisabled();
 
-    // Click to open picker
-    fireEvent.click(btn);
-    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
-    expect(screen.getByTestId('quick-mode-terminal')).toBeInTheDocument();
-
-    // Press Escape to dismiss
-    act(() => {
-      fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' });
-    });
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
-    });
-
-    expect(API.sessions.createQuick).not.toHaveBeenCalled();
-  });
-
-  it('selecting Chat invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'claude\' }', async () => {
-    render(<CyboflowRoot projectId={42} />);
-
-    // Open picker
-    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
-    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
-
-    // Click Chat
+    // No mode-picker: clicking the button should immediately invoke start
     await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-mode-chat'));
+      fireEvent.click(btn);
     });
 
-    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
-    expect(API.sessions.createQuick).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'claude' });
-  });
+    expect(mockQuickSessionStart).toHaveBeenCalledTimes(1);
+    expect(mockQuickSessionStart).toHaveBeenCalledWith();
 
-  it('selecting Terminal invokes createQuick with { prompt: \'\', projectId: 42, toolType: \'none\' }', async () => {
-    render(<CyboflowRoot projectId={42} />);
-
-    // Open picker
-    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
-    expect(screen.getByTestId('quick-mode-terminal')).toBeInTheDocument();
-
-    // Click Terminal
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-mode-terminal'));
-    });
-
-    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
-    expect(API.sessions.createQuick).toHaveBeenCalledWith({ prompt: '', projectId: 42, toolType: 'none' });
-  });
-
-  it('IPC failure does not set activeQuickSessionId and does not call panelApi.createPanel', async () => {
-    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({ success: false, error: 'project not found' });
-
-    render(<CyboflowRoot projectId={42} />);
-
-    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
-    expect(screen.getByTestId('quick-mode-chat')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-mode-chat'));
-    });
-
-    expect(API.sessions.createQuick).toHaveBeenCalledTimes(1);
-    expect(panelApi.createPanel).not.toHaveBeenCalled();
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
-  });
-
-  it('Chat full lifecycle: panelApi.createPanel called with type=\'claude\' AND activeQuickSessionId set', async () => {
-    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({
-      success: true,
-      data: { jobId: 'job-chat', sessionId: 'sess-chat-1', worktreePath: '/tmp/chat-wt' },
-    });
-
-    render(<CyboflowRoot projectId={42} />);
-
-    // Open picker and click Chat
-    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-mode-chat'));
-    });
-
-    // panelApi.createPanel must be called with the claude panel type
-    expect(panelApi.createPanel).toHaveBeenCalledTimes(1);
-    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'sess-chat-1', type: 'claude' });
-
-    // Store must reflect the new quick session ID
-    await waitFor(() => {
-      expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-chat-1');
-    });
-    // Mutual-exclusion invariant: activeRunId must remain null
-    expect(useCyboflowStore.getState().activeRunId).toBeNull();
-  });
-
-  it('Terminal full lifecycle: panelApi.createPanel called with type=\'terminal\' and cwd=worktreePath AND activeQuickSessionId set', async () => {
-    vi.mocked(API.sessions.createQuick).mockResolvedValueOnce({
-      success: true,
-      data: { jobId: 'job-term', sessionId: 'sess-term-1', worktreePath: '/tmp/term-wt' },
-    });
-
-    render(<CyboflowRoot projectId={42} />);
-
-    // Open picker and click Terminal
-    fireEvent.click(screen.getByTestId('open-quick-session-picker'));
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-mode-terminal'));
-    });
-
-    // panelApi.createPanel must be called with the terminal panel type including cwd
-    expect(panelApi.createPanel).toHaveBeenCalledTimes(1);
-    expect(panelApi.createPanel).toHaveBeenCalledWith({
-      sessionId: 'sess-term-1',
-      type: 'terminal',
-      title: 'Terminal',
-      initialState: { cwd: '/tmp/term-wt' },
-    });
-
-    // Store must reflect the new quick session ID
-    await waitFor(() => {
-      expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-term-1');
-    });
-    // Mutual-exclusion invariant: activeRunId must remain null
-    expect(useCyboflowStore.getState().activeRunId).toBeNull();
+    // No mode picker dropdown ever appears
+    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
   });
 });

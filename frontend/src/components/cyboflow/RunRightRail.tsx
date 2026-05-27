@@ -10,6 +10,7 @@
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff';
 
@@ -51,7 +52,7 @@ const TABS: Tab[] = [
   },
 ];
 
-export function RunRightRail() {
+export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
 
@@ -96,7 +97,7 @@ export function RunRightRail() {
       >
         {currentTab.id === 'workflow-progress' ? (
           activeRunId !== null ? (
-            <WorkflowProgressTimeline runId={activeRunId} />
+            <WorkflowProgressTimeline runId={activeRunId} phaseState={phaseState} />
           ) : (
             <div
               data-testid="run-right-rail-workflow-progress-empty"

@@ -733,7 +733,7 @@ describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', 
     }
   });
 
-  it('getQuickSessions(projectId) returns only sessions with run_id IS NULL; getAllSessions returns both', () => {
+  it('getQuickSessions(projectId) returns only sessions with is_quick = 1; getAllSessions returns both', () => {
     tmpDbDir009 = mkdtempSync(join(tmpdir(), 'cyboflow-qs-'));
     const dbPath = join(tmpDbDir009, 'test.db');
     const realMigrationsDir = join(__dirname, '..', 'migrations');
@@ -750,16 +750,16 @@ describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', 
     ).run();
     const project = rawDb.prepare("SELECT id FROM projects LIMIT 1").get() as { id: number };
 
-    // Seed a "flow" session — has a non-null run_id.
+    // Seed a "flow" session — has a non-null run_id and is_quick = 0 (default).
     rawDb.prepare(`
       INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, run_id)
       VALUES ('flow-session-1', 'Flow Session', 'do work', 'flow-1', '/tmp/flow-1', 'completed', ?, 'run-abc')
     `).run(project.id);
 
-    // Seed a "quick" session — run_id IS NULL.
+    // Seed a "quick" session — is_quick = 1 (migration 012 flag).
     rawDb.prepare(`
-      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
-      VALUES ('quick-session-1', 'Quick Session', 'ask something', 'quick-1', '/tmp/quick-1', 'idle', ?)
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, is_quick)
+      VALUES ('quick-session-1', 'Quick Session', 'ask something', 'quick-1', '/tmp/quick-1', 'idle', ?, 1)
     `).run(project.id);
 
     rawDb.close();
@@ -771,7 +771,7 @@ describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', 
     expect(allIds).toContain('quick-session-1');
     expect(allSessions).toHaveLength(2);
 
-    // getQuickSessions must return ONLY the null-run row.
+    // getQuickSessions must return ONLY the is_quick = 1 row.
     const quickSessions = svc.getQuickSessions(project.id);
     const quickIds = quickSessions.map((s) => s.id);
     expect(quickIds).toContain('quick-session-1');
@@ -796,15 +796,16 @@ describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', 
     const projA = rawDb.prepare("SELECT id FROM projects WHERE name = 'proj-a'").get() as { id: number };
     const projB = rawDb.prepare("SELECT id FROM projects WHERE name = 'proj-b'").get() as { id: number };
 
+    // Quick sessions — set is_quick = 1 explicitly (migration 012 flag).
     rawDb.prepare(`
-      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
-      VALUES ('qs-proj-a', 'QS A', 'ask a', 'qa', '/tmp/qa', 'idle', ?)
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, is_quick)
+      VALUES ('qs-proj-a', 'QS A', 'ask a', 'qa', '/tmp/qa', 'idle', ?, 1)
     `).run(projA.id);
     rawDb.prepare(`
-      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id)
-      VALUES ('qs-proj-b', 'QS B', 'ask b', 'qb', '/tmp/qb', 'idle', ?)
+      INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, is_quick)
+      VALUES ('qs-proj-b', 'QS B', 'ask b', 'qb', '/tmp/qb', 'idle', ?, 1)
     `).run(projB.id);
-    // Flow session — must NOT appear in getQuickSessions().
+    // Flow session — must NOT appear in getQuickSessions() (is_quick = 0 default).
     rawDb.prepare(`
       INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, run_id)
       VALUES ('flow-proj-a', 'Flow A', 'do', 'fa', '/tmp/fa', 'completed', ?, 'run-xyz')

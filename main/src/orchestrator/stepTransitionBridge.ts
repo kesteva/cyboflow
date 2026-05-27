@@ -17,31 +17,10 @@
  */
 import { stepTransitionEvents } from './trpc/routers/events';
 import type { DatabaseLike, LoggerLike } from './types';
-import type { SoloFlowWorkflowName } from '../../../shared/types/workflows';
+import type { SoloFlowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../shared/types/workflows';
 
-// ---------------------------------------------------------------------------
-// WorkflowStepTransitionEvent
-// ---------------------------------------------------------------------------
-
-/**
- * Event payload emitted by stepTransitionEvents on the 'transition' channel.
- *
- * NOTE: shared/types/workflows.ts was extended with WorkflowStepState in
- * TASK-763 but WorkflowStepTransitionEvent was intentionally not added there
- * (it is an orchestrator-boundary type). Declared here per the TASK-765 plan's
- * Lowest Confidence Area note.
- */
-export interface WorkflowStepTransitionEvent {
-  /** The workflow_runs.id this transition belongs to. */
-  runId: string;
-  /** The step identifier (e.g. 'implement', 'extract' — bare WorkflowStep.id values). */
-  stepId: string;
-  /** New status of the step. */
-  status: 'pending' | 'running' | 'done';
-  /** ISO-8601 timestamp of the transition. */
-  timestamp: string;
-}
+export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // v1 step-id resolution

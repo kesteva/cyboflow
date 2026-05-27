@@ -1,10 +1,10 @@
 /**
  * WorkflowProgressTimeline — vertical per-phase step feed wired to live phase state
- * via useWorkflowPhaseState hook.
+ * via a phaseState prop (prop-drilled from CyboflowRoot via RunRightRail).
  *
  * Consumes:
- *   useWorkflowPhaseState(runId) — hook owns tRPC seed-query + subscription lifecycle
- *   useCyboflowStore            — streamEvents for log-line projection
+ *   phaseState prop (UseWorkflowPhaseStateResult) — caller owns tRPC lifecycle
+ *   useCyboflowStore                              — streamEvents for log-line projection
  *
  * Renders protoflow §4a: vertical feed with phase sections (colored swatch + label +
  * step count), timeline step items with state-keyed 2px left borders + 8px bullet +
@@ -14,11 +14,11 @@
  * 1.4s opacity+scale pulse on running step bullet only.
  * Uses existing cyboflow Tailwind tokens — NOT protoflow paper-cream palette.
  *
- * TASK-768 / TASK-781 / IDEA-026
+ * TASK-768 / TASK-781 / TASK-783 / IDEA-026
  */
 import { useEffect, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
+import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { WorkflowStepState } from '../../../../shared/types/workflows';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 
@@ -171,9 +171,15 @@ function ensurePulseStyle(): void {
 // WorkflowProgressTimeline
 // ---------------------------------------------------------------------------
 
-export function WorkflowProgressTimeline({ runId }: { runId: string | null }): ReactElement {
-  // ── Phase state from hook (owns tRPC seed-query + subscription lifecycle) ──
-  const { definition, stepStates, isLoading, error } = useWorkflowPhaseState(runId);
+export function WorkflowProgressTimeline({
+  runId,
+  phaseState,
+}: {
+  runId: string | null;
+  phaseState: UseWorkflowPhaseStateResult;
+}): ReactElement {
+  // ── Phase state from prop (caller — CyboflowRoot — owns tRPC lifecycle) ───
+  const { definition, stepStates, isLoading, error } = phaseState;
 
   // Stream events for log-line projection
   const streamEvents = useCyboflowStore((s) => s.streamEvents);

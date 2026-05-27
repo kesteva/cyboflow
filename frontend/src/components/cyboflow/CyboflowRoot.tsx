@@ -2,14 +2,17 @@
  * CyboflowRoot — top-level Cyboflow view.
  *
  * Layout:
- *   header row     — thin bar with a "Choose workflow" button and "Quick Session" button
- *   main content   — empty-state CTA when activeRunId is null, RunView otherwise
- *   panel surface  — PanelTabBar + PanelContainer when the main-repo session is resolved
- *                    (Option B: secondary surface below the run/empty-state area)
- *   Modal overlay  — WorkflowPicker mounted inside Modal; opened from the
- *                    header button or the empty-state CTA
+ *   header row     — thin bar with "Choose workflow" and "Quick Session" buttons
+ *   main content   — three-branch left column:
+ *                    1. activeRunId set   → WorkflowCanvas (when phaseState has definition) + RunBottomPane
+ *                    2. mainRepoSession   → RunBottomPane (panels stay alive after run completion)
+ *                    3. neither          → empty-state CTA
+ *   right rail     — RunRightRail (always rendered, 296 px fixed)
+ *   panel surface  — PanelTabBar + PanelContainer anchored below the left+right area
+ *                    when a main-repo session exists (Option B)
+ *   Modal overlay  — WorkflowPicker mounted inside Modal
  */
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { RunBottomPane } from './RunBottomPane';
@@ -36,8 +39,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
-  const [isQuickModePickerOpen, setIsQuickModePickerOpen] = useState(false);
-  const quickPickerRef = useRef<HTMLDivElement>(null);
 
   const {
     mainRepoSession,
@@ -55,39 +56,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   const quickSession = useQuickSession({ projectId });
 
-  const handleOpenQuickPicker = useCallback(() => {
+  const handleStartQuickSession = useCallback(() => {
     if (projectId === null) return;
-    setIsQuickModePickerOpen((prev) => !prev);
-  }, [projectId]);
+    void quickSession.start();
+  }, [projectId, quickSession]);
 
-  useAddQuickSessionShortcut(handleOpenQuickPicker, { enabled: projectId !== null });
-
-  // Escape-key + outside-click dismissal for the inline mode picker
-  useEffect(() => {
-    if (!isQuickModePickerOpen) return;
-
-    function handleKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') {
-        setIsQuickModePickerOpen(false);
-      }
-    }
-
-    function handleClickOutside(event: MouseEvent): void {
-      if (
-        quickPickerRef.current &&
-        !quickPickerRef.current.contains(event.target as Node)
-      ) {
-        setIsQuickModePickerOpen(false);
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown);
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [isQuickModePickerOpen]);
+  useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
 
   return (
     <div className="flex h-full flex-col">
@@ -101,43 +75,21 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           Choose workflow
         </button>
 
-        {/* Quick Session button + inline mode picker */}
-        <div className="relative" ref={quickPickerRef}>
-          <button
-            onClick={handleOpenQuickPicker}
-            disabled={projectId === null}
-            title={projectId === null ? 'Select a project to start a quick session' : undefined}
-            className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-            data-testid="open-quick-session-picker"
-          >
-            Quick Session
-          </button>
-
-          {/* Inline mode picker — shown when isQuickModePickerOpen is true */}
-          {isQuickModePickerOpen && (
-            <div className="absolute left-0 top-full z-10 mt-1 flex flex-col gap-1 rounded border border-border-primary bg-bg-primary p-2 shadow-md">
-              <button
-                onClick={() => { setIsQuickModePickerOpen(false); void quickSession.start('claude'); }}
-                className="rounded px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary"
-                data-testid="quick-mode-chat"
-              >
-                Chat
-              </button>
-              <button
-                onClick={() => { setIsQuickModePickerOpen(false); void quickSession.start('none'); }}
-                className="rounded px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary"
-                data-testid="quick-mode-terminal"
-              >
-                Terminal
-              </button>
-            </div>
-          )}
-        </div>
+        {/* Quick Session button — starts a Claude session directly */}
+        <button
+          onClick={handleStartQuickSession}
+          disabled={projectId === null || quickSession.isStarting}
+          title={projectId === null ? 'Select a project to start a quick session' : undefined}
+          className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="start-quick-session"
+        >
+          Quick Session
+        </button>
       </div>
 
       {/* Main content area — two-column flex-row layout */}
       <div className="flex flex-row flex-1 overflow-hidden">
-        {/* Left column — fluid; hosts empty-state CTA or WorkflowCanvas+RunBottomPane */}
+        {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {activeRunId !== null ? (
             <>
@@ -155,6 +107,10 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                 <RunBottomPane />
               </div>
             </>
+          ) : mainRepoSession ? (
+            <div className="flex-1 overflow-hidden">
+              <RunBottomPane />
+            </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>
@@ -170,7 +126,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </div>
 
         {/* Right rail — always rendered as layout shell (296px fixed) */}
-        <RunRightRail />
+        <RunRightRail phaseState={phaseState} />
       </div>
 
       {/* Panel surface — rendered below the run/empty-state area when a main-repo session exists (Option B) */}

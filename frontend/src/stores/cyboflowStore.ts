@@ -2,27 +2,41 @@
  * cyboflowStore — Zustand slice for the cyboflow orchestrator UI state.
  *
  * State:
- *   activeRunId          — the currently-viewed workflow run, or null
- *   activeQuickSessionId — the currently-viewed quick session (no workflow run), or null
- *   streamEvents         — ordered log of events received from the active run's stream
+ *   activeRunId               — the currently-viewed workflow run, or null
+ *   activeQuickSessionId      — the currently-viewed quick session, or null
+ *   activeQuickSessionRunId   — the workflow_runs row id for the active quick
+ *                               session (present when the session was created
+ *                               with `sessions:create-quick` after TASK-788),
+ *                               or null when no quick session is active or the
+ *                               session pre-dates TASK-788
+ *   streamEvents              — ordered log of events received from the active run's stream
  *
  * Actions:
- *   setActiveRun(runId)               — switch to a new run (clears prior events + clears
- *                                       activeQuickSessionId), starts the module-level
- *                                       stream-event subscription singleton
- *   clearActiveRun()                  — deselect the active run, tears down the subscription
- *   setActiveQuickSession(sessionId)  — switch to a quick session: clears activeRunId,
- *                                       tears down any active stream subscription, does NOT
- *                                       start a new subscription (quick sessions have no
- *                                       workflow_runs row and therefore no stream)
- *   clearActiveQuickSession()         — clear activeQuickSessionId without touching
- *                                       subscriptions or activeRunId
- *   appendStreamEvent(event)          — push one stream event onto the log
+ *   setActiveRun(runId)                        — switch to a new run (clears prior events +
+ *                                                clears activeQuickSessionId /
+ *                                                activeQuickSessionRunId), starts the
+ *                                                module-level stream-event subscription
+ *                                                singleton
+ *   clearActiveRun()                           — deselect the active run, tears down the
+ *                                                subscription
+ *   setActiveQuickSession(sessionId, runId?)   — switch to a quick session: clears activeRunId,
+ *                                                tears down any active stream subscription.
+ *                                                When runId is provided, starts a new stream
+ *                                                subscription for that run and stores
+ *                                                activeQuickSessionRunId = runId.
+ *                                                When runId is omitted, no subscription is
+ *                                                started (backward-compatible — quick sessions
+ *                                                that pre-date TASK-788 have no workflow_runs
+ *                                                row).
+ *   clearActiveQuickSession()                  — clear activeQuickSessionId and
+ *                                                activeQuickSessionRunId, tears down any
+ *                                                active stream subscription
+ *   appendStreamEvent(event)                   — push one stream event onto the log
  *
  * Mutual-exclusion invariant (IDEA-024 / TASK-743):
  *   Exactly one of `activeRunId` and `activeQuickSessionId` is non-null at any
  *   given time (or both are null when nothing is selected).
- *   - setActiveRun clears activeQuickSessionId.
+ *   - setActiveRun clears activeQuickSessionId and activeQuickSessionRunId.
  *   - setActiveQuickSession clears activeRunId.
  *
  * Subscription management:
@@ -30,7 +44,9 @@
  *   (not React component state). This prevents React Strict Mode's double-invoke
  *   or any component re-render from tearing down the subscription mid-run.
  *   RunView.tsx's useEffect no longer subscribes — it is a no-op for subscriptions.
- *   Quick sessions have no stream subscription — only workflow runs do.
+ *   Quick sessions without a runId have no stream subscription.
+ *   Quick sessions WITH a runId (post-TASK-788) share the same subscription
+ *   singleton as workflow runs.
  */
 import { create } from 'zustand';
 import { subscribeToStreamEvents } from '../utils/cyboflowApi';
@@ -83,10 +99,12 @@ function _stopSubscription(): void {
 interface CyboflowState {
   activeRunId: string | null;
   activeQuickSessionId: string | null;
+  /** workflow_runs row id for the active quick session, or null */
+  activeQuickSessionRunId: string | null;
   streamEvents: StreamEvent[];
   setActiveRun: (runId: string) => void;
   clearActiveRun: () => void;
-  setActiveQuickSession: (sessionId: string) => void;
+  setActiveQuickSession: (sessionId: string, runId?: string) => void;
   clearActiveQuickSession: () => void;
   appendStreamEvent: (event: StreamEvent) => void;
 }
@@ -94,40 +112,74 @@ interface CyboflowState {
 export const useCyboflowStore = create<CyboflowState>((set) => ({
   activeRunId: null,
   activeQuickSessionId: null,
+  activeQuickSessionRunId: null,
   streamEvents: [],
 
   setActiveRun: (runId) => {
     // Start the IPC subscription BEFORE updating state so the renderer is
     // subscribed before any React re-render may cause timing issues.
-    // Also clears activeQuickSessionId — mutual-exclusion invariant (IDEA-024).
+    // Also clears activeQuickSessionId / activeQuickSessionRunId —
+    // mutual-exclusion invariant (IDEA-024).
     _startSubscription(runId);
-    set({ activeRunId: runId, activeQuickSessionId: null, streamEvents: [] });
+    set({
+      activeRunId: runId,
+      activeQuickSessionId: null,
+      activeQuickSessionRunId: null,
+      streamEvents: [],
+    });
   },
 
   clearActiveRun: () => {
     _stopSubscription();
-    set({ activeRunId: null, streamEvents: [] });
+    set({ activeRunId: null, activeQuickSessionRunId: null, streamEvents: [] });
   },
 
   /**
-   * Switch to a quick session (no workflow run).
-   * Tears down any active stream subscription and clears activeRunId.
-   * Does NOT start a new subscription — quick sessions have no stream.
+   * Switch to a quick session.
+   *
+   * Always tears down any active stream subscription and clears activeRunId.
+   *
+   * When `runId` is provided (post-TASK-788 quick sessions that have a
+   * workflow_runs row), a new subscription is started for that runId and
+   * `activeQuickSessionRunId` is set.
+   *
+   * When `runId` is omitted (backward-compatible: legacy quick sessions with
+   * no workflow_runs row), no subscription is started and
+   * `activeQuickSessionRunId` remains null.
+   *
    * Mutual-exclusion invariant: sets activeQuickSessionId, clears activeRunId.
    */
-  setActiveQuickSession: (sessionId) => {
-    // Tear down any existing stream subscription (workflow-run sessions only).
-    _stopSubscription();
-    set({ activeQuickSessionId: sessionId, activeRunId: null, streamEvents: [] });
+  setActiveQuickSession: (sessionId, runId?) => {
+    if (runId !== undefined) {
+      // Start subscription for the quick session's workflow_runs row.
+      _startSubscription(runId);
+      set({
+        activeQuickSessionId: sessionId,
+        activeQuickSessionRunId: runId,
+        activeRunId: null,
+        streamEvents: [],
+      });
+    } else {
+      // Backward-compatible path: tear down any existing workflow-run subscription.
+      _stopSubscription();
+      set({
+        activeQuickSessionId: sessionId,
+        activeQuickSessionRunId: null,
+        activeRunId: null,
+        streamEvents: [],
+      });
+    }
   },
 
   /**
-   * Clear the active quick session without touching the stream subscription
-   * or activeRunId.  Use this when deselecting a quick session without
-   * switching to a workflow run.
+   * Clear the active quick session and its associated run id.
+   * Also tears down any active stream subscription (quick sessions with a
+   * runId hold a subscription that must be released).
+   * Does NOT touch activeRunId.
    */
   clearActiveQuickSession: () => {
-    set({ activeQuickSessionId: null });
+    _stopSubscription();
+    set({ activeQuickSessionId: null, activeQuickSessionRunId: null });
   },
 
   appendStreamEvent: (event) =>

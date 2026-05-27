@@ -20,6 +20,8 @@ import { MessageProjection, TypedEventNarrowing } from '../services/streamParser
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
+import { transitionToRunning } from '../services/cyboflow/transitions';
+import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -115,7 +117,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cliManagerFactory,
     claudeCodeManager, // For backward compatibility
     gitStatusManager,
-    archiveProgressManager
+    archiveProgressManager,
+    cyboflow
   } = services;
 
   // Helper function to get CLI manager for a specific tool
@@ -342,7 +345,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
-        permissionMode: request.permissionMode,
         projectId: targetProject.id,
         folderId: request.folderId,
         baseBranch: request.baseBranch,
@@ -378,7 +380,36 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         sessionManager.on('session-created', onCreated);
       });
 
-      return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath } };
+      // Wire the quick session to a workflow_runs row so ApprovalRouter can
+      // work for quick sessions.
+      //
+      // 1. Ensure the __quick__ sentinel workflow exists for this project.
+      // 2. Create a workflow_runs row (status='queued').
+      // 3. Advance: queued -> starting -> running.
+      // 4. Backfill sessions.run_id with the new runId.
+      const sentinelWorkflowId = cyboflow.workflowRegistry.ensureQuickWorkflow(targetProject.id);
+      const { runId } = cyboflow.workflowRegistry.createRun(sentinelWorkflowId);
+
+      const db = databaseService.getDb();
+
+      // queued -> starting (no helper exists; do guarded UPDATE directly).
+      assertTransitionAllowed('queued', 'starting', runId);
+      const startingResult = db.prepare(
+        `UPDATE workflow_runs
+            SET status = 'starting', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'queued'`,
+      ).run(runId);
+      if (startingResult.changes === 0) {
+        throw new Error(`Failed to advance run ${runId} from queued to starting`);
+      }
+
+      // starting -> running via the guarded helper in transitions.ts.
+      transitionToRunning(db, { runId });
+
+      // Backfill sessions.run_id.
+      db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
+
+      return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath, runId } };
     } catch (error) {
       console.error('[IPC] Failed to create quick session:', error);
       console.error('[IPC] Error stack:', error instanceof Error ? error.stack : 'No stack trace');

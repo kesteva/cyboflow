@@ -59,7 +59,7 @@ import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { setStartRunDeps } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
-import type { WorkflowStepTransitionEvent } from '../../../stepTransitionBridge';
+import type { WorkflowStepTransitionEvent } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveTerminalStepId } from '../../../stepTransitionBridge';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
@@ -583,6 +583,104 @@ describe('cyboflow.runs.getPhaseState', () => {
     ).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // (g) Terminal run status: completed → current step is 'done' not 'running'
+  //
+  // This covers the race condition where both 'running' and 'done' subscription
+  // events arrive before the getPhaseState query resolves and are silently
+  // dropped by useWorkflowPhaseState's mergeTransition (definition is null at
+  // that point). Without this fix the current step would appear as 'running'
+  // forever even though the run has completed.
+  // -------------------------------------------------------------------------
+  it('(g) completed run: current step returns status=done not running', async () => {
+    const runId = 'run-gps-completed';
+    // Seed the run with status='completed' and current_step_id set.
+    const workflowId = `wf-${runId}`;
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(workflowId, 'soloflow');
+    db.prepare(
+      `INSERT INTO workflow_runs
+         (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+       VALUES (?, ?, 1, '/tmp/test', 'completed', '{}', ?)`,
+    ).run(runId, workflowId, 'context');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    // The current step must be 'done' because the run is completed.
+    const currentStep = result.stepStates.find((s) => s.stepId === 'context');
+    expect(currentStep, 'context step not found in stepStates').toBeDefined();
+    expect(currentStep!.status).toBe('done');
+
+    // Steps before 'context' (none in this case) must be 'done'.
+    // Steps after 'context' must be 'pending'.
+    const currentIdx = result.stepStates.findIndex((s) => s.stepId === 'context');
+    for (let i = 0; i < currentIdx; i++) {
+      expect(result.stepStates[i].status).toBe('done');
+    }
+    for (let i = currentIdx + 1; i < result.stepStates.length; i++) {
+      expect(result.stepStates[i].status).toBe('pending');
+    }
+  });
+
+  it('(g) failed run: current step returns status=done not running', async () => {
+    const runId = 'run-gps-failed';
+    const workflowId = `wf-${runId}`;
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(workflowId, 'sprint');
+    db.prepare(
+      `INSERT INTO workflow_runs
+         (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+       VALUES (?, ?, 1, '/tmp/test', 'failed', '{}', ?)`,
+    ).run(runId, workflowId, 'implement');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const implementStep = result.stepStates.find((s) => s.stepId === 'implement');
+    expect(implementStep, 'implement step not found in stepStates').toBeDefined();
+    expect(implementStep!.status).toBe('done');
+  });
+
+  it('(g) canceled run: current step returns status=done not running', async () => {
+    const runId = 'run-gps-canceled';
+    const workflowId = `wf-${runId}`;
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(workflowId, 'planner');
+    db.prepare(
+      `INSERT INTO workflow_runs
+         (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+       VALUES (?, ?, 1, '/tmp/test', 'canceled', '{}', ?)`,
+    ).run(runId, workflowId, 'tasks');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const tasksStep = result.stepStates.find((s) => s.stepId === 'tasks');
+    expect(tasksStep, 'tasks step not found in stepStates').toBeDefined();
+    expect(tasksStep!.status).toBe('done');
+  });
+
+  it('(g) running status: current step remains status=running (not terminal)', async () => {
+    // Verify the fix does not regress live runs.
+    const runId = 'run-gps-still-running';
+    seedPhaseRun(db, runId, 'soloflow', 'context');
+
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const contextStep = result.stepStates.find((s) => s.stepId === 'context');
+    expect(contextStep, 'context step not found in stepStates').toBeDefined();
+    expect(contextStep!.status).toBe('running');
   });
 });
 

@@ -68,6 +68,8 @@ export interface Session {
   commit_mode_settings?: string; // JSON string of CommitModeSettings
   skip_continue_next?: boolean;
   run_id?: string | null;
+  /** Set to true for sessions created outside any workflow flow (TASK-787 / IDEA-027). */
+  is_quick?: boolean;
 }
 
 export interface SessionOutput {

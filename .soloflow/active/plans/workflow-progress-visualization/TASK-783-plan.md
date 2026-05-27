@@ -1,8 +1,8 @@
 ---
 id: TASK-783
 idea: SPRINT-041-compound
-status: ready
-created: 2026-05-27T00:00:00Z
+status: done
+created: "2026-05-27T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx
   - frontend/src/components/cyboflow/RunRightRail.tsx
@@ -10,6 +10,10 @@ files_owned:
   - frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
   - frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx
   - frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
+  - frontend/src/test/setup.ts
+  - frontend/src/hooks/__tests__/useQuickSession.test.tsx
+  - shared/types/workflows.ts
+  - main/src/orchestrator/trpc/routers/runs.ts
 files_readonly:
   - frontend/src/hooks/useWorkflowPhaseState.ts
   - frontend/src/hooks/__tests__/useWorkflowPhaseState.test.tsx
@@ -22,18 +26,18 @@ acceptance_criteria:
     verification: "grep -rn 'useWorkflowPhaseState(' frontend/src/components frontend/src/hooks --include='*.ts' --include='*.tsx' returns exactly 3 lines: the hook definition (useWorkflowPhaseState.ts:115), CyboflowRoot.tsx (the single consumer), and the hook's own __tests__ file. WorkflowProgressTimeline.tsx and RunRightRail.tsx return ZERO matches."
   - criterion: "WorkflowProgressTimeline's exported signature accepts a phaseState prop typed UseWorkflowPhaseStateResult and no longer imports useWorkflowPhaseState."
     verification: "grep -n 'export function WorkflowProgressTimeline' frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx shows a signature containing 'phaseState: UseWorkflowPhaseStateResult'; grep -n 'useWorkflowPhaseState' frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx returns 0 matches."
-  - criterion: "RunRightRail accepts phaseState as a prop and forwards it to WorkflowProgressTimeline."
+  - criterion: RunRightRail accepts phaseState as a prop and forwards it to WorkflowProgressTimeline.
     verification: "grep -n 'phaseState' frontend/src/components/cyboflow/RunRightRail.tsx shows the prop declaration on the RunRightRail component and the `<WorkflowProgressTimeline phaseState={phaseState}` pass-down."
-  - criterion: "CyboflowRoot passes phaseState to RunRightRail."
+  - criterion: CyboflowRoot passes phaseState to RunRightRail.
     verification: "grep -n '<RunRightRail' frontend/src/components/cyboflow/CyboflowRoot.tsx shows `<RunRightRail phaseState={phaseState}` (or `<RunRightRail phaseState={phaseState} />`)."
   - criterion: "At runtime, exactly one onStepTransition subscription and one getPhaseState query fire per active run, regardless of which right-rail tab is selected."
     verification: "In CyboflowRoot.test.tsx, render with activeRunId set and assert vi.mocked(trpc.cyboflow.runs.onStepTransition.subscribe).mock.calls.length === 1 and vi.mocked(trpc.cyboflow.runs.getPhaseState.query).mock.calls.length === 1 after the seed query resolves."
   - criterion: "Existing TASK-781 behaviors are preserved: state-keyed border colors, pulse animation on running bullet only, runId=null placeholder, isLoading/error/null-definition placeholders, two-phase render, log-line empty in degraded mode."
-    verification: "pnpm --filter frontend test -- WorkflowProgressTimeline.test.tsx exits 0 with at least the same number of behavior assertions as before the change (15 cases pre-change; new test file may consolidate but must not drop coverage of these 9 ACs)."
-  - criterion: "All sibling tests stay green."
+    verification: pnpm --filter frontend test -- WorkflowProgressTimeline.test.tsx exits 0 with at least the same number of behavior assertions as before the change (15 cases pre-change; new test file may consolidate but must not drop coverage of these 9 ACs).
+  - criterion: All sibling tests stay green.
     verification: "pnpm test:unit exits 0. Specifically pnpm --filter frontend test exits 0 covering WorkflowProgressTimeline.test.tsx, RunRightRail.test.tsx, CyboflowRoot.test.tsx, and useWorkflowPhaseState.test.tsx."
-  - criterion: "Typecheck and lint pass."
-    verification: "pnpm typecheck exits 0 and pnpm lint exits 0."
+  - criterion: Typecheck and lint pass.
+    verification: pnpm typecheck exits 0 and pnpm lint exits 0.
 depends_on: []
 estimated_complexity: low
 epic: workflow-progress-visualization
@@ -41,17 +45,16 @@ test_strategy:
   needed: true
   justification: "Three existing test files cover the modified components and one of the post-change ACs (single subscription) is itself a test assertion. Component contracts change (signature of WorkflowProgressTimeline; new prop on RunRightRail), so test mocks and call counts must move in lockstep."
   targets:
-    - behavior: "WorkflowProgressTimeline accepts phaseState as a prop and renders all 9 placeholder/loaded states based on prop value (replaces the mock-hook-return pattern)."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+    - behavior: WorkflowProgressTimeline accepts phaseState as a prop and renders all 9 placeholder/loaded states based on prop value (replaces the mock-hook-return pattern).
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "RunRightRail forwards phaseState to WorkflowProgressTimeline when the workflow-progress tab is active; empty-state path when activeRunId is null is unchanged."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx"
+    - behavior: RunRightRail forwards phaseState to WorkflowProgressTimeline when the workflow-progress tab is active; empty-state path when activeRunId is null is unchanged.
+      test_file: frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx
       type: component
     - behavior: "CyboflowRoot opens exactly ONE onStepTransition.subscribe and ONE getPhaseState.query when activeRunId is set, even with RunRightRail mounted in workflow-progress tab (the default)."
-      test_file: "frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
       type: component
 ---
-
 # TASK-783 — Eliminate duplicate useWorkflowPhaseState subscription via phaseState prop-drill
 
 ## Objective

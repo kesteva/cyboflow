@@ -1,13 +1,14 @@
 /**
- * WorkflowPicker component tests (TASK-747).
+ * WorkflowPicker component tests (TASK-791).
  *
  * Behaviors verified:
- *   1. Renders "Quick Chat" and "Quick Terminal" buttons below the Start Run button.
- *   2. Quick Chat click calls window.electronAPI.sessions.createQuick with { projectId, toolType: 'claude' }.
- *   3. Quick Terminal click calls window.electronAPI.sessions.createQuick with { projectId, toolType: 'none' }.
+ *   1. Renders a single "Quick Session" button below the Start Run button.
+ *   2. Quick Session click calls API.sessions.createQuick with { prompt: '', projectId }
+ *      (no toolType, no permissionMode).
+ *   3. Successful quick-create creates both Claude and Terminal panels.
  *   4. Successful quick-create updates cyboflowStore and fires onWorkflowStarted.
- *   5. Quick Chat creates a Claude panel via panelApi.createPanel; Quick Terminal creates a terminal panel.
- *   6. Quick buttons are disabled while their IPC is in flight.
+ *   5. Quick Session button is disabled while the IPC is in flight.
+ *   6. Start Run button is disabled while a quick session is in flight.
  *   7. IPC failure surfaces error message in role=alert and aborts navigation + panel creation.
  */
 import '@testing-library/jest-dom';
@@ -89,10 +90,9 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock the API wrapper — aligns with sibling tests (useQuickSession.test.tsx,
-// CyboflowRoot.test.tsx). Routes through the typed wrapper so any future
+// Mock the API wrapper — routes through the typed wrapper so any future
 // pre-flight validation or normalisation in API.sessions.createQuick is
-// exercised here too (FIND-SPRINT-038-8).
+// exercised here too.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../utils/api', () => ({
@@ -133,7 +133,7 @@ beforeEach(() => {
   } as any);
   mockCreateQuick.mockResolvedValue({
     success: true,
-    data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt' },
+    data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt', runId: 'run-quick-001' },
   });
 });
 
@@ -141,62 +141,67 @@ beforeEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('WorkflowPicker — Quick Chat / Quick Terminal', () => {
-  it('renders Quick Chat and Quick Terminal buttons below the Start Run button', async () => {
+describe('WorkflowPicker — Quick Session button', () => {
+  it('renders a single Quick Session button below the Start Run button', async () => {
     render(<WorkflowPicker projectId={1} />);
 
     // Wait for workflows to load and the Start Run button to be rendered
     const startRunBtn = await screen.findByRole('button', { name: 'Start Run' });
     expect(startRunBtn).toBeInTheDocument();
 
-    // Both quick buttons should also be present
-    expect(screen.getByTestId('quick-chat-button')).toBeInTheDocument();
-    expect(screen.getByTestId('quick-terminal-button')).toBeInTheDocument();
+    // Quick Session button should be present
+    const quickBtn = screen.getByTestId('quick-session-button');
+    expect(quickBtn).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quick Session' })).toBeInTheDocument();
 
-    // Verify text labels
-    expect(screen.getByRole('button', { name: 'Quick Chat' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Quick Terminal' })).toBeInTheDocument();
+    // Old buttons should NOT be present
+    expect(screen.queryByTestId('quick-chat-button')).toBeNull();
+    expect(screen.queryByTestId('quick-terminal-button')).toBeNull();
 
-    // Verify ordering: Quick Chat and Quick Terminal are rendered after Start Run
+    // Verify ordering: Quick Session is rendered after Start Run
     const allButtons = screen.getAllByRole('button');
     const startRunIndex = allButtons.findIndex((b) => b.textContent === 'Start Run');
-    const quickChatIndex = allButtons.findIndex((b) => b.textContent === 'Quick Chat');
-    const quickTermIndex = allButtons.findIndex((b) => b.textContent === 'Quick Terminal');
-    expect(quickChatIndex).toBeGreaterThan(startRunIndex);
-    expect(quickTermIndex).toBeGreaterThan(startRunIndex);
+    const quickIndex = allButtons.findIndex((b) => b.textContent === 'Quick Session');
+    expect(quickIndex).toBeGreaterThan(startRunIndex);
   });
 
-  it('Quick Chat click calls createQuick with { projectId, toolType: "claude" }', async () => {
+  it('Quick Session click calls createQuick with { prompt, projectId } — no toolType or permissionMode', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
     await act(async () => {
-      fireEvent.click(quickChatBtn);
+      fireEvent.click(quickBtn);
     });
 
     expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, toolType: 'claude' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
   });
 
-  it('Quick Terminal click calls createQuick with { projectId, toolType: "none" }', async () => {
+  it('Quick Session success path creates both Claude and Terminal panels', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const quickTermBtn = await screen.findByTestId('quick-terminal-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
     await act(async () => {
-      fireEvent.click(quickTermBtn);
+      fireEvent.click(quickBtn);
     });
 
-    expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, toolType: 'none' });
+    expect(panelApi.createPanel).toHaveBeenCalledTimes(2);
+    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
+    expect(panelApi.createPanel).toHaveBeenCalledWith({
+      sessionId: 'session-quick-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/quick-wt' },
+    });
   });
 
-  it('Quick Chat success path updates cyboflowStore and fires onWorkflowStarted', async () => {
+  it('Quick Session success path updates cyboflowStore and fires onWorkflowStarted', async () => {
     const onWorkflowStarted = vi.fn();
     render(<WorkflowPicker projectId={1} onWorkflowStarted={onWorkflowStarted} />);
 
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
     await act(async () => {
-      fireEvent.click(quickChatBtn);
+      fireEvent.click(quickBtn);
     });
 
     // onWorkflowStarted must be called with the session ID returned from createQuick
@@ -209,57 +214,23 @@ describe('WorkflowPicker — Quick Chat / Quick Terminal', () => {
     expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
 
-  it('Quick Chat creates a Claude panel via panelApi.createPanel; Quick Terminal creates a terminal panel with cwd = worktreePath', async () => {
-    // --- Quick Chat ---
-    const { unmount: unmountChat } = render(<WorkflowPicker projectId={1} />);
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
-    await act(async () => {
-      fireEvent.click(quickChatBtn);
-    });
-    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
-    unmountChat();
-
-    // Reset
-    vi.mocked(panelApi.createPanel).mockClear();
-    mockCreateQuick.mockClear();
-    act(() => {
-      useCyboflowStore.getState().clearActiveQuickSession();
-    });
-
-    // --- Quick Terminal ---
-    render(<WorkflowPicker projectId={1} />);
-    const quickTermBtn = await screen.findByTestId('quick-terminal-button');
-    await act(async () => {
-      fireEvent.click(quickTermBtn);
-    });
-    expect(panelApi.createPanel).toHaveBeenCalledWith({
-      sessionId: 'session-quick-001',
-      type: 'terminal',
-      title: 'Terminal',
-      initialState: { cwd: '/tmp/quick-wt' },
-    });
-  });
-
-  it('Quick Chat button is disabled while the quick-create IPC is in flight', async () => {
+  it('Quick Session button is disabled while the quick-create IPC is in flight', async () => {
     // Use a never-resolving promise so the button stays in the "starting" state
     mockCreateQuick.mockReturnValue(new Promise(() => { /* never resolves */ }));
 
     render(<WorkflowPicker projectId={1} />);
 
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
-    const quickTermBtn = screen.getByTestId('quick-terminal-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
 
-    // Buttons should be enabled before clicking
-    expect(quickChatBtn).not.toBeDisabled();
-    expect(quickTermBtn).not.toBeDisabled();
+    // Button should be enabled before clicking
+    expect(quickBtn).not.toBeDisabled();
 
-    // Click Quick Chat — IPC is now in-flight (never resolves)
-    fireEvent.click(quickChatBtn);
+    // Click Quick Session — IPC is now in-flight (never resolves)
+    fireEvent.click(quickBtn);
 
-    // Both quick buttons must immediately become disabled
+    // Button must immediately become disabled
     await waitFor(() => {
-      expect(quickChatBtn).toBeDisabled();
-      expect(quickTermBtn).toBeDisabled();
+      expect(quickBtn).toBeDisabled();
     });
   });
 
@@ -268,25 +239,25 @@ describe('WorkflowPicker — Quick Chat / Quick Terminal', () => {
 
     render(<WorkflowPicker projectId={1} />);
 
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
     const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
 
-    fireEvent.click(quickChatBtn);
+    fireEvent.click(quickBtn);
 
     await waitFor(() => {
       expect(startRunBtn).toBeDisabled();
     });
   });
 
-  it('Quick Chat surfaces IPC error and does not navigate or call panelApi.createPanel', async () => {
+  it('Quick Session surfaces IPC error and does not navigate or call panelApi.createPanel', async () => {
     const onWorkflowStarted = vi.fn();
     mockCreateQuick.mockResolvedValue({ success: false, error: 'IPC error: quota exceeded' });
 
     render(<WorkflowPicker projectId={1} onWorkflowStarted={onWorkflowStarted} />);
 
-    const quickChatBtn = await screen.findByTestId('quick-chat-button');
+    const quickBtn = await screen.findByTestId('quick-session-button');
     await act(async () => {
-      fireEvent.click(quickChatBtn);
+      fireEvent.click(quickBtn);
     });
 
     // Error message must appear in the role=alert region
