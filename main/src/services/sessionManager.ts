@@ -350,6 +350,10 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    // run_id is intentionally omitted: no flow-owned-session creation surface exists today.
+    // All current callers (TaskQueue, getOrCreateMainRepoSession, sessions:create-quick)
+    // create sessions independently of workflow_runs. When a RunLauncher-initiated
+    // session is needed, plumb run_id through at that point (follow-up task).
     const sessionData: CreateSessionData = {
       id,
       name,
