@@ -1,7 +1,7 @@
 ---
 id: TASK-790
 idea: IDEA-027
-status: ready
+status: done
 created: "2026-05-27T20:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx

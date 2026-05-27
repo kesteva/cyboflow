@@ -1,18 +1,22 @@
 ---
 id: TASK-784
 idea: braindump
-status: ready
-created: 2026-05-27T00:00:00Z
+status: done
+created: "2026-05-27T00:00:00Z"
 source: braindump
-files_owned: []
+files_owned:
+  - main/src/orchestrator/trpc/routers/runs.ts
+  - main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
+  - frontend/src/hooks/__tests__/useQuickSession.test.tsx
+  - frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
+  - frontend/src/components/cyboflow/__tests__/WorkflowPicker.test.tsx
 files_readonly: []
 acceptance_criteria:
-  - criterion: "Workflow progress view is static instead of reflecting actual workflow state"
-    verification: "manual"
+  - criterion: Workflow progress view is static instead of reflecting actual workflow state
+    verification: manual
 depends_on: []
 estimated_complexity: low
 ---
-
 # Workflow progress view is static instead of reflecting actual workflow state
 
 ## Objective

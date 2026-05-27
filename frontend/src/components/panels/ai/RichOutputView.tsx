@@ -10,7 +10,6 @@ import { ToolCallGroup } from './components/ToolCallGroup';
 import { TodoListDisplay } from './components/TodoListDisplay';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
-import type { UserPromptMessage } from './parseJsonMessage';
 
 // Interface for conversation messages from database
 interface ConversationMessage {
@@ -181,37 +180,34 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
           API.panels.getJsonMessages(panelId)
         ]);
         
-        // Combine both sources - conversation messages have the actual user prompts
-        const userPrompts: UserPromptMessage[] = [];
+        // Combine both sources - conversation messages have the actual user prompts.
+        // Convert them to UnifiedMessage shape so the identity transformer doesn't
+        // produce objects missing `segments` (crashes RichOutputView).
+        const userPrompts: UnifiedMessage[] = [];
         if (conversationResponse.success && Array.isArray(conversationResponse.data)) {
           conversationResponse.data.forEach((msg: ConversationMessage) => {
             if (msg.message_type === 'user') {
-              // Skip slash command tool results (they contain <local-command-stdout> tags)
               if (msg.content && typeof msg.content === 'string' && msg.content.includes('<local-command-stdout>')) {
-                // This is a slash command result, skip it - it will be shown from JSON messages
                 return;
               }
 
               userPrompts.push({
-                type: 'user',
-                message: {
-                  role: 'user',
-                  content: [{ type: 'text', text: msg.content }]
-                },
-                timestamp: msg.timestamp
+                id: `user-${msg.timestamp}-${userPrompts.length}`,
+                role: 'user',
+                timestamp: msg.timestamp,
+                segments: [{ type: 'text', content: typeof msg.content === 'string' ? msg.content : '' }],
               });
             }
           });
         }
-        
+
         // Combine user prompts with output messages.
         const allMessages: unknown[] = [...userPrompts];
         if (outputResponse.success && Array.isArray(outputResponse.data)) {
           allMessages.push(...outputResponse.data);
         }
         
-        // Sort by timestamp to get correct order. Items are either UserPromptMessage or
-        // UnifiedMessage — both have a string timestamp field.
+        // Sort by timestamp to get correct order.
         allMessages.sort((a, b) => {
           const msgA = a as { timestamp?: string };
           const msgB = b as { timestamp?: string };

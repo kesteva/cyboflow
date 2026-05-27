@@ -18,7 +18,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import * as path from 'path';
-import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, type WorkflowDescriptor } from '../workflowRegistry';
+import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
 import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
@@ -225,7 +225,7 @@ describe('WorkflowRegistry', () => {
   });
 
   describe('listByProject', () => {
-    it('returns all workflows for a project', async () => {
+    it('returns all non-sentinel workflows for a project', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const descriptors = buildDescriptors(tmpDir);
         registry.seed(1, descriptors);
@@ -236,6 +236,88 @@ describe('WorkflowRegistry', () => {
 
     it('returns empty array for an unknown project', () => {
       expect(registry.listByProject(999)).toEqual([]);
+    });
+
+    it('excludes __quick__ sentinel workflow from results', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const descriptors = buildDescriptors(tmpDir);
+        registry.seed(1, descriptors);
+        // Also create a sentinel row directly so we don't depend on ensureQuickWorkflow
+        db.prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json, permission_mode)
+           VALUES ('wf-1-__quick__', 1, '__quick__', '{}', 'default')`,
+        ).run();
+
+        const rows = registry.listByProject(1);
+        // Should still be 5 (no sentinel)
+        expect(rows).toHaveLength(5);
+        expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // ensureQuickWorkflow
+  // -------------------------------------------------------------------------
+
+  describe('ensureQuickWorkflow', () => {
+    it('creates a __quick__ sentinel row and returns the deterministic id', () => {
+      const workflowId = registry.ensureQuickWorkflow(42);
+      expect(workflowId).toBe('wf-42-__quick__');
+
+      interface WfRow { id: string; name: string; project_id: number }
+      const row = db
+        .prepare('SELECT id, name, project_id FROM workflows WHERE id = ?')
+        .get(workflowId) as WfRow | undefined;
+
+      expect(row).toBeDefined();
+      expect(row!.name).toBe(QUICK_WORKFLOW_NAME);
+      expect(row!.project_id).toBe(42);
+    });
+
+    it('is idempotent — calling twice for the same project does not duplicate rows', () => {
+      registry.ensureQuickWorkflow(7);
+      registry.ensureQuickWorkflow(7);
+
+      interface CountRow { count: number }
+      const { count } = db
+        .prepare("SELECT COUNT(*) AS count FROM workflows WHERE project_id = 7 AND name = '__quick__'")
+        .get() as CountRow;
+
+      expect(count).toBe(1);
+    });
+
+    it('returns the same id on every call', () => {
+      const first = registry.ensureQuickWorkflow(99);
+      const second = registry.ensureQuickWorkflow(99);
+      expect(first).toBe(second);
+      expect(first).toBe('wf-99-__quick__');
+    });
+
+    it('creates independent sentinels for different projects', () => {
+      const idA = registry.ensureQuickWorkflow(10);
+      const idB = registry.ensureQuickWorkflow(20);
+
+      expect(idA).toBe('wf-10-__quick__');
+      expect(idB).toBe('wf-20-__quick__');
+
+      interface CountRow { count: number }
+      const { count } = db
+        .prepare("SELECT COUNT(*) AS count FROM workflows WHERE name = '__quick__'")
+        .get() as CountRow;
+
+      expect(count).toBe(2);
+    });
+
+    it('sentinel row is excluded from listByProject results', () => {
+      registry.ensureQuickWorkflow(5);
+
+      const rows = registry.listByProject(5);
+      expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
+    });
+
+    it('QUICK_WORKFLOW_NAME constant equals __quick__', () => {
+      expect(QUICK_WORKFLOW_NAME).toBe('__quick__');
     });
   });
 

@@ -1,0 +1,21 @@
+{
+  "id": "SPRINT-042",
+  "status": "in_progress",
+  "created": "2026-05-27T21:00:00Z",
+  "tasks": [
+    "TASK-782",
+    "TASK-783",
+    "TASK-784",
+    "TASK-785",
+    "TASK-786",
+    "TASK-787",
+    "TASK-788",
+    "TASK-789",
+    "TASK-790",
+    "TASK-791"
+  ],
+  "execution_mode": "parallel",
+  "branch": "soloflow/run-20260527-210000-SPRINT-042",
+  "model": "opus",
+  "task_limit": 10
+}

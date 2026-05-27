@@ -2136,25 +2136,32 @@ export class DatabaseService {
   //   All existing SELECT * FROM sessions queries in this file are already
   //   NULL-tolerant — they do not JOIN workflow_runs and do not assert run_id
   //   IS NOT NULL.  No changes are required to those queries.
-  //   getQuickSessions() below is the only helper that explicitly filters on
-  //   run_id IS NULL, targeting the quick-session feature.
+  //   getQuickSessions() below filters on is_quick = 1 (TASK-787 / IDEA-027),
+  //   which is the authoritative flag set by migration 012 and the
+  //   create-quick-session handler.  The previous run_id IS NULL predicate is
+  //   kept as a fallback comment for context only.
   // ---------------------------------------------------------------------------
 
   /**
-   * Returns active (non-archived, non-main-repo) sessions that have no linked
-   * workflow run (run_id IS NULL).  These are "quick sessions" created outside
-   * any flow (IDEA-024).
+   * Returns active (non-archived, non-main-repo) sessions that are flagged as
+   * quick sessions (is_quick = 1).  These are sessions created outside any
+   * workflow flow (IDEA-024 / IDEA-027).
+   *
+   * The is_quick flag is set by migration 012 (backfill) and the
+   * create-quick-session handler.  This replaces the previous `run_id IS NULL`
+   * predicate, which was ambiguous for flow sessions whose run_id has not yet
+   * been backfilled.
    *
    * @param projectId — when provided, limits results to that project.
    */
   getQuickSessions(projectId?: number): Session[] {
     if (projectId !== undefined) {
       return this.db.prepare(
-        "SELECT * FROM sessions WHERE project_id = ? AND run_id IS NULL AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
+        "SELECT * FROM sessions WHERE project_id = ? AND is_quick = 1 AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
       ).all(projectId) as Session[];
     }
     return this.db.prepare(
-      "SELECT * FROM sessions WHERE run_id IS NULL AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
+      "SELECT * FROM sessions WHERE is_quick = 1 AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL) ORDER BY display_order ASC, created_at DESC"
     ).all() as Session[];
   }
 

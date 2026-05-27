@@ -16,8 +16,8 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
   buildStepTransitionEvent,
   resolveTerminalStepId,
-  type WorkflowStepTransitionEvent,
 } from '../stepTransitionBridge';
+import type { WorkflowStepTransitionEvent } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 

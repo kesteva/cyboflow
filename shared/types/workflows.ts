@@ -156,6 +156,18 @@ export interface WorkflowStepState {
   status: 'pending' | 'running' | 'done';
 }
 
+/**
+ * Event payload emitted by stepTransitionEvents on the 'transition' channel.
+ * Consumed by the tRPC onStepTransition subscription and the renderer's
+ * useWorkflowPhaseState hook.
+ */
+export interface WorkflowStepTransitionEvent {
+  runId: string;
+  stepId: string;
+  status: WorkflowStepState['status'];
+  timestamp: string;
+}
+
 // ─── Hardcoded starter definitions ──────────────────────────────────────────
 // Source of truth: docs/protoflow-design/data.js (IDEA-026).
 // These are static in v1; a future task will migrate them to a user-editable

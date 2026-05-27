@@ -1,7 +1,7 @@
 ---
 id: TASK-789
 idea: IDEA-027
-status: ready
+status: done
 created: 2026-05-27T17:00:00Z
 files_owned:
   - frontend/src/stores/cyboflowStore.ts

@@ -1,7 +1,7 @@
 ---
 id: TASK-782
 idea: SPRINT-040-compound
-status: ready
+status: done
 created: 2026-05-26T18:00:00Z
 files_owned:
   - shared/types/workflows.ts

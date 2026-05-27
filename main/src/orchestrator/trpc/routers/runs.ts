@@ -14,7 +14,7 @@ import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
 import { WORKFLOW_DEFINITIONS, SOLOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
-import type { WorkflowStepTransitionEvent } from '../../stepTransitionBridge';
+import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
@@ -247,15 +247,19 @@ export const runsRouter = router({
         });
       }
 
-      // JOIN workflow_runs with workflows to get the workflow name in one query.
+      // JOIN workflow_runs with workflows to get the workflow name and run status in one query.
+      // Including wr.status allows getPhaseState to mark the current step as 'done' when
+      // the run has reached a terminal state — fixing the race where both 'running' and
+      // 'done' subscription events arrive before the query resolves and are dropped by
+      // useWorkflowPhaseState's mergeTransition (definition is null at that point).
       const row = ctx.db
         .prepare(
-          `SELECT wr.current_step_id, w.name AS workflow_name
+          `SELECT wr.current_step_id, wr.status AS run_status, w.name AS workflow_name
              FROM workflow_runs wr
              JOIN workflows w ON wr.workflow_id = w.id
             WHERE wr.id = ?`,
         )
-        .get(input.runId) as { current_step_id: string | null; workflow_name: string } | undefined;
+        .get(input.runId) as { current_step_id: string | null; run_status: string; workflow_name: string } | undefined;
 
       if (row === undefined) {
         throw new TRPCError({
@@ -277,6 +281,14 @@ export const runsRouter = router({
       const definition = WORKFLOW_DEFINITIONS[workflowName];
       const currentStepId = row.current_step_id;
 
+      // Terminal run statuses: when the run has completed, failed, or been canceled,
+      // the current step's status must be 'done' — not 'running'. Without this check,
+      // a run that completes before the renderer's getPhaseState query resolves (which
+      // causes subscription 'done' events to be silently dropped) would show the current
+      // step as perpetually 'running'.
+      const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'canceled']);
+      const runIsTerminal = TERMINAL_RUN_STATUSES.has(row.run_status);
+
       // Flatten all steps across phases in declaration order.
       const flatSteps = definition.phases.flatMap((p) => p.steps);
 
@@ -294,7 +306,9 @@ export const runsRouter = router({
         } else if (i < matchIndex) {
           status = 'done';
         } else if (i === matchIndex) {
-          status = 'running';
+          // Mark the current step as 'done' when the run has terminated —
+          // otherwise always 'running' (live run in progress).
+          status = runIsTerminal ? 'done' : 'running';
         } else {
           status = 'pending';
         }

@@ -214,6 +214,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         setExpandedProjects(projectsToExpand);
         setExpandedFolders(new Set());
       }
+
+      // Auto-select the first project when none is active
+      const { activeProjectId: currentActive } = useNavigationStore.getState();
+      if (currentActive === null && projectsWithRunsData.length > 0) {
+        useNavigationStore.getState().navigateToProject(projectsWithRunsData[0].id);
+      }
     } catch (error) {
       console.error('Failed to load projects with runs:', error);
     } finally {

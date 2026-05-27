@@ -16,6 +16,16 @@
  *   6. StrictMode-resistance: calling setActiveRun then clearActiveRun then
  *      setActiveRun (simulating Strict Mode double-invoke on the store action
  *      side) results in exactly 1 live subscription.
+ *
+ *   Quick-session tests added in TASK-789:
+ *   14. setActiveQuickSession(id, runId) starts subscription and stores runId
+ *   15. setActiveQuickSession(id) without runId does NOT start subscription
+ *   16. setActiveRun clears activeQuickSessionRunId
+ *   17. clearActiveQuickSession tears down subscription and clears runId
+ *   18. Quick-to-workflow switch tears down quick subscription first
+ *   19. Rapid quick session switches properly teardown/replace subscriptions
+ *   20. setActiveQuickSession with runId sets both activeQuickSessionId and
+ *       activeQuickSessionRunId
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -49,6 +59,7 @@ beforeEach(() => {
   mockSubscribe.mockImplementation(() => vi.fn());
   // Reset store state between tests.
   useCyboflowStore.getState().clearActiveRun();
+  useCyboflowStore.getState().clearActiveQuickSession();
 });
 
 // ---------------------------------------------------------------------------
@@ -213,7 +224,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(state.activeQuickSessionId).toBeNull();
     // activeRunId was not set in this test — must remain null.
     expect(state.activeRunId).toBeNull();
-    // No subscription changes.
+    // No workflow-run subscription was ever started (no runId) — mockSubscribe untouched.
     expect(mockSubscribe).not.toHaveBeenCalled();
   });
 
@@ -273,5 +284,120 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(state.activeRunId).toBe('run-B');
     expect(state.streamEvents).toHaveLength(1);
     expect(state.streamEvents[0]).toEqual(eventForB);
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-789: activeQuickSessionRunId tests
+  // -------------------------------------------------------------------------
+
+  it('(14) setActiveQuickSession(id, runId) starts subscription and stores runId', () => {
+    const unsub = vi.fn();
+    mockSubscribe.mockReturnValueOnce(unsub);
+
+    useCyboflowStore.getState().setActiveQuickSession('qs-with-run', 'run-quick-001');
+
+    // Subscription must have been started with the provided runId.
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+    const args = mockSubscribe.mock.calls[0][0] as { runId: string; onEvent: unknown };
+    expect(args.runId).toBe('run-quick-001');
+    expect(typeof args.onEvent).toBe('function');
+
+    // activeQuickSessionRunId must be stored.
+    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBe('run-quick-001');
+  });
+
+  it('(15) setActiveQuickSession(id) without runId does NOT start subscription', () => {
+    useCyboflowStore.getState().setActiveQuickSession('qs-no-run');
+
+    expect(mockSubscribe).not.toHaveBeenCalled();
+    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+  });
+
+  it('(16) setActiveRun clears activeQuickSessionRunId', () => {
+    // First establish a quick session with a runId.
+    mockSubscribe.mockImplementation(() => vi.fn());
+    useCyboflowStore.getState().setActiveQuickSession('qs-with-run', 'run-quick-002');
+    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBe('run-quick-002');
+
+    // Now switch to a workflow run.
+    useCyboflowStore.getState().setActiveRun('run-workflow-003');
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeRunId).toBe('run-workflow-003');
+    expect(state.activeQuickSessionRunId).toBeNull();
+    expect(state.activeQuickSessionId).toBeNull();
+  });
+
+  it('(17) clearActiveQuickSession tears down subscription and clears runId', () => {
+    const unsub = vi.fn();
+    mockSubscribe.mockReturnValueOnce(unsub);
+
+    // Start a quick session WITH a runId (so a subscription is live).
+    useCyboflowStore.getState().setActiveQuickSession('qs-clear-test', 'run-quick-003');
+    expect(unsub).not.toHaveBeenCalled();
+
+    useCyboflowStore.getState().clearActiveQuickSession();
+
+    // Subscription must be torn down.
+    expect(unsub).toHaveBeenCalledOnce();
+    // Both session fields must be cleared.
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+  });
+
+  it('(18) quick-to-workflow switch tears down quick subscription first', () => {
+    const quickUnsub = vi.fn();
+    const workflowUnsub = vi.fn();
+    mockSubscribe
+      .mockReturnValueOnce(quickUnsub)   // quick session subscription
+      .mockReturnValueOnce(workflowUnsub); // workflow run subscription
+
+    // Start a quick session with a runId.
+    useCyboflowStore.getState().setActiveQuickSession('qs-switch', 'run-quick-004');
+    expect(quickUnsub).not.toHaveBeenCalled();
+
+    // Switch to a workflow run — quick subscription must be torn down first.
+    useCyboflowStore.getState().setActiveRun('run-workflow-004');
+
+    expect(quickUnsub).toHaveBeenCalledOnce();
+    expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow-004');
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+  });
+
+  it('(19) rapid quick session switches properly teardown/replace subscriptions', () => {
+    const unsub1 = vi.fn();
+    const unsub2 = vi.fn();
+    mockSubscribe
+      .mockReturnValueOnce(unsub1)
+      .mockReturnValueOnce(unsub2);
+
+    // First quick session with a runId.
+    useCyboflowStore.getState().setActiveQuickSession('qs-rapid-1', 'run-quick-005');
+    expect(unsub1).not.toHaveBeenCalled();
+
+    // Second quick session with a different runId — must tear down first.
+    useCyboflowStore.getState().setActiveQuickSession('qs-rapid-2', 'run-quick-006');
+
+    expect(unsub1).toHaveBeenCalledOnce();
+    expect(mockSubscribe).toHaveBeenCalledTimes(2);
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeQuickSessionId).toBe('qs-rapid-2');
+    expect(state.activeQuickSessionRunId).toBe('run-quick-006');
+    expect(state.activeRunId).toBeNull();
+  });
+
+  it('(20) setActiveQuickSession with runId sets both activeQuickSessionId and activeQuickSessionRunId', () => {
+    mockSubscribe.mockImplementation(() => vi.fn());
+
+    useCyboflowStore.getState().setActiveQuickSession('qs-both-fields', 'run-quick-007');
+
+    const state = useCyboflowStore.getState();
+    expect(state.activeQuickSessionId).toBe('qs-both-fields');
+    expect(state.activeQuickSessionRunId).toBe('run-quick-007');
+    // Mutual-exclusion: activeRunId must be null.
+    expect(state.activeRunId).toBeNull();
   });
 });

@@ -155,6 +155,20 @@ export const DEFAULT_SOLOFLOW_WORKFLOWS: { name: SoloFlowWorkflowName; pathFromH
   })();
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Name of the per-project sentinel workflow that represents quick sessions
+ * in the workflow_runs pipeline (TASK-787 / IDEA-027).
+ *
+ * The sentinel row is inserted by migration 012_quick_workflow_sentinel.sql
+ * for existing projects and by ensureQuickWorkflow() for new projects.
+ * listByProject() excludes it so it never appears in the user-facing picker.
+ */
+export const QUICK_WORKFLOW_NAME = '__quick__' as const;
+
+// ---------------------------------------------------------------------------
 // WorkflowRegistry
 // ---------------------------------------------------------------------------
 
@@ -243,12 +257,48 @@ export class WorkflowRegistry {
   /**
    * List all workflows registered for a project.
    * Used by the frontend workflow picker.
+   *
+   * Excludes the __quick__ sentinel row — that row is an internal implementation
+   * detail for the quick-session pipeline and must never appear in user-facing
+   * workflow pickers (TASK-787 / IDEA-027).
    */
   listByProject(projectId: number): WorkflowRow[] {
     const stmt = this.db.prepare(
-      'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE project_id = ? ORDER BY name',
+      `SELECT id, project_id, name, workflow_path, permission_mode, created_at
+       FROM workflows
+       WHERE project_id = ? AND name != ?
+       ORDER BY name`,
     );
-    return stmt.all(projectId) as WorkflowRow[];
+    return stmt.all(projectId, QUICK_WORKFLOW_NAME) as WorkflowRow[];
+  }
+
+  /**
+   * Ensure a __quick__ sentinel workflow exists for the given project.
+   *
+   * Uses INSERT OR IGNORE with a deterministic primary key so the call is
+   * idempotent — calling it multiple times for the same projectId is safe.
+   *
+   * The deterministic id format is `wf-{projectId}-__quick__`, which mirrors
+   * the pattern used by seed() and migration 012.
+   *
+   * @returns The workflow_id of the sentinel row (whether it was just created
+   *          or already existed).
+   */
+  ensureQuickWorkflow(projectId: number): string {
+    const workflowId = `wf-${projectId}-${QUICK_WORKFLOW_NAME}`;
+
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json, permission_mode)
+      VALUES (?, ?, ?, '{}', 'default')
+    `);
+
+    const tx = this.db.transaction(() => {
+      insert.run(workflowId, projectId, QUICK_WORKFLOW_NAME);
+    });
+
+    tx();
+
+    return workflowId;
   }
 
   /**

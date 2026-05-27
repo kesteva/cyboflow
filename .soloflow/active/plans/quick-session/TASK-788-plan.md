@@ -1,7 +1,7 @@
 ---
 id: TASK-788
 idea: IDEA-027
-status: ready
+status: done
 created: 2026-05-27T17:30:00Z
 files_owned:
   - main/src/ipc/session.ts

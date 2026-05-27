@@ -1,15 +1,14 @@
 /**
- * WorkflowPicker — dropdown of the 5 SoloFlow workflows + Start Run button.
+ * WorkflowPicker — dropdown of the SoloFlow workflows + Start Run button.
  *
  * Accepts a `projectId` prop; on mount it calls `trpc.cyboflow.workflows.list`
  * and populates a `<select>`.  Clicking "Start Run" calls
  * `trpc.cyboflow.runs.start.mutate` and stores the returned runId in
  * `cyboflowStore`.
  *
- * Also provides "Quick Chat" and "Quick Terminal" buttons that create a quick
- * session via `sessions:create-quick` IPC, bootstrap the appropriate panel via
- * `panelApi.createPanel`, and navigate via `setActiveQuickSession`.
- * Quick session logic is delegated to the `useQuickSession` hook.
+ * Also provides a "Quick Session" button that creates a quick session via
+ * `sessions:create-quick` IPC, bootstraps both Claude and Terminal panels via
+ * `panelApi.createPanel`, and navigates via `setActiveQuickSession`.
  */
 import { useState, useEffect } from 'react';
 import { trpc } from '../../trpc/client';
@@ -29,7 +28,16 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const quickSession = useQuickSession({ projectId, onSuccess: onWorkflowStarted });
+  const {
+    start: startQuickSession,
+    isStarting: isQuickStarting,
+    error: quickError,
+  } = useQuickSession({
+    projectId,
+    onSuccess: (sessionId) => {
+      onWorkflowStarted?.(sessionId);
+    },
+  });
 
   // Load workflows on mount (or when projectId changes)
   useEffect(() => {
@@ -76,6 +84,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     }
   };
 
+  const combinedError = error ?? quickError;
+
   return (
     <div className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold text-text-primary">Workflow</h2>
@@ -99,15 +109,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         </select>
       )}
 
-      {(error ?? quickSession.error) && (
+      {combinedError && (
         <p className="text-xs text-red-500" role="alert">
-          {error ?? quickSession.error}
+          {combinedError}
         </p>
       )}
 
       <button
         onClick={handleStartRun}
-        disabled={selectedId === null || isLoading || isStarting || quickSession.isStarting !== null}
+        disabled={selectedId === null || isLoading || isStarting || isQuickStarting}
         className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         Start Run
@@ -115,24 +125,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
 
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
-        <div className="flex gap-2">
-          <button
-            onClick={() => { void quickSession.start('claude'); }}
-            disabled={quickSession.isStarting !== null || isStarting}
-            className="flex-1 rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
-            data-testid="quick-chat-button"
-          >
-            Quick Chat
-          </button>
-          <button
-            onClick={() => { void quickSession.start('none'); }}
-            disabled={quickSession.isStarting !== null || isStarting}
-            className="flex-1 rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
-            data-testid="quick-terminal-button"
-          >
-            Quick Terminal
-          </button>
-        </div>
+        <button
+          onClick={() => void startQuickSession()}
+          disabled={isQuickStarting || isStarting}
+          className="rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="quick-session-button"
+        >
+          Quick Session
+        </button>
       </div>
     </div>
   );
