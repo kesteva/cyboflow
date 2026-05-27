@@ -1,8 +1,8 @@
 ---
 id: TASK-773
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/stores/__tests__/reviewQueueStore.test.ts
 files_readonly:
@@ -10,37 +10,36 @@ files_readonly:
   - frontend/src/stores/__tests__/questionStore.test.ts
   - .soloflow/active/findings/SPRINT-039-findings.md
 acceptance_criteria:
-  - criterion: "All 4 pre-existing test failures in reviewQueueStore.test.ts are resolved. Failures stem from missing `trpc.cyboflow.events.onApprovalDecided.subscribe` in the mock factory after TASK-750 removed the trpc-shim."
+  - criterion: All 4 pre-existing test failures in reviewQueueStore.test.ts are resolved. Failures stem from missing `trpc.cyboflow.events.onApprovalDecided.subscribe` in the mock factory after TASK-750 removed the trpc-shim.
     verification: "pnpm --filter frontend test -- reviewQueueStore.test.ts exits 0; the previously-failing 4 cases in `describe('init() idempotency', ...)` all pass."
   - criterion: "Mock factory now exposes BOTH `onApprovalCreated.subscribe` AND `onApprovalDecided.subscribe`, using the same mutable-reference pattern as questionStore.test.ts."
     verification: "grep -n 'onApprovalDecided' frontend/src/stores/__tests__/reviewQueueStore.test.ts returns ≥2 matches (one in the vi.mock factory, one or more in beforeEach mutable-reference assignment)."
   - criterion: "Test expectations for `mockSubscribe` call counts are updated to account for two subscriptions (created + decided) per init(), mirroring questionStore.test.ts's pattern of separate `mockCreatedSubscribe` and `mockDecidedSubscribe` (or `mockAnsweredSubscribe`-equivalent) spies."
     verification: "grep -n 'mockDecidedSubscribe\\|mockApprovalDecidedSubscribe' frontend/src/stores/__tests__/reviewQueueStore.test.ts returns ≥1 match."
-  - criterion: "All 452 frontend tests pass (the 448 previously-passing + 4 newly-fixed)."
-    verification: "pnpm --filter frontend test exits 0; the printed test summary shows 0 failed tests."
-  - criterion: "Frontend typecheck and lint clean."
-    verification: "pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint reports 0 errors (warnings unchanged from baseline acceptable)."
+  - criterion: All 452 frontend tests pass (the 448 previously-passing + 4 newly-fixed).
+    verification: pnpm --filter frontend test exits 0; the printed test summary shows 0 failed tests.
+  - criterion: Frontend typecheck and lint clean.
+    verification: pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint reports 0 errors (warnings unchanged from baseline acceptable).
 depends_on: []
 estimated_complexity: low
 epic: testing-infrastructure
 test_strategy:
   needed: true
-  justification: "This task IS the test fix — the deliverable is correct passing tests. The 4 failing tests need their mock factory + spy expectations updated."
+  justification: This task IS the test fix — the deliverable is correct passing tests. The 4 failing tests need their mock factory + spy expectations updated.
   targets:
-    - behavior: "init() subscribes to both onApprovalCreated and onApprovalDecided exactly once on first init; double-init is a no-op for both"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: init() subscribes to both onApprovalCreated and onApprovalDecided exactly once on first init; double-init is a no-op for both
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "unsubscribe then init re-subscribes both subscriptions"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: unsubscribe then init re-subscribes both subscriptions
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "onError on the first (created) subscription resets closure state so a subsequent init re-subscribes"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: onError on the first (created) subscription resets closure state so a subsequent init re-subscribes
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
-    - behavior: "StrictMode double-invoke leaves exactly one live subscription per subscription channel"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+    - behavior: StrictMode double-invoke leaves exactly one live subscription per subscription channel
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
 ---
-
 # TASK-773 — Fix pre-existing reviewQueueStore.test.ts failures from TASK-750 trpc-shim removal
 
 ## Objective

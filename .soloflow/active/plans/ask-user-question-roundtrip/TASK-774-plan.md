@@ -1,8 +1,8 @@
 ---
 id: TASK-774
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - main/src/orchestrator/cancelAndRestartHandler.ts
   - main/src/orchestrator/__tests__/cancelAndRestart.test.ts
@@ -15,32 +15,31 @@ files_readonly:
 acceptance_criteria:
   - criterion: "CancelAndRestartDeps interface now includes `questionRouter: Pick<QuestionRouter, 'clearPendingForRun'>`."
     verification: "grep -n 'questionRouter:' main/src/orchestrator/cancelAndRestartHandler.ts returns ≥1 match inside the CancelAndRestartDeps interface body."
-  - criterion: "cancelAndRestartHandler invokes `questionRouter.clearPendingForRun(runId)` immediately after `approvalRouter.clearPendingForRun(runId)` and before `claudeManagerStop(runId)`."
+  - criterion: cancelAndRestartHandler invokes `questionRouter.clearPendingForRun(runId)` immediately after `approvalRouter.clearPendingForRun(runId)` and before `claudeManagerStop(runId)`.
     verification: "grep -n 'questionRouter.clearPendingForRun' main/src/orchestrator/cancelAndRestartHandler.ts returns ≥1 match; the call site is placed between the existing approvalRouter.clearPendingForRun call (currently line 126) and the existing claudeManagerStop try-block (currently line 137-144)."
-  - criterion: "main/src/index.ts setCancelAndRestartDeps wiring passes QuestionRouter.getInstance() as `questionRouter`."
+  - criterion: main/src/index.ts setCancelAndRestartDeps wiring passes QuestionRouter.getInstance() as `questionRouter`.
     verification: "grep -n 'questionRouter: QuestionRouter' main/src/index.ts returns ≥1 match inside the setCancelAndRestartDeps call (currently lines 774-780)."
   - criterion: "A regression test in main/src/orchestrator/__tests__/cancelAndRestart.test.ts asserts that BOTH `approvalRouter.clearPendingForRun` AND `questionRouter.clearPendingForRun` are called before `claudeManagerStop`, with the relative ordering: approvalRouter first, questionRouter second, claudeManagerStop third."
     verification: "grep -n 'questionRouter\\b' main/src/orchestrator/__tests__/cancelAndRestart.test.ts returns ≥3 matches (mock spy declaration in OrderSpy interface + injection in makeDeps + assertion in a new `it()` case)."
   - criterion: "Main + integration tests pass: pnpm --filter main test exits 0; pnpm typecheck exits 0."
-    verification: "pnpm --filter main test exits 0; pnpm typecheck exits 0."
+    verification: pnpm --filter main test exits 0; pnpm typecheck exits 0.
 depends_on: []
 estimated_complexity: low
 epic: ask-user-question-roundtrip
 test_strategy:
   needed: true
-  justification: "Behavioral fix that closes a symmetry gap introduced when SPRINT-039 added the awaiting_input gate. A regression test asserting both routers are called before PTY kill is required; without it a future cancel-handler edit could silently re-introduce the bug."
+  justification: Behavioral fix that closes a symmetry gap introduced when SPRINT-039 added the awaiting_input gate. A regression test asserting both routers are called before PTY kill is required; without it a future cancel-handler edit could silently re-introduce the bug.
   targets:
     - behavior: "cancelAndRestartHandler calls approvalRouter.clearPendingForRun AND questionRouter.clearPendingForRun before claudeManagerStop, in that order"
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: integration
-    - behavior: "questionRouter.clearPendingForRun is invoked with the correct runId"
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+    - behavior: questionRouter.clearPendingForRun is invoked with the correct runId
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: integration
-    - behavior: "noOp path (already-terminal run) does NOT invoke questionRouter.clearPendingForRun"
-      test_file: "main/src/orchestrator/__tests__/cancelAndRestart.test.ts"
+    - behavior: noOp path (already-terminal run) does NOT invoke questionRouter.clearPendingForRun
+      test_file: main/src/orchestrator/__tests__/cancelAndRestart.test.ts
       type: integration
 ---
-
 # TASK-774 — Wire questionRouter.clearPendingForRun into cancelAndRestartHandler
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-754
 idea: SPRINT-038-compound-B1
-status: ready
+status: in-flight
 created: "2026-05-25T00:00:00Z"
 files_owned:
   - main/src/database/models.ts
@@ -24,11 +24,11 @@ acceptance_criteria:
   - criterion: "`createSession` in `main/src/database/database.ts` includes `run_id` in the INSERT column list and binds `data.run_id ?? null`."
     verification: "grep -n 'INSERT INTO sessions' main/src/database/database.ts shows `run_id` in the column list and a matching `?` placeholder; the `.run(...)` argument list includes `data.run_id ?? null` (or equivalent NULL-coalescing) in the matching position."
   - criterion: "A round-trip INSERT with `run_id='flow-001'` reads back `session.runId === 'flow-001'`, and an INSERT with no `run_id` reads back `session.runId === null`."
-    verification: "pnpm --filter main exec vitest run main/src/services/__tests__/sessionManagerRunIdMapping.test.ts — both new fixtures-DB round-trip cases pass."
-  - criterion: "All existing main-process tests still pass."
-    verification: "pnpm --filter main test exits 0."
-  - criterion: "Type-check and lint stay clean."
-    verification: "pnpm typecheck exits 0; pnpm lint exits 0."
+    verification: pnpm --filter main exec vitest run main/src/services/__tests__/sessionManagerRunIdMapping.test.ts — both new fixtures-DB round-trip cases pass.
+  - criterion: All existing main-process tests still pass.
+    verification: pnpm --filter main test exits 0.
+  - criterion: Type-check and lint stay clean.
+    verification: pnpm typecheck exits 0; pnpm lint exits 0.
   - criterion: "Quick session creation via `sessions:create-quick` continues to persist `run_id = NULL` (regression guard)."
     verification: "Read `main/src/ipc/session.ts:322-353` — confirm `sessions:create-quick` never sets `data.run_id`. The new fixtures-DB round-trip case asserting `runId === null` on a no-run_id INSERT covers this."
 depends_on: []
@@ -36,16 +36,15 @@ estimated_complexity: medium
 epic: quick-session
 test_strategy:
   needed: true
-  justification: "Augment the existing mapper unit-test file with two fixtures-DB round-trip cases that exercise the real SQLite INSERT/SELECT path — the original three mapper cases use mocks and could not catch the missing INSERT column (FIND-SPRINT-038-4 root cause)."
+  justification: Augment the existing mapper unit-test file with two fixtures-DB round-trip cases that exercise the real SQLite INSERT/SELECT path — the original three mapper cases use mocks and could not catch the missing INSERT column (FIND-SPRINT-038-4 root cause).
   targets:
     - behavior: "INSERT into sessions with run_id='flow-001' round-trips through `db.createSession` → `sessionManager.getSession` to `session.runId === 'flow-001'`"
-      test_file: "main/src/services/__tests__/sessionManagerRunIdMapping.test.ts"
+      test_file: main/src/services/__tests__/sessionManagerRunIdMapping.test.ts
       type: integration
-    - behavior: "INSERT into sessions WITHOUT supplying run_id round-trips to `session.runId === null` (default-NULL path used by every current caller)"
-      test_file: "main/src/services/__tests__/sessionManagerRunIdMapping.test.ts"
+    - behavior: INSERT into sessions WITHOUT supplying run_id round-trips to `session.runId === null` (default-NULL path used by every current caller)
+      test_file: main/src/services/__tests__/sessionManagerRunIdMapping.test.ts
       type: integration
 ---
-
 # Persist sessions.run_id on creation so future flow-owned sessions can render correctly
 
 ## Objective

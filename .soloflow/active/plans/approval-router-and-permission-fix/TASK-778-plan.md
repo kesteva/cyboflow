@@ -1,8 +1,8 @@
 ---
 id: TASK-778
 idea: SPRINT-040-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/stores/__tests__/reviewQueueStore.test.ts
 files_readonly:
@@ -12,27 +12,26 @@ files_readonly:
 acceptance_criteria:
   - criterion: "The tRPC module mock in reviewQueueStore.test.ts declares onApprovalDecided.subscribe returning { unsubscribe: vi.fn() }, symmetric with the existing onApprovalCreated.subscribe declaration."
     verification: "grep -n 'onApprovalDecided' frontend/src/stores/__tests__/reviewQueueStore.test.ts returns at least one match inside the vi.mock('../../trpc/client', ...) factory."
-  - criterion: "All 17 tests in reviewQueueStore.test.ts pass — including the 4 previously failing init() idempotency tests."
-    verification: "pnpm --filter frontend test -- reviewQueueStore.test.ts exits 0 and the stdout reports 17 tests passing."
-  - criterion: "No production code in frontend/src/stores/reviewQueueStore.ts is modified by this task."
-    verification: "git diff --name-only HEAD -- frontend/src/stores/reviewQueueStore.ts returns empty."
-  - criterion: "Frontend typecheck and lint are clean."
-    verification: "pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0 (or unchanged from baseline)."
+  - criterion: All 17 tests in reviewQueueStore.test.ts pass — including the 4 previously failing init() idempotency tests.
+    verification: pnpm --filter frontend test -- reviewQueueStore.test.ts exits 0 and the stdout reports 17 tests passing.
+  - criterion: No production code in frontend/src/stores/reviewQueueStore.ts is modified by this task.
+    verification: git diff --name-only HEAD -- frontend/src/stores/reviewQueueStore.ts returns empty.
+  - criterion: Frontend typecheck and lint are clean.
+    verification: pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0 (or unchanged from baseline).
 depends_on: []
 estimated_complexity: low
 epic: approval-router-and-permission-fix
 test_strategy:
   needed: true
-  justification: "The whole task IS a test fix — adjusting the test module-mock so the existing 4 idempotency tests stop crashing in setup. No new test cases are added; the existing 17 cases become the verification surface."
+  justification: The whole task IS a test fix — adjusting the test module-mock so the existing 4 idempotency tests stop crashing in setup. No new test cases are added; the existing 17 cases become the verification surface.
   targets:
     - behavior: "Updated vi.mock factory declares onApprovalDecided.subscribe returning { unsubscribe: vi.fn() }"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
     - behavior: "All 4 init() idempotency tests pass: 'double init()', 'unsubscribe then init() re-subscribes', 'onError resets closure state', 'StrictMode double-invoke'"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
 ---
-
 # TASK-778 — Fix reviewQueueStore.test.ts init-idempotency failures
 
 ## Objective

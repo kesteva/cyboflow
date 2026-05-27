@@ -1,8 +1,8 @@
 ---
 id: TASK-776
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/RunChatView.tsx
   - frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx
@@ -21,31 +21,30 @@ acceptance_criteria:
     verification: "New vitest test 'renders a post-history user event that arrives after the latest historicalMessage' asserts the post-history user-bubble content is visible."
   - criterion: "When historicalMessages is empty, all live events render (the dedup pass is a no-op on empty history)."
     verification: "Existing tests in RunChatView.test.tsx that render with empty historical state and only streamEvents continue to pass; the existing test 'renders assistant text content wrapped in markdown-preview class' (line 189) covers this directly."
-  - criterion: "Test count increase ≥ 2 over the pre-task baseline in RunChatView.test.tsx."
+  - criterion: Test count increase ≥ 2 over the pre-task baseline in RunChatView.test.tsx.
     verification: "`pnpm --filter frontend test -- RunChatView.test.tsx --reporter=verbose` shows ≥2 more `passed` assertions than the pre-task baseline; the new dedup test names appear in the listing."
-  - criterion: "Frontend typecheck and lint clean; all frontend tests pass."
-    verification: "pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0; pnpm --filter frontend test exits 0."
+  - criterion: Frontend typecheck and lint clean; all frontend tests pass.
+    verification: pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0; pnpm --filter frontend test exits 0.
 depends_on: []
 estimated_complexity: medium
 epic: per-run-chat-surface
 test_strategy:
   needed: true
-  justification: "Behavioral bug that produces visible UX duplication; without a dedup test the regression is silent until a user notices double bubbles. Two new tests lock in (a) assistant id-based dedup and (b) user timestamp-based dedup."
+  justification: Behavioral bug that produces visible UX duplication; without a dedup test the regression is silent until a user notices double bubbles. Two new tests lock in (a) assistant id-based dedup and (b) user timestamp-based dedup.
   targets:
-    - behavior: "Assistant StreamEvents whose payload.message.id matches a historicalMessage.id are dropped from the live arm"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx"
+    - behavior: Assistant StreamEvents whose payload.message.id matches a historicalMessage.id are dropped from the live arm
+      test_file: frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx
       type: component
-    - behavior: "User StreamEvents whose timestamp ≤ latest historicalMessage.createdAt are dropped from the live arm"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx"
+    - behavior: User StreamEvents whose timestamp ≤ latest historicalMessage.createdAt are dropped from the live arm
+      test_file: frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx
       type: component
     - behavior: "Post-history live user events still render (filter is strict-less-than, not less-or-equal in the rendering direction)"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx
       type: component
-    - behavior: "Existing render-empty-history tests still pass (dedup is a no-op on empty history)"
-      test_file: "frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx"
+    - behavior: Existing render-empty-history tests still pass (dedup is a no-op on empty history)
+      test_file: frontend/src/components/cyboflow/__tests__/RunChatView.test.tsx
       type: component
 ---
-
 # TASK-776 — Deduplicate overlapping historical + live events in RunChatView.mergedTimeline
 
 ## Objective
