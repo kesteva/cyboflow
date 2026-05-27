@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { ApprovalRouter } from './approvalRouter';
+import type { QuestionRouter } from './questionRouter';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import {
   TERMINAL_RUN_STATUSES,
@@ -28,6 +29,7 @@ import {
 export interface CancelAndRestartDeps {
   db: DatabaseLike;
   approvalRouter: Pick<ApprovalRouter, 'clearPendingForRun'>;
+  questionRouter: Pick<QuestionRouter, 'clearPendingForRun'>;
   runQueues: RunQueueRegistry;
   /**
    * Stops the Claude SDK run identified by the given key.
@@ -98,7 +100,7 @@ export async function cancelAndRestartHandler(
   runId: string,
   deps: CancelAndRestartDeps,
 ): Promise<CancelAndRestartResult> {
-  const { db, approvalRouter, runQueues, claudeManagerStop, logger } = deps;
+  const { db, approvalRouter, questionRouter, runQueues, claudeManagerStop, logger } = deps;
 
   // Execute everything inside the per-run PQueue to serialize with any
   // concurrent status changes for this run.
@@ -124,6 +126,11 @@ export async function cancelAndRestartHandler(
     // This satisfies the ordered side-effect requirement (AC5):
     // Claude receives deny responses on the socket before the process is aborted.
     approvalRouter.clearPendingForRun(runId);
+    // Symmetry with approvalRouter.clearPendingForRun above — settle any
+    // pending AskUserQuestion gate Promises before PTY kill so the
+    // awaiting PreToolUse hook callbacks resolve cleanly and the SDK
+    // abort does not race with the question router's pending map.
+    questionRouter.clearPendingForRun(runId);
     logger?.debug(
       '[cancelAndRestart] clearPendingForRun is a no-op until TASK-304 lands — deny-replies are NOT being sent on the permission socket for this run',
       { runId },
