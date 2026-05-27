@@ -250,58 +250,54 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       message,
     }));
 
-    // ---- Deduplicate live overlap with history ----
+    // ---- Deduplicate historical overlap with live ----
     // Both feeds derive from raw_events. Any live event that arrived between
     // setActiveRun (which begins streamEvents accumulation) and the
     // listMessages query resolution (which populates historicalMessages)
-    // appears in BOTH arrays. Drop the live duplicates so each message
-    // renders exactly once.
+    // appears in BOTH arrays. We prefer LIVE events over historical ones
+    // because live events carry the full content blocks (including tool_use),
+    // while historical ChatMessages are text-only.
     //
-    // Assistant events: dedup by payload.message.id ↔ historicalMessage.id
-    //   (selectRunMessages extracts the same id from payload.message.id).
-    // User events: no stable id at the message level — fall back to
-    //   timestamp filter (drop user events whose timestamp ≤ the latest
-    //   historicalMessage.createdAt).
-
-    const historicalAssistantIds = new Set<string>(
-      historicalMessages
-        .filter((m) => m.role === 'assistant')
-        .map((m) => m.id),
-    );
-
-    // Latest historical createdAt — used to gate user events. Empty history
-    // produces a sentinel that lets everything through (since '' < any ISO).
-    const latestHistoricalCreatedAt = historicalMessages.length === 0
-      ? ''
-      : historicalMessages
-          .map((m) => m.createdAt)
-          .reduce((a, b) => (a > b ? a : b));
+    // Strategy: build a set of message ids present in live events, then drop
+    // matching historical messages. Non-overlapping historical messages
+    // (older turns from before the subscription started) are kept.
 
     const liveItems: TimelineItem[] = streamEvents
       .filter((e) => e.runId === runId)
-      .filter((e) => {
-        if (e.type === 'assistant') {
-          const msgId = e.payload.message?.id;
-          if (typeof msgId === 'string' && historicalAssistantIds.has(msgId)) {
-            return false; // dedup: already in history
-          }
-          return true;
-        }
-        if (e.type === 'user') {
-          // User events carry no stable message id — gate by timestamp.
-          // Strict-less-or-equal: a live event at exactly the same ISO
-          // string as the latest historical entry is treated as part of
-          // the historical batch (drop it).
-          return e.timestamp > latestHistoricalCreatedAt;
-        }
-        // Other event types (system, result, stream_event, ...) are not
-        // rendered by renderTimelineItem anyway; pass them through so
-        // future renderer additions are not silently filtered.
-        return true;
-      })
-      .map((event) => ({ kind: 'live', event }));
+      .filter((e) => e.type === 'assistant' || e.type === 'user')
+      .map((event) => ({ kind: 'live' as const, event }));
 
-    return [...historicalItems, ...liveItems];
+    const liveAssistantIds = new Set<string>();
+    const liveTimestamps: string[] = [];
+    for (const item of liveItems) {
+      if (item.kind !== 'live') continue;
+      liveTimestamps.push(item.event.timestamp);
+      if (item.event.type === 'assistant') {
+        const msgId = (item.event.payload as { message?: { id?: string } }).message?.id;
+        if (typeof msgId === 'string') {
+          liveAssistantIds.add(msgId);
+        }
+      }
+    }
+
+    // Earliest live event timestamp — used to gate historical user messages.
+    const earliestLiveTimestamp = liveTimestamps.length === 0
+      ? ''
+      : liveTimestamps.reduce((a, b) => (a < b ? a : b));
+
+    const dedupedHistorical: TimelineItem[] = historicalItems.filter((item) => {
+      if (item.kind !== 'historical') return true;
+      const { message } = item;
+      if (message.role === 'assistant') {
+        return !liveAssistantIds.has(message.id);
+      }
+      if (message.role === 'user' && earliestLiveTimestamp !== '') {
+        return message.createdAt < earliestLiveTimestamp;
+      }
+      return true;
+    });
+
+    return [...dedupedHistorical, ...liveItems];
   }, [historicalMessages, streamEvents, runId]);
 
   // -------------------------------------------------------------------------
