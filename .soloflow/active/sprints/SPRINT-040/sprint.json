@@ -6,10 +6,6 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-767": {
-      "status": "pending",
-      "depends_on": []
-    },
     "TASK-768": {
       "status": "pending",
       "depends_on": [
