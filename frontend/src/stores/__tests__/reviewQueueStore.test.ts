@@ -293,6 +293,44 @@ describe('init() idempotency', () => {
     expect(mockListPendingQuery).toHaveBeenCalledTimes(2); // listPending called again
   });
 
+  it('onError on onApprovalDecided resets closure state so a subsequent init() re-subscribes', () => {
+    let capturedDecidedOnError: ((err: unknown) => void) | undefined;
+    mockDecidedSubscribe = vi.fn().mockImplementation((_input: undefined, handlers: { onError?: (err: unknown) => void }) => {
+      capturedDecidedOnError = handlers.onError;
+      return { unsubscribe: mockDecidedSubscribeUnsubscribe };
+    });
+
+    const unsub1 = useReviewQueueStore.getState().init();
+    activeUnsub = unsub1;
+
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(1);
+    expect(capturedDecidedOnError).toBeDefined();
+
+    // Trigger the SECOND subscription's error
+    capturedDecidedOnError!(new Error('decided channel dropped'));
+
+    // Store should be disconnected AND closure state cleared
+    expect(useReviewQueueStore.getState().connectionStatus).toBe('disconnected');
+    // Both unsubscribes should have fired (no leak)
+    expect(mockCreatedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockDecidedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+
+    // Reset for the recovery probe
+    mockCreatedSubscribeUnsubscribe = vi.fn();
+    mockCreatedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockCreatedSubscribeUnsubscribe });
+    mockDecidedSubscribeUnsubscribe = vi.fn();
+    mockDecidedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockDecidedSubscribeUnsubscribe });
+
+    // A subsequent init() must NOT be a no-op
+    const unsub2 = useReviewQueueStore.getState().init();
+    activeUnsub = unsub2;
+
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1); // fresh subscribe
+    expect(mockDecidedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockListPendingQuery).toHaveBeenCalledTimes(2); // listPending called again
+  });
+
   it('StrictMode double-invoke — exactly one live subscription set after both mount effects settle', () => {
     // React StrictMode in development invokes effects twice: mount → cleanup → mount.
     // Simulate: init() → unsubscribe() → init()

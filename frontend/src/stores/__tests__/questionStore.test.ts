@@ -299,6 +299,39 @@ describe('init() idempotency', () => {
     expect(mockListPendingQuery).toHaveBeenCalledTimes(2); // listPending called again
   });
 
+  it('onError on onQuestionAnswered resets closure state so a subsequent init() re-subscribes', () => {
+    let capturedAnsweredOnError: ((err: unknown) => void) | undefined;
+    mockAnsweredSubscribe = vi.fn().mockImplementation((_input: undefined, handlers: { onError?: (err: unknown) => void }) => {
+      capturedAnsweredOnError = handlers.onError;
+      return { unsubscribe: mockAnsweredSubscribeUnsubscribe };
+    });
+
+    const unsub1 = useQuestionStore.getState().init();
+    activeUnsub = unsub1;
+
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockAnsweredSubscribe).toHaveBeenCalledTimes(1);
+    expect(capturedAnsweredOnError).toBeDefined();
+
+    capturedAnsweredOnError!(new Error('answered channel dropped'));
+
+    expect(useQuestionStore.getState().connectionStatus).toBe('disconnected');
+    expect(mockCreatedSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockAnsweredSubscribeUnsubscribe).toHaveBeenCalledTimes(1);
+
+    mockCreatedSubscribeUnsubscribe = vi.fn();
+    mockCreatedSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockCreatedSubscribeUnsubscribe });
+    mockAnsweredSubscribeUnsubscribe = vi.fn();
+    mockAnsweredSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockAnsweredSubscribeUnsubscribe });
+
+    const unsub2 = useQuestionStore.getState().init();
+    activeUnsub = unsub2;
+
+    expect(mockCreatedSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockAnsweredSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockListPendingQuery).toHaveBeenCalledTimes(2);
+  });
+
   it('StrictMode double-invoke — exactly one live subscription set after both mount effects settle', () => {
     // React StrictMode in development invokes effects twice: mount → cleanup → mount.
     // Simulate: init() → unsubscribe() → init()
