@@ -11,10 +11,6 @@
       "depends_on": [],
       "verdict_at": "2026-05-27T04:09:13.517Z"
     },
-    "TASK-779": {
-      "status": "pending",
-      "depends_on": []
-    },
     "TASK-780": {
       "status": "pending",
       "depends_on": [
