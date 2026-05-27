@@ -41,14 +41,15 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   const {
     mainRepoSession,
+    effectiveSession,
     sessionPanels,
     currentActivePanel,
     handlePanelSelect,
     handlePanelClose,
   } = usePanelSurface(projectId, { autoCreatePermanentPanels: false });
 
-  const handleAddTerminal = useAddTerminalPanel(mainRepoSession, { logTag: 'CyboflowRoot' });
-  const ensureClaudePanel = useEnsureClaudePanel(mainRepoSession, { logTag: 'CyboflowRoot' });
+  const handleAddTerminal = useAddTerminalPanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
+  const ensureClaudePanel = useEnsureClaudePanel(effectiveSession ?? mainRepoSession, { logTag: 'CyboflowRoot' });
 
   useAddTerminalShortcut(handleAddTerminal);
   useAddClaudeShortcut(ensureClaudePanel);
@@ -108,8 +109,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                 <RunBottomPane />
               </div>
             </>
-          ) : mainRepoSession ? (
-            <SessionProvider session={mainRepoSession} projectName="">
+          ) : effectiveSession ? (
+            <SessionProvider session={effectiveSession} projectName="">
               <PanelTabBar
                 panels={sessionPanels}
                 activePanel={currentActivePanel}
@@ -124,7 +125,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                   <PanelContainer
                     panel={currentActivePanel}
                     isActive
-                    isMainRepo={!!mainRepoSession?.isMainRepo}
+                    isMainRepo={!!effectiveSession?.isMainRepo}
                   />
                 </div>
               )}
