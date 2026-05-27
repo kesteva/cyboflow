@@ -11,21 +11,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-
-// ---------------------------------------------------------------------------
-// ResizeObserver shim for jsdom
-// ---------------------------------------------------------------------------
-
-beforeAll(() => {
-  if (typeof global.ResizeObserver === 'undefined') {
-    global.ResizeObserver = vi.fn().mockImplementation(() => ({
-      observe: vi.fn(),
-      unobserve: vi.fn(),
-      disconnect: vi.fn(),
-    }));
-  }
-});
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi — WorkflowProgressTimeline calls subscribeToStreamEvents
