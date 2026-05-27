@@ -10,21 +10,8 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
-// ---------------------------------------------------------------------------
-// ResizeObserver shim for jsdom
-// ---------------------------------------------------------------------------
-
-beforeAll(() => {
-  if (typeof global.ResizeObserver === 'undefined') {
-    global.ResizeObserver = vi.fn().mockImplementation(() => ({
-      observe: vi.fn(),
-      unobserve: vi.fn(),
-      disconnect: vi.fn(),
-    }));
-  }
-});
 import { WorkflowCanvas } from '../WorkflowCanvas';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 

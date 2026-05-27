@@ -17,21 +17,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-
-// ---------------------------------------------------------------------------
-// ResizeObserver shim for jsdom
-// ---------------------------------------------------------------------------
-
-beforeAll(() => {
-  if (typeof global.ResizeObserver === 'undefined') {
-    global.ResizeObserver = vi.fn().mockImplementation(() => ({
-      observe: vi.fn(),
-      unobserve: vi.fn(),
-      disconnect: vi.fn(),
-    }));
-  }
-});
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi — keeps only the entries that WorkflowPicker/RunView still
