@@ -797,6 +797,7 @@ app.whenReady().then(async () => {
     setCancelAndRestartDeps({
       db,
       approvalRouter: ApprovalRouter.getInstance(),
+      questionRouter: QuestionRouter.getInstance(),
       runQueues,
       claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
       logger: loggerLike,
