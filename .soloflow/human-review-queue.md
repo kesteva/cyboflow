@@ -1,8 +1,8 @@
 ---
-pending_count: 29
+pending_count: 30
 buckets:
   decisions: 0
-  actions: 1
+  actions: 2
   testing: 23
   deferred_visual: 5
 items: []
@@ -25,15 +25,32 @@ _No items._
     - Level 2 visual_macos verification of toolFormatter rendered output
     - Level 2 visual_macos verification for TASK-715 WorkflowPicker + mcpHealthStore tRPC cutover
     - Level 2 visual verification for macOS
+    - Level 2 visual_macos verification of RunBottomPane tab bar rendered output (Chat / Terminal / Data Stream three buttons + Data Stream default panel containing RunView)
+    - Level 2 visual verification of RunChatView Chat tab rendering
   level: visual
   severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-26T04:27:12.280Z"
+  updated_at: "2026-05-26T23:13:57.893Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
   affected_tasks:
     - TASK-655
     - TASK-715
     - TASK-752
+    - TASK-756
+    - TASK-761
+
+- task: TASK-756
+  type: config_issue
+  bucket: actions
+  dedup_key: visual_web_unavailable
+  plan_ref: .soloflow/active/plans/bottom-pane-restructure/TASK-756-plan.md
+  action: "Verifier could not run visual_web verification for TASK-756. visual_web is documented as NON-FUNCTIONAL in this Electron repo (CLAUDE.md: Vite renderer at http://localhost:4521 cannot bootstrap without preload-injected electronTRPC). Either (a) rework playwright config to launch via _electron.launch() and flip verification.visual_web=false as a sentinel until reworked, or (b) wire a Playwright-Electron driver per docs/VISUAL-VERIFICATION-SETUP.md."
+  blocked_checks:
+    - Level 2 visual_web verification of RunBottomPane tab bar rendered output
+  level: visual
+  severity: low
+  created_at: "2026-05-26T21:27:15.844Z"
+  updated_at: "2026-05-26T21:27:15.844Z"
 
 ## Testing
 

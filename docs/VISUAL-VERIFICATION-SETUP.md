@@ -82,6 +82,25 @@ Peekaboo CLI binary. Locate it with `find node_modules/.pnpm -name 'Electron.app
 grant Screen Recording in System Settings, and relaunch `pnpm dev`. Blocked
 two consecutive sprints (FIND-SPRINT-034-3).
 
+### Troubleshooting: confirm which process holds each TCC grant
+
+When `mcp__peekaboo__image` fails with `"The user declined TCCs for application,
+window, display capture"` even though `mcp__peekaboo__probe` / `server_status`
+reports grants present, the grants are likely held by the wrong binary (e.g.
+Warp instead of the Node subprocess that issues the CGDisplay / CGWindow
+capture calls). One-shot diagnostic:
+
+```bash
+sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
+  "SELECT client, auth_value, last_modified FROM access WHERE service IN ('kTCCServiceScreenCapture','kTCCServiceAccessibility') ORDER BY service, client;"
+```
+
+Look for the MCP host binary path (e.g. `/usr/local/bin/node` or the Claude
+Code CLI) in the `client` column with `auth_value=2`. If missing, grant Screen
+Recording and Accessibility to that binary in System Settings → Privacy &
+Security, then restart `pnpm dev`. Recurring failure across SPRINT-031..SPRINT-039
+(TASK-655, TASK-715, TASK-752, TASK-756, TASK-761).
+
 ## Mobile (visual_mobile) — not applicable
 
 cyboflow is desktop-only. `verification.visual_mobile=false`.

@@ -52,7 +52,7 @@ function seedWorkflow(db: Database.Database, id: string): void {
 function seedRun(
   db: Database.Database,
   runId: string,
-  status: 'running' | 'awaiting_review' | 'canceled' | 'completed' | 'failed' | 'stuck',
+  status: 'running' | 'awaiting_review' | 'canceled' | 'completed' | 'failed' | 'stuck' | 'awaiting_input',
 ): void {
   const workflowId = `workflow-for-${runId}`;
   seedWorkflow(db, workflowId);
@@ -555,6 +555,57 @@ describe('StuckDetector event emission shape', () => {
     expect(run.status).toBe('stuck');
     expect(run.stuck_reason).toBe('orphan_pty');
     expect(run.stuck_detected_at).toBe(event.detectedAt);
+
+    rawDb.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TEST 8: awaiting_input exemption — stale approval does NOT cause stuck transition
+// ---------------------------------------------------------------------------
+
+describe('StuckDetector awaiting_input exemption', () => {
+  it('does NOT classify awaiting_input runs as stuck even when an associated approval is stale', async () => {
+    // includeQuestionsTable applies migration 010, which widens the
+    // workflow_runs CHECK constraint to accept 'awaiting_input'. This is the
+    // canonical post-010 schema for tests; see orchestratorTestDb.ts.
+    const rawDb = createTestDb({
+      includeStuckDetectedAt: true,
+      includeQuestionsTable: true,
+    });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+    const events: StuckDetectedEvent[] = [];
+    emitter.on('runs:stuck', (e: StuckDetectedEvent) => events.push(e));
+
+    // Seed an awaiting_input run + a stale pending approval.
+    seedRun(rawDb, 'run-ai', 'awaiting_input');
+    rawDb
+      .prepare(
+        `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+         VALUES ('a-stale', 'run-ai', 'Bash', '{}', 'tu-1', 'pending', ?)`,
+      )
+      .run(ageMsToIso(10 * 60_000));
+
+    // claudeManager: hasActiveRunForId returns false → orphan_pty classification.
+    // But the UPDATE `WHERE id = ? AND status = 'awaiting_review'` won't match
+    // (the run is in 'awaiting_input'), so changes === 0 and no event fires.
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(),
+      emitter,
+      logger,
+    });
+    await detector.scan();
+
+    expect(events).toHaveLength(0);
+
+    // workflow_runs row stays in awaiting_input.
+    const row = rawDb
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get('run-ai') as { status: string };
+    expect(row.status).toBe('awaiting_input');
 
     rawDb.close();
   });

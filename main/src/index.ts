@@ -28,6 +28,7 @@ import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
+import { QuestionRouter } from './orchestrator/questionRouter';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -35,11 +36,14 @@ import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setStartRunDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
-import { approvalEvents } from './orchestrator/trpc/routers/events';
+import { approvalEvents, questionEvents } from './orchestrator/trpc/routers/events';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
+import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
+import type { QuestionAnsweredEvent } from '../../shared/types/questions';
 import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
+import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
@@ -724,6 +728,27 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] ApprovalRouter → approvalEvents bridge wired');
     console.log('[Main] ApprovalRouter initialized');
+
+    // Wire QuestionRouter after the RunQueueRegistry and ApprovalRouter are live.
+    // Question answers arrive via the SDK PreToolUse hook in ClaudeCodeManager.
+    QuestionRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    QuestionRouter.getInstance().on('questionCreated', (request: QuestionRequest) => {
+      const event = buildQuestionCreatedEvent(request, db);
+      questionEvents.emit('created', event);
+      console.log('[Main] Bridged questionCreated → questionEvents.emit(created) for questionId=', request.id);
+    });
+    QuestionRouter.getInstance().on('questionAnswered', (event: QuestionAnsweredEvent) => {
+      questionEvents.emit('answered', event);
+      console.log('[Main] Bridged questionAnswered → questionEvents.emit(answered) for questionId=', event.questionId);
+    });
+    console.log('[Main] QuestionRouter → questionEvents bridge wired');
+    console.log('[Main] QuestionRouter initialized');
+
+    // Boot recovery: any awaiting_input rows from a previous session have a dead SDK session.
+    const staleQuestionsRecovered = QuestionRouter.getInstance().recoverStaleAwaitingInput();
+    if (staleQuestionsRecovered > 0) {
+      console.log(`[Main] Recovered ${staleQuestionsRecovered} stale awaiting_input run(s) on boot`);
+    }
 
     // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
     const recoveredCount = ApprovalRouter.getInstance().recoverStaleAwaitingReview();

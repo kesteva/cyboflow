@@ -13,8 +13,10 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import type { WorkflowRunListRow } from '../../../../../shared/types/workflows';
+import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
+import { selectRunMessages } from '../../runMessagesListing';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -168,6 +170,29 @@ export const runsRouter = router({
       }
 
       return cancelAndRestartHandler(input.runId, cancelAndRestartDeps);
+    }),
+
+  /**
+   * Return the reconstructed chat history for a run.
+   *
+   * Reads from `raw_events` filtered to 'assistant' and 'user' event types,
+   * reconstructing user-text and assistant-text turns as ChatMessage[]. Tool-use
+   * and tool-result blocks are intentionally excluded — they surface via the
+   * approvals and questions channels.
+   *
+   * Uses `selectRunMessages` from runMessagesListing.ts which applies
+   * json_extract() at the SQL layer for efficient pre-filtering.
+   */
+  listMessages: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(async ({ ctx, input }): Promise<ChatMessage[]> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return selectRunMessages(ctx.db, input.runId);
     }),
 
   /**
