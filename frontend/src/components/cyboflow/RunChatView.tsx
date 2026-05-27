@@ -196,7 +196,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // -------------------------------------------------------------------------
   // Bootstrap from listMessages when runId changes
@@ -306,7 +306,8 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // -------------------------------------------------------------------------
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [mergedTimeline]);
 
   // -------------------------------------------------------------------------
@@ -335,7 +336,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
 
   return (
     <div className="flex h-full flex-col gap-2">
-      <div className="flex-1 overflow-auto rounded border border-border-primary bg-bg-secondary p-2">
+      <div ref={scrollContainerRef} className="flex-1 overflow-auto rounded border border-border-primary bg-bg-secondary p-2">
         {isLoadingHistory && (
           <p className="text-xs text-text-muted">Loading history...</p>
         )}
@@ -344,8 +345,6 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
         )}
 
         {mergedTimeline.map((item, idx) => renderTimelineItem(item, idx, deps))}
-
-        <div ref={bottomRef} />
       </div>
 
       {runApprovals.length > 0 && (
