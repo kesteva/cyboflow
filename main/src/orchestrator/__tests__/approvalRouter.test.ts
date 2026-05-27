@@ -510,7 +510,6 @@ describe('ApprovalRouter', () => {
   it('clearPendingForRun on a runId with no pending entries is a silent no-op', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
     const router = ApprovalRouter.initialize(adapter);
 
@@ -671,7 +670,6 @@ describe('ApprovalRouter', () => {
   it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const router = ApprovalRouter.initialize(adapter);
 
     seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
@@ -715,7 +713,6 @@ describe('ApprovalRouter', () => {
   it("recoverStaleAwaitingReview cancels pending approvals for recovered runs", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-H1';
@@ -752,7 +749,6 @@ describe('ApprovalRouter', () => {
   // -------------------------------------------------------------------------
   it('clearPendingForRun swallows a DB error and still resolves the pending promise with deny', async () => {
     const db = createTestDb();
-    const adapter = dbAdapter(db);
     const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 

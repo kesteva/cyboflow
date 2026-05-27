@@ -26,29 +26,9 @@
  * up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import PQueue from 'p-queue';
 import { QuestionRouter, RunNotRunningError, type QuestionAnswer } from '../questionRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
-
-// ---------------------------------------------------------------------------
-// Per-run queue registry (real PQueue — no mocks)
-// ---------------------------------------------------------------------------
-
-function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue; queues: Map<string, PQueue> } {
-  const queues = new Map<string, PQueue>();
-  return {
-    queues,
-    getOrCreate(runId: string): PQueue {
-      let q = queues.get(runId);
-      if (!q) {
-        q = new PQueue({ concurrency: 1 });
-        queues.set(runId, q);
-      }
-      return q;
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -67,7 +47,6 @@ describe('QuestionRouter', () => {
   it('requestQuestion inserts questions (pending) and sets workflow_runs to awaiting_input', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const noopSocketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -125,7 +104,6 @@ describe('QuestionRouter', () => {
   it('respond writes answer_json + answered_at and transitions workflow_runs back to running', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -192,7 +170,6 @@ describe('QuestionRouter', () => {
   it('two concurrent requestQuestion calls for the same runId are serialized by the per-run queue', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
     const router = QuestionRouter.initialize(adapter);
 
@@ -255,7 +232,6 @@ describe('QuestionRouter', () => {
   it('clearPendingForRun resolves pending entries with empty-answers payload and updates DB rows to status=timed_out', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -314,7 +290,6 @@ describe('QuestionRouter', () => {
   it('respond after run is canceled does NOT revive the run and resolves awaiting caller with empty-answers payload', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -383,7 +358,6 @@ describe('QuestionRouter', () => {
   it("emits 'questionCreated' event after requestQuestion transaction commits", async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -429,7 +403,6 @@ describe('QuestionRouter', () => {
   it('getPending returns in-flight questions and is empty after respond', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
 
     const router = QuestionRouter.initialize(adapter);
@@ -475,7 +448,6 @@ describe('QuestionRouter', () => {
   it('clearPendingForRun swallows a DB error and still resolves the pending promise with empty-answers payload', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
@@ -544,7 +516,6 @@ describe('QuestionRouter', () => {
   it('recoverStaleAwaitingInput transitions awaiting_input rows to failed', () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const router = QuestionRouter.initialize(adapter);
 
     seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' });
