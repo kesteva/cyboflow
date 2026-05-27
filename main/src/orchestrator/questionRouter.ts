@@ -111,15 +111,14 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * @param db               - Narrow DatabaseLike surface (no better-sqlite3 import).
-   * @param _getQueueForRun  - Retained for parity with ApprovalRouter constructor.
-   *                           NOT used internally — QuestionRouter serializes its
-   *                           own mutations via questionQueues (see field doc above).
+   * Per-router PQueues (this.questionQueues, see field doc above) are
+   * intentional and MUST stay separate from RunQueueRegistry's per-run
+   * queues — that registry hosts the long-running runExecutor.execute()
+   * task and the SDK PreToolUse hook fires from WITHIN that task.
+   * Re-entering RunQueueRegistry's queue from inside its own task would
+   * self-deadlock (runQueueRegistry.ts §no-recursive-enqueue).
    */
-  constructor(
-    private readonly db: DatabaseLike,
-    _getQueueForRun: (runId: string) => PQueue,
-  ) {
+  constructor(private readonly db: DatabaseLike) {
     super();
   }
 
@@ -133,11 +132,8 @@ export class QuestionRouter extends EventEmitter {
    * ready. Question answers arrive via the SDK PreToolUse hook in
    * claudeCodeManager.makePreToolUseHook (TASK-758).
    */
-  static initialize(
-    db: DatabaseLike,
-    getQueueForRun: (runId: string) => PQueue,
-  ): QuestionRouter {
-    QuestionRouter.instance = new QuestionRouter(db, getQueueForRun);
+  static initialize(db: DatabaseLike): QuestionRouter {
+    QuestionRouter.instance = new QuestionRouter(db);
     return QuestionRouter.instance;
   }
 
