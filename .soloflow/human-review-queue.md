@@ -27,10 +27,12 @@ _No items._
     - Level 2 visual verification for macOS
     - Level 2 visual_macos verification of RunBottomPane tab bar rendered output (Chat / Terminal / Data Stream three buttons + Data Stream default panel containing RunView)
     - Level 2 visual verification of RunChatView Chat tab rendering
+    - "Level 2 visual_macos verification of RunRightRail 3-tab shell (296px right column, left border, tab switching)"
+    - Level 2 visual_macos verification of CyboflowRoot two-column layout (left column fluid + right rail fixed)
   level: visual
   severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-26T23:13:57.893Z"
+  updated_at: "2026-05-27T01:53:21.330Z"
   sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
   affected_tasks:
     - TASK-655
@@ -38,6 +40,8 @@ _No items._
     - TASK-752
     - TASK-756
     - TASK-761
+    - TASK-767
+    - TASK-768
 
 - task: TASK-756
   type: config_issue
@@ -47,10 +51,14 @@ _No items._
   action: "Verifier could not run visual_web verification for TASK-756. visual_web is documented as NON-FUNCTIONAL in this Electron repo (CLAUDE.md: Vite renderer at http://localhost:4521 cannot bootstrap without preload-injected electronTRPC). Either (a) rework playwright config to launch via _electron.launch() and flip verification.visual_web=false as a sentinel until reworked, or (b) wire a Playwright-Electron driver per docs/VISUAL-VERIFICATION-SETUP.md."
   blocked_checks:
     - Level 2 visual_web verification of RunBottomPane tab bar rendered output
+    - Level 2 visual_web verification of RunRightRail 3-tab shell
   level: visual
   severity: low
   created_at: "2026-05-26T21:27:15.844Z"
-  updated_at: "2026-05-26T21:27:15.844Z"
+  updated_at: "2026-05-27T01:36:47.322Z"
+  affected_tasks:
+    - TASK-756
+    - TASK-767
 
 ## Testing
 

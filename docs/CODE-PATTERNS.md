@@ -266,6 +266,19 @@ Any state mutation for a workflow run passes through a per-run `SimpleQueue({con
 This serializes concurrent events (Claude stream events arriving while user approves a tool call).
 Do not skip the queue for "quick" mutations — the queue is the correctness guarantee.
 
+### tRPC seed-query + subscription race policy
+
+For a tRPC pair where a query returns initial state and a subscription delivers
+delta events (e.g. `getPhaseState` + `onStepTransition`), the consumer MUST open
+the subscription BEFORE awaiting the query — not in a separate concurrent
+`useEffect` — so events that arrive during the query window are not overwritten
+when the seed resolves. Use a `cancelled` flag so the seed `.then()` skips
+applying stale state after teardown.
+
+**Canonical example:** `frontend/src/hooks/useWorkflowPhaseState.ts` (subscribe before the `getPhaseState.query` `.then(...)`; both guarded by a `cancelled` flag).
+**Anti-pattern:** pre-retrofit `WorkflowProgressTimeline.tsx` ran two sibling effects;
+the query's `setStepStates` overwrote subscription deltas (FIND-SPRINT-040-12).
+
 ### Database access
 
 `main/src/services/database.ts` is the singleton. All mutations go through the main process —
