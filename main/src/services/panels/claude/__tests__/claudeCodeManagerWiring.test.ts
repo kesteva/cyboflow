@@ -23,7 +23,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
-import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
@@ -91,24 +90,6 @@ vi.mock('../../../utils/sessionValidation', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Database / ApprovalRouter helpers
-// ---------------------------------------------------------------------------
-
-function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
-  const queues = new Map<string, PQueue>();
-  return {
-    getOrCreate(runId: string): PQueue {
-      let q = queues.get(runId);
-      if (!q) {
-        q = new PQueue({ concurrency: 1 });
-        queues.set(runId, q);
-      }
-      return q;
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Minimal SessionManager mock factories
 // ---------------------------------------------------------------------------
 
@@ -139,7 +120,6 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     db = createTestDb();
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter);
     QuestionRouter.initialize(adapter);
   });
@@ -394,7 +374,6 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     db = createTestDb({ disableForeignKeys: true });
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter);
     QuestionRouter.initialize(adapter);
   });
@@ -519,7 +498,6 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     db = createTestDb();
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter);
     QuestionRouter.initialize(adapter);
   });

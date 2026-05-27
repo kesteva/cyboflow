@@ -19,7 +19,6 @@ import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { QuestionRouter } from '../../../questionRouter';
-import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { questionEvents } from '../events';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedQuestion } from '../../../__test_fixtures__/orchestratorTestDb';
@@ -104,7 +103,6 @@ describe('cyboflow.questions.answer', () => {
   it('answer(questionId, answers) resolves the in-flight answerPromise; returns { success: true }', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     QuestionRouter.initialize(adapter);
     const qr = QuestionRouter.getInstance();
 
@@ -157,7 +155,6 @@ describe('cyboflow.questions.answer', () => {
   it('answer: annotations field is silently dropped — answer_json contains only { answers }', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     QuestionRouter.initialize(adapter);
     const qr = QuestionRouter.getInstance();
 
@@ -203,7 +200,6 @@ describe('cyboflow.questions.answer', () => {
   it('answer(unknownId) throws TRPCError code=NOT_FOUND', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     QuestionRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));

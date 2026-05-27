@@ -22,7 +22,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import type Database from 'better-sqlite3';
-import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
@@ -67,24 +66,6 @@ vi.mock('../../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),
   logValidationFailure: vi.fn(),
 }));
-
-// ---------------------------------------------------------------------------
-// Database / ApprovalRouter helpers
-// ---------------------------------------------------------------------------
-
-function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
-  const queues = new Map<string, PQueue>();
-  return {
-    getOrCreate(runId: string): PQueue {
-      let q = queues.get(runId);
-      if (!q) {
-        q = new PQueue({ concurrency: 1 });
-        queues.set(runId, q);
-      }
-      return q;
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Minimal SessionManager stub — always returns a session WITHOUT project_id
@@ -147,7 +128,6 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
     findNodeExecutableMock.mockResolvedValue('/mock/path/node');
 
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     ApprovalRouter.initialize(adapter);
 
     mgr = new TestableClaudeCodeManager(

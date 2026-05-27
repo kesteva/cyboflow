@@ -20,7 +20,6 @@ import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { ApprovalRouter } from '../../../approvalRouter';
-import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 
@@ -95,7 +94,6 @@ describe('cyboflow.approvals.approve', () => {
   it('approve(approvalId) resolves the in-flight decisionPromise with {behavior:"allow"}', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     ApprovalRouter.initialize(adapter);
     const router = ApprovalRouter.getInstance();
 
@@ -146,7 +144,6 @@ describe('cyboflow.approvals.approve', () => {
   it('approve(unknownId) throws TRPCError code=NOT_FOUND', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     ApprovalRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -161,7 +158,6 @@ describe('cyboflow.approvals.reject', () => {
   it('reject(approvalId, message) resolves the decisionPromise with {behavior:"deny", message}', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     ApprovalRouter.initialize(adapter);
     const approvalRouter = ApprovalRouter.getInstance();
 
@@ -208,7 +204,6 @@ describe('cyboflow.approvals.reject', () => {
   it('reject(unknownId) throws TRPCError code=NOT_FOUND', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const registry = new RunQueueRegistry();
     ApprovalRouter.initialize(adapter);
 
     const caller = appRouter.createCaller(createContext({ db: adapter }));
