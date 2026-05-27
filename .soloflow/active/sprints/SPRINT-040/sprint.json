@@ -6,15 +6,57 @@
     "execution_mode": "serial"
   },
   "tasks": {
-    "TASK-763": { "status": "pending", "depends_on": [] },
-    "TASK-764": { "status": "pending", "depends_on": ["TASK-763"] },
-    "TASK-765": { "status": "pending", "depends_on": ["TASK-763", "TASK-764"] },
-    "TASK-766": { "status": "pending", "depends_on": ["TASK-765"] },
-    "TASK-767": { "status": "pending", "depends_on": [] },
-    "TASK-768": { "status": "pending", "depends_on": ["TASK-766", "TASK-767"] },
-    "TASK-769": { "status": "pending", "depends_on": ["TASK-763", "TASK-767"] },
-    "TASK-770": { "status": "pending", "depends_on": ["TASK-769"] },
-    "TASK-771": { "status": "pending", "depends_on": ["TASK-766", "TASK-769", "TASK-770"] }
+    "TASK-764": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-763"
+      ]
+    },
+    "TASK-765": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-763",
+        "TASK-764"
+      ]
+    },
+    "TASK-766": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-765"
+      ]
+    },
+    "TASK-767": {
+      "status": "pending",
+      "depends_on": []
+    },
+    "TASK-768": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-766",
+        "TASK-767"
+      ]
+    },
+    "TASK-769": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-763",
+        "TASK-767"
+      ]
+    },
+    "TASK-770": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-769"
+      ]
+    },
+    "TASK-771": {
+      "status": "pending",
+      "depends_on": [
+        "TASK-766",
+        "TASK-769",
+        "TASK-770"
+      ]
+    }
   },
   "playwright_target": {
     "kind": "electron",
