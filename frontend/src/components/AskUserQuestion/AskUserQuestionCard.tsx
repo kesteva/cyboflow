@@ -12,12 +12,27 @@
  *
  * This component ships building blocks only — wiring into RunChatView /
  * RunBottomPane is TASK-761.
+ *
+ * ## Multi-sub-question keying
+ *
+ * The `otherText` bus in questionStore is keyed by `questionId` only (not by
+ * sub-question index). When the bus slot for this card's `item.id` is defined,
+ * every sub-question's Other input is pre-filled with the same bus value
+ * (uniform distribution). The user can override per-sub-question by typing
+ * into a specific input — local edits win for that sub-question while other
+ * sub-questions keep showing the bus value. Rationale: the bottom-bar
+ * ChatInput writes a single text blob with no sub-question context; uniform
+ * distribution is the only correctness-preserving default. Future enhancement
+ * (not in this task): extend the bus to `Record<string, Record<number, string>>`
+ * keyed by `(questionId, subIndex)` if the multi-sub-question case becomes
+ * user-visible. This file is the bus is question-level reader.
  */
 import React, { useState } from 'react';
 import { Pill } from '../ui/Pill';
 import { Button } from '../ui/Button';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { trpc } from '../../trpc/client';
+import { useQuestionStore } from '../../stores/questionStore';
 import type { Question, QuestionPayload } from '../../../../shared/types/questions';
 
 // ---------------------------------------------------------------------------
@@ -204,6 +219,11 @@ function QuestionFieldset({
 export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardProps): React.ReactElement {
   const questionCount = item.questions.length;
 
+  // Subscribe to the otherText bus slot for THIS question id. ChatInput
+  // (bottom-bar in workflow-question mode) writes here via setOtherText.
+  const busOtherText = useQuestionStore((s) => s.otherText[item.id]);
+  const clearOtherText = useQuestionStore((s) => s.clearOtherText);
+
   // Per-question selections: index → single label (string|null) or multi label set
   const [selections, setSelections] = useState<Array<string | null | Set<string>>>(() =>
     item.questions.map((qp) => (qp.multiSelect ? new Set<string>() : null)),
@@ -217,7 +237,22 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
     Array.from({ length: questionCount }, () => ''),
   );
 
+  // Per-sub-question "has the user typed here?" flag. When false, the input
+  // mirrors the bus value; when true, the local state wins.
+  const [otherTextLocalDirty, setOtherTextLocalDirty] = useState<boolean[]>(() =>
+    Array.from({ length: questionCount }, () => false),
+  );
+
   const [busy, setBusy] = useState(false);
+
+  // ---------------------------------------------------------------------------
+  // Effective Other text — prefers bus value unless the user has locally edited
+  // ---------------------------------------------------------------------------
+
+  function effectiveOtherText(index: number): string {
+    if (otherTextLocalDirty[index]) return otherText[index];
+    return busOtherText ?? otherText[index];
+  }
 
   // ---------------------------------------------------------------------------
   // Completeness check — submit disabled until every question has a valid answer
@@ -227,7 +262,7 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
     const qp = item.questions[index];
     const sel = selections[index];
     const other = otherSelected[index];
-    const text = otherText[index];
+    const text = effectiveOtherText(index);
 
     if (other) {
       // Other is selected — free-text must be non-empty
@@ -289,6 +324,12 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
         next[questionIndex] = '';
         return next;
       });
+      setOtherTextLocalDirty((prev) => {
+        if (!prev[questionIndex]) return prev;
+        const next = [...prev];
+        next[questionIndex] = false;
+        return next;
+      });
     }
     if (!item.questions[questionIndex].multiSelect && checked) {
       // Single-select: deselect any concrete option when Other is selected
@@ -306,6 +347,12 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
       next[questionIndex] = text;
       return next;
     });
+    setOtherTextLocalDirty((prev) => {
+      if (prev[questionIndex]) return prev;
+      const next = [...prev];
+      next[questionIndex] = true;
+      return next;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -321,7 +368,7 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
     for (let i = 0; i < questionCount; i++) {
       const qp = item.questions[i];
       if (otherSelected[i]) {
-        answers[qp.question] = otherText[i].trim();
+        answers[qp.question] = effectiveOtherText(i).trim();
       } else if (qp.multiSelect) {
         const set = selections[i];
         const labels = set instanceof Set ? Array.from(set) : [];
@@ -335,6 +382,7 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
     void trpc.cyboflow.questions.answer
       .mutate({ questionId: item.id, answers })
       .then(() => {
+        clearOtherText(item.id);
         onAnswered?.();
       })
       .catch(() => {
@@ -368,7 +416,7 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
               questionIndex={index}
               selection={selections[index]}
               otherSelected={otherSelected[index]}
-              otherText={otherText[index]}
+              otherText={effectiveOtherText(index)}
               onSingleChange={(label) => { handleSingleChange(index, label); }}
               onMultiChange={(label, checked) => { handleMultiChange(index, label, checked); }}
               onOtherToggle={(checked) => { handleOtherToggle(index, checked); }}
