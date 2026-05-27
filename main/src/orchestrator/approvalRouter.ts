@@ -114,16 +114,14 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
-   * @param db               - Narrow DatabaseLike surface (no better-sqlite3 import).
-   * @param _getQueueForRun  - Retained for backward compatibility with existing
-   *                           callers/tests; NOT used internally.  ApprovalRouter
-   *                           serializes its own mutations via approvalQueues
-   *                           (see field doc above for the rationale).
+   * Per-router PQueues (this.approvalQueues, see field doc above) are
+   * intentional and MUST stay separate from RunQueueRegistry's per-run
+   * queues — that registry hosts the long-running runExecutor.execute()
+   * task and the SDK PreToolUse hook fires from WITHIN that task.
+   * Re-entering RunQueueRegistry's queue from inside its own task would
+   * self-deadlock (runQueueRegistry.ts §no-recursive-enqueue).
    */
-  constructor(
-    private readonly db: DatabaseLike,
-    _getQueueForRun: (runId: string) => PQueue,
-  ) {
+  constructor(private readonly db: DatabaseLike) {
     super();
   }
 
@@ -137,11 +135,8 @@ export class ApprovalRouter extends EventEmitter {
    * ready. Permission decisions arrive via the SDK PreToolUse hook in
    * claudeCodeManager.makePreToolUseHook (TASK-590).
    */
-  static initialize(
-    db: DatabaseLike,
-    getQueueForRun: (runId: string) => PQueue,
-  ): ApprovalRouter {
-    ApprovalRouter.instance = new ApprovalRouter(db, getQueueForRun);
+  static initialize(db: DatabaseLike): ApprovalRouter {
+    ApprovalRouter.instance = new ApprovalRouter(db);
     return ApprovalRouter.instance;
   }
 

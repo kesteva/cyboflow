@@ -13,6 +13,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 
 // ---------------------------------------------------------------------------
 // Mock cyboflowApi so store-level subscription does not attempt real IPC
@@ -30,7 +31,7 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 // Mock tRPC client — listMessages returns [] by default
 // ---------------------------------------------------------------------------
 
-const mockListMessages = vi.fn(async () => []);
+const mockListMessages = vi.fn<() => Promise<ChatMessage[]>>(async () => []);
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -441,6 +442,84 @@ describe('RunChatView', () => {
   // Race condition: aborted flag prevents stale state from a slow first fetch
   // landing after runId has already changed
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // TASK-776: Dedup — assistant id-based and user timestamp-based
+  // -------------------------------------------------------------------------
+
+  it('deduplicates assistant message overlap between historicalMessages and streamEvents', async () => {
+    const historicalMessage: ChatMessage = {
+      id: 'msg-dup-001',
+      runId: 'run-1',
+      role: 'assistant',
+      text: 'Hello duplicated',
+      createdAt: '2026-05-26T00:00:00.000Z',
+    };
+    mockListMessages.mockImplementationOnce(async () => [historicalMessage]);
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-1');
+      // Live event with the SAME payload.message.id as the historical row
+      useCyboflowStore.getState().appendStreamEvent({
+        runId: 'run-1',
+        type: 'assistant',
+        payload: {
+          type: 'assistant',
+          message: {
+            id: 'msg-dup-001',                       // same id => dedup
+            model: 'claude-sonnet',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Hello duplicated' }],
+          },
+        },
+        timestamp: '2026-05-26T00:00:01.000Z',
+      });
+    });
+
+    render(<RunChatView runId="run-1" />);
+
+    await waitFor(() => {
+      // EXACTLY ONE rendering of the duplicated text
+      expect(screen.getAllByText('Hello duplicated')).toHaveLength(1);
+    });
+  });
+
+  it('renders a post-history user event that arrives after the latest historicalMessage.createdAt', async () => {
+    const historicalMessage: ChatMessage = {
+      id: 'msg-hist-001',
+      runId: 'run-2',
+      role: 'assistant',
+      text: 'Historical only',
+      createdAt: '2026-05-26T00:00:00.000Z',
+    };
+    mockListMessages.mockImplementationOnce(async () => [historicalMessage]);
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-2');
+      // Live user event with timestamp STRICTLY AFTER the historical createdAt
+      useCyboflowStore.getState().appendStreamEvent({
+        runId: 'run-2',
+        type: 'user',
+        payload: {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'toolu-z', content: 'Post-history result', is_error: false },
+            ],
+          },
+        },
+        timestamp: '2026-05-26T00:00:05.000Z',  // strictly after historical
+      });
+    });
+
+    render(<RunChatView runId="run-2" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Historical only')).toBeInTheDocument();
+      expect(screen.getByText(/Post-history result/)).toBeInTheDocument();
+    });
+  });
 
   it('ignores the result of a stale listMessages fetch when runId changes before it resolves', async () => {
     // Give the first fetch a deferred promise so it resolves only after we

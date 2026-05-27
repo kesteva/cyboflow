@@ -18,7 +18,6 @@ import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../
 import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
-import { RunQueueRegistry } from '../../main/src/orchestrator/RunQueueRegistry';
 import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
 import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
@@ -79,16 +78,9 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
   // Adapt better-sqlite3 to DatabaseLike interface
   const dbLike = dbAdapter(db);
 
-  const runQueueRegistry = new RunQueueRegistry();
-  const approvalRouter = new ApprovalRouter(
-    dbLike,
-    (runId: string) => runQueueRegistry.getOrCreate(runId),
-  );
+  const approvalRouter = new ApprovalRouter(dbLike);
   // Initialize singleton for any code that calls ApprovalRouter.getInstance()
-  ApprovalRouter.initialize(
-    dbLike,
-    (runId: string) => runQueueRegistry.getOrCreate(runId),
-  );
+  ApprovalRouter.initialize(dbLike);
 
   const workflowRegistry = new WorkflowRegistry(dbLike, harnessLogger);
   const worktreeManager = new WorktreeManager();

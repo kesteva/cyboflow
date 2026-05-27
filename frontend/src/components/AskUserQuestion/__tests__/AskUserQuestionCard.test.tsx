@@ -13,7 +13,7 @@
  *   9. Submit failure does not call onAnswered
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Question } from '../../../../../shared/types/questions';
 
@@ -43,6 +43,7 @@ vi.mock('../../../trpc/client', () => ({
 // ---------------------------------------------------------------------------
 
 import { AskUserQuestionCard } from '../AskUserQuestionCard';
+import { useQuestionStore } from '../../../stores/questionStore';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -94,6 +95,8 @@ function makeQuestion(overrides: Partial<Question> = {}): Question {
 beforeEach(() => {
   mockAnswerMutate.mockReset();
   mockAnswerMutate.mockResolvedValue({ success: true });
+  // Reset questionStore to clean state so bus values don't bleed between tests.
+  useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
 });
 
 // ---------------------------------------------------------------------------
@@ -495,5 +498,146 @@ describe('submit failure does not call onAnswered', () => {
     });
 
     expect(onAnswered).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// otherText bus integration
+// ---------------------------------------------------------------------------
+
+describe('otherText bus integration', () => {
+  it('reads otherText from questionStore and prefers bus over local state', async () => {
+    const item = makeQuestion({
+      id: 'q-1',
+      questions: [
+        {
+          question: 'What color?',
+          header: 'Color',
+          multiSelect: false,
+          options: [{ label: 'Red' }],
+        },
+        {
+          question: 'What size?',
+          header: 'Size',
+          multiSelect: false,
+          options: [{ label: 'Large' }],
+        },
+      ],
+    });
+
+    render(<AskUserQuestionCard item={item} />);
+
+    // Set bus value after render — simulates ChatInput typing
+    await act(async () => {
+      useQuestionStore.setState({ otherText: { 'q-1': 'from-bus' } });
+    });
+
+    // Both sub-question Other inputs should show the bus value
+    const otherInputs = screen.getAllByRole('textbox', { name: /other free-text/i });
+    expect(otherInputs).toHaveLength(2);
+    expect((otherInputs[0] as HTMLInputElement).value).toBe('from-bus');
+    expect((otherInputs[1] as HTMLInputElement).value).toBe('from-bus');
+  });
+
+  it('calls clearOtherText after successful submit', async () => {
+    const item = makeQuestion({
+      id: 'q-1',
+      questions: [
+        {
+          question: 'What color?',
+          header: 'Color',
+          multiSelect: false,
+          options: [{ label: 'Red' }],
+        },
+      ],
+    });
+
+    // Pre-fill the bus so we can detect it being cleared
+    useQuestionStore.setState({ otherText: { 'q-1': 'sentinel' } });
+
+    render(<AskUserQuestionCard item={item} />);
+
+    // Select Other and confirm the bus value is shown
+    const otherRadio = screen.getByRole('radio', { name: /Other/i });
+    fireEvent.click(otherRadio);
+
+    // Wait for the submit button to become enabled (Other text from bus fills the field)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /submit answer/i })).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /submit answer/i }));
+
+    await waitFor(() => {
+      expect(mockAnswerMutate).toHaveBeenCalledTimes(1);
+    });
+
+    // After successful submit, the bus slot for q-1 must be cleared
+    await waitFor(() => {
+      expect(useQuestionStore.getState().otherText['q-1']).toBeUndefined();
+    });
+  });
+
+  it('falls back to local useState when bus slot is undefined', () => {
+    const item = makeQuestion({
+      id: 'q-1',
+      questions: [
+        {
+          question: 'What color?',
+          header: 'Color',
+          multiSelect: false,
+          options: [{ label: 'Red' }],
+        },
+      ],
+    });
+
+    // No bus value set — otherText is already {} from beforeEach reset
+    render(<AskUserQuestionCard item={item} />);
+
+    const otherRadio = screen.getByRole('radio', { name: /Other/i });
+    fireEvent.click(otherRadio);
+
+    const textInput = screen.getByRole('textbox', { name: /other free-text/i });
+    fireEvent.change(textInput, { target: { value: 'local-value' } });
+
+    expect((textInput as HTMLInputElement).value).toBe('local-value');
+  });
+
+  it('local edit in one sub-question does not affect bus-prefilled sibling', async () => {
+    const item = makeQuestion({
+      id: 'q-1',
+      questions: [
+        {
+          question: 'What color?',
+          header: 'Color',
+          multiSelect: false,
+          options: [{ label: 'Red' }],
+        },
+        {
+          question: 'What size?',
+          header: 'Size',
+          multiSelect: false,
+          options: [{ label: 'Large' }],
+        },
+      ],
+    });
+
+    // Set the bus to 'from-bus' before render
+    useQuestionStore.setState({ otherText: { 'q-1': 'from-bus' } });
+
+    render(<AskUserQuestionCard item={item} />);
+
+    // Both inputs should start at 'from-bus'
+    const otherInputs = screen.getAllByRole('textbox', { name: /other free-text/i });
+    expect((otherInputs[0] as HTMLInputElement).value).toBe('from-bus');
+    expect((otherInputs[1] as HTMLInputElement).value).toBe('from-bus');
+
+    // Type into sub-question 0's Other input to create a local override
+    fireEvent.change(otherInputs[0], { target: { value: 'override' } });
+
+    // Sub-question 0 shows the local override
+    expect((otherInputs[0] as HTMLInputElement).value).toBe('override');
+    // Sub-question 1 still shows the bus value
+    expect((otherInputs[1] as HTMLInputElement).value).toBe('from-bus');
   });
 });

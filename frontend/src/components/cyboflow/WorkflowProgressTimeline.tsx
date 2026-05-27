@@ -1,9 +1,10 @@
 /**
- * WorkflowProgressTimeline — vertical per-phase step feed wired to live tRPC phase state.
+ * WorkflowProgressTimeline — vertical per-phase step feed wired to live phase state
+ * via useWorkflowPhaseState hook.
  *
  * Consumes:
- *   trpc.cyboflow.runs.getPhaseState({ runId })  — seed query on mount / runId change
- *   trpc.cyboflow.runs.onStepTransition({ runId }) — live subscription for step updates
+ *   useWorkflowPhaseState(runId) — hook owns tRPC seed-query + subscription lifecycle
+ *   useCyboflowStore            — streamEvents for log-line projection
  *
  * Renders protoflow §4a: vertical feed with phase sections (colored swatch + label +
  * step count), timeline step items with state-keyed 2px left borders + 8px bullet +
@@ -13,23 +14,13 @@
  * 1.4s opacity+scale pulse on running step bullet only.
  * Uses existing cyboflow Tailwind tokens — NOT protoflow paper-cream palette.
  *
- * TASK-768 / IDEA-026
+ * TASK-768 / TASK-781 / IDEA-026
  */
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { trpc } from '../../trpc/client';
-import type { WorkflowDefinition, WorkflowStepState } from '../../../../shared/types/workflows';
+import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
+import type { WorkflowStepState } from '../../../../shared/types/workflows';
 import type { StreamEvent } from '../../utils/cyboflowApi';
-
-// ---------------------------------------------------------------------------
-// PhaseState — shape returned by getPhaseState query
-// ---------------------------------------------------------------------------
-
-interface PhaseState {
-  definition: WorkflowDefinition;
-  currentStepId: string | null;
-  stepStates: WorkflowStepState[];
-}
 
 // ---------------------------------------------------------------------------
 // LogLine — projected from streamEvents
@@ -181,11 +172,8 @@ function ensurePulseStyle(): void {
 // ---------------------------------------------------------------------------
 
 export function WorkflowProgressTimeline({ runId }: { runId: string | null }): ReactElement {
-  // ── State ──────────────────────────────────────────────────────────────────
-  const [phaseState, setPhaseState] = useState<PhaseState | null>(null);
-  const [stepStates, setStepStates] = useState<WorkflowStepState[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // ── Phase state from hook (owns tRPC seed-query + subscription lifecycle) ──
+  const { definition, stepStates, isLoading, error } = useWorkflowPhaseState(runId);
 
   // Stream events for log-line projection
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
@@ -194,67 +182,6 @@ export function WorkflowProgressTimeline({ runId }: { runId: string | null }): R
   useEffect(() => {
     ensurePulseStyle();
   }, []);
-
-  // ── Seed-query effect ──────────────────────────────────────────────────────
-  useEffect(() => {
-    if (runId === null) {
-      // Reset state for null runId
-      setPhaseState(null);
-      setStepStates([]);
-      setIsLoading(false);
-      setLoadError(null);
-      return;
-    }
-
-    let aborted = false;
-    setIsLoading(true);
-    setLoadError(null);
-
-    trpc.cyboflow.runs.getPhaseState.query({ runId })
-      .then((result) => {
-        if (aborted) return;
-        setPhaseState(result);
-        setStepStates(result.stepStates);
-        setIsLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (aborted) return;
-        const msg = err instanceof Error ? err.message : String(err);
-        setLoadError(msg);
-        setIsLoading(false);
-      });
-
-    return () => {
-      aborted = true;
-    };
-  }, [runId]);
-
-  // ── Subscription effect ────────────────────────────────────────────────────
-  useEffect(() => {
-    if (runId === null) return;
-
-    const subscription = trpc.cyboflow.runs.onStepTransition.subscribe(
-      { runId },
-      {
-        onData: (event) => {
-          if (event.runId !== runId) return;
-          setStepStates((prev) =>
-            prev.map((s) =>
-              s.stepId === event.stepId ? { ...s, status: event.status } : s,
-            ),
-          );
-        },
-        onError: (err: unknown) => {
-          console.error('[WorkflowProgressTimeline] onStepTransition error:', err);
-          // Do not reset state — subscription errors are non-fatal
-        },
-      },
-    );
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, [runId]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -277,15 +204,15 @@ export function WorkflowProgressTimeline({ runId }: { runId: string | null }): R
     );
   }
 
-  if (loadError !== null) {
+  if (error !== null) {
     return (
       <div className="flex h-full items-center justify-center p-3 text-xs text-status-error">
-        Failed to load workflow state: {loadError}
+        Failed to load workflow state: {error.message}
       </div>
     );
   }
 
-  if (phaseState === null) {
+  if (definition === null) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-text-secondary">
         No workflow data
@@ -300,7 +227,7 @@ export function WorkflowProgressTimeline({ runId }: { runId: string | null }): R
 
   return (
     <div className="flex h-full flex-col overflow-y-auto p-3 text-xs text-text-primary">
-      {phaseState.definition.phases.map((phase) => {
+      {definition.phases.map((phase) => {
         const phaseStepCount = phase.steps.length;
 
         return (

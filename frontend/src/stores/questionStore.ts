@@ -248,6 +248,12 @@ export const useQuestionStore = create<QuestionStoreState>((set, get) => {
         onError: (err: unknown) => {
           console.error('[questionStore] onQuestionAnswered subscription error:', err);
           setConnectionStatus('disconnected');
+          // Mirror onQuestionCreated onError: tear down both subscriptions and
+          // clear closure state so a subsequent init() can re-subscribe.
+          createdSubscription.unsubscribe();
+          answeredSubscription.unsubscribe();
+          initialized = false;
+          cachedUnsubscribe = null;
         },
       });
 

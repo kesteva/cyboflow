@@ -1,8 +1,8 @@
 ---
-pending_count: 30
+pending_count: 31
 buckets:
   decisions: 0
-  actions: 2
+  actions: 3
   testing: 23
   deferred_visual: 5
 items: []
@@ -29,11 +29,12 @@ _No items._
     - Level 2 visual verification of RunChatView Chat tab rendering
     - "Level 2 visual_macos verification of RunRightRail 3-tab shell (296px right column, left border, tab switching)"
     - Level 2 visual_macos verification of CyboflowRoot two-column layout (left column fluid + right rail fixed)
+    - Level 2 visual verification for macos (RunChatView dedup of duplicate bubbles)
   level: visual
   severity: medium
   created_at: "2026-05-23T20:24:55.800Z"
-  updated_at: "2026-05-27T01:53:21.330Z"
-  sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 end-of-sprint Pass 1 — same exact error: 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782, both capture_focus modes. Grants probe still reports clean. Suggested action documented in FIND-SPRINT-034-3 and matches the existing action above. Same dedup_key intentionally — this is a recurring config gap that has now blocked 2 sprints."
+  updated_at: "2026-05-27T14:28:59.000Z"
+  sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-034 + SPRINT-041 end-of-sprint Pass 1. SPRINT-034: live capture failed with 'Failed to start stream due to audio/video capture failure' on Peekaboo MCP image() against Electron PID 80782 in both capture_focus modes. SPRINT-041: Peekaboo server_status reports Screen Recording granted but Accessibility NOT granted; visual capture against the running Electron app is therefore unavailable. Same dedup_key intentionally — this is a recurring config gap that has now blocked 3+ sprints."
   affected_tasks:
     - TASK-655
     - TASK-715
@@ -42,6 +43,10 @@ _No items._
     - TASK-761
     - TASK-767
     - TASK-768
+    - TASK-772
+    - TASK-776
+    - TASK-780
+    - TASK-781
 
 - task: TASK-756
   type: config_issue
@@ -52,13 +57,29 @@ _No items._
   blocked_checks:
     - Level 2 visual_web verification of RunBottomPane tab bar rendered output
     - Level 2 visual_web verification of RunRightRail 3-tab shell
+    - Level 2 visual verification for web
+    - Level 2 visual verification for web (RunChatView dedup of duplicate bubbles)
   level: visual
-  severity: low
+  severity: medium
   created_at: "2026-05-26T21:27:15.844Z"
-  updated_at: "2026-05-27T01:36:47.322Z"
+  updated_at: "2026-05-27T14:28:59.000Z"
+  sprint_recurrence: "shadow-sprint-verifier confirms recurrence at SPRINT-041 end-of-sprint Pass 1. visual_web remains structurally non-functional in this Electron repo per CLAUDE.md (Vite renderer at http://localhost:4521 cannot bootstrap without preload-injected electronTRPC). Same dedup_key intentionally — this is a recurring config gap until the Playwright config is reworked to use _electron.launch()."
   affected_tasks:
     - TASK-756
     - TASK-767
+    - TASK-772
+    - TASK-776
+    - TASK-780
+    - TASK-781
+
+- task: TASK-755
+  type: action_required
+  bucket: actions
+  action: "Re-audit production consumers of the two SPRINT-038 quick-session fields. If matches found, reclassify as alive and switch task to add-to-twin instead of delete-on-both. Re-run /soloflow:sprint when ready."
+  blocked_checks:
+    - "prerequisite: Sanity check that both fields are still dead before pruning"
+  level: ground_truth
+  severity: high
 
 ## Testing
 

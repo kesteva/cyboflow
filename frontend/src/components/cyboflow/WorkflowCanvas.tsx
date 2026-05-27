@@ -8,14 +8,18 @@
  *   - steps after currentStepId → pending
  *   - currentStepId null / not found → all pending
  *
- * No tRPC calls, no SVG edge layer, no animated token in this task.
- * SVG edge layer and animated token deferred to TASK-770.
+ * Measures step-card rects via ResizeObserver and useLayoutEffect, runs the RAF
+ * token clock via useWorkflowTokenAnimation, and renders the SVG edge overlay
+ * via WorkflowCanvasEdges.
  *
- * TASK-769 / IDEA-026
+ * TASK-769 / TASK-780 / IDEA-026
  */
+import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
+import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
+import { useWorkflowTokenAnimation } from '../../hooks/useWorkflowTokenAnimation';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,17 +65,88 @@ export function WorkflowCanvas({
   const COL_GAP = 14;
   const ROW_H = 86;
   const TOP = 28; // vertical offset from canvas inner top for first card
-  const LEFT = 12; // left padding of canvas inner
 
   // ── Build per-phase column layout ─────────────────────────────────────────
   const columns = definition.phases.map((phase, phaseIdx) => {
-    const x = LEFT + phaseIdx * (COL_W + COL_GAP);
+    const x = COL_W + phaseIdx * (COL_W + COL_GAP);
     return { phase, x };
   });
 
   // ── Canvas inner height: tallest column + TOP padding ────────────────────
   const maxSteps = Math.max(...definition.phases.map((p) => p.steps.length), 0);
   const canvasInnerHeight = TOP + maxSteps * ROW_H + 12;
+
+  // ── Refs for rect measurement ─────────────────────────────────────────────
+  const innerRef = useRef<HTMLDivElement | null>(null);
+  const stepRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+
+  // ── DOMRect state ─────────────────────────────────────────────────────────
+  const [stepRects, setStepRects] = useState<Map<string, DOMRect>>(new Map());
+  const [containerRect, setContainerRect] = useState<DOMRect | null>(null);
+
+  // ── Measure rects via ResizeObserver ──────────────────────────────────────
+  useLayoutEffect(() => {
+    const container = innerRef.current;
+    if (!container) return;
+
+    const measure = () => {
+      const cRect = container.getBoundingClientRect();
+      setContainerRect(cRect);
+
+      const newStepRects = new Map<string, DOMRect>();
+      for (const [id, el] of stepRefs.current.entries()) {
+        if (el) {
+          const raw = el.getBoundingClientRect();
+          // Make container-relative
+          newStepRects.set(
+            id,
+            new DOMRect(raw.x - cRect.x, raw.y - cRect.y, raw.width, raw.height),
+          );
+        }
+      }
+      setStepRects(newStepRects);
+    };
+
+    measure();
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    for (const el of stepRefs.current.values()) {
+      if (el) ro.observe(el);
+    }
+
+    return () => {
+      ro.disconnect();
+    };
+  }, [definition]);
+
+  // ── Animated token clock ───────────────────────────────────────────────────
+  const t = useWorkflowTokenAnimation({
+    enabled: isRunning && currentIdx >= 0 && currentIdx < stepIds.length - 1,
+  });
+
+  // ── Token position via linear interpolation ───────────────────────────────
+  const token = useMemo<{ x: number; y: number } | null>(() => {
+    if (currentIdx < 0 || currentIdx >= stepIds.length - 1) return null;
+
+    const currentId = stepIds[currentIdx];
+    const nextId = stepIds[currentIdx + 1];
+    if (!currentId || !nextId) return null;
+
+    const fromRect = stepRects.get(currentId);
+    const toRect = stepRects.get(nextId);
+    if (!fromRect || !toRect) return null;
+
+    const fromX = fromRect.x + fromRect.width / 2;
+    const toX = toRect.x + toRect.width / 2;
+    const fromY = fromRect.y + HEAD_BAR_CENTER_Y;
+    const toY = toRect.y + HEAD_BAR_CENTER_Y;
+
+    return {
+      x: fromX + (toX - fromX) * t,
+      y: fromY + (toY - fromY) * t,
+    };
+  }, [t, stepRects, currentIdx, stepIds]);
 
   // ── Running pill — uses Tailwind animate-pulse (1.4s built-in) ───────────
 
@@ -154,6 +229,7 @@ export function WorkflowCanvas({
 
       {/* ── Canvas inner — phase columns with step cards ───────────────────── */}
       <div
+        ref={innerRef}
         style={{
           position: 'relative',
           flex: 1,
@@ -166,7 +242,19 @@ export function WorkflowCanvas({
         }}
         data-testid="workflow-canvas-inner"
       >
-        {/* SVG edge layer and animated token deferred to TASK-770 */}
+        {/* SVG edge overlay */}
+        <div
+          data-testid="workflow-canvas-edges-overlay"
+          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+        >
+          <WorkflowCanvasEdges
+            definition={definition}
+            currentStepIndex={currentIdx}
+            stepRects={stepRects}
+            containerRect={containerRect}
+            token={token}
+          />
+        </div>
 
         {columns.map(({ phase }, phaseIdx) => {
           // Track running flat-step index across phases
@@ -211,6 +299,7 @@ export function WorkflowCanvas({
                 return (
                   <div
                     key={step.id}
+                    ref={(el) => { stepRefs.current.set(step.id, el); }}
                     style={{ height: ROW_H, position: 'relative' }}
                     data-testid={`step-wrapper-${step.id}`}
                   >

@@ -3,6 +3,14 @@ import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 afterEach(() => { cleanup(); });
 
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  } as unknown as typeof ResizeObserver;
+}
+
 // ---------------------------------------------------------------------------
 // Global tRPC stub — prevents "Could not find `electronTRPC` global" crash
 // when a test file renders a component that imports trpc/client without

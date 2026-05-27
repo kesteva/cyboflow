@@ -23,32 +23,12 @@
  * end-to-end without spinning up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import PQueue from 'p-queue';
 import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
 import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
 import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-
-// ---------------------------------------------------------------------------
-// Per-run queue registry (real PQueue — no mocks)
-// ---------------------------------------------------------------------------
-
-function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue; queues: Map<string, PQueue> } {
-  const queues = new Map<string, PQueue>();
-  return {
-    queues,
-    getOrCreate(runId: string): PQueue {
-      let q = queues.get(runId);
-      if (!q) {
-        q = new PQueue({ concurrency: 1 });
-        queues.set(runId, q);
-      }
-      return q;
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -67,10 +47,9 @@ describe('ApprovalRouter', () => {
   it('requestApproval inserts approvals (pending) and sets workflow_runs to awaiting_review', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const noopSocketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-001';
     seedRun(db, { id: runId, status: 'running' });
@@ -82,7 +61,7 @@ describe('ApprovalRouter', () => {
     // Wait for the queue task to complete (transaction committed) by yielding
     // a few microtask ticks, then inspect the DB.  We wait until the queue
     // for this run is idle to be deterministic.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // --- Assert: workflow_runs updated ---
     const run = db
@@ -113,10 +92,9 @@ describe('ApprovalRouter', () => {
   it('respond (allow) after run is canceled does NOT call socketReply with allow', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-002';
     seedRun(db, { id: runId, status: 'running' });
@@ -126,7 +104,7 @@ describe('ApprovalRouter', () => {
     const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/x' }, socketReply);
 
     // Wait for the queue to be idle so the transaction has committed.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // --- Simulate a concurrent cancel OUTSIDE the queue ---
     // This is the race: the run is canceled between requestApproval and respond.
@@ -174,7 +152,6 @@ describe('ApprovalRouter', () => {
   it('two concurrent requestApproval calls for the same runId are serialized by the queue', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
     // Track call order inside the transaction to confirm serialization.
     const transactionOrder: number[] = [];
@@ -182,7 +159,7 @@ describe('ApprovalRouter', () => {
     // Wrap the prepare so we can spy on UPDATE workflow_runs calls.
     // We do this by creating two separate runs and confirming each finishes
     // before the next starts (via queue ordering).
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-003'; // Same runId for both requests.
     seedRun(db, { id: runId, status: 'running' });
@@ -200,7 +177,7 @@ describe('ApprovalRouter', () => {
     const promise2 = router.requestApproval(runId, 'tool_b', {}, socketReply2);
 
     // Wait for both queue tasks to drain.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // promise1 is waiting for respond(); promise2 should have thrown.
     // Retrieve approval ID for the first (successful) request.
@@ -228,10 +205,9 @@ describe('ApprovalRouter', () => {
   it("respond deny updates approvals to 'rejected' and transitions workflow_runs back to running", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-004';
     seedRun(db, { id: runId, status: 'running' });
@@ -239,7 +215,7 @@ describe('ApprovalRouter', () => {
     const approvalPromise = router.requestApproval(runId, 'dangerous_tool', { force: true }, socketReply);
 
     // Wait for the transaction to commit.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Confirm run is now awaiting_review.
     const runAfterRequest = db
@@ -282,10 +258,9 @@ describe('ApprovalRouter', () => {
   it('two concurrent respond(deny) calls invoke socketReply exactly once', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-005';
     seedRun(db, { id: runId, status: 'running' });
@@ -294,7 +269,7 @@ describe('ApprovalRouter', () => {
     const approvalPromise = router.requestApproval(runId, 'shell', { cmd: 'rm -rf /' }, socketReply);
 
     // Wait for the transaction to commit so the approval is in pending.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Retrieve the approvalId.
     const approvalId = (db
@@ -341,16 +316,15 @@ describe('ApprovalRouter', () => {
   it("respond(allow) on a non-canceled run marks approvals 'approved', run 'running', calls socketReply with allow", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-006';
     seedRun(db, { id: runId, status: 'running' });
 
     const approvalPromise = router.requestApproval(runId, 'read_file', { path: '/etc/hosts' }, socketReply);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Confirm intermediate state.
     const runMid = db
@@ -392,10 +366,9 @@ describe('ApprovalRouter', () => {
   it('getPending returns in-flight approvals and is empty after respond', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-007';
     seedRun(db, { id: runId, status: 'running' });
@@ -404,7 +377,7 @@ describe('ApprovalRouter', () => {
     expect(router.getPending()).toHaveLength(0);
 
     const approvalPromise = router.requestApproval(runId, 'write_file', { path: '/tmp/out' }, socketReply);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // After transaction commits, one entry should be visible.
     const pending = router.getPending();
@@ -426,10 +399,9 @@ describe('ApprovalRouter', () => {
   it("emits 'approvalCreated' event after requestApproval transaction commits", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-008';
     seedRun(db, { id: runId, status: 'running' });
@@ -438,7 +410,7 @@ describe('ApprovalRouter', () => {
     router.on('approvalCreated', (req) => { emittedRequests.push(req); });
 
     const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo hi' }, socketReply);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // One event should have fired after the transaction committed.
     expect(emittedRequests).toHaveLength(1);
@@ -461,10 +433,9 @@ describe('ApprovalRouter', () => {
   it('clearPendingForRun resolves in-flight pending entry with deny; socketReply NOT called; DB row rejected', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-009';
     seedRun(db, { id: runId, status: 'running' });
@@ -473,7 +444,7 @@ describe('ApprovalRouter', () => {
     const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo hi' }, socketReply);
 
     // Wait for the transaction to commit so the entry is in this.pending.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Confirm the entry is in-flight.
     expect(router.getPending()).toHaveLength(1);
@@ -510,9 +481,8 @@ describe('ApprovalRouter', () => {
   it('clearPendingForRun on a runId with no pending entries is a silent no-op', () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     // No entries in pending — clearPendingForRun must not throw and must be
     // a no-op (no DB writes, no errors).
@@ -527,11 +497,10 @@ describe('ApprovalRouter', () => {
   it('clearPendingForRun only clears the targeted runId; unrelated entries remain intact', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReplyA = vi.fn<(decision: ApprovalDecision) => void>();
     const socketReplyB = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runIdA = 'run-101A';
     const runIdB = 'run-101B';
@@ -544,8 +513,8 @@ describe('ApprovalRouter', () => {
 
     // Wait for both queue tasks to commit.
     await Promise.all([
-      qf.getOrCreate(runIdA).onIdle(),
-      qf.getOrCreate(runIdB).onIdle(),
+      router['getApprovalQueue'](runIdA).onIdle(),
+      router['getApprovalQueue'](runIdB).onIdle(),
     ]);
 
     expect(router.getPending()).toHaveLength(2);
@@ -603,18 +572,17 @@ describe('ApprovalRouter', () => {
   it('clearPendingForRun with two pending entries for the same runId rejects both', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply1 = vi.fn<(decision: ApprovalDecision) => void>();
     const socketReply2 = vi.fn<(decision: ApprovalDecision) => void>();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-012';
     seedRun(db, { id: runId, status: 'running' });
 
     // First requestApproval — moves run to 'awaiting_review'.
     const promise1 = router.requestApproval(runId, 'tool_x', {}, socketReply1);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Manually reset the run back to 'running' so a second requestApproval can
     // succeed (bypasses the production guard — intentional for this unit test).
@@ -624,7 +592,7 @@ describe('ApprovalRouter', () => {
 
     // Second requestApproval — also lands in this.pending.
     const promise2 = router.requestApproval(runId, 'tool_y', {}, socketReply2);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Two entries should be in-flight.
     expect(router.getPending()).toHaveLength(2);
@@ -671,8 +639,7 @@ describe('ApprovalRouter', () => {
   it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
     seedRun(db, { id: 'run-G2', status: 'awaiting_review' });
@@ -715,8 +682,7 @@ describe('ApprovalRouter', () => {
   it("recoverStaleAwaitingReview cancels pending approvals for recovered runs", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-H1';
     seedRun(db, { id: runId, status: 'awaiting_review' });
@@ -752,8 +718,6 @@ describe('ApprovalRouter', () => {
   // -------------------------------------------------------------------------
   it('clearPendingForRun swallows a DB error and still resolves the pending promise with deny', async () => {
     const db = createTestDb();
-    const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
     const socketReply = vi.fn<(decision: ApprovalDecision) => void>();
 
     // Inject a DB adapter whose prepare() throws for UPDATE approvals statements
@@ -774,13 +738,13 @@ describe('ApprovalRouter', () => {
         db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
     };
 
-    const router = ApprovalRouter.initialize(faultyAdapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(faultyAdapter);
 
     const runId = 'run-013';
     seedRun(db, { id: runId, status: 'running' });
 
     const approvalPromise = router.requestApproval(runId, 'bash', { cmd: 'echo test' }, socketReply);
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     expect(router.getPending()).toHaveLength(1);
 
@@ -831,9 +795,8 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
   it("routePreToolUseThroughApprovalRouter inserts approvals row, flips workflow_runs.status, and returns allow on respond(allow)", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'e2e-run-001';
     seedRun(db, { id: runId, status: 'running' });
@@ -847,7 +810,7 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     );
 
     // Wait for the queue task to complete (transaction committed).
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // (a) approvals row must exist with status='pending'.
     const approval = db
@@ -881,9 +844,8 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
   it("emits 'approvalCreated' exactly once with the inserted ApprovalRequest payload (bridge contract)", async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
 
-    const router = ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'e2e-run-002';
     seedRun(db, { id: runId, status: 'running' });
@@ -899,7 +861,7 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     );
 
     // Wait for the queue task to commit.
-    await qf.getOrCreate(runId).onIdle();
+    await router['getApprovalQueue'](runId).onIdle();
 
     // Exactly one event must have been emitted.
     expect(emitted).toHaveLength(1);

@@ -239,14 +239,66 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Merge historical + live events into a single timeline
   // -------------------------------------------------------------------------
 
+  // mergedTimeline — historical messages (from listMessages query) merged
+  // with live stream events (from cyboflowStore.streamEvents). Both feeds
+  // derive from raw_events; the dedup pass below removes the overlap that
+  // accumulates between setActiveRun and the listMessages resolution.
+  // See FIND-SPRINT-039-11 for the original bug report.
   const mergedTimeline = useMemo<TimelineItem[]>(() => {
     const historicalItems: TimelineItem[] = historicalMessages.map((message) => ({
       kind: 'historical',
       message,
     }));
 
+    // ---- Deduplicate live overlap with history ----
+    // Both feeds derive from raw_events. Any live event that arrived between
+    // setActiveRun (which begins streamEvents accumulation) and the
+    // listMessages query resolution (which populates historicalMessages)
+    // appears in BOTH arrays. Drop the live duplicates so each message
+    // renders exactly once.
+    //
+    // Assistant events: dedup by payload.message.id ↔ historicalMessage.id
+    //   (selectRunMessages extracts the same id from payload.message.id).
+    // User events: no stable id at the message level — fall back to
+    //   timestamp filter (drop user events whose timestamp ≤ the latest
+    //   historicalMessage.createdAt).
+
+    const historicalAssistantIds = new Set<string>(
+      historicalMessages
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.id),
+    );
+
+    // Latest historical createdAt — used to gate user events. Empty history
+    // produces a sentinel that lets everything through (since '' < any ISO).
+    const latestHistoricalCreatedAt = historicalMessages.length === 0
+      ? ''
+      : historicalMessages
+          .map((m) => m.createdAt)
+          .reduce((a, b) => (a > b ? a : b));
+
     const liveItems: TimelineItem[] = streamEvents
       .filter((e) => e.runId === runId)
+      .filter((e) => {
+        if (e.type === 'assistant') {
+          const msgId = e.payload.message?.id;
+          if (typeof msgId === 'string' && historicalAssistantIds.has(msgId)) {
+            return false; // dedup: already in history
+          }
+          return true;
+        }
+        if (e.type === 'user') {
+          // User events carry no stable message id — gate by timestamp.
+          // Strict-less-or-equal: a live event at exactly the same ISO
+          // string as the latest historical entry is treated as part of
+          // the historical batch (drop it).
+          return e.timestamp > latestHistoricalCreatedAt;
+        }
+        // Other event types (system, result, stream_event, ...) are not
+        // rendered by renderTimelineItem anyway; pass them through so
+        // future renderer additions are not silently filtered.
+        return true;
+      })
       .map((event) => ({ kind: 'live', event }));
 
     return [...historicalItems, ...liveItems];

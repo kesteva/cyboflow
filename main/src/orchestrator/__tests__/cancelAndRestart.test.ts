@@ -65,7 +65,8 @@ function seedWorkflowAndRun(
 
 interface OrderSpy {
   calls: string[];
-  clearPendingForRun: ReturnType<typeof vi.fn>;
+  clearPendingForRun: ReturnType<typeof vi.fn>;       // approvalRouter
+  clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
   claudeManagerStop: ReturnType<typeof vi.fn>;
   worktreeRemove: ReturnType<typeof vi.fn>;
 }
@@ -77,6 +78,10 @@ function makeOrderSpy(): OrderSpy {
     calls.push('clearPendingForRun');
   });
 
+  const clearQuestionsForRun = vi.fn((_runId: string) => {
+    calls.push('clearQuestionsForRun');
+  });
+
   const claudeManagerStop = vi.fn(async (_sessionId: string) => {
     calls.push('claudeManagerStop');
   });
@@ -85,7 +90,7 @@ function makeOrderSpy(): OrderSpy {
     calls.push('worktreeRemove');
   });
 
-  return { calls, clearPendingForRun, claudeManagerStop, worktreeRemove };
+  return { calls, clearPendingForRun, clearQuestionsForRun, claudeManagerStop, worktreeRemove };
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +106,7 @@ function makeDeps(
   return {
     db: dbAdapter(db),
     approvalRouter: { clearPendingForRun: spy.clearPendingForRun } as unknown as import('../approvalRouter').ApprovalRouter,
+    questionRouter: { clearPendingForRun: spy.clearQuestionsForRun },
     runQueues: registry,
     claudeManagerStop: spy.claudeManagerStop,
   };
@@ -133,7 +139,36 @@ describe('cancelAndRestartHandler', () => {
     await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
 
     expect(spy.calls[0]).toBe('clearPendingForRun');
-    expect(spy.calls[1]).toBe('claudeManagerStop');
+    expect(spy.calls.indexOf('claudeManagerStop')).toBeGreaterThan(spy.calls.indexOf('clearPendingForRun'));
+  });
+
+  it('calls approvalRouter.clearPendingForRun → questionRouter.clearPendingForRun → claudeManagerStop in that order', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect(spy.calls[0]).toBe('clearPendingForRun');       // approvalRouter
+    expect(spy.calls[1]).toBe('clearQuestionsForRun');     // questionRouter (NEW)
+    expect(spy.calls[2]).toBe('claudeManagerStop');
+  });
+
+  it('calls questionRouter.clearPendingForRun with the correct runId', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect(spy.clearQuestionsForRun).toHaveBeenCalledWith(runId);
+  });
+
+  it('does NOT call questionRouter.clearPendingForRun on the noOp path (already-terminal run)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'completed');
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    expect('noOp' in result && result.noOp).toBe(true);
+    expect(spy.clearQuestionsForRun).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -428,6 +463,7 @@ describe('cancelAndRestartHandler', () => {
     const deps: HandlerDeps = {
       db: racingDb,
       approvalRouter: { clearPendingForRun: spy.clearPendingForRun } as unknown as import('../approvalRouter').ApprovalRouter,
+      questionRouter: { clearPendingForRun: spy.clearQuestionsForRun },
       runQueues,
       claudeManagerStop: spy.claudeManagerStop,
     };
