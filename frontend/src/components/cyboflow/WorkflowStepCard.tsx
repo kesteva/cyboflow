@@ -220,6 +220,7 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
         >
           {/* Inline SVG person glyph */}
           <svg
+            aria-hidden="true"
             width="11"
             height="11"
             viewBox="0 0 12 12"
@@ -274,6 +275,7 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
           data-testid={`step-card-check-${step.id}`}
         >
           <svg
+            aria-hidden="true"
             width="14"
             height="14"
             viewBox="0 0 14 14"
