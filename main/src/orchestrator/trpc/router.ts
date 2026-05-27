@@ -11,14 +11,16 @@ import { approvalsRouter } from './routers/approvals';
 import { workflowsRouter } from './routers/workflows';
 import { eventsRouter } from './routers/events';
 import { healthRouter } from './routers/health';
+import { questionsRouter } from './routers/questions';
 
 export const appRouter = router({
   cyboflow: router({
-    runs: runsRouter,
     approvals: approvalsRouter,
-    workflows: workflowsRouter,
     events: eventsRouter,
     health: healthRouter,
+    questions: questionsRouter,
+    runs: runsRouter,
+    workflows: workflowsRouter,
   }),
 });
 

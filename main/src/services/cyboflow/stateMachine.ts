@@ -9,7 +9,7 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
  * once a run reaches a terminal state, NO further transitions are legal —
  * not even same-status no-ops (e.g. completed -> completed is rejected).
  *
- * Rationale: the database CHECK constraint enforces "status is one of 8
+ * Rationale: the database CHECK constraint enforces "status is one of 9
  * values" but cannot enforce "this transition from A to B is legal".
  * This table is the in-process source of truth.
  */
@@ -19,8 +19,16 @@ export const ALLOWED_TRANSITIONS: Record<
 > = {
   queued:          ['starting', 'canceled'],
   starting:        ['running', 'failed', 'canceled'],
-  running:         ['awaiting_review', 'completed', 'failed', 'canceled', 'stuck'],
+  // running -> awaiting_input: the only way to enter awaiting_input — QuestionRouter
+  // transitions atomically with the question INSERT (TASK-758).
+  running:         ['awaiting_review', 'awaiting_input', 'completed', 'failed', 'canceled', 'stuck'],
   awaiting_review: ['running', 'canceled', 'stuck', 'failed'],
+  // awaiting_input -> running: symmetric return when QuestionRouter.respond resolves.
+  // awaiting_input -> canceled: user/system cancellation while a question is in flight.
+  // awaiting_input -> failed: defensive — SDK loop crashed mid-question.
+  // awaiting_input -> stuck is intentionally NOT allowed: per IDEA-025 Q2 resolution,
+  // awaiting_input runs are exempt from stuck classification.
+  awaiting_input:  ['running', 'canceled', 'failed'],
   stuck:           ['running', 'canceled', 'failed'],
   completed:       [],
   failed:          [],

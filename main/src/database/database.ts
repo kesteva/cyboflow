@@ -1588,6 +1588,14 @@ export class DatabaseService {
         continue;
       }
 
+      // SQLite docs: PRAGMA foreign_keys toggles are no-ops inside a transaction
+      // (https://sqlite.org/pragma.html#pragma_foreign_keys). Migration 010 needs
+      // foreign_keys=OFF so that DROP TABLE workflow_runs does not CASCADE-delete
+      // child rows in approvals/messages/raw_events during the table-recreation
+      // recipe. We honour the intent by toggling the pragma OUTSIDE the
+      // this.transaction() wrapper, then restore it unconditionally in a finally.
+      const needsFkOff = sql.includes('PRAGMA foreign_keys=OFF');
+      if (needsFkOff) this.db.pragma('foreign_keys = OFF');
       try {
         this.transaction(() => {
           this.db.exec(sql);
@@ -1611,6 +1619,9 @@ export class DatabaseService {
           // log + continue so a single broken file does not brick the app boot.
           console.error(`[Database] Migration ${name} failed:`, err);
         }
+      } finally {
+        // Always restore FK enforcement, even if the transaction threw.
+        if (needsFkOff) this.db.pragma('foreign_keys = ON');
       }
     }
   }

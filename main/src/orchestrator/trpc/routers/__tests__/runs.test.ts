@@ -28,6 +28,10 @@
  *  (a) Happy path: project found → launch called → { runId, worktreePath, branchName } returned.
  *  (b) Project not found → TRPCError NOT_FOUND.
  *  (d) Deps not wired → TRPCError METHOD_NOT_SUPPORTED (also covered in router.test.ts).
+ *
+ * runs.listMessages (TASK-759 — wrapper-layer guard coverage):
+ *  (a) Empty raw_events returns [].
+ *  (b) Missing ctx.db → TRPCError PRECONDITION_FAILED.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -302,4 +306,41 @@ describe('cyboflow.runs.start', () => {
   // isolation guarantees that test file starts with startRunDeps === null.
   // Repeating it here would require a __resetForTest escape hatch in source
   // code — not added because it would exist solely to support tests.
+});
+
+// ---------------------------------------------------------------------------
+// runs.listMessages wrapper-layer tests (TASK-759)
+//
+// These tests exercise the two conditional branches in the listMessages
+// procedure body at the tRPC layer. The underlying selectRunMessages logic
+// is covered in main/src/orchestrator/__tests__/runMessagesListing.test.ts.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.listMessages', () => {
+  // -------------------------------------------------------------------------
+  // (a) Empty raw_events returns []
+  // -------------------------------------------------------------------------
+  it('(a) empty raw_events returns []', async () => {
+    // Use createTestDb with includeStuckDetectedAt because the raw_events table
+    // is part of the GATE_SCHEMA already — no extra migration needed.
+    const db = createTestDb({ includeStuckDetectedAt: true });
+    const adapter = dbAdapter(db);
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+
+    const result = await caller.cyboflow.runs.listMessages({ runId: 'run-no-messages' });
+    expect(result).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // (b) Missing ctx.db → PRECONDITION_FAILED
+  // -------------------------------------------------------------------------
+  it('(b) missing ctx.db → TRPCError PRECONDITION_FAILED', async () => {
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(
+      caller.cyboflow.runs.listMessages({ runId: 'any-run-id' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
 });

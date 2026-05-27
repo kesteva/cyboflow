@@ -52,6 +52,19 @@ export const approvalEvents = new EventEmitter();
  */
 export const stuckEvents = new EventEmitter();
 
+/**
+ * Main-process EventEmitter for question lifecycle events.
+ *
+ * QuestionRouter (questionRouter.ts) emits on this emitter via the bridge
+ * wired in main/src/index.ts:
+ *   questionEvents.emit('created', event satisfies QuestionCreatedEvent);
+ *   questionEvents.emit('answered', event satisfies QuestionAnsweredEvent);
+ *
+ * The emitter is module-level (singleton) so both the questionsRouter and
+ * main/src/index.ts share the same instance without circular imports.
+ */
+export const questionEvents = new EventEmitter();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -81,8 +94,11 @@ function makePlaceholderAsyncIterator<T>(signal: AbortSignal): AsyncIterable<T> 
  * When `signal` fires, the iterator returns without yielding any further
  * events, allowing the tRPC subscription to tear down cleanly and preventing
  * listener leaks.
+ *
+ * Exported so questions.ts (and any future single-feature router) can import
+ * this helper without duplicating the implementation.
  */
-function eventToAsyncIterable<T>(
+export function eventToAsyncIterable<T>(
   emitter: EventEmitter,
   eventName: string,
   signal: AbortSignal,
