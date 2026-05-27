@@ -1,7 +1,7 @@
 ---
 sprint: SPRINT-041
-pending_count: 3
-last_updated: "2026-05-27T05:17:58.849Z"
+pending_count: 4
+last_updated: "2026-05-27T14:23:06.075Z"
 ---
 # Findings Queue
 
@@ -56,3 +56,13 @@ last_updated: "2026-05-27T05:17:58.849Z"
 - **description:** Asymmetric cleanup vs sibling questionRouter.test.ts. The 65af958 chore commit dropped `makeQueueFactory` from questionRouter.test.ts and rewrote all its `await qf.getOrCreate(runId).onIdle()` barriers to `await router['getQuestionQueue'](runId).onIdle()` (which observes the router's REAL internal queue). The same chore left approvalRouter.test.ts with 14 standalone `await qf.getOrCreate(runId).onIdle()` calls + 2 inside `await Promise.all([qf.getOrCreate(A).onIdle(), qf.getOrCreate(B).onIdle()])` (line 545-548) plus the unused `makeQueueFactory` helper at line 38-51. Since `qf` is no longer passed to `ApprovalRouter.initialize`, these queues have zero tasks enqueued and `onIdle()` resolves immediately — the comment at line 128 ("Wait for the queue to be idle so the transaction has committed") is now actively misleading. Tests still pass only because better-sqlite3 transactions are synchronous, so DB state is committed before the next microtask; the synchronization machinery is dead weight that survives only by accident.
 - **suggested_action:** Mirror the questionRouter.test.ts fix: replace every `qf.getOrCreate(runId).onIdle()` with `router['getApprovalQueue'](runId).onIdle()` (private-field bracket access), then delete the now-unused `makeQueueFactory` helper + `import PQueue from 'p-queue'`. Verify with `grep -n 'makeQueueFactory\|qf\.' main/src/orchestrator/__tests__/approvalRouter.test.ts` returning 0 matches.
 - **resolved_by:** TASK-777
+
+## FIND-SPRINT-041-6
+- **source:** TASK-781 (verifier)
+- **type:** claude-md
+- **severity:** low
+- **status:** open
+- **location:** docs/VISUAL-VERIFICATION-SETUP.md
+- **description:** Visual verification for TASK-781 (WorkflowProgressTimeline retrofit) could not run on either configured platform. visual_web=true but Cyboflow CLAUDE.md documents that Vite renderer at http://localhost:4521 cannot bootstrap without Electron preload-injected electronTRPC — Playwright MCP path is non-functional. visual_macos=true but Peekaboo MCP reports Accessibility NOT granted for the host binary (recurring TCC.db host-process gap, duplicate of FIND-SPRINT-041-3 and the same pattern across SPRINT-031..SPRINT-040). Net result: visual verification has been silently skipped for many sprints. Compounder should either (a) ship a Playwright config that uses _electron.launch() so visual_web becomes functional, or (b) automate the Peekaboo TCC.db host-process fix so visual_macos no longer requires per-sprint manual remediation. Without one of these, the visual-verify checkbox is decorative on this project.
+- **suggested_action:** Compounder: open a tracked task to make visual verification actually runnable here — either Playwright over _electron.launch() (preferred per VISUAL-VERIFICATION-SETUP.md) or a scripted Peekaboo TCC remediation step in project bootstrap.
+- **resolved_by:** 
