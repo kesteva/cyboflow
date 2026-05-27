@@ -262,8 +262,9 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     // matching historical messages. Non-overlapping historical messages
     // (older turns from before the subscription started) are kept.
 
+    // cyboflowStore.streamEvents is already scoped to the active run
+    // (cleared on setActiveRun) — no runId filter needed.
     const liveItems: TimelineItem[] = streamEvents
-      .filter((e) => e.runId === runId)
       .filter((e) => e.type === 'assistant' || e.type === 'user')
       .map((event) => ({ kind: 'live' as const, event }));
 
