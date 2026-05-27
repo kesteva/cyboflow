@@ -32,6 +32,12 @@ interface ClaudeSpawnOptions {
   permissionMode?: 'approve' | 'ignore';
   model?: string;
   /**
+   * The workflow_runs row ID for ApprovalRouter. For workflow runs this equals
+   * panelId (RunExecutor invariant). For quick sessions it's resolved from
+   * sessions.run_id and differs from panelId. Falls back to panelId when unset.
+   */
+  runId?: string;
+  /**
    * When true, `--strict-mcp-config` is added to the CLI args so that only
    * the per-run `.mcp.json` servers load and user-global MCP servers from
    * `~/.claude.json` cannot interfere with the permission bridge.
@@ -258,11 +264,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
         }
       }
 
-      // Build SDK options.
-      const sdkOptions = await this.buildSdkOptions(options);
+      // Resolve the workflow_runs runId from the session's DB row.
+      // For workflow runs: panelId === runId (invariant from RunExecutor).
+      // For quick sessions: sessions.run_id was backfilled by the IPC handler
+      // (sessions:create-quick) and differs from panelId.
+      const sessionRow = this.sessionManager.getDbSession(sessionId);
+      const runId = (sessionRow?.run_id as string | null) ?? panelId;
+
+      // Build SDK options (uses runId for the approval-router hook).
+      const sdkOptions = await this.buildSdkOptions({ ...options, runId });
 
       // Set up the per-run pipeline (EventRouter + RawEventsSink).
-      const runId = panelId;
       const router = new EventRouter();
       const sink = new RawEventsSink(this.db, this.logger);
       sink.attachToRouter(router, runId);
@@ -309,7 +321,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       (this.processes as Map<string, StubCliProcess>).set(panelId, stub);
 
       // Wire up the ClaudeSdkRun entry.
-      const iteratorDone = this.runSdkQuery(panelId, sessionId, finalPrompt, sdkOptions, abortController, router);
+      const iteratorDone = this.runSdkQuery(panelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
 
       const run: ClaudeSdkRun = {
         abortController,
@@ -348,8 +360,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     sdkOptions: Options,
     abortController: AbortController,
     router: EventRouter,
+    runId: string,
   ): Promise<void> {
-    const runId = panelId;
     let exitCode = 0;
     try {
       const q = query({ prompt, options: { ...sdkOptions, abortController } });
@@ -386,11 +398,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
     } finally {
       this.cleanupPipeline(panelId);
-      // Clear pending approvals and questions under panelId — the same id passed to
-      // requestApproval() / requestQuestion(). cleanupCliResources takes sessionId
-      // (abstract contract) so we call the routers directly here.
-      ApprovalRouter.getInstance().clearPendingForRun(panelId);
-      QuestionRouter.getInstance().clearPendingForRun(panelId);
+      // Clear pending approvals and questions under runId — the same id passed to
+      // requestApproval() / requestQuestion() via makePreToolUseHook.
+      ApprovalRouter.getInstance().clearPendingForRun(runId);
+      QuestionRouter.getInstance().clearPendingForRun(runId);
       this.processes.delete(panelId);
       this.sdkRuns.delete(panelId);
       this.emit('exit', {
@@ -439,7 +450,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       ...(options.permissionMode !== 'ignore' ? {
         hooks: {
           PreToolUse: [{
-            hooks: [this.makePreToolUseHook(options.panelId)]
+            hooks: [this.makePreToolUseHook(options.runId ?? options.panelId)]
           }]
         }
       } : {})
@@ -547,14 +558,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * decision). In that case decision.message will be
    * 'Run was terminated before approval could be processed'.
    */
-  private makePreToolUseHook(panelId: string): HookCallback {
+  private makePreToolUseHook(runId: string): HookCallback {
     const loggerLike = makeLoggerLike(this.logger);
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
       if (pretool.tool_name === 'AskUserQuestion') {
-        return this.routeAskUserQuestion(pretool, panelId, loggerLike);
+        return this.routeAskUserQuestion(pretool, runId, loggerLike);
       }
-      return routePreToolUseThroughApprovalRouter(pretool, panelId, 'ClaudeCodeManager', loggerLike);
+      return routePreToolUseThroughApprovalRouter(pretool, runId, 'ClaudeCodeManager', loggerLike);
     };
   }
 
