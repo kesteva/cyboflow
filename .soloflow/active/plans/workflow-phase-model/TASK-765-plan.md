@@ -1,8 +1,8 @@
 ---
 id: TASK-765
 idea: IDEA-026
-status: ready
-created: 2026-05-26T16:00:00Z
+status: in-flight
+created: "2026-05-26T16:00:00Z"
 files_owned:
   - main/src/orchestrator/trpc/routers/events.ts
   - main/src/orchestrator/stepTransitionBridge.ts
@@ -27,7 +27,7 @@ acceptance_criteria:
     verification: "grep -n 'export const stepTransitionEvents = new EventEmitter()' main/src/orchestrator/trpc/routers/events.ts returns exactly 1 match."
   - criterion: "stepTransitionBridge.ts exports buildStepTransitionEvent(runId, stepId, status, db) that returns a typed WorkflowStepTransitionEvent (shape from shared/types/workflows.ts, defined by TASK-763) and emits via stepTransitionEvents.emit('transition', event)."
     verification: "grep -n 'export function buildStepTransitionEvent' main/src/orchestrator/stepTransitionBridge.ts returns 1 match; grep -n \"stepTransitionEvents.emit('transition'\" main/src/orchestrator/stepTransitionBridge.ts returns at least 1 match."
-  - criterion: "stepTransitionBridge.ts writes current_step_id to workflow_runs via parameterized UPDATE before emitting (write-then-emit ordering)."
+  - criterion: stepTransitionBridge.ts writes current_step_id to workflow_runs via parameterized UPDATE before emitting (write-then-emit ordering).
     verification: "grep -n 'UPDATE workflow_runs SET current_step_id' main/src/orchestrator/stepTransitionBridge.ts returns at least 1 match; emit call appears AFTER the .run() line."
   - criterion: "stepTransitionBridge.ts honors the standalone-typecheck invariant — no imports from 'electron', 'better-sqlite3', or main/src/services/*."
     verification: "grep -nE \"from 'electron'|from 'better-sqlite3'|from '../../services/\" main/src/orchestrator/stepTransitionBridge.ts returns 0 matches."
@@ -38,35 +38,36 @@ acceptance_criteria:
   - criterion: "v1 step-id resolution via resolveTerminalStepId(workflowName) returns a stable starter step id for each SoloFlowWorkflowName; returns null for unknown names. When null, no DB write and no emit occurs."
     verification: "grep -n 'function resolveTerminalStepId' main/src/orchestrator/stepTransitionBridge.ts returns at least 1 match."
   - criterion: "stepTransitionBridge.test.ts proves (a) happy-path emit fires with correct shape, (b) DB current_step_id is updated, (c) emit happens after UPDATE, (d) unknown workflow name returns null with no DB write/emit, (e) missing workflow_runs row logs warn and does NOT throw."
-    verification: "pnpm --filter main test -- main/src/orchestrator/__tests__/stepTransitionBridge.test.ts exits 0 with at least 5 named test cases."
+    verification: pnpm --filter main test -- main/src/orchestrator/__tests__/stepTransitionBridge.test.ts exits 0 with at least 5 named test cases.
   - criterion: "runExecutor.test.ts grows test cases proving run-start and run-end emissions fire on happy and failure paths, AND a throwing stepEmitter does not crash the executor."
     verification: "pnpm --filter main test -- main/src/orchestrator/__tests__/runExecutor.test.ts exits 0; grep -n 'stepEmitter' main/src/orchestrator/__tests__/runExecutor.test.ts returns at least 3 matches."
-  - criterion: "Existing pnpm --filter main test suite remains green."
-    verification: "pnpm --filter main test exits 0."
-depends_on: [TASK-763, TASK-764]
+  - criterion: Existing pnpm --filter main test suite remains green.
+    verification: pnpm --filter main test exits 0.
+depends_on:
+  - TASK-763
+  - TASK-764
 estimated_complexity: high
 epic: workflow-phase-model
 test_strategy:
   needed: true
   justification: "New emitter + bridge wiring + RunExecutor lifecycle integration. Three concerns: (1) the bridge builds events / writes DB / fail-softly emits; (2) RunExecutor calls the emitter at specific lifecycle points; (3) the existing runExecutor.test.ts is the canonical regression net for executor lifecycle and MUST be extended."
   targets:
-    - behavior: "buildStepTransitionEvent emits correctly shaped event and updates workflow_runs.current_step_id via DB before emit fires."
-      test_file: "main/src/orchestrator/__tests__/stepTransitionBridge.test.ts"
+    - behavior: buildStepTransitionEvent emits correctly shaped event and updates workflow_runs.current_step_id via DB before emit fires.
+      test_file: main/src/orchestrator/__tests__/stepTransitionBridge.test.ts
       type: unit
     - behavior: "buildStepTransitionEvent missing-row fallback: logs warn, does NOT throw."
-      test_file: "main/src/orchestrator/__tests__/stepTransitionBridge.test.ts"
+      test_file: main/src/orchestrator/__tests__/stepTransitionBridge.test.ts
       type: unit
-    - behavior: "resolveTerminalStepId returns canonical terminal step id for each of the five SOLOFLOW_WORKFLOW_NAMES and null for unknown."
-      test_file: "main/src/orchestrator/__tests__/stepTransitionBridge.test.ts"
+    - behavior: resolveTerminalStepId returns canonical terminal step id for each of the five SOLOFLOW_WORKFLOW_NAMES and null for unknown.
+      test_file: main/src/orchestrator/__tests__/stepTransitionBridge.test.ts
       type: unit
-    - behavior: "RunExecutor.execute fires stepEmitter.emit on run start and run end (happy/failure/cancel paths)."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+    - behavior: RunExecutor.execute fires stepEmitter.emit on run start and run end (happy/failure/cancel paths).
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
     - behavior: "RunExecutor.execute is fail-soft against a throwing stepEmitter — no escalation, one warn logged."
-      test_file: "main/src/orchestrator/__tests__/runExecutor.test.ts"
+      test_file: main/src/orchestrator/__tests__/runExecutor.test.ts
       type: integration
 ---
-
 # Add stepTransitionEvents emitter and instrument run lifecycle to emit step transitions
 
 ## Objective

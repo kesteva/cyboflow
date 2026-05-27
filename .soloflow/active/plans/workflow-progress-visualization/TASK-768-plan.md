@@ -1,8 +1,8 @@
 ---
 id: TASK-768
 idea: IDEA-026
-status: ready
-created: 2026-05-26T16:00:00Z
+status: in-flight
+created: "2026-05-26T16:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx
   - frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
@@ -42,9 +42,11 @@ acceptance_criteria:
     verification: "Vitest test renders runId={null}, asserts placeholder text present and both trpc mocks have callCount 0."
   - criterion: "Component renders entirely within cyboflow Tailwind tokens — no hardcoded protoflow paper-cream palette hex (#f5f1e8, #ebe4d2, #1a1815, #6a5e44, #9c8e6c, #d8cfb8). Phase.color values are data, not theme tokens."
     verification: "grep -nE '#f5f1e8|#ebe4d2|#1a1815|#6a5e44|#9c8e6c|#d8cfb8' frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx returns 0 matches."
-  - criterion: "pnpm --filter frontend typecheck exits 0 and pnpm --filter frontend test exits 0 with new test suite green."
-    verification: "Run both commands; both exit 0."
-depends_on: [TASK-766, TASK-767]
+  - criterion: pnpm --filter frontend typecheck exits 0 and pnpm --filter frontend test exits 0 with new test suite green.
+    verification: Run both commands; both exit 0.
+depends_on:
+  - TASK-766
+  - TASK-767
 estimated_complexity: high
 epic: workflow-progress-visualization
 test_strategy:
@@ -54,26 +56,25 @@ test_strategy:
     - behavior: "On mount with non-null runId, calls getPhaseState.query exactly once and re-calls on runId change."
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Opens onStepTransition subscription on mount and tears it down on unmount or runId change exactly once."
+    - behavior: Opens onStepTransition subscription on mount and tears it down on unmount or runId change exactly once.
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Renders phase headers + step items with state-keyed border colors using cyboflow Tailwind tokens."
+    - behavior: Renders phase headers + step items with state-keyed border colors using cyboflow Tailwind tokens.
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
     - behavior: "Applies 1.4s pulse animation to running step's bullet only."
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Projects log lines from cyboflowStore.streamEvents filtered to step time window with prefix glyph + 42px tabular timestamp + message."
+    - behavior: Projects log lines from cyboflowStore.streamEvents filtered to step time window with prefix glyph + 42px tabular timestamp + message.
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Incoming onStepTransition delta updates state; delta for different runId is ignored."
+    - behavior: Incoming onStepTransition delta updates state; delta for different runId is ignored.
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "runId=null renders placeholder and issues no tRPC calls."
+    - behavior: runId=null renders placeholder and issues no tRPC calls.
       test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
 ---
-
 # WorkflowProgressTimeline — vertical per-phase step feed wired to live tRPC phase state
 
 ## Objective

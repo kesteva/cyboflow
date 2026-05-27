@@ -1,7 +1,7 @@
 ---
 id: TASK-767
 idea: IDEA-026
-status: ready
+status: in-flight
 created: "2026-05-26T16:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx

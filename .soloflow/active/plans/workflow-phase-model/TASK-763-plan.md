@@ -1,8 +1,8 @@
 ---
 id: TASK-763
 idea: IDEA-026
-status: ready
-created: 2026-05-26T16:00:00Z
+status: in-flight
+created: "2026-05-26T16:00:00Z"
 files_owned:
   - shared/types/workflows.ts
 files_readonly:
@@ -25,10 +25,10 @@ acceptance_criteria:
     verification: "grep -nE 'export const WORKFLOW_DEFINITIONS' shared/types/workflows.ts returns one match; visual confirmation that all five SoloFlowWorkflowName keys appear in the object literal."
   - criterion: "Every WorkflowStep across all 5 definitions has a stable string id (kebab-case strings, not array-index ids). Step ids must be unique within a phase."
     verification: "Visual review: every step entry has an id: 'kebab-case-string'. Run pnpm typecheck to confirm shape."
-  - criterion: "Any WorkflowStep with a loopback field has loopback typed as string referencing the id of another step within the SAME phase (intra-phase loopbacks only in v1)."
+  - criterion: Any WorkflowStep with a loopback field has loopback typed as string referencing the id of another step within the SAME phase (intra-phase loopbacks only in v1).
     verification: "Visual review of WORKFLOW_DEFINITIONS — each loopback target value must equal an id present on the same phase's steps array. pnpm typecheck must succeed."
-  - criterion: "pnpm typecheck (workspace-wide) passes with no new errors after this change."
-    verification: "Run pnpm typecheck; exit code 0; stdout shows 0 errors that are attributable to shared/types/workflows.ts."
+  - criterion: pnpm typecheck (workspace-wide) passes with no new errors after this change.
+    verification: Run pnpm typecheck; exit code 0; stdout shows 0 errors that are attributable to shared/types/workflows.ts.
   - criterion: "All existing imports of shared/types/workflows (PermissionMode, WorkflowRow, WorkflowRunRow, WorkflowRunListRow, SOLOFLOW_WORKFLOW_NAMES, SoloFlowWorkflowName) continue to resolve unchanged."
     verification: "grep -rn \"from .*shared/types/workflows\" --include='*.ts' --include='*.tsx' . shows the existing import sites and pnpm typecheck passes (zero downstream breakage)."
 depends_on: []
@@ -38,7 +38,6 @@ test_strategy:
   needed: false
   justification: "shared/types/workflows.ts is a pure type and data module with no runtime behavior beyond a static const object literal. There are no sibling test files under shared/types/ (Glob 'shared/types/*.test.ts' → no matches; Glob 'shared/**/__tests__/**' → no matches). Structural correctness of WORKFLOW_DEFINITIONS is enforced by the TypeScript compiler at build time. Downstream tasks (TASK-764 migration, TASK-765 runner instrumentation, TASK-766 tRPC) will add behavioral tests that transitively exercise WORKFLOW_DEFINITIONS."
 ---
-
 # Define WorkflowDefinition type system and hardcode 5 starter definitions
 
 ## Objective
