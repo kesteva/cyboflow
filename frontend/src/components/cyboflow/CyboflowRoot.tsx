@@ -12,13 +12,14 @@
  *                    when a main-repo session exists (Option B)
  *   Modal overlay  — WorkflowPicker mounted inside Modal
  */
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useQuestionStore } from '../../stores/questionStore';
 import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
 import { usePanelSurface } from '../../hooks/usePanelSurface';
 import { SessionProvider } from '../../contexts/SessionContext';
@@ -62,6 +63,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   }, [projectId, quickSession]);
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
+
+  useEffect(() => useQuestionStore.getState().init(), []);
 
   return (
     <div className="flex h-full flex-col">
