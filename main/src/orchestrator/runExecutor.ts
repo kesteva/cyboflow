@@ -84,6 +84,20 @@ export interface LifecycleTransitionsLike {
   canceled(runId: string): void;
 }
 
+/**
+ * Narrow interface for emitting step-transition events.
+ * The concrete adapter in main/src/index.ts delegates to buildStepTransitionEvent()
+ * from stepTransitionBridge.ts. Keeping this interface here preserves the
+ * standalone-typecheck invariant: runExecutor.ts never imports from the bridge
+ * or from main/src/services/*.
+ *
+ * `emit(runId, status)` is fail-soft by convention: the executor wraps each
+ * call in a try/catch and logs at warn level without escalating.
+ */
+export interface StepTransitionEmitterLike {
+  emit(runId: string, status: 'pending' | 'running' | 'done'): void;
+}
+
 // ---------------------------------------------------------------------------
 // RunExecutor
 // ---------------------------------------------------------------------------
@@ -141,6 +155,13 @@ export class RunExecutor {
      * When absent, bridgeEvents() short-circuits (no bridging, backward-compat).
      */
     private readonly source?: EventEmitter,
+    /**
+     * Optional step-transition emitter collaborator (TASK-765).
+     * When injected, emitStep() calls stepEmitter.emit(runId, status) at run
+     * start ('running') and run end ('done'). When absent, step transitions are
+     * silently skipped (backward-compat with callers that predate TASK-765).
+     */
+    private readonly stepEmitter?: StepTransitionEmitterLike,
   ) {}
 
   /**
@@ -205,6 +226,9 @@ export class RunExecutor {
       }
 
       await this.onLifecycleTransition(runId, 'pre_spawn');
+      // Emit step 'running' after the run transitions to running status (write-then-emit
+      // ordering mirrors stepTransitionBridge: lifecycle transition fires first, then step emit).
+      this.emitStep(runId, 'running');
 
       this.logger.info('[RunExecutor] spawning Claude CLI process', {
         runId,
@@ -223,11 +247,15 @@ export class RunExecutor {
 
         // Iterator drained without error — fire the completed phase.
         await this.onLifecycleTransition(runId, 'completed');
+        // Emit step 'done' after completed lifecycle fires.
+        this.emitStep(runId, 'done');
       } catch (err) {
         // Stash the error message so onLifecycleTransition('failed') can pick it up.
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
+        // Emit step 'done' on failure path as well — the step ended, regardless of outcome.
+        this.emitStep(runId, 'done');
         // Re-throw so the caller's catch (in runLauncher.ts) can log it.
         throw err;
       }
@@ -258,6 +286,8 @@ export class RunExecutor {
 
       await this.spawner.abort(panelId);
       await this.onLifecycleTransition(runId, 'canceled');
+      // Emit step 'done' on canceled path — the step ended regardless of reason.
+      this.emitStep(runId, 'done');
       this.teardownRun(runId);
     }
   }
@@ -277,6 +307,29 @@ export class RunExecutor {
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingFailedMessage.delete(runId);
     this.pendingFailedFromStatus.delete(runId);
+  }
+
+  /**
+   * Fail-soft step-transition emit.
+   *
+   * Calls stepEmitter.emit(runId, status) if a stepEmitter is injected.
+   * A throwing emitter is caught, logged at warn level, and NOT escalated —
+   * step-transition events must never crash the executor.
+   *
+   * @param runId  The workflow run ID.
+   * @param status The new step status to emit.
+   */
+  private emitStep(runId: string, status: 'pending' | 'running' | 'done'): void {
+    if (!this.stepEmitter) return;
+    try {
+      this.stepEmitter.emit(runId, status);
+    } catch (err) {
+      this.logger.warn('[RunExecutor] stepEmitter.emit threw (fail-soft)', {
+        runId,
+        status,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
