@@ -1,8 +1,8 @@
 ---
 id: TASK-780
 idea: IDEA-026
-status: ready
-created: 2026-05-26T18:00:00Z
+status: in-flight
+created: "2026-05-26T18:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx
   - frontend/src/components/cyboflow/RunRightRail.tsx
@@ -23,18 +23,19 @@ acceptance_criteria:
   - criterion: "RunRightRail no longer renders the 'Workflow Progress — coming soon' placeholder; it imports and uses WorkflowProgressTimeline."
     verification: "grep returns 0 hits for the placeholder string AND >=2 hits for WorkflowProgressTimeline (import + JSX)."
   - criterion: "When activeRunId is null, RunRightRail renders a neutral empty state with data-testid='run-right-rail-workflow-progress-empty' (does NOT mount the timeline with null runId)."
-    verification: "grep for the empty-state testid returns at least 1 match; new test case passes."
-  - criterion: "CyboflowRoot imports WorkflowCanvas and mounts it stacked ABOVE RunBottomPane in the left column whenever activeRunId is non-null AND useWorkflowPhaseState returned a definition."
+    verification: grep for the empty-state testid returns at least 1 match; new test case passes.
+  - criterion: CyboflowRoot imports WorkflowCanvas and mounts it stacked ABOVE RunBottomPane in the left column whenever activeRunId is non-null AND useWorkflowPhaseState returned a definition.
     verification: "grep for WorkflowCanvas in CyboflowRoot.tsx returns import + JSX; new test case 'mounts WorkflowCanvas above RunBottomPane' passes."
-  - criterion: "CyboflowRoot drives WorkflowCanvas via useWorkflowPhaseState(activeRunId); renders no canvas when activeRunId is null."
+  - criterion: CyboflowRoot drives WorkflowCanvas via useWorkflowPhaseState(activeRunId); renders no canvas when activeRunId is null.
     verification: "grep for useWorkflowPhaseState returns import + hook call; new test 'does not mount WorkflowCanvas when activeRunId is null' passes and asserts getPhaseState.query was not called."
   - criterion: "WorkflowCanvas references all Insertion Contract symbols: WorkflowCanvasEdges, useWorkflowTokenAnimation, ResizeObserver, stepRects, containerRect; attaches refs per step wrapper; runs useLayoutEffect writing container-relative DOMRects; computes linear-interpolated token; renders the SVG overlay tagged data-testid='workflow-canvas-edges-overlay'."
     verification: "grep returns >=6 distinct symbol matches; the stale 'deferred to TASK-770' comment is removed."
   - criterion: "WorkflowCanvas test 'does not render an SVG edge layer...' is deleted; replaced with one asserting workflow-canvas-edges-overlay testid is present when currentStepId is supplied."
-    verification: "grep for the old test text returns 0; grep for workflow-canvas-edges-overlay in the test file returns at least 1."
-  - criterion: "pnpm typecheck exits 0 and pnpm lint exits 0."
+    verification: grep for the old test text returns 0; grep for workflow-canvas-edges-overlay in the test file returns at least 1.
+  - criterion: pnpm typecheck exits 0 and pnpm lint exits 0.
   - criterion: "pnpm --filter frontend test passes; all seven affected test files green (CyboflowRoot, RunRightRail, WorkflowCanvas, WorkflowProgressTimeline, WorkflowCanvasEdges, useWorkflowPhaseState, useWorkflowTokenAnimation)."
-depends_on: [TASK-779]
+depends_on:
+  - TASK-779
 estimated_complexity: medium
 epic: workflow-progress-visualization
 test_strategy:
@@ -42,22 +43,21 @@ test_strategy:
   justification: "Wiring touches three source files with existing sibling tests; new mounts in CyboflowRoot/RunRightRail need presence assertions, and the WorkflowCanvas no-svg test must be replaced. tRPC mock surfaces in CyboflowRoot.test.tsx and RunRightRail.test.tsx need extension so WorkflowProgressTimeline + useWorkflowPhaseState don't throw when the canvas/timeline mount."
   targets:
     - behavior: "RunRightRail with activeRunId set mounts WorkflowProgressTimeline (placeholder gone; phase-section-* appears after seed query resolves)."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx
       type: component
-    - behavior: "RunRightRail with activeRunId=null renders empty state and does NOT mount the timeline."
-      test_file: "frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx"
+    - behavior: RunRightRail with activeRunId=null renders empty state and does NOT mount the timeline.
+      test_file: frontend/src/components/cyboflow/__tests__/RunRightRail.test.tsx
       type: component
-    - behavior: "CyboflowRoot with activeRunId set renders both workflow-canvas AND run-bottom-pane tabs in same render."
-      test_file: "frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx"
+    - behavior: CyboflowRoot with activeRunId set renders both workflow-canvas AND run-bottom-pane tabs in same render.
+      test_file: frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
       type: component
-    - behavior: "CyboflowRoot with activeRunId=null does NOT render workflow-canvas and does NOT call getPhaseState.query."
-      test_file: "frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx"
+    - behavior: CyboflowRoot with activeRunId=null does NOT render workflow-canvas and does NOT call getPhaseState.query.
+      test_file: frontend/src/components/cyboflow/__tests__/CyboflowRoot.test.tsx
       type: component
     - behavior: "WorkflowCanvas with non-null currentStepId mounts WorkflowCanvasEdges overlay and contains at least one <svg> child."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowCanvas.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowCanvas.test.tsx
       type: component
 ---
-
 # Wire workflow canvas components into CyboflowRoot and RunRightRail
 
 ## Objective

@@ -1,8 +1,8 @@
 ---
 id: TASK-777
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - main/src/orchestrator/approvalRouter.ts
   - main/src/orchestrator/questionRouter.ts
@@ -24,14 +24,14 @@ acceptance_criteria:
     verification: "grep -n 'constructor' main/src/orchestrator/questionRouter.ts shows a single-arg constructor; grep -n '_getQueueForRun' main/src/orchestrator/questionRouter.ts returns 0 matches."
   - criterion: "ApprovalRouter.initialize and QuestionRouter.initialize static methods are reduced to a single argument: `static initialize(db: DatabaseLike)`. The `getQueueForRun: (runId: string) => PQueue` parameter is removed."
     verification: "grep -nA 2 'static initialize' main/src/orchestrator/approvalRouter.ts shows a 1-arg signature; same grep against main/src/orchestrator/questionRouter.ts also shows 1-arg."
-  - criterion: "main/src/index.ts no longer passes the runQueues factory to either router. The calls at lines 719 and 734 each pass only `db`."
+  - criterion: main/src/index.ts no longer passes the runQueues factory to either router. The calls at lines 719 and 734 each pass only `db`.
     verification: "grep -n 'ApprovalRouter.initialize\\|QuestionRouter.initialize' main/src/index.ts shows both calls as `XxxRouter.initialize(db)` (no second argument)."
-  - criterion: "All 8 test call sites that currently pass `qf.getOrCreate.bind(qf)` or `registry.getOrCreate.bind(registry)` to a router initialize are updated to the 1-arg form."
+  - criterion: All 8 test call sites that currently pass `qf.getOrCreate.bind(qf)` or `registry.getOrCreate.bind(registry)` to a router initialize are updated to the 1-arg form.
     verification: "grep -rn 'Router.initialize(adapter, qf' main/src returns 0 matches; grep -rn 'Router.initialize(adapter, registry' main/src returns 0 matches; grep -rn 'Router.initialize(faultyAdapter, qf' main/src returns 0 matches."
-  - criterion: "A new comment above each constructor (in both routers) explains why per-router PQueues are intentional (no recursive-enqueue with RunQueueRegistry)."
+  - criterion: A new comment above each constructor (in both routers) explains why per-router PQueues are intentional (no recursive-enqueue with RunQueueRegistry).
     verification: "grep -B 1 -A 6 'constructor(' main/src/orchestrator/approvalRouter.ts shows a comment block mentioning 'recursive' or 'RunQueueRegistry'; same grep against questionRouter.ts shows the symmetric comment."
   - criterion: "Main + integration tests pass: pnpm --filter main test exits 0; pnpm typecheck exits 0."
-    verification: "pnpm --filter main test exits 0; pnpm typecheck exits 0."
+    verification: pnpm --filter main test exits 0; pnpm typecheck exits 0.
 depends_on: []
 estimated_complexity: medium
 epic: orchestrator-and-trpc-router
@@ -39,7 +39,6 @@ test_strategy:
   needed: false
   justification: "Pure signature narrowing — all existing tests cover the routers' behavior; the change removes a dead parameter without altering runtime semantics. Sibling tests in main/src/orchestrator/__tests__/*Router.test.ts (≥18 invocations of `Router.initialize(adapter, qf.getOrCreate.bind(qf))`) ARE updated in step 5 because their call signatures change, but no NEW test cases are needed — the existing behavioral tests continue to assert the same invariants on the new 1-arg form. Sibling-test scan: `main/src/orchestrator/__tests__/approvalRouter.test.ts`, `main/src/orchestrator/__tests__/questionRouter.test.ts`, `main/src/orchestrator/trpc/routers/__tests__/approvals.test.ts`, `main/src/orchestrator/trpc/routers/__tests__/questions.test.ts`, and the three claudeCodeManager test files — all explicitly included in `files_owned` because their calls must change."
 ---
-
 # TASK-777 — Remove dead `_getQueueForRun` constructor parameter from QuestionRouter and ApprovalRouter
 
 ## Objective

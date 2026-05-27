@@ -1,8 +1,8 @@
 ---
 id: TASK-775
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/stores/reviewQueueStore.ts
   - frontend/src/stores/questionStore.ts
@@ -19,11 +19,12 @@ acceptance_criteria:
     verification: "grep -nC 4 'onApprovalDecided subscription error' frontend/src/stores/reviewQueueStore.ts shows the onError body calls subscription.unsubscribe() AND decidedSubscription.unsubscribe() before setting initialized = false; similar pattern for onQuestionAnswered in questionStore.ts."
   - criterion: "A new test case in each store's test file asserts that triggering the SECOND subscription's onError allows a subsequent init() to re-subscribe (mirroring the existing first-subscription onError tests)."
     verification: "grep -n 'onError.*second subscription\\|onQuestionAnswered.*resets closure\\|onApprovalDecided.*resets closure' frontend/src/stores/__tests__/reviewQueueStore.test.ts returns ≥1 match; same grep against questionStore.test.ts returns ≥1 match."
-  - criterion: "All frontend tests pass."
-    verification: "pnpm --filter frontend test exits 0."
-  - criterion: "Frontend typecheck and lint clean."
-    verification: "pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint reports 0 errors."
-depends_on: [TASK-773]
+  - criterion: All frontend tests pass.
+    verification: pnpm --filter frontend test exits 0.
+  - criterion: Frontend typecheck and lint clean.
+    verification: pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint reports 0 errors.
+depends_on:
+  - TASK-773
 estimated_complexity: medium
 epic: ask-user-question-roundtrip
 test_strategy:
@@ -31,16 +32,15 @@ test_strategy:
   justification: "The bug is a latent recoverability hole: if the SECOND subscription drops independently of the FIRST, the store is stuck 'initialized' with no path to recover. Without a regression test mirroring the existing first-subscription onError test, the asymmetry would re-emerge on any future store refactor."
   targets:
     - behavior: "Triggering reviewQueueStore's onApprovalDecided.subscribe onError allows a subsequent init() to re-subscribe to both channels"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts
       type: unit
     - behavior: "Triggering questionStore's onQuestionAnswered.subscribe onError allows a subsequent init() to re-subscribe to both channels"
-      test_file: "frontend/src/stores/__tests__/questionStore.test.ts"
+      test_file: frontend/src/stores/__tests__/questionStore.test.ts
       type: unit
     - behavior: "Triggering the second-subscription onError calls BOTH subscriptions' unsubscribe (no leak)"
-      test_file: "frontend/src/stores/__tests__/reviewQueueStore.test.ts and frontend/src/stores/__tests__/questionStore.test.ts"
+      test_file: frontend/src/stores/__tests__/reviewQueueStore.test.ts and frontend/src/stores/__tests__/questionStore.test.ts
       type: unit
 ---
-
 # TASK-775 — Make second-subscription onError mirror first-subscription cleanup in both stores
 
 ## Objective

@@ -1,7 +1,7 @@
 ---
 id: TASK-755
 idea: SPRINT-038-compound-B2
-status: ready
+status: in-flight
 created: "2026-05-25T00:00:00Z"
 files_owned:
   - main/src/types/session.ts
@@ -21,16 +21,16 @@ acceptance_criteria:
     verification: "grep -nE 'model\\?:' main/src/types/session.ts returns no hit inside the `interface CreateSessionRequest` block (the nested `claudeConfig.model` must remain — verify the only deleted line is the top-level `model?: string;`)."
   - criterion: "`CreateSessionRequest` in `frontend/src/types/session.ts` no longer declares `isMainRepo?: boolean`."
     verification: "Inside `interface CreateSessionRequest` (frontend/src/types/session.ts:126-145) `grep -n 'isMainRepo' frontend/src/types/session.ts` shows only the unrelated `Session.isMainRepo` declaration (not inside `CreateSessionRequest`)."
-  - criterion: "No production code in main/src or frontend/src reads `request.model` or `request.isMainRepo` on a `CreateSessionRequest`-typed value."
+  - criterion: No production code in main/src or frontend/src reads `request.model` or `request.isMainRepo` on a `CreateSessionRequest`-typed value.
     verification: "grep -rnE 'request\\.(model|isMainRepo)\\b' main/src frontend/src returns zero hits. Also `grep -rnE 'const\\s*\\{[^}]*\\b(model|isMainRepo)\\b' main/src frontend/src` returns zero hits involving the request type (destructuring guard)."
-  - criterion: "Sync-warning comment blocks on both files reference this audit pass (include FIND-SPRINT-038-3 alongside the existing FIND-SPRINT-037-5 reference)."
+  - criterion: Sync-warning comment blocks on both files reference this audit pass (include FIND-SPRINT-038-3 alongside the existing FIND-SPRINT-037-5 reference).
     verification: "grep -n 'FIND-SPRINT-038-3' main/src/types/session.ts frontend/src/types/session.ts shows one match in each file."
-  - criterion: "Type-check passes across all workspaces."
-    verification: "pnpm typecheck exits 0."
-  - criterion: "Main and frontend test suites pass."
-    verification: "pnpm --filter main test exits 0; pnpm --filter frontend test exits 0."
-  - criterion: "Lint stays clean (no new errors)."
-    verification: "pnpm lint exits 0."
+  - criterion: Type-check passes across all workspaces.
+    verification: pnpm typecheck exits 0.
+  - criterion: Main and frontend test suites pass.
+    verification: pnpm --filter main test exits 0; pnpm --filter frontend test exits 0.
+  - criterion: Lint stays clean (no new errors).
+    verification: pnpm lint exits 0.
 depends_on: []
 estimated_complexity: low
 epic: quick-session
@@ -43,7 +43,6 @@ prerequisites:
     description: Sanity check that both fields are still dead before pruning
     blocking: true
 ---
-
 # Prune dead `isMainRepo` (frontend) and `model` (main) from `CreateSessionRequest`
 
 ## Objective

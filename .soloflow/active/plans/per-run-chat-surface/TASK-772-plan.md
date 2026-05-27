@@ -1,8 +1,8 @@
 ---
 id: TASK-772
 idea: SPRINT-039-followups
-status: ready
-created: 2026-05-26T00:00:00Z
+status: in-flight
+created: "2026-05-26T00:00:00Z"
 files_owned:
   - frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx
   - frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx
@@ -13,7 +13,7 @@ files_readonly:
   - shared/types/questions.ts
   - .soloflow/active/findings/SPRINT-039-findings.md
 acceptance_criteria:
-  - criterion: "AskUserQuestionCard imports useQuestionStore and reads otherText for the active question id."
+  - criterion: AskUserQuestionCard imports useQuestionStore and reads otherText for the active question id.
     verification: "grep -n \"useQuestionStore\" frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx returns at least one match and 'otherText' is read from the store (grep -n \"otherText\\[\\|store.otherText\\|s\\.otherText\" frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx returns ≥1 match)."
   - criterion: "When questionStore.otherText[item.id] is a defined string, every sub-question's Other text input renders that value (uniform distribution across the 1–4 sub-questions). Local state only governs the textarea when the bus slot is undefined."
     verification: "New vitest test 'reads otherText from questionStore and prefers bus over local state' renders the card with two sub-questions, sets useQuestionStore.setState({ otherText: { 'q-1': 'from-bus' } }), and asserts BOTH 'Other free-text answer' input values equal 'from-bus'."
@@ -23,29 +23,28 @@ acceptance_criteria:
     verification: "grep -n 'bus is question-level' frontend/src/components/AskUserQuestion/AskUserQuestionCard.tsx returns exactly one match in the file header comment."
   - criterion: "Submitting still uses each sub-question's effective Other text (bus value when bus is defined for item.id AND local state has not been edited since mount; local edited value otherwise) — i.e. the existing per-sub-question divergence test remains green."
     verification: "Existing AskUserQuestionCard tests in __tests__/AskUserQuestionCard.test.tsx still pass: pnpm --filter frontend test -- AskUserQuestionCard.test.tsx exits 0."
-  - criterion: "Frontend typecheck and lint clean."
-    verification: "pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0 (or unchanged from baseline)."
+  - criterion: Frontend typecheck and lint clean.
+    verification: pnpm --filter frontend typecheck exits 0; pnpm --filter frontend lint exits 0 (or unchanged from baseline).
 depends_on: []
 estimated_complexity: medium
 epic: per-run-chat-surface
 test_strategy:
   needed: true
-  justification: "This is the epic completion gate per FIND-SPRINT-039-14; the new reader+clear behavior must be locked in with tests so a future refactor cannot silently regress the otherText round-trip."
+  justification: This is the epic completion gate per FIND-SPRINT-039-14; the new reader+clear behavior must be locked in with tests so a future refactor cannot silently regress the otherText round-trip.
   targets:
     - behavior: "Card reads otherText[item.id] from useQuestionStore and renders it in every sub-question's Other input when the bus slot is defined"
-      test_file: "frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx"
+      test_file: frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx
       type: component
-    - behavior: "Card calls clearOtherText(item.id) exactly once on successful submit"
-      test_file: "frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx"
+    - behavior: Card calls clearOtherText(item.id) exactly once on successful submit
+      test_file: frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx
       type: component
     - behavior: "When bus slot is undefined, the card falls back to local useState behavior (typing into a sub-question's Other input only affects that sub-question's value)"
-      test_file: "frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx"
+      test_file: frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx
       type: component
     - behavior: "When user types into a specific sub-question's Other input after the bus pre-fill, the local edit wins for THAT sub-question only (other sub-questions still show the bus value)"
-      test_file: "frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx"
+      test_file: frontend/src/components/AskUserQuestion/__tests__/AskUserQuestionCard.test.tsx
       type: component
 ---
-
 # TASK-772 — Wire AskUserQuestionCard to read questionStore.otherText (epic completion gate)
 
 ## Objective

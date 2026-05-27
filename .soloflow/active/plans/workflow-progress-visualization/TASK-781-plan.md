@@ -1,8 +1,8 @@
 ---
 id: TASK-781
 idea: IDEA-026
-status: ready
-created: 2026-05-26T17:00:00Z
+status: in-flight
+created: "2026-05-26T17:00:00Z"
 files_owned:
   - frontend/src/components/cyboflow/WorkflowProgressTimeline.tsx
   - frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
@@ -14,44 +14,44 @@ files_readonly:
   - shared/types/workflows.ts
   - docs/CODE-PATTERNS.md
 acceptance_criteria:
-  - criterion: "WorkflowProgressTimeline.tsx no longer calls trpc.cyboflow.runs.getPhaseState.query or trpc.cyboflow.runs.onStepTransition.subscribe directly; the only phase-state source is useWorkflowPhaseState(runId)."
+  - criterion: WorkflowProgressTimeline.tsx no longer calls trpc.cyboflow.runs.getPhaseState.query or trpc.cyboflow.runs.onStepTransition.subscribe directly; the only phase-state source is useWorkflowPhaseState(runId).
     verification: "grep returns 0 hits for those tRPC calls in the timeline file AND >=2 hits for useWorkflowPhaseState (import + call)."
   - criterion: "The local PhaseState interface, isLoading state, loadError state, and the two seed/subscription useEffect blocks are removed from WorkflowProgressTimeline.tsx."
-    verification: "grep over the timeline file returns 0 hits for interface PhaseState / setPhaseState / setIsLoading / setLoadError / setStepStates."
-  - criterion: "Component still consumes streamEvents from useCyboflowStore for log-line projection."
-  - criterion: "Pulse-style injection effect remains (timeline-specific keyframes)."
+    verification: grep over the timeline file returns 0 hits for interface PhaseState / setPhaseState / setIsLoading / setLoadError / setStepStates.
+  - criterion: Component still consumes streamEvents from useCyboflowStore for log-line projection.
+  - criterion: Pulse-style injection effect remains (timeline-specific keyframes).
   - criterion: "Hook-driven placeholder branches: isLoading → 'Loading workflow state…'; error !== null → 'Failed to load workflow state: {error.message}'; definition === null (not loading, no error) → 'No workflow data'."
   - criterion: "Existing public test IDs preserved exactly (workflow-progress-timeline-empty, phase-section-<id>, phase-header-<id>, phase-swatch-<id>, step-item-<id>, step-bullet-<id>, log-line-<id>-<idx>)."
-  - criterion: "WorkflowProgressTimeline.test.tsx no longer mocks `../../../trpc/client`; mocks `../../../hooks/useWorkflowPhaseState` instead."
+  - criterion: WorkflowProgressTimeline.test.tsx no longer mocks `../../../trpc/client`; mocks `../../../hooks/useWorkflowPhaseState` instead.
   - criterion: "All seven behaviour groups from the original test file (mount lifecycle, subscription lifecycle, state-keyed borders, pulse animation, degraded log lines, delta-driven re-render, runId=null placeholder) are still covered after the rewrite via hook-mock surface."
-  - criterion: "pnpm typecheck and pnpm lint exit 0."
-depends_on: [TASK-779]
+  - criterion: pnpm typecheck and pnpm lint exit 0.
+depends_on:
+  - TASK-779
 estimated_complexity: low
 epic: workflow-progress-visualization
 test_strategy:
   needed: true
   justification: "Replace tRPC client mock with hook mock; adapt existing 12+ cases to drive the component via hook return values rather than query/subscribe spies. Behavior coverage preserved 1:1; mock surface changes."
   targets:
-    - behavior: "Loading / error / empty / data placeholders render correctly based on hook return."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+    - behavior: Loading / error / empty / data placeholders render correctly based on hook return.
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
     - behavior: "Step border classes match status: done→success, running→error fallback, pending→border-primary."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
     - behavior: "Step bullet pulse applies only when status === 'running'."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Degraded mode renders 0 log lines."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+    - behavior: Degraded mode renders 0 log lines.
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
     - behavior: "Delta-driven re-render: changing the hook return shape causes border updates on rerender."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
-    - behavior: "Hook receives runId on every render; changing the prop forwards the new runId."
-      test_file: "frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx"
+    - behavior: Hook receives runId on every render; changing the prop forwards the new runId.
+      test_file: frontend/src/components/cyboflow/__tests__/WorkflowProgressTimeline.test.tsx
       type: component
 ---
-
 # Retrofit WorkflowProgressTimeline onto useWorkflowPhaseState
 
 ## Objective
