@@ -739,7 +739,7 @@ app.whenReady().then(async () => {
     // Permission decisions are produced in-process by the SDK PreToolUse hook
     // (claudeCodeManager.makePreToolUseHook), so no per-request socket-reply
     // factory is needed here.
-    ApprovalRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    ApprovalRouter.initialize(db);
     ApprovalRouter.getInstance().on('approvalCreated', (request: ApprovalRequest) => {
       const event = buildApprovalCreatedEvent(request, db);
       approvalEvents.emit('created', event);
@@ -754,7 +754,7 @@ app.whenReady().then(async () => {
 
     // Wire QuestionRouter after the RunQueueRegistry and ApprovalRouter are live.
     // Question answers arrive via the SDK PreToolUse hook in ClaudeCodeManager.
-    QuestionRouter.initialize(db, runQueues.getOrCreate.bind(runQueues));
+    QuestionRouter.initialize(db);
     QuestionRouter.getInstance().on('questionCreated', (request: QuestionRequest) => {
       const event = buildQuestionCreatedEvent(request, db);
       questionEvents.emit('created', event);
@@ -797,6 +797,7 @@ app.whenReady().then(async () => {
     setCancelAndRestartDeps({
       db,
       approvalRouter: ApprovalRouter.getInstance(),
+      questionRouter: QuestionRouter.getInstance(),
       runQueues,
       claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
       logger: loggerLike,

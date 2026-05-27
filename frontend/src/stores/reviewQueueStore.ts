@@ -236,6 +236,12 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
         onError: (err: unknown) => {
           console.error('[reviewQueueStore] onApprovalDecided subscription error:', err);
           setConnectionStatus('disconnected');
+          // Mirror onApprovalCreated onError: tear down both subscriptions and
+          // clear closure state so a subsequent init() can re-subscribe.
+          subscription.unsubscribe();
+          decidedSubscription.unsubscribe();
+          initialized = false;
+          cachedUnsubscribe = null;
         },
       });
 

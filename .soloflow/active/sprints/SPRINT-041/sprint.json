@@ -1,0 +1,27 @@
+{
+  "sprint": {
+    "id": "SPRINT-041",
+    "status": "complete",
+    "started": "2026-05-26T17:40:00.000Z",
+    "execution_mode": "serial"
+  },
+  "tasks": {
+    "TASK-755": {
+      "status": "blocked",
+      "depends_on": [],
+      "verdict_at": "2026-05-27T04:09:13.517Z"
+    }
+  },
+  "run": {
+    "branch": "soloflow/run-20260526-210555-SPRINT-041",
+    "base_branch": "main",
+    "base_sha": "7c20aebb6dfb6dbca5022a97a132dac01c9b007d",
+    "created_at": "2026-05-26T21:05:55.000Z"
+  },
+  "playwright_target": {
+    "kind": "electron",
+    "evidence": "electron in package.json",
+    "dev_url_hint": null,
+    "divergence_risk": false
+  }
+}

@@ -2066,8 +2066,8 @@ export class DatabaseService {
       const displayOrder = maxOrder + 1;
       
       this.db.prepare(`
-        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, display_order, auto_commit, tool_type, base_commit, base_branch, commit_mode, commit_mode_settings)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, display_order, auto_commit, tool_type, base_commit, base_branch, commit_mode, commit_mode_settings, run_id)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         data.id,
         data.name,
@@ -2084,7 +2084,8 @@ export class DatabaseService {
         data.base_commit || null,
         data.base_branch || null,
         data.commit_mode || null,
-        data.commit_mode_settings || null
+        data.commit_mode_settings || null,
+        data.run_id ?? null
       );
       
       const session = this.getSession(data.id);

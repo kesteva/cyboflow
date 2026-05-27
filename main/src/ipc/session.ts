@@ -309,8 +309,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    * (b) `prompt === ''` causes TaskQueue to skip prompt-related setup (conversation
    *     message, prompt marker, Claude panel auto-start) — the user's first message
    *     via `sessions:input` will bootstrap the Claude panel on demand.
-   * (c) `db.createSession` omits `run_id` from its INSERT column list, so the row
-   *     naturally gets `run_id = NULL` via TASK-743's migration default.
+   * (c) `db.createSession` writes `data.run_id ?? null` into the INSERT column list
+   *     (TASK-754). The quick-session path never sets `data.run_id`, so the row is
+   *     persisted with `run_id = NULL` via the `?? null` coalesce.
    * (d) Second-precision branch-name collisions (two quick sessions in the same
    *     second) are resolved by `TaskQueue.ensureUniqueNames`, which appends a
    *     `-<counter>` suffix.

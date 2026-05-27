@@ -11,10 +11,12 @@
  */
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
+import { WorkflowCanvas } from './WorkflowCanvas';
 import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
 import { usePanelSurface } from '../../hooks/usePanelSurface';
 import { SessionProvider } from '../../contexts/SessionContext';
 import { PanelTabBar } from '../panels/PanelTabBar';
@@ -32,6 +34,7 @@ interface CyboflowRootProps {
 
 export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
+  const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isQuickModePickerOpen, setIsQuickModePickerOpen] = useState(false);
   const quickPickerRef = useRef<HTMLDivElement>(null);
@@ -134,10 +137,24 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
       {/* Main content area — two-column flex-row layout */}
       <div className="flex flex-row flex-1 overflow-hidden">
-        {/* Left column — fluid; hosts empty-state CTA or RunBottomPane */}
+        {/* Left column — fluid; hosts empty-state CTA or WorkflowCanvas+RunBottomPane */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {activeRunId !== null ? (
-            <RunBottomPane />
+            <>
+              {phaseState.definition !== null && (
+                <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
+                  <WorkflowCanvas
+                    definition={phaseState.definition}
+                    currentStepId={phaseState.currentStepId}
+                    runLabel={activeRunId}
+                    isRunning={!phaseState.isLoading && phaseState.error === null}
+                  />
+                </div>
+              )}
+              <div className="flex-1 overflow-hidden">
+                <RunBottomPane />
+              </div>
+            </>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>

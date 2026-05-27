@@ -104,6 +104,7 @@ export interface CreateSessionData {
   base_branch?: string;
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
   commit_mode_settings?: string; // JSON string of CommitModeSettings
+  run_id?: string | null;
 }
 
 export interface UpdateSessionData {

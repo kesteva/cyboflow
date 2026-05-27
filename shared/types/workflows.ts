@@ -37,7 +37,7 @@ export interface WorkflowRunRow {
   stuck_at?: string | null;
   stuck_reason?: string | null;
   error_message?: string | null;
-  /** Id of the workflow step currently executing, e.g. 'plan.context'. NULL when no step is active. IDEA-026 / TASK-764. */
+  /** Id of the workflow step currently executing, e.g. 'context'. Bare WorkflowStep.id from WORKFLOW_DEFINITIONS. NULL when no step is active. IDEA-026 / TASK-764. */
   current_step_id?: string | null;
   started_at?: string | null;
   ended_at?: string | null;

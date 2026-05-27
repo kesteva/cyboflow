@@ -23,7 +23,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import type Database from 'better-sqlite3';
-import PQueue from 'p-queue';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
@@ -71,24 +70,6 @@ vi.mock('../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),
   logValidationFailure: vi.fn(),
 }));
-
-// ---------------------------------------------------------------------------
-// Database / ApprovalRouter helpers (mirrors approvalRouter.test.ts)
-// ---------------------------------------------------------------------------
-
-function makeQueueFactory(): { getOrCreate: (runId: string) => PQueue } {
-  const queues = new Map<string, PQueue>();
-  return {
-    getOrCreate(runId: string): PQueue {
-      let q = queues.get(runId);
-      if (!q) {
-        q = new PQueue({ concurrency: 1 });
-        queues.set(runId, q);
-      }
-      return q;
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Minimal SessionManager mock
@@ -160,9 +141,8 @@ describe('ClaudeCodeManager.killProcess', () => {
   beforeEach(() => {
     db = createTestDb();
     const adapter = dbAdapter(db);
-    const qf = makeQueueFactory();
-    ApprovalRouter.initialize(adapter, qf.getOrCreate.bind(qf));
-    QuestionRouter.initialize(adapter, qf.getOrCreate.bind(qf));
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
     mgr = new ClaudeCodeManager(createMockSessionManager(), undefined, undefined, db);
     // Spy on clearPendingForRun to assert it is called from runSdkQuery's
     // finally block (single-sourced), not directly from killProcess.

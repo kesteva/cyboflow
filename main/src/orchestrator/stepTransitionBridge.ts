@@ -35,7 +35,7 @@ import { SOLOFLOW_WORKFLOW_NAMES } from '../../../shared/types/workflows';
 export interface WorkflowStepTransitionEvent {
   /** The workflow_runs.id this transition belongs to. */
   runId: string;
-  /** The step identifier (e.g. 'execute.implement', 'compound.extract'). */
+  /** The step identifier (e.g. 'implement', 'extract' — bare WorkflowStep.id values). */
   stepId: string;
   /** New status of the step. */
   status: 'pending' | 'running' | 'done';
@@ -49,22 +49,23 @@ export interface WorkflowStepTransitionEvent {
 
 /**
  * Maps each SoloFlowWorkflowName to its single representative step id (v1
- * single-step-per-workflow model). Step ids use the 'phase.step' dot notation
- * mirroring the migration 011 column comment examples ('execute.implement').
+ * single-step-per-workflow model). Step ids are bare WorkflowStep.id values
+ * from WORKFLOW_DEFINITIONS — matching the lookup keys used by getPhaseState,
+ * mergeTransition, and stepStatusMap.
  *
  * Mapping rationale:
- *  - soloflow  → execute.implement  (main execution phase's primary step)
- *  - planner   → refine.tasks       (main output of the planner workflow)
- *  - sprint    → execute.implement  (per-task implementation step)
- *  - compound  → compound.extract   (core learning-extraction step)
- *  - prune     → prune.scan         (first meaningful pruner step)
+ *  - soloflow  → implement  (execute phase primary step)
+ *  - planner   → tasks      (main output of the planner workflow)
+ *  - sprint    → implement  (per-task implementation step)
+ *  - compound  → extract    (core learning-extraction step)
+ *  - prune     → scan       (first meaningful pruner step)
  */
 const TERMINAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
-  soloflow: 'execute.implement',
-  planner:  'refine.tasks',
-  sprint:   'execute.implement',
-  compound: 'compound.extract',
-  prune:    'prune.scan',
+  soloflow: 'implement',
+  planner:  'tasks',
+  sprint:   'implement',
+  compound: 'extract',
+  prune:    'scan',
 } as const;
 
 /**
