@@ -305,10 +305,11 @@ export class QuestionRouter extends EventEmitter {
           `[QuestionRouter] respond: run ${request.runId} is no longer in ` +
           `'awaiting_input'; question ${questionId} superseded — marking timed_out`,
         );
-        // Mark the DB row as timed_out.
+        // Mark the DB row as timed_out (guarded so a prior clearPendingForRun
+        // can't be clobbered with a later answered_at timestamp).
         this.db.prepare(
           `UPDATE questions SET status = 'timed_out', answered_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND status = 'pending'`,
         ).run(now, questionId);
         // Resolve the requestQuestion promise with a synthetic empty-answers payload
         // so the awaiting caller is not left hanging.
