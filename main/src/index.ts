@@ -49,11 +49,11 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike, PendingWorkProbeLike } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
-  transitionToCompleted,
+  transitionRunningToAwaitingReview,
   transitionToFailed,
   transitionToCanceled,
 } from './services/cyboflow/transitions';
@@ -583,7 +583,7 @@ async function initializeServices() {
   const rawDb = databaseService.getDb();
   const lifecycleTransitions: LifecycleTransitionsLike = {
     running: (runId) => transitionToRunning(rawDb, { runId }),
-    completed: (runId, fromStatus) => transitionToCompleted(rawDb, { runId, fromStatus }),
+    restAwaitingReview: (runId) => transitionRunningToAwaitingReview(rawDb, { runId }),
     failed: (runId, fromStatus, errorMessage) =>
       transitionToFailed(rawDb, { runId, fromStatus, errorMessage }),
     canceled: (runId) => transitionToCanceled(rawDb, { runId }),
@@ -609,25 +609,16 @@ async function initializeServices() {
     },
   };
 
-  // PendingWorkProbe adapter (GAP-A guard) — lets RunExecutor consult the live
-  // ApprovalRouter / QuestionRouter pending state before completing a run, so a
-  // run with an unresolved tool approval or question gate is never marked
-  // 'completed' when the SDK iterator drains. getInstance() is resolved lazily
-  // at probe time (run completion happens well after both routers are
-  // initialized below), so this adapter is safe to construct before
-  // ApprovalRouter.initialize() / QuestionRouter.initialize().
-  const pendingWorkProbe: PendingWorkProbeLike = {
-    hasPendingApproval: (runId) =>
-      ApprovalRouter.getInstance().getPending().some((a) => a.runId === runId),
-    hasPendingQuestion: (runId) =>
-      QuestionRouter.getInstance().getPending().some((q) => q.runId === runId),
-  };
-
   // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
   // LifecycleTransitions adapter, streaming publisher + db for event bridging,
   // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output'),
-  // the stepTransitionEmitter for lifecycle step-transition events (TASK-765),
-  // and the pendingWorkProbe for the GAP-A completion guard.
+  // and the stepTransitionEmitter for lifecycle step-transition events (TASK-765).
+  //
+  // The executor NEVER auto-completes a run: on SDK iterator drain it rests the
+  // run in awaiting_review (running -> awaiting_review via restAwaitingReview).
+  // `completed` is set ONLY by an explicit user accept (Merge / Create-PR) in the
+  // runs router. This supersedes the old GAP-A pending-work probe (never
+  // auto-completing subsumes "don't complete while a gate is pending").
   const runExecutor = new RunExecutor(
     spawnerAdapter,
     workflowRegistry,
@@ -638,7 +629,6 @@ async function initializeServices() {
     rawDb,
     defaultCliManager,
     stepTransitionEmitter,
-    pendingWorkProbe,
   );
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
@@ -838,6 +828,8 @@ app.whenReady().then(async () => {
           worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
         removeWorktreeByPath: (projectPath, worktreePath) =>
           worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
+        gitPush: (worktreePath) => worktreeManager.gitPush(worktreePath),
+        getRemoteUrlAndBranch: (worktreePath) => worktreeManager.getRemoteUrlAndBranch(worktreePath),
       },
       sessionManager: {
         getProjectById: (projectId) => {

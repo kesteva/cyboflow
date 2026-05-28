@@ -120,6 +120,10 @@ export interface RunWorktreeManagerLike {
   mergeWorktreeToMain(projectPath: string, worktreePath: string, mainBranch: string): Promise<void>;
   /** `git worktree remove "<worktreePath>" --force` — idempotent on already-gone trees. */
   removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
+  /** `git push` from the worktree — pushes the run's branch to origin (Create-PR). */
+  gitPush(worktreePath: string): Promise<{ output: string }>;
+  /** Resolve the origin remote URL + current branch of the worktree (Create-PR). */
+  getRemoteUrlAndBranch(worktreePath: string): Promise<{ remoteUrl: string; branchName: string }>;
 }
 
 export interface RunCloseoutSessionManagerLike {
@@ -315,6 +319,50 @@ export const runsRouter = router({
         )
         .run(input.runId);
       return { success: true };
+    }),
+
+  /**
+   * Create a pull request for a workflow run (GAP-B / un-defer): push the run's
+   * branch from its worktree to origin, then return the origin remote URL +
+   * branch name so the renderer can open the GitHub compare URL. Mirrors the
+   * session-scoped Create-PR flow (sessions:git-push + sessions:get-remote-url),
+   * but operates on the workflow_runs row + its nested worktree path.
+   *
+   * After a successful push the run's artifact is considered delivered, so the
+   * run is marked terminal ('completed') — the same close-out outcome as merge.
+   * The local worktree is removed (idempotent) since the branch now lives on
+   * origin; this matches the session flow's post-PR session deletion.
+   *
+   * Completion is a guarded UPDATE (`WHERE status NOT IN (terminal)`) so it works
+   * from the run's CURRENT status (awaiting_review / stuck / running) and no-ops
+   * if the run already reached a terminal state.
+   */
+  createPr: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<{ remoteUrl: string; branchName: string }> => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const deps = runCloseoutDeps;
+      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
+      const wm = deps!.worktreeManager;
+
+      await wm.gitPush(worktreePath);
+      const { remoteUrl, branchName } = await wm.getRemoteUrlAndBranch(worktreePath);
+
+      // Artifact delivered to origin — close the run out. Remove the local
+      // worktree (the branch now lives on origin) and mark the run completed.
+      await wm.removeWorktreeByPath(projectPath, worktreePath);
+      ctx.db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        )
+        .run(input.runId);
+
+      return { remoteUrl, branchName };
     }),
 
   /**

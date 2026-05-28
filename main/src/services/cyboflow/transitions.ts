@@ -118,11 +118,16 @@ export function transitionToRunning(
 export interface TransitionToCompletedParams {
   runId: string;
   /**
-   * Only 'running' may complete directly per ALLOWED_TRANSITIONS.
-   * awaiting_review -> completed is NOT a valid transition; the run must return
-   * to 'running' first (via approvalRouter.respond) before it can complete.
+   * `completed` is set ONLY by an explicit user accept decision (Merge or
+   * Create-PR), never by the run executor. The run rests in `awaiting_review`
+   * on SDK drain (or is `stuck`); the accept decision then completes it from
+   * whatever non-terminal status it currently holds.
+   *
+   * 'running' is retained for the in-flight accept case (no approval pending),
+   * 'awaiting_review' is the common rest-state accept, and 'stuck' covers
+   * accepting a flagged-but-deliverable run — all three are in ALLOWED_TRANSITIONS.
    */
-  fromStatus: 'running';
+  fromStatus: 'running' | 'awaiting_review' | 'stuck';
 }
 
 /**
@@ -144,6 +149,49 @@ export function transitionToCompleted(
     throw new TransitionRejectedError(
       `Cannot transition run ${params.runId} to completed: not in '${params.fromStatus}' state`,
       { runId: params.runId, expectedStatus: params.fromStatus, entity: 'workflow_run' },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transitionRunningToAwaitingReview (rest transition — NO approval)
+// ---------------------------------------------------------------------------
+
+export interface TransitionRunningToAwaitingReviewParams {
+  runId: string;
+}
+
+/**
+ * REST transition fired by the run executor when the SDK iterator drains without
+ * error: workflow_runs status = 'awaiting_review' WHERE id = ? AND status = 'running'.
+ *
+ * Semantics: "the agent finished its turn; the run now awaits the user's
+ * Merge / Create-PR / Dismiss decision." Unlike transitionToAwaitingReview, this
+ * does NOT INSERT a pending `approvals` row — it is the plain rest state, not a
+ * tool-approval gate. The two awaiting_review entry points are distinguished by
+ * the presence (approval gate) or absence (agent finished) of a PENDING approvals
+ * row for the run.
+ *
+ * Guarded on status='running' so it is a safe no-op (rejected → swallowed by the
+ * executor's try/catch) when the run is already parked in awaiting_review /
+ * awaiting_input / stuck or has already gone terminal.
+ *
+ * Throws TransitionRejectedError if the run is not in 'running' state.
+ */
+export function transitionRunningToAwaitingReview(
+  db: Database.Database,
+  params: TransitionRunningToAwaitingReviewParams,
+): void {
+  assertTransitionAllowed('running', 'awaiting_review', params.runId);
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'awaiting_review', updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status = 'running'`,
+  ).run({ runId: params.runId });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot rest run ${params.runId} in awaiting_review: not in 'running' state`,
+      { runId: params.runId, expectedStatus: 'running', entity: 'workflow_run' },
     );
   }
 }

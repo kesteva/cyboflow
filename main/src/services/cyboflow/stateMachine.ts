@@ -22,14 +22,22 @@ export const ALLOWED_TRANSITIONS: Record<
   // running -> awaiting_input: the only way to enter awaiting_input — QuestionRouter
   // transitions atomically with the question INSERT (TASK-758).
   running:         ['awaiting_review', 'awaiting_input', 'completed', 'failed', 'canceled', 'stuck'],
-  awaiting_review: ['running', 'canceled', 'stuck', 'failed'],
+  // awaiting_review -> completed: the user accepted the run's artifact (Merge or
+  //   Create-PR). The executor never auto-completes; a run RESTS in awaiting_review
+  //   on SDK drain and only the user's accept decision drives it to completed.
+  // awaiting_review -> running: existing approval cycle — an in-flight tool approval
+  //   resolves back to running (transitionFromAwaitingReview).
+  awaiting_review: ['running', 'completed', 'canceled', 'stuck', 'failed'],
   // awaiting_input -> running: symmetric return when QuestionRouter.respond resolves.
   // awaiting_input -> canceled: user/system cancellation while a question is in flight.
   // awaiting_input -> failed: defensive — SDK loop crashed mid-question.
   // awaiting_input -> stuck is intentionally NOT allowed: per IDEA-025 Q2 resolution,
   // awaiting_input runs are exempt from stuck classification.
   awaiting_input:  ['running', 'canceled', 'failed'],
-  stuck:           ['running', 'canceled', 'failed'],
+  // stuck -> completed: the user accepted the artifact of a run that the
+  //   StuckDetector flagged (e.g. an orphaned PTY) but whose worktree still holds
+  //   deliverable work. Merge / Create-PR is valid from a stuck run.
+  stuck:           ['running', 'completed', 'canceled', 'failed'],
   completed:       [],
   failed:          [],
   canceled:        [],

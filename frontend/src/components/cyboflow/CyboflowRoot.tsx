@@ -39,6 +39,7 @@ import { SessionMergeDialog } from './SessionMergeDialog';
 import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
 import { RunMergeDialog } from './RunMergeDialog';
+import { RunCreatePrDialog } from './RunCreatePrDialog';
 import { RunDismissDialog } from './RunDismissDialog';
 import { SessionActionToast } from './SessionActionToast';
 
@@ -265,6 +266,15 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             onSuccess={() => {
               setIsMergeOpen(false);
               handleActionSuccess('Run merged');
+            }}
+          />
+          <RunCreatePrDialog
+            isOpen={isCreatePrOpen}
+            onClose={() => setIsCreatePrOpen(false)}
+            runId={lifecycleTarget.runId}
+            onSuccess={() => {
+              setIsCreatePrOpen(false);
+              handleActionSuccess('Pull request created');
             }}
           />
           <RunDismissDialog

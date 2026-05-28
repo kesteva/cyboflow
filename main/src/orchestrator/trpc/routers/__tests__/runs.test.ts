@@ -348,6 +348,11 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+      gitPush: vi.fn().mockResolvedValue({ output: 'pushed' }),
+      getRemoteUrlAndBranch: vi.fn().mockResolvedValue({
+        remoteUrl: 'https://github.com/acme/repo.git',
+        branchName: 'cyboflow/sprint/abcd1234',
+      }),
     };
   }
 
@@ -375,8 +380,10 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     });
   });
 
-  it('merge(squash) squash-merges, removes the worktree, and marks the run completed', async () => {
-    seedRun(db, { id: 'run-merge-1', status: 'completed', worktreePath: '/tmp/wt/run-merge-1' });
+  it('merge(squash) from awaiting_review squash-merges, removes the worktree, and marks the run completed', async () => {
+    // The executor rests a finished run in awaiting_review; the user accept
+    // (Merge) is what completes it — verify the awaiting_review → completed path.
+    seedRun(db, { id: 'run-merge-1', status: 'awaiting_review', worktreePath: '/tmp/wt/run-merge-1' });
     const wm = makeWmStub();
     wire(wm);
 
@@ -394,8 +401,8 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(getStatus('run-merge-1')).toBe('completed');
   });
 
-  it('merge(preserve) replays commits without a squash message', async () => {
-    seedRun(db, { id: 'run-merge-2', status: 'completed', worktreePath: '/tmp/wt/run-merge-2' });
+  it('merge(preserve) from stuck replays commits without a squash message', async () => {
+    seedRun(db, { id: 'run-merge-2', status: 'stuck', worktreePath: '/tmp/wt/run-merge-2' });
     const wm = makeWmStub();
     wire(wm);
 
@@ -405,6 +412,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(wm.mergeWorktreeToMain).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-2', 'main');
     expect(wm.squashAndMergeWorktreeToMain).not.toHaveBeenCalled();
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-2');
+    expect(getStatus('run-merge-2')).toBe('completed');
   });
 
   it('merge(squash) without a commit message → BAD_REQUEST and no worktree mutation', async () => {
@@ -451,6 +459,36 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     await expect(
       caller.cyboflow.runs.dismiss({ runId: 'run-no-wt' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+
+  it('createPr from awaiting_review pushes, removes the worktree, returns remote+branch, and completes the run', async () => {
+    seedRun(db, { id: 'run-pr-1', status: 'awaiting_review', worktreePath: '/tmp/wt/run-pr-1' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.createPr({ runId: 'run-pr-1' });
+
+    expect(wm.gitPush).toHaveBeenCalledWith('/tmp/wt/run-pr-1');
+    expect(wm.getRemoteUrlAndBranch).toHaveBeenCalledWith('/tmp/wt/run-pr-1');
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-pr-1');
+    expect(result).toEqual({
+      remoteUrl: 'https://github.com/acme/repo.git',
+      branchName: 'cyboflow/sprint/abcd1234',
+    });
+    expect(getStatus('run-pr-1')).toBe('completed');
+  });
+
+  it('createPr on a run with no worktree → PRECONDITION_FAILED and no push', async () => {
+    seedRun(db, { id: 'run-pr-nowt', status: 'awaiting_review' });
+    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run('run-pr-nowt');
+    const wm = makeWmStub();
+    wire(wm);
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.createPr({ runId: 'run-pr-nowt' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+    expect(wm.gitPush).not.toHaveBeenCalled();
   });
 });
 

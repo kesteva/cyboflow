@@ -71,6 +71,12 @@ vi.mock('../../../trpc/client', () => ({
         },
         merge: { mutate: vi.fn().mockResolvedValue({ success: true }) },
         dismiss: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        createPr: {
+          mutate: vi.fn().mockResolvedValue({
+            remoteUrl: 'https://github.com/o/r.git',
+            branchName: 'cyboflow/planner/run-plan',
+          }),
+        },
       },
       workflows: {
         list: {
@@ -608,7 +614,10 @@ const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
   id: 'run-planner-1',
   workflow_id: 'wf-2',
   project_id: 1,
-  status: 'completed' as const,
+  // Default to the rest state: a finished run awaiting the user's Merge / PR /
+  // Dismiss decision. The executor never auto-completes, so awaiting_review is
+  // the normal "ready to accept" status (not 'completed', which is terminal).
+  status: 'awaiting_review' as const,
   worktree_path: '/tmp/wt/planner/run-plan',
   branch_name: 'cyboflow/planner/run-plan',
   created_at: '',
@@ -640,27 +649,45 @@ describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
     return run;
   };
 
-  it('renders the action bar (Merge + Dismiss, no Create PR) for an active workflow run with no session', () => {
+  it('renders the action bar (Merge + Create PR + Dismiss) for an active workflow run with no session', () => {
     activateRun();
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.getByTestId('session-lifecycle-action-bar')).toBeInTheDocument();
     expect(screen.getByTestId('session-action-merge')).toBeInTheDocument();
     expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
-    // Create-PR is session-only.
-    expect(screen.queryByTestId('session-action-create-pr')).not.toBeInTheDocument();
+    // Create-PR is now offered for runs too (GAP-B un-defer).
+    expect(screen.getByTestId('session-action-create-pr')).toBeInTheDocument();
   });
 
-  it('disables Merge while the run is still in flight (non-terminal status)', () => {
+  it('enables Merge + Create PR when the run is awaiting_review (finished, ready to accept)', () => {
+    activateRun({ status: 'awaiting_review' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+  });
+
+  it('enables Merge + Create PR when the run is stuck', () => {
+    activateRun({ status: 'stuck' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
+  });
+
+  it('disables Merge + Create PR while the run is still running; Dismiss stays enabled', () => {
     activateRun({ status: 'running' });
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.getByTestId('session-action-merge')).toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).toBeDisabled();
     expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
   });
 
   it('clicking Merge opens the RunMergeDialog', () => {
-    activateRun({ status: 'completed' });
+    activateRun({ status: 'awaiting_review' });
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByText('Merge run changes')).not.toBeInTheDocument();
@@ -668,8 +695,17 @@ describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
     expect(screen.getByText('Merge run changes')).toBeInTheDocument();
   });
 
+  it('clicking Create PR opens the RunCreatePrDialog', () => {
+    activateRun({ status: 'awaiting_review' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Create pull request')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-create-pr'));
+    expect(screen.getByText('Create pull request')).toBeInTheDocument();
+  });
+
   it('clicking Dismiss opens the RunDismissDialog', () => {
-    activateRun({ status: 'completed' });
+    activateRun({ status: 'awaiting_review' });
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByText('Dismiss run?')).not.toBeInTheDocument();
@@ -678,7 +714,7 @@ describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
   });
 
   it('confirming Dismiss calls cyboflow.runs.dismiss.mutate with the runId', async () => {
-    const run = activateRun({ status: 'completed' });
+    const run = activateRun({ status: 'awaiting_review' });
     render(<CyboflowRoot projectId={1} />);
 
     fireEvent.click(screen.getByTestId('session-action-dismiss'));
