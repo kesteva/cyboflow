@@ -14,6 +14,8 @@ import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import type { QuestionPayload } from '../../../orchestrator/questionRouter';
 import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
+import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
+import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
@@ -444,7 +446,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
       ...(options.permissionMode !== 'ignore' ? {
         hooks: {
           PreToolUse: [{
-            hooks: [this.makePreToolUseHook(options.runId ?? options.panelId)]
+            // Load the user/project allow-list ONCE per spawn and capture it in
+            // the hook closure — the hook fires per tool call and must not touch
+            // the filesystem each time. The PreToolUse hook is first in the CLI's
+            // permission order, so the SDK's own settingSources allow-rule
+            // evaluation never runs; the hook honors those grants itself.
+            hooks: [this.makePreToolUseHook(
+              options.runId ?? options.panelId,
+              loadMergedPermissionRules(options.worktreePath),
+            )]
           }]
         }
       } : {})
@@ -552,12 +562,24 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * decision). In that case decision.message will be
    * 'Run was terminated before approval could be processed'.
    */
-  private makePreToolUseHook(runId: string): HookCallback {
+  private makePreToolUseHook(runId: string, allowRules: MergedPermissionRules): HookCallback {
     const loggerLike = makeLoggerLike(this.logger);
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
       if (pretool.tool_name === 'AskUserQuestion') {
         return this.routeAskUserQuestion(pretool, runId, loggerLike);
+      }
+      // Honor user/project allow grants: a tool the user already approved at the
+      // settings level is auto-allowed without re-prompting via ApprovalRouter.
+      // Conservative by design — non-matches fall through to the approval router.
+      const toolInput = (pretool.tool_input ?? {}) as Record<string, unknown>;
+      if (isToolAllowed(pretool.tool_name, toolInput, allowRules)) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+          },
+        };
       }
       return routePreToolUseThroughApprovalRouter(pretool, runId, 'ClaudeCodeManager', loggerLike);
     };
