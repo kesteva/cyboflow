@@ -75,6 +75,36 @@ describe('WorkflowCanvas', () => {
     expect(pill).toHaveTextContent('running');
   });
 
+  it('renders folder (basename) + branch chips when folderPath/branchName are provided', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        runLabel="run-001"
+        folderPath="/Users/dev/proj/.claude/worktrees/planner-abc"
+        branchName="cyboflow/planner/abc"
+        currentStepId="step-b"
+      />,
+    );
+
+    const folder = screen.getByTestId('workflow-canvas-folder');
+    // Shows the worktree basename, not the full path.
+    expect(folder).toHaveTextContent('planner-abc');
+    expect(folder).not.toHaveTextContent('/Users/dev');
+    // Full path preserved in the title for hover.
+    expect(folder).toHaveAttribute('title', '/Users/dev/proj/.claude/worktrees/planner-abc');
+
+    const branch = screen.getByTestId('workflow-canvas-branch');
+    expect(branch).toHaveTextContent('cyboflow/planner/abc');
+  });
+
+  it('omits folder + branch chips when folderPath/branchName are absent', () => {
+    render(
+      <WorkflowCanvas definition={MOCK_DEFINITION} runLabel="run-001" currentStepId="step-b" />,
+    );
+    expect(screen.queryByTestId('workflow-canvas-folder')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-canvas-branch')).not.toBeInTheDocument();
+  });
+
   it('renders one column per phase with 138px width and 14px gap in canvas inner', () => {
     render(
       <WorkflowCanvas
