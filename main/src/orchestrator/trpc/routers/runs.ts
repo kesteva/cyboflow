@@ -16,9 +16,11 @@ import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState } from '
 import { WORKFLOW_DEFINITIONS, SOLOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
+import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
+import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -196,6 +198,32 @@ export const runsRouter = router({
         });
       }
       return selectRunMessages(ctx.db, input.runId);
+    }),
+
+  /**
+   * Return the reconstructed chat history for a run as fully-correlated
+   * `UnifiedMessage[]` — the SAME rich projection the quick-session path
+   * produces (tool_use folded together with its matching tool_result, system
+   * init/compact and error messages surfaced).
+   *
+   * Reads from `raw_events` and folds every stored event through the shared
+   * `TypedEventNarrowing` + `MessageProjection` pipeline via
+   * `selectRunUnifiedMessages` from runUnifiedMessagesListing.ts.
+   *
+   * This is the Phase-1 backend half of chat unification. `listMessages`
+   * (the legacy TEXT-ONLY reducer) is intentionally kept intact — a later
+   * phase will mark it `@cyboflow-hidden` once the renderer migrates here.
+   */
+  listUnifiedMessages: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(async ({ ctx, input }): Promise<UnifiedMessage[]> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return selectRunUnifiedMessages(ctx.db, input.runId);
     }),
 
   /**
