@@ -4,7 +4,7 @@ import * as os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
-import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
@@ -53,15 +53,6 @@ interface ClaudeSpawnOptions {
    * dbSession-only path.
    */
   systemPromptAppend?: string;
-  /**
-   * When true, this spawn honors the user/project `permissions.allow` rules
-   * loaded via `settingSources`: allow-listed tools auto-approve in the CLI
-   * (no prompt) and only un-listed tools surface via `canUseTool` →
-   * ApprovalRouter. Set ONLY on interactive panel spawns (spawnClaudeCode).
-   * Workflow runs leave it unset so every tool routes through ApprovalRouter
-   * via the PreToolUse hook — autonomous-run behavior is unchanged.
-   */
-  honorSettingsPermissions?: boolean;
 }
 
 /**
@@ -448,7 +439,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
           previewFormat: 'markdown' as const,
         },
       },
-      ...this.buildPermissionConfig(options)
+      // When permissionMode is 'ignore', omit PreToolUse entirely so every tool call
+      // is auto-allowed by the SDK — matching the pre-SDK "skip the bridge" behavior.
+      ...(options.permissionMode !== 'ignore' ? {
+        hooks: {
+          PreToolUse: [{
+            hooks: [this.makePreToolUseHook(options.runId ?? options.panelId)]
+          }]
+        }
+      } : {})
     };
 
     if (options.model && options.model !== 'auto') {
@@ -532,97 +531,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return {
       ...process.env,
       ...(verbose ? { MCP_DEBUG: '1' } : {})
-    };
-  }
-
-  /**
-   * Build the permission-related SDK options (permissionMode / canUseTool /
-   * PreToolUse hook) for a spawn.
-   *
-   * Three modes:
-   *  - 'ignore'                       → omit all gating (test-only escape hatch).
-   *  - honorSettingsPermissions=true  → interactive sessions. The CLI resolves
-   *      user/project allow & deny rules (loaded via settingSources); allow-listed
-   *      tools auto-approve with no prompt, and only tools that resolve to 'ask'
-   *      surface via canUseTool → ApprovalRouter. The PreToolUse hook handles
-   *      ONLY AskUserQuestion (→ QuestionRouter); all other tools are non-deciding
-   *      so the CLI's rule evaluation runs. permissionMode is forced to 'default'
-   *      so the in-app queue (not the user's settings defaultMode, e.g. 'auto'
-   *      classifier) is the handler for un-listed tools.
-   *  - otherwise (workflow runs)      → every tool routes through ApprovalRouter
-   *      via the PreToolUse hook; allow-rules are NOT consulted (autonomous-run
-   *      behavior is unchanged).
-   */
-  private buildPermissionConfig(options: ClaudeSpawnOptions): Partial<Options> {
-    if (options.permissionMode === 'ignore') {
-      return {};
-    }
-    const hookId = options.runId ?? options.panelId;
-    if (options.honorSettingsPermissions) {
-      return {
-        permissionMode: 'default',
-        canUseTool: this.makeCanUseTool(hookId),
-        hooks: {
-          PreToolUse: [{ hooks: [this.makeAskUserQuestionHook(hookId)] }],
-        },
-      };
-    }
-    return {
-      hooks: {
-        PreToolUse: [{ hooks: [this.makePreToolUseHook(hookId)] }],
-      },
-    };
-  }
-
-  /**
-   * Build the canUseTool callback. The SDK invokes it only for tools the CLI
-   * could not auto-resolve from allow/deny rules (the 'ask' path), so this is
-   * the single permission gate for un-allow-listed tools — routed through
-   * ApprovalRouter and translated to a PermissionResult.
-   */
-  private makeCanUseTool(runId: string): CanUseTool {
-    const loggerLike = makeLoggerLike(this.logger);
-    return async (toolName, input) => {
-      try {
-        const decision = await ApprovalRouter.getInstance().requestApproval(
-          runId,
-          toolName,
-          input,
-          () => {},
-        );
-        if (decision.behavior === 'allow') {
-          return {
-            behavior: 'allow',
-            ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {}),
-          };
-        }
-        return {
-          behavior: 'deny',
-          message: decision.message ?? 'Denied by approval router',
-        };
-      } catch (err) {
-        loggerLike.error(
-          `[ClaudeCodeManager] canUseTool failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return { behavior: 'deny', message: 'Internal approval-router error' };
-      }
-    };
-  }
-
-  /**
-   * PreToolUse hook for the honor-settings path: routes AskUserQuestion through
-   * QuestionRouter (its answer flows back via updatedInput) and is non-deciding
-   * for every other tool, so the CLI's allow/deny-rule evaluation (then
-   * canUseTool for the 'ask' residue) runs normally.
-   */
-  private makeAskUserQuestionHook(runId: string): HookCallback {
-    const loggerLike = makeLoggerLike(this.logger);
-    return async (input, _toolUseId, _ctx) => {
-      const pretool = input as PreToolUseHookInput;
-      if (pretool.tool_name === 'AskUserQuestion') {
-        return this.routeAskUserQuestion(pretool, runId, loggerLike);
-      }
-      return { continue: true };
     };
   }
 
@@ -862,9 +770,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       conversationHistory,
       isResume,
       permissionMode,
-      model,
-      // Interactive sessions honor the user/project allow-list (see buildPermissionConfig).
-      honorSettingsPermissions: true
+      model
     };
     await this.spawnCliProcess(options);
   }
