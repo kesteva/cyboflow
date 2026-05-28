@@ -22,14 +22,18 @@
  * Props:
  *   runId — the active workflow run id (null in quick-session or idle mode).
  */
-import { useState } from 'react';
+import { useState, useRef, useLayoutEffect } from 'react';
+import { Send } from 'lucide-react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
-import { Textarea } from '../ui/Textarea';
 import { Button } from '../ui/Button';
 import { Tooltip } from '../ui/Tooltip';
+import { cn } from '../../utils/cn';
 import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
+
+/** Max composer height (px) before the textarea scrolls instead of growing. */
+const MAX_COMPOSER_HEIGHT = 160;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +59,16 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   const [text, setText] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the composer with its content (up to MAX_COMPOSER_HEIGHT), then
+  // scroll — mirrors the quick-session composer's feel.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
+  }, [text]);
 
   // -------------------------------------------------------------------------
   // Three-state gate
@@ -129,43 +143,57 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   // Render
   // -------------------------------------------------------------------------
 
-  const textarea = (
-    <Textarea
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onKeyDown={handleKeyDown}
-      placeholder={
-        mode === 'quick'
-          ? 'Send a message…'
-          : 'Type your answer…'
-      }
-      disabled={isDisabled}
-      rows={2}
-      className="resize-none text-xs"
-    />
-  );
-
-  return (
-    <div className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2">
-      <div className="flex gap-2 items-end">
-        <div className="flex-1">
-          {mode === 'workflow-idle' ? (
-            <Tooltip content="Input enabled only when the agent asks a question">
-              {textarea}
-            </Tooltip>
-          ) : (
-            textarea
-          )}
-        </div>
+  const composer = (
+    <div
+      className={cn(
+        'flex flex-col rounded-lg border bg-surface-secondary transition-colors',
+        'focus-within:border-interactive focus-within:ring-2 focus-within:ring-interactive',
+        'border-border-primary',
+        isDisabled && 'opacity-60',
+      )}
+    >
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={mode === 'quick' ? 'Send a message…' : 'Type your answer…'}
+        disabled={isDisabled}
+        rows={1}
+        style={{ maxHeight: MAX_COMPOSER_HEIGHT }}
+        className={cn(
+          'w-full resize-none bg-transparent px-3 pt-2 pb-1 text-xs',
+          'text-text-primary placeholder-text-tertiary',
+          'focus:outline-none disabled:cursor-not-allowed',
+        )}
+      />
+      <div className="flex items-center justify-between gap-2 px-2 pb-2">
+        <span className="text-[10px] text-text-tertiary">
+          {isDisabled ? '' : 'Enter to send · Shift+Enter for newline'}
+        </span>
         <Button
           size="sm"
           variant="primary"
           disabled={!canSend}
           onClick={() => void handleSend()}
+          className="gap-1.5"
         >
+          <Send className="h-3.5 w-3.5" />
           Send
         </Button>
       </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2">
+      {mode === 'workflow-idle' ? (
+        <Tooltip content="Input enabled only when the agent asks a question">
+          {composer}
+        </Tooltip>
+      ) : (
+        composer
+      )}
       {sendError !== null && (
         <p className="text-xs text-status-error" role="alert">
           {sendError}
