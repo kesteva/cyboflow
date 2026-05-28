@@ -46,6 +46,15 @@ type WorkflowRow = RouterOutputs['cyboflow']['workflows']['list'][number];
 const QUICK_WORKFLOW_NAME = '__quick__';
 
 /**
+ * Suffix of the deterministic `__quick__` sentinel workflow id
+ * (`wf-<projectId>-__quick__`, produced by `ensureQuickWorkflow` and migration
+ * 012). The sentinel workflow is intentionally absent from `workflows.list`, so
+ * its runs can NOT be identified by resolving `workflow_id → name` — they must
+ * be matched on the id itself. See {@link buildActiveRunRows}.
+ */
+const QUICK_WORKFLOW_ID_SUFFIX = `-${QUICK_WORKFLOW_NAME}`;
+
+/**
  * Terminal run statuses. A run in any of these is NOT active and is excluded
  * from the rail. Everything else (queued / starting / running / awaiting_review
  * / stuck / any future awaiting_* state) is treated as active — defined as an
@@ -95,7 +104,12 @@ export function buildActiveRunRows(
 
   return runs
     .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status))
-    .filter((run) => nameById.get(run.workflow_id) !== QUICK_WORKFLOW_NAME)
+    // Exclude quick-session sentinel runs. They can't be filtered by resolved
+    // name (the `__quick__` workflow is excluded from `workflows.list`, so
+    // `nameById` never holds it — the old name-based check let every quick run
+    // slip through with a "workflow" fallback label). Match the id suffix
+    // instead, which is the only reliable signal here.
+    .filter((run) => !run.workflow_id.endsWith(QUICK_WORKFLOW_ID_SUFFIX))
     .map((run) => ({
       ...run,
       workflowName: nameById.get(run.workflow_id) ?? 'workflow',
