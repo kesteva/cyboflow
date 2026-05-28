@@ -119,7 +119,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // Active open sessions drive the rail (reactive — dismiss/merge removes a row).
   const allSessions = useSessionStore((state) => state.sessions);
   const activeQuickSessionId = useCyboflowStore((state) => state.activeQuickSessionId);
-  const activeRunId = useCyboflowStore((state) => state.activeRunId);
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // Performance monitoring
@@ -832,14 +831,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // ---------------------------------------------------------------------------
 
   const handleSessionClick = (session: Session) => {
-    // Workflow-backed sessions restore the run view (canvas + bottom pane);
-    // others open as a quick session (panel surface). Either path makes the
-    // session the active lifecycle target so the action bar resolves it.
-    if (session.runId) {
-      useCyboflowStore.getState().setActiveRun(session.runId);
-    } else {
-      useCyboflowStore.getState().setActiveQuickSession(session.id);
-    }
+    // Rail sessions are quick sessions: open them via the panel surface, the same
+    // way useQuickSession does on creation. Passing runId (when the row was
+    // backfilled per TASK-788) starts the approval subscription; routing through
+    // setActiveRun instead would drive the workflow-run pane, which throws on the
+    // __quick__ sentinel in getPhaseState and renders a degraded text-only history.
+    useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
     }
@@ -1118,9 +1115,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                       {projectSessions.map((session, index) => {
                         const isLastSession = index === projectSessions.length - 1;
                         const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
-                        const isActive = session.runId
-                          ? activeRunId === session.runId
-                          : activeQuickSessionId === session.id;
+                        const isActive = activeQuickSessionId === session.id;
 
                         return (
                           <div

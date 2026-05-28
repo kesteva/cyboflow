@@ -5,8 +5,9 @@
  * historic log of workflow runs. Covers:
  *   (a) session rows render under an expanded project (by name)
  *   (b) main-repo sessions are excluded
- *   (c) clicking a quick session (no runId) → setActiveQuickSession + setActiveProjectId
- *   (d) clicking a workflow-backed session (runId) → setActiveRun + setActiveProjectId
+ *   (c) clicking a quick session (no runId) → setActiveQuickSession(id, undefined) + setActiveProjectId
+ *   (d) clicking a runId-backed session → setActiveQuickSession(id, runId) + setActiveProjectId
+ *       (panel surface, NOT setActiveRun — avoids the __quick__ workflow-pane bug)
  *   (e) status indicator dot class differs across session statuses
  *   (f) empty session list renders "No open sessions. Start one with Quick Session."
  */
@@ -311,12 +312,12 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(row).not.toBeNull();
     fireEvent.click(row!);
 
-    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-quick');
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-quick', undefined);
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
-  it('(d) clicking a workflow-backed session (runId) triggers setActiveRun + setActiveProjectId', async () => {
+  it('(d) clicking a runId-backed session opens the panel surface via setActiveQuickSession(id, runId)', async () => {
     mockSessions = [makeSession({ id: 'sess-wf', name: 'wf-CLICK', projectId: 1, runId: 'run-xyz' })];
 
     await renderExpanded();
@@ -326,9 +327,12 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(row).not.toBeNull();
     fireEvent.click(row!);
 
-    expect(mockSetActiveRun).toHaveBeenCalledWith('run-xyz');
+    // Quick sessions get a backfilled runId (TASK-788); reopening must NOT route
+    // through setActiveRun (workflow-run pane) — that throws on the __quick__
+    // sentinel in getPhaseState. Pass runId so the approval subscription starts.
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-wf', 'run-xyz');
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
-    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
   it('(e) status indicator dot class differs across session statuses', async () => {
