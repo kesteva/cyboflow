@@ -568,13 +568,16 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     // Extract the hook callback via private access — makePreToolUseHook is the
     // factory; we call it directly and invoke the resulting callback.
     const mgrPrivate = mgr as unknown as {
-      makePreToolUseHook: (panelId: string) => (
+      makePreToolUseHook: (
+        panelId: string,
+        allowRules: { allow: string[]; deny: string[] },
+      ) => (
         input: unknown,
         toolUseId: string,
         ctx: unknown,
       ) => Promise<unknown>;
     };
-    const hook = mgrPrivate.makePreToolUseHook('panel-ask-user');
+    const hook = mgrPrivate.makePreToolUseHook('panel-ask-user', { allow: [], deny: [] });
 
     const fakeQuestions = [
       {
@@ -634,13 +637,16 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     );
 
     const mgrPrivate = mgr as unknown as {
-      makePreToolUseHook: (panelId: string) => (
+      makePreToolUseHook: (
+        panelId: string,
+        allowRules: { allow: string[]; deny: string[] },
+      ) => (
         input: unknown,
         toolUseId: string,
         ctx: unknown,
       ) => Promise<unknown>;
     };
-    const hook = mgrPrivate.makePreToolUseHook('panel-ask-error');
+    const hook = mgrPrivate.makePreToolUseHook('panel-ask-error', { allow: [], deny: [] });
 
     const fakePreToolInput = {
       hook_event_name: 'PreToolUse',
@@ -686,13 +692,16 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     );
 
     const mgrPrivate = mgr as unknown as {
-      makePreToolUseHook: (panelId: string) => (
+      makePreToolUseHook: (
+        panelId: string,
+        allowRules: { allow: string[]; deny: string[] },
+      ) => (
         input: unknown,
         toolUseId: string,
         ctx: unknown,
       ) => Promise<unknown>;
     };
-    const hook = mgrPrivate.makePreToolUseHook('panel-bash');
+    const hook = mgrPrivate.makePreToolUseHook('panel-bash', { allow: [], deny: [] });
 
     const fakePreToolInput = {
       hook_event_name: 'PreToolUse',
@@ -715,5 +724,57 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     expect(output.hookSpecificOutput.permissionDecision).toBe('allow');
     expect(requestApproval).toHaveBeenCalledOnce();
     expect(requestApproval).toHaveBeenCalledWith('panel-bash', 'Bash', { command: 'ls' }, expect.any(Function));
+  });
+
+  it('makePreToolUseHook auto-allows a tool matching the allow-list without calling ApprovalRouter', async () => {
+    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    const mgrPrivate = mgr as unknown as {
+      makePreToolUseHook: (
+        panelId: string,
+        allowRules: { allow: string[]; deny: string[] },
+      ) => (
+        input: unknown,
+        toolUseId: string,
+        ctx: unknown,
+      ) => Promise<unknown>;
+    };
+    const hook = mgrPrivate.makePreToolUseHook('panel-allow', {
+      allow: ['Bash(git status:*)'],
+      deny: [],
+    });
+
+    const fakePreToolInput = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-use-allow-001',
+      tool_input: { command: 'git status -s' },
+      session_id: 'test-session',
+      transcript_path: '/tmp/test.jsonl',
+      cwd: '/tmp',
+    };
+
+    const result = await hook(fakePreToolInput, 'tool-use-allow-001', null);
+    const output = result as {
+      hookSpecificOutput: { hookEventName: string; permissionDecision: string };
+    };
+
+    expect(output.hookSpecificOutput.permissionDecision).toBe('allow');
+    // The key assertion: a granted tool bypasses the approval router entirely.
+    expect(requestApproval).not.toHaveBeenCalled();
   });
 });
