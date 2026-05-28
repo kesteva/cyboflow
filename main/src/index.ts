@@ -33,7 +33,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setStartRunDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { approvalEvents, questionEvents } from './orchestrator/trpc/routers/events';
@@ -49,7 +49,7 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
+import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike, PendingWorkProbeLike } from './orchestrator/runExecutor';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -609,10 +609,25 @@ async function initializeServices() {
     },
   };
 
+  // PendingWorkProbe adapter (GAP-A guard) — lets RunExecutor consult the live
+  // ApprovalRouter / QuestionRouter pending state before completing a run, so a
+  // run with an unresolved tool approval or question gate is never marked
+  // 'completed' when the SDK iterator drains. getInstance() is resolved lazily
+  // at probe time (run completion happens well after both routers are
+  // initialized below), so this adapter is safe to construct before
+  // ApprovalRouter.initialize() / QuestionRouter.initialize().
+  const pendingWorkProbe: PendingWorkProbeLike = {
+    hasPendingApproval: (runId) =>
+      ApprovalRouter.getInstance().getPending().some((a) => a.runId === runId),
+    hasPendingQuestion: (runId) =>
+      QuestionRouter.getInstance().getPending().some((q) => q.runId === runId),
+  };
+
   // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
   // LifecycleTransitions adapter, streaming publisher + db for event bridging,
   // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output'),
-  // and the stepTransitionEmitter for lifecycle step-transition events (TASK-765).
+  // the stepTransitionEmitter for lifecycle step-transition events (TASK-765),
+  // and the pendingWorkProbe for the GAP-A completion guard.
   const runExecutor = new RunExecutor(
     spawnerAdapter,
     workflowRegistry,
@@ -623,6 +638,7 @@ async function initializeServices() {
     rawDb,
     defaultCliManager,
     stepTransitionEmitter,
+    pendingWorkProbe,
   );
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
@@ -809,6 +825,28 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
+    // worktreeManager.removeWorktreeByPath takes the run's absolute nested
+    // worktree path; getProjectById resolves the project path from project_id.
+    setRunCloseoutDeps({
+      worktreeManager: {
+        getProjectMainBranch: (projectPath) => worktreeManager.getProjectMainBranch(projectPath),
+        squashAndMergeWorktreeToMain: (projectPath, worktreePath, mainBranch, commitMessage) =>
+          worktreeManager.squashAndMergeWorktreeToMain(projectPath, worktreePath, mainBranch, commitMessage),
+        mergeWorktreeToMain: (projectPath, worktreePath, mainBranch) =>
+          worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
+        removeWorktreeByPath: (projectPath, worktreePath) =>
+          worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
+      },
+      sessionManager: {
+        getProjectById: (projectId) => {
+          const p = sessionManager.getProjectById(projectId);
+          return p ? { path: p.path } : undefined;
+        },
+      },
+    });
+    console.log('[Main] runs.merge/dismiss deps wired');
 
     setHealthProvider(orchestratorHealth);
     console.log('[Main] health.mcpServer deps wired');

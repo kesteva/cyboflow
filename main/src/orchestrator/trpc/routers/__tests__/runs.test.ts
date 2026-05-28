@@ -56,7 +56,8 @@ import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps } from '../runs';
+import type { RunWorktreeManagerLike } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent } from '../../../../../../shared/types/workflows';
@@ -327,6 +328,130 @@ describe('cyboflow.runs.start', () => {
   // isolation guarantees that test file starts with startRunDeps === null.
   // Repeating it here would require a __resetForTest escape hatch in source
   // code — not added because it would exist solely to support tests.
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.merge / cyboflow.runs.dismiss — GAP-B run close-out
+//
+// Deps (WorktreeManagerLike + SessionManagerLike) are injected via
+// setRunCloseoutDeps() with vi.fn() stubs so the test stays free of git /
+// Electron. Each test seeds a run with a worktree_path and asserts the right
+// WorktreeManager calls + the run's terminal status transition.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
+  let db: Database.Database;
+
+  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
+    return {
+      getProjectMainBranch: vi.fn().mockResolvedValue('main'),
+      squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  function wire(wm: RunWorktreeManagerLike) {
+    setRunCloseoutDeps({
+      worktreeManager: wm,
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+    });
+  }
+
+  function getStatus(runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  beforeEach(() => {
+    db = createTestDb({ includeStuckDetectedAt: true });
+  });
+
+  afterEach(() => {
+    db.close();
+    // Reset module-level deps so a wired stub doesn't leak into other describe blocks.
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: () => undefined },
+    });
+  });
+
+  it('merge(squash) squash-merges, removes the worktree, and marks the run completed', async () => {
+    seedRun(db, { id: 'run-merge-1', status: 'completed', worktreePath: '/tmp/wt/run-merge-1' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({
+      runId: 'run-merge-1',
+      strategy: 'squash',
+      commitMessage: 'combined commit',
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(wm.squashAndMergeWorktreeToMain).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-1', 'main', 'combined commit');
+    expect(wm.mergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-1');
+    expect(getStatus('run-merge-1')).toBe('completed');
+  });
+
+  it('merge(preserve) replays commits without a squash message', async () => {
+    seedRun(db, { id: 'run-merge-2', status: 'completed', worktreePath: '/tmp/wt/run-merge-2' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-merge-2', strategy: 'preserve' });
+
+    expect(wm.mergeWorktreeToMain).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-2', 'main');
+    expect(wm.squashAndMergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-2');
+  });
+
+  it('merge(squash) without a commit message → BAD_REQUEST and no worktree mutation', async () => {
+    seedRun(db, { id: 'run-merge-3', status: 'completed', worktreePath: '/tmp/wt/run-merge-3' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.merge({ runId: 'run-merge-3', strategy: 'squash', commitMessage: '   ' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+
+    expect(wm.squashAndMergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(wm.removeWorktreeByPath).not.toHaveBeenCalled();
+  });
+
+  it('dismiss removes the worktree and marks a non-terminal run canceled', async () => {
+    seedRun(db, { id: 'run-dismiss-1', status: 'stuck', worktreePath: '/tmp/wt/run-dismiss-1' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.dismiss({ runId: 'run-dismiss-1' });
+
+    expect(result).toEqual({ success: true });
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-1');
+    expect(getStatus('run-dismiss-1')).toBe('canceled');
+  });
+
+  it('merge on a missing run → NOT_FOUND', async () => {
+    wire(makeWmStub());
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.merge({ runId: 'no-such-run', strategy: 'preserve' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('dismiss on a run with no worktree → PRECONDITION_FAILED', async () => {
+    // seedRun then null out the worktree_path to simulate a run that never got a worktree.
+    seedRun(db, { id: 'run-no-wt', status: 'queued' });
+    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run('run-no-wt');
+    wire(makeWmStub());
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.dismiss({ runId: 'run-no-wt' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
 });
 
 // ---------------------------------------------------------------------------

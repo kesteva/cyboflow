@@ -17,6 +17,7 @@ import { WORKFLOW_DEFINITIONS, SOLOFLOW_WORKFLOW_NAMES } from '../../../../../sh
 import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
+import type { DatabaseLike } from '../../types';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
@@ -88,6 +89,91 @@ let startRunDeps: StartRunDeps | null = null;
  */
 export function setStartRunDeps(deps: StartRunDeps): void {
   startRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// run close-out dependency bag (GAP-B)
+//
+// Planner / workflow runs never create a `sessions` row (a sessions row would
+// double-list the run in the rail and its flat worktree-name layout does not
+// match the run's nested `.cyboflow/worktrees/<workflow>/<runId8>` path). So
+// the lifecycle close-out (Merge / Dismiss + worktree cleanup) operates on the
+// `workflow_runs` row directly, reusing WorktreeManager's git helpers — which
+// already take an absolute worktreePath — via the narrow interfaces below.
+//
+// Injected at boot by main/src/index.ts via setRunCloseoutDeps(). Until wired,
+// the mutations throw METHOD_NOT_SUPPORTED (same pattern as the other stubs).
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrow slice of WorktreeManager needed for run close-out. Keeps the router
+ * free of a concrete services/* import (standalone-typecheck invariant).
+ */
+export interface RunWorktreeManagerLike {
+  getProjectMainBranch(projectPath: string): Promise<string>;
+  squashAndMergeWorktreeToMain(
+    projectPath: string,
+    worktreePath: string,
+    mainBranch: string,
+    commitMessage: string,
+  ): Promise<void>;
+  mergeWorktreeToMain(projectPath: string, worktreePath: string, mainBranch: string): Promise<void>;
+  /** `git worktree remove "<worktreePath>" --force` — idempotent on already-gone trees. */
+  removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
+}
+
+export interface RunCloseoutSessionManagerLike {
+  getProjectById(projectId: number): { path: string } | undefined;
+}
+
+export interface RunCloseoutDeps {
+  worktreeManager: RunWorktreeManagerLike;
+  sessionManager: RunCloseoutSessionManagerLike;
+}
+
+let runCloseoutDeps: RunCloseoutDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the run close-out mutations (merge /
+ * dismiss). Called once at boot by main/src/index.ts after WorktreeManager and
+ * SessionManager are constructed. Until then the mutations throw
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setRunCloseoutDeps(deps: RunCloseoutDeps): void {
+  runCloseoutDeps = deps;
+}
+
+/**
+ * Shared helper: load a run, validate it has a worktree + project, and resolve
+ * the project path. Throws TRPCError on any failure so the procedures stay thin.
+ */
+function resolveRunForCloseout(
+  db: DatabaseLike,
+  runId: string,
+): { worktreePath: string; branchName: string | null; projectPath: string } {
+  if (!runCloseoutDeps) {
+    throw new TRPCError({
+      code: 'METHOD_NOT_SUPPORTED',
+      message: 'run close-out dependencies not wired yet. Call setRunCloseoutDeps() at boot.',
+    });
+  }
+  const row = db
+    .prepare('SELECT worktree_path, branch_name, project_id FROM workflow_runs WHERE id = ?')
+    .get(runId) as { worktree_path: string | null; branch_name: string | null; project_id: number } | undefined;
+  if (!row) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${runId} not found` });
+  }
+  if (!row.worktree_path) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `Run ${runId} has no worktree to close out`,
+    });
+  }
+  const project = runCloseoutDeps.sessionManager.getProjectById(row.project_id);
+  if (!project) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `Project ${row.project_id} not found for run ${runId}` });
+  }
+  return { worktreePath: row.worktree_path, branchName: row.branch_name, projectPath: project.path };
 }
 
 export const runsRouter = router({
@@ -175,6 +261,85 @@ export const runsRouter = router({
       }
 
       return cancelAndRestartHandler(input.runId, cancelAndRestartDeps);
+    }),
+
+  /**
+   * Merge a workflow run's worktree into the project's main branch (GAP-B).
+   *
+   * strategy='squash'   → squash all commits into one with `commitMessage`.
+   * strategy='preserve' → replay all commits onto main (no squash).
+   *
+   * After a successful merge the run's worktree is removed and the run is
+   * marked terminal ('completed'); the caller (dialog) then drops the active-run
+   * selection. Mirrors the session merge dialog's squash/preserve choice but
+   * operates on the workflow_runs row instead of a sessions row.
+   */
+  merge: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      strategy: z.enum(['squash', 'preserve']),
+      commitMessage: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }): Promise<{ success: true }> => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const deps = runCloseoutDeps;
+      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
+      const wm = deps!.worktreeManager;
+
+      const mainBranch = await wm.getProjectMainBranch(projectPath);
+      if (input.strategy === 'squash') {
+        const message = input.commitMessage?.trim();
+        if (!message) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'commitMessage is required for a squash merge',
+          });
+        }
+        await wm.squashAndMergeWorktreeToMain(projectPath, worktreePath, mainBranch, message);
+      } else {
+        await wm.mergeWorktreeToMain(projectPath, worktreePath, mainBranch);
+      }
+
+      // Remove the worktree and mark the run terminal. The worktree removal is
+      // idempotent; mark-completed is guarded so it no-ops on an already-terminal
+      // run rather than throwing.
+      await wm.removeWorktreeByPath(projectPath, worktreePath);
+      ctx.db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        )
+        .run(input.runId);
+      return { success: true };
+    }),
+
+  /**
+   * Dismiss a workflow run (GAP-B): remove its worktree and mark the run
+   * terminal ('canceled'). Any unmerged changes in the worktree are discarded.
+   * The session-side equivalent is `sessions:delete`; this is the run-scoped
+   * twin that operates on the workflow_runs row + its nested worktree path.
+   */
+  dismiss: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<{ success: true }> => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const deps = runCloseoutDeps;
+      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
+      ctx.db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        )
+        .run(input.runId);
+      return { success: true };
     }),
 
   /**

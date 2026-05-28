@@ -697,6 +697,128 @@ describe('lifecycle transitions', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GAP-A: a run must NOT be marked 'completed' while it has a pending approval
+// or question (or is parked awaiting human work) when the SDK iterator drains.
+// ---------------------------------------------------------------------------
+
+import type { PendingWorkProbeLike } from '../runExecutor';
+
+function makePendingProbe(
+  overrides?: Partial<PendingWorkProbeLike>,
+): PendingWorkProbeLike {
+  return {
+    hasPendingApproval: vi.fn().mockReturnValue(false),
+    hasPendingQuestion: vi.fn().mockReturnValue(false),
+    ...overrides,
+  };
+}
+
+describe('RunExecutor.execute — GAP-A completion guard', () => {
+  // (i) drain with a pending approval does NOT complete.
+  it('does NOT complete when the run has a pending approval at iterator drain', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const probe = makePendingProbe({ hasPendingApproval: vi.fn().mockReturnValue(true) });
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      lt,
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      probe,
+    );
+    await executor.execute(run.id);
+
+    expect(probe.hasPendingApproval).toHaveBeenCalledWith(run.id);
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  // (i') drain with a pending question does NOT complete.
+  it('does NOT complete when the run has a pending question at iterator drain', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const probe = makePendingProbe({ hasPendingQuestion: vi.fn().mockReturnValue(true) });
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined,
+      lt,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      probe,
+    );
+    await executor.execute(run.id);
+
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  // (i'') drain while the run is parked awaiting_review (DB-status guard) does
+  // NOT complete, even with no pending-work probe injected.
+  it('does NOT complete when the live run status is awaiting_review at drain (no probe)', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'awaiting_review' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, lt);
+    await executor.execute(run.id);
+
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  // (ii) drain with NO pending work DOES complete (existing behavior preserved).
+  it('DOES complete when the run has no pending work at iterator drain', async () => {
+    const { mock: lt, completed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const probe = makePendingProbe(); // both false
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined,
+      lt,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      probe,
+    );
+    await executor.execute(run.id);
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-662 follow-up: source EventEmitter arg wires onFirstMessage → running()
 // ---------------------------------------------------------------------------
 
