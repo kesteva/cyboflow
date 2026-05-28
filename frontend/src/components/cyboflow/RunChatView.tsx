@@ -18,17 +18,14 @@
 import { useEffect, useRef, useMemo, useState, type ReactElement } from 'react';
 import { ChatInput } from './ChatInput';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { useReviewQueueStore } from '../../stores/reviewQueueStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
-import { PendingApprovalCard } from '../ReviewQueue/PendingApprovalCard';
+import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
 import { trpc } from '../../trpc/client';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 import type { ChatMessage } from '../../../../shared/types/chatMessage';
 import type { Question } from '../../../../shared/types/questions';
-import type { Approval } from '../../../../shared/types/approvals';
-import type { QueueItem } from '../../utils/reviewQueueSelectors';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,26 +167,12 @@ function renderTimelineItem(
 }
 
 // ---------------------------------------------------------------------------
-// Approval conversion helper
-// ---------------------------------------------------------------------------
-
-/** Wrap a raw Approval in the QueueItem shape PendingApprovalCard expects. */
-function approvalToQueueItem(approval: Approval): QueueItem {
-  return {
-    kind: 'single',
-    approval,
-    isBlocking: false,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Public component
 // ---------------------------------------------------------------------------
 
 export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
-  const approvalQueue = useReviewQueueStore((s) => s.queue);
   const questionQueue = useQuestionStore((s) => s.queue);
 
   const [historicalMessages, setHistoricalMessages] = useState<ChatMessage[]>([]);
@@ -332,7 +315,6 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
 
   // runId is non-null — full conversation view
   const deps: EventRenderDeps = { questionQueue, runId };
-  const runApprovals = approvalQueue.filter((a) => a.runId === runId);
 
   return (
     <div className="flex h-full flex-col gap-2">
@@ -347,19 +329,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
         {mergedTimeline.map((item, idx) => renderTimelineItem(item, idx, deps))}
       </div>
 
-      {runApprovals.length > 0 && (
-        <div className="rounded border border-border-primary bg-bg-secondary p-2">
-          <p className="mb-2 text-xs font-semibold text-text-primary">Pending approvals</p>
-          <div>
-            {runApprovals.map((approval) => (
-              <PendingApprovalCard
-                key={approval.id}
-                item={approvalToQueueItem(approval)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      <PendingApprovalsForRun runId={runId} />
 
       <ChatInput runId={runId} />
     </div>
