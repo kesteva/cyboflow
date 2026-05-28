@@ -107,6 +107,15 @@ vi.mock('../../../utils/api', () => ({
         success: true,
         data: { jobId: 'job-1', sessionId: 'sess-qs-1', worktreePath: '/tmp/qs' },
       }),
+      // Referenced inside lifecycle-dialog confirm handlers (not at render time).
+      delete: vi.fn().mockResolvedValue({ success: true }),
+      squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true }),
+      rebaseToMain: vi.fn().mockResolvedValue({ success: true }),
+      gitPush: vi.fn().mockResolvedValue({ success: true }),
+      getRemoteUrl: vi.fn().mockResolvedValue({
+        success: true,
+        data: { remoteUrl: 'https://github.com/o/r.git', branchName: 'b' },
+      }),
     },
   },
 }));
@@ -497,5 +506,91 @@ describe('CyboflowRoot — SessionLifecycleActionBar (TASK-792)', () => {
     expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
     expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
     expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session lifecycle dialog wiring (TASK-796)
+// ---------------------------------------------------------------------------
+
+const makeWorkflowSession = (overrides: Record<string, unknown> = {}) => ({
+  id: 'sess-run-test',
+  name: 'run-test',
+  projectId: 1,
+  status: 'stopped' as const,
+  isMainRepo: false,
+  worktreePath: '/tmp/run-test',
+  prompt: 'test prompt',
+  output: [],
+  jsonMessages: [],
+  createdAt: new Date().toISOString(),
+  runId: 'run-abc-999',
+  ...overrides,
+});
+
+describe('CyboflowRoot — lifecycle dialog wiring (TASK-796)', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+    });
+  });
+
+  const activateQuickSession = () => {
+    const session = makeQuickSession();
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+  };
+
+  it('clicking Merge opens the SessionMergeDialog', () => {
+    activateQuickSession();
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Merge session changes')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-merge'));
+    expect(screen.getByText('Merge session changes')).toBeInTheDocument();
+  });
+
+  it('clicking Create PR opens the SessionCreatePrDialog', () => {
+    activateQuickSession();
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Create pull request')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-create-pr'));
+    expect(screen.getByText('Create pull request')).toBeInTheDocument();
+  });
+
+  it('clicking Dismiss opens the SessionDismissDialog', () => {
+    activateQuickSession();
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Dismiss session?')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-dismiss'));
+    expect(screen.getByText('Dismiss session?')).toBeInTheDocument();
+  });
+
+  it('renders the action bar for an opened workflow run whose session.runId matches activeRunId', () => {
+    const session = makeWorkflowSession({ runId: 'run-abc-999' });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveRun('run-abc-999');
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-lifecycle-action-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
+  });
+
+  it('does not render the action bar for a workflow run with no matching session', () => {
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useCyboflowStore.getState().setActiveRun('run-no-match');
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByTestId('session-lifecycle-action-bar')).not.toBeInTheDocument();
   });
 });

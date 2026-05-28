@@ -1,6 +1,5 @@
 import { GitMerge, ExternalLink, Trash2 } from 'lucide-react';
-import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { useSessionStore } from '../../stores/sessionStore';
+import { useLifecycleSession } from '../../hooks/useLifecycleSession';
 
 interface SessionLifecycleActionBarProps {
   onMerge?: () => void;
@@ -9,13 +8,8 @@ interface SessionLifecycleActionBarProps {
 }
 
 export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: SessionLifecycleActionBarProps) {
-  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
-  const sessions = useSessionStore((s) => s.sessions);
-
-  if (!activeQuickSessionId) return null;
-
-  const session = sessions.find((s) => s.id === activeQuickSessionId);
-  if (!session || session.isMainRepo) return null;
+  const session = useLifecycleSession();
+  if (!session) return null;
 
   const isRunning = session.status === 'running';
 
