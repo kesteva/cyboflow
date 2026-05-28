@@ -21,6 +21,7 @@ import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
 import { usePanelSurface } from '../../hooks/usePanelSurface';
 import { SessionProvider } from '../../contexts/SessionContext';
@@ -47,6 +48,15 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+
+  // Resolve the active run's worktree folder + branch for the canvas meta row.
+  // Sourced from activeRunsStore (workflow_runs.worktree_path / branch_name);
+  // planner runs have no `sessions` row, so useLifecycleSession can't supply these.
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  const activeRun =
+    projectId !== null && activeRunId !== null
+      ? runsByProject[projectId]?.find((r) => r.id === activeRunId)
+      : undefined;
 
   const {
     mainRepoSession,
@@ -138,6 +148,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     definition={phaseState.definition}
                     currentStepId={phaseState.currentStepId}
                     runLabel={activeRunId}
+                    folderPath={activeRun?.worktree_path}
+                    branchName={activeRun?.branch_name}
                     isRunning={!phaseState.isLoading && phaseState.error === null}
                   />
                 </div>

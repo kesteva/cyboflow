@@ -30,9 +30,20 @@ export interface WorkflowCanvasProps {
   currentStepId?: string | null;
   runLabel?: string;
   workflowTitle?: string;
+  /** Worktree path of the run; rendered (basename) as a "folder" chip in the meta row. */
+  folderPath?: string | null;
+  /** Branch name of the run; rendered as a "branch" chip in the meta row. */
+  branchName?: string | null;
   elapsed?: string;
   tokenCount?: string;
   isRunning?: boolean;
+}
+
+/** Last path segment of a worktree path, for a compact "folder" chip. */
+function basename(p: string): string {
+  const trimmed = p.replace(/[/\\]+$/, '');
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return idx === -1 ? trimmed : trimmed.slice(idx + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -44,6 +55,8 @@ export function WorkflowCanvas({
   currentStepId = null,
   runLabel,
   workflowTitle,
+  folderPath,
+  branchName,
   elapsed,
   tokenCount,
   isRunning = false,
@@ -182,6 +195,22 @@ export function WorkflowCanvas({
           <span data-testid="workflow-canvas-run-label">
             {' · '}
             {runLabel}
+          </span>
+        )}
+        {folderPath && (
+          <span data-testid="workflow-canvas-folder" title={folderPath}>
+            folder{' '}
+            <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>
+              {basename(folderPath)}
+            </b>
+          </span>
+        )}
+        {branchName && (
+          <span data-testid="workflow-canvas-branch" title={branchName}>
+            branch{' '}
+            <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>
+              {branchName}
+            </b>
           </span>
         )}
         {elapsed !== undefined && (
