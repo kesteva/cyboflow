@@ -30,9 +30,11 @@ function makeRun(overrides: Partial<Run>): Run {
   } as Run;
 }
 
+// Mirror production: `cyboflow.workflows.list` EXCLUDES the `__quick__` sentinel
+// (workflowRegistry.listByProject filters `name != '__quick__'`), so the rows
+// resolver never has a name for a quick run — it must match the id suffix.
 const workflows: Wf[] = [
   { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', created_at: '' },
-  { id: 'wf-quick', project_id: 1, name: '__quick__', workflow_path: null, permission_mode: 'default', created_at: '' },
 ];
 
 describe('buildActiveRunRows', () => {
@@ -49,11 +51,14 @@ describe('buildActiveRunRows', () => {
     expect(rows.map((r) => r.id)).toEqual(['r-run']);
   });
 
-  it('(b) excludes __quick__ sentinel-workflow runs', () => {
+  it('(b) excludes __quick__ sentinel-workflow runs by id suffix (absent from workflows.list)', () => {
     const rows = buildActiveRunRows(
       [
         makeRun({ id: 'r-wf', workflow_id: 'wf-planner', status: 'running' }),
-        makeRun({ id: 'r-quick', workflow_id: 'wf-quick', status: 'running' }),
+        // Real quick-run id shape: `wf-<projectId>-__quick__`. This workflow is
+        // NOT in `workflows`, reproducing the production bug where the old
+        // name-based filter let every quick run through as "workflow".
+        makeRun({ id: 'r-quick', workflow_id: 'wf-1-__quick__', status: 'running' }),
       ],
       workflows,
     );
