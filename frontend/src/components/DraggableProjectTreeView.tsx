@@ -3,16 +3,16 @@ import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Sett
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import { useSessionStore } from '../stores/sessionStore';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
-import { trpc } from '../trpc/client';
-import type { WorkflowRunListRow } from '../../../shared/types/workflows';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
 import type { Project, CreateProjectRequest } from '../types/project';
 import type { Folder } from '../types/folder';
+import type { Session } from '../types/session';
 import { useContextMenu } from '../contexts/ContextMenuContext';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
@@ -26,10 +26,11 @@ import { formatDistanceToNow } from '../utils/timestampUtils';
 // ---------------------------------------------------------------------------
 
 interface ProjectWithRuns extends Project {
-  /** Always-empty placeholder; kept so existing folder/drag logic compiles. */
+  /** Always-empty placeholder; kept so existing folder/drag logic compiles.
+   *  Session rows are derived from the session store at render time (reactive),
+   *  not stored here. */
   sessions: never[];
   folders: Folder[];
-  runs: WorkflowRunListRow[];
 }
 
 interface DragState {
@@ -49,6 +50,7 @@ export type DraggableProjectTreeViewProps = Record<string, never>;
 // ---------------------------------------------------------------------------
 
 const STATUS_DOT_CLASS: Record<string, string> = {
+  // Workflow-run statuses
   queued: 'bg-text-tertiary',
   starting: 'bg-status-info animate-pulse',
   running: 'bg-status-success animate-pulse',
@@ -57,6 +59,13 @@ const STATUS_DOT_CLASS: Record<string, string> = {
   completed: 'bg-status-neutral',
   failed: 'bg-status-error',
   canceled: 'bg-text-tertiary',
+  // Session statuses
+  initializing: 'bg-status-info animate-pulse',
+  ready: 'bg-status-neutral',
+  waiting: 'bg-status-warning animate-pulse',
+  stopped: 'bg-text-tertiary',
+  completed_unviewed: 'bg-status-success',
+  error: 'bg-status-error',
 };
 
 function statusDotClass(status: string): string {
@@ -107,6 +116,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
   const { showError } = useErrorStore();
   const activeProjectId = useNavigationStore((state) => state.activeProjectId);
+  // Active open sessions drive the rail (reactive — dismiss/merge removes a row).
+  const allSessions = useSessionStore((state) => state.sessions);
+  const activeQuickSessionId = useCyboflowStore((state) => state.activeQuickSessionId);
+  const activeRunId = useCyboflowStore((state) => state.activeRunId);
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // Performance monitoring
@@ -173,18 +186,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
       const projects = response.data as Project[];
 
-      // Fetch runs for every project in parallel (newest first — server sorts DESC)
-      const runsPerProject = await Promise.all(
-        projects.map(p =>
-          trpc.cyboflow.runs.list.query({ projectId: p.id }).catch(() => [] as WorkflowRunListRow[]),
-        ),
-      );
-
-      const projectsWithRunsData: ProjectWithRuns[] = projects.map((p, i) => ({
+      const projectsWithRunsData: ProjectWithRuns[] = projects.map((p) => ({
         ...p,
         sessions: [] as never[],
         folders: [] as Folder[],
-        runs: runsPerProject[i],
       }));
 
       setProjectsWithRuns(projectsWithRunsData);
@@ -204,10 +209,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         setExpandedProjects(new Set(savedState.expandedProjects));
         setExpandedFolders(new Set(savedState.expandedFolders));
       } else {
-        // Auto-expand projects that have runs
+        // Auto-expand projects that currently have active sessions
+        const sessionsSnapshot = useSessionStore.getState().sessions;
         const projectsToExpand = new Set<number>();
         projectsWithRunsData.forEach(p => {
-          if (p.runs.length > 0) {
+          if (sessionsSnapshot.some(s => s.projectId === p.id && !s.isMainRepo)) {
             projectsToExpand.add(p.id);
           }
         });
@@ -306,7 +312,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                 ...updatedProject,
                 sessions: [] as never[],
                 folders: project.folders,
-                runs: project.runs,
               };
             }
             return project;
@@ -674,7 +679,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       setNewProject({ name: '', path: '', buildScript: '', runScript: '' });
       setDetectedBranchForNewProject(null);
       setShowValidationErrors(false);
-      const newProjectWithRuns: ProjectWithRuns = { ...response.data, sessions: [] as never[], folders: [], runs: [] };
+      const newProjectWithRuns: ProjectWithRuns = { ...response.data, sessions: [] as never[], folders: [] };
       setProjectsWithRuns(prev => [...prev, newProjectWithRuns]);
     } catch (error: unknown) {
       showError({ title: 'Failed to Create Project', error: error instanceof Error ? error.message : 'An error occurred while creating the project.' });
@@ -823,12 +828,21 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   };
 
   // ---------------------------------------------------------------------------
-  // Run row click
+  // Session row click
   // ---------------------------------------------------------------------------
 
-  const handleRunClick = (run: WorkflowRunListRow) => {
-    useCyboflowStore.getState().setActiveRun(run.id);
-    useNavigationStore.getState().setActiveProjectId(run.project_id);
+  const handleSessionClick = (session: Session) => {
+    // Workflow-backed sessions restore the run view (canvas + bottom pane);
+    // others open as a quick session (panel surface). Either path makes the
+    // session the active lifecycle target so the action bar resolves it.
+    if (session.runId) {
+      useCyboflowStore.getState().setActiveRun(session.runId);
+    } else {
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    }
+    if (session.projectId != null) {
+      useNavigationStore.getState().setActiveProjectId(session.projectId);
+    }
   };
 
   // ---------------------------------------------------------------------------
@@ -984,9 +998,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
           <>
             {projectsWithRuns.map((project) => {
               const isExpanded = expandedProjects.has(project.id);
-              const runCount = project.runs.length;
+              const projectSessions = allSessions.filter(
+                (s) => s.projectId === project.id && !s.isMainRepo,
+              );
+              const sessionCount = projectSessions.length;
               const folderCount = project.folders?.length ?? 0;
-              const hasChildren = runCount > 0 || folderCount > 0;
+              const hasChildren = sessionCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
 
@@ -1093,25 +1110,26 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
                       {/* Folder tree */}
                       {buildFolderTree(project.folders ?? []).map((folder, index, arr) => {
-                        const isLastItem = index === arr.length - 1 && runCount === 0;
+                        const isLastItem = index === arr.length - 1 && sessionCount === 0;
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
-                      {/* Run rows — newest first (server returns DESC order) */}
-                      {project.runs.map((run, index) => {
-                        const isLastRun = index === project.runs.length - 1;
-                        // TODO: enrich with workflow.name — currently shows workflow_id last-6
-                        const runLabel = run.workflow_id.slice(-6);
-                        const relativeTime = formatDistanceToNow(run.created_at);
+                      {/* Active session rows */}
+                      {projectSessions.map((session, index) => {
+                        const isLastSession = index === projectSessions.length - 1;
+                        const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
+                        const isActive = session.runId
+                          ? activeRunId === session.runId
+                          : activeQuickSessionId === session.id;
 
                         return (
                           <div
-                            key={run.id}
+                            key={session.id}
                             className="relative"
                             style={{ marginLeft: '16px' }}
                           >
                             <div className="absolute inset-0 pointer-events-none">
-                              {!isLastRun && (
+                              {!isLastSession && (
                                 <div
                                   className="absolute top-0 bottom-0 w-px bg-border-secondary"
                                   style={{ left: '8px' }}
@@ -1123,22 +1141,24 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                               />
                             </div>
 
-                            {/* Run row — NOT draggable */}
+                            {/* Session row — NOT draggable */}
                             <div
-                              className="relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-surface-hover transition-colors"
+                              className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                                isActive ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                              }`}
                               style={{ paddingLeft: '24px' }}
-                              onClick={() => handleRunClick(run)}
+                              onClick={() => handleSessionClick(session)}
                               role="button"
                               tabIndex={0}
-                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleRunClick(run); }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSessionClick(session); }}
                             >
                               {/* Status indicator dot */}
                               <span
-                                className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(run.status)}`}
-                                title={run.status}
+                                className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(session.status)}`}
+                                title={session.status}
                               />
-                              <span className="text-xs text-text-primary font-mono truncate" title={run.workflow_id}>
-                                {runLabel}
+                              <span className="text-sm text-text-primary truncate" title={session.name}>
+                                {session.name || session.id.slice(0, 8)}
                               </span>
                               <span className="text-xs text-text-tertiary truncate ml-auto">
                                 {relativeTime}
@@ -1147,13 +1167,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                           </div>
                         );
                       })}
-
-                      {/* Empty state when no runs AND no folders */}
-                      {runCount === 0 && folderCount === 0 && (
-                        <div className="px-4 py-2 text-xs text-text-tertiary">
-                          No runs yet. Use Start Run.
-                        </div>
-                      )}
 
                       {/* Add folder button */}
                       <div className="ml-6 mt-2 border-t border-border-primary pt-2">
@@ -1176,7 +1189,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                   {/* Empty state for expanded project with zero children */}
                   {isExpanded && !hasChildren && (
                     <div className="px-4 py-2 text-xs text-text-tertiary">
-                      No runs yet. Use Start Run.
+                      No open sessions. Start one with Quick Session.
                     </div>
                   )}
                 </div>
