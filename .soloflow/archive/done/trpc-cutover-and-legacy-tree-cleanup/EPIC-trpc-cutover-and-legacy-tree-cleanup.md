@@ -1,7 +1,7 @@
 ---
 epic: trpc-cutover-and-legacy-tree-cleanup
 created: 2026-05-21T14:30:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-023]
 ---
 
