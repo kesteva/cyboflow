@@ -68,7 +68,10 @@ const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
 // ---------------------------------------------------------------------------
 
 export function RunBottomPane() {
-  const [activeTab, setActiveTab] = useState<TabId>('data-stream');
+  // Default to the unified Chat transcript so a run opens to the same rich
+  // experience as a quick session. Data Stream (raw event log) and Terminal
+  // remain available as secondary tabs.
+  const [activeTab, setActiveTab] = useState<TabId>('chat');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
 
   return (
