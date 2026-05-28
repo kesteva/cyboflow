@@ -3,10 +3,10 @@
  *
  * Behaviors verified:
  *   1. Renders three tab buttons with labels Chat, Terminal, Data Stream.
- *   2. Data Stream is the default active tab; RunView is mounted on first render.
- *   3. Clicking Terminal tab shows the "Terminal — coming soon" placeholder and hides RunView.
- *   4. Clicking Chat tab mounts RunChatView (mocked) and hides RunView.
- *   5. Clicking Data Stream tab after switching away restores RunView.
+ *   2. Chat is the default active tab; RunChatView is mounted on first render.
+ *   3. Clicking Terminal tab shows the "Terminal — coming soon" placeholder and hides the chat.
+ *   4. Clicking Data Stream tab mounts RunView (raw event log) and hides the chat.
+ *   5. Clicking Chat tab after switching away restores RunChatView.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent } from '@testing-library/react';
@@ -61,63 +61,66 @@ describe('RunBottomPane', () => {
     expect(screen.getByRole('tab', { name: 'Data Stream' })).toBeInTheDocument();
   });
 
-  it('defaults to Data Stream tab and mounts RunView (renders activeRunId)', () => {
+  it('defaults to Chat tab and mounts RunChatView', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
     render(<RunBottomPane />);
-    // RunView renders the runId text when Data Stream (default) tab is active
-    expect(screen.getByText('run-xyz')).toBeInTheDocument();
+    // RunChatView (mocked) is mounted on first render; RunView is not.
+    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
+    expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
 
-  it('clicking Terminal tab shows "Terminal — coming soon" and hides RunView', () => {
+  it('clicking Terminal tab shows "Terminal — coming soon" and hides the chat', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
     render(<RunBottomPane />);
 
-    // Default: RunView is visible
-    expect(screen.getByText('run-xyz')).toBeInTheDocument();
+    // Default: RunChatView is visible
+    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
 
     // Click Terminal tab
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
 
     // Terminal placeholder visible
     expect(screen.getByText('Terminal — coming soon')).toBeInTheDocument();
-    // RunView content gone
-    expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
+    // Chat content gone
+    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
-  it('clicking Chat tab mounts RunChatView and hides RunView', () => {
+  it('clicking Data Stream tab mounts RunView and hides the chat', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
     render(<RunBottomPane />);
 
-    // Default: RunView is visible
-    expect(screen.getByText('run-xyz')).toBeInTheDocument();
-
-    // Click Chat tab
-    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
-
-    // RunChatView (mocked) is visible
+    // Default: RunChatView is visible
     expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
-    // RunView content gone
-    expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
+
+    // Click Data Stream tab
+    fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
+
+    // RunView renders the runId text
+    expect(screen.getByText('run-xyz')).toBeInTheDocument();
+    // Chat content gone
+    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
-  it('clicking Data Stream tab after switching away restores RunView', () => {
+  it('clicking Chat tab after switching away restores RunChatView', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
     render(<RunBottomPane />);
 
-    // Switch to Terminal
-    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
-    expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
-
-    // Switch back to Data Stream
+    // Switch to Data Stream (RunView visible, chat gone)
     fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
     expect(screen.getByText('run-xyz')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
+
+    // Switch back to Chat
+    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
+    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
+    expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
 });
