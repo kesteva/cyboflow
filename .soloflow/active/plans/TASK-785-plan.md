@@ -1,7 +1,7 @@
 ---
 id: TASK-785
 idea: braindump
-status: deferred
+status: done
 created: 2026-05-27T00:00:00Z
 source: braindump
 files_owned:

@@ -29,6 +29,7 @@ import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../../hooks/useAddClaudeShortcut';
 import { useAddQuickSessionShortcut } from '../../hooks/useAddQuickSessionShortcut';
 import { useQuickSession } from '../../hooks/useQuickSession';
+import { SessionLifecycleActionBar } from './SessionLifecycleActionBar';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -87,6 +88,10 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         >
           Quick Session
         </button>
+
+        <div className="flex-1" />
+
+        <SessionLifecycleActionBar />
       </div>
 
       {/* Main content area — two-column flex-row layout */}

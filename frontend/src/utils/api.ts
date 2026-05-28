@@ -258,6 +258,11 @@ export class API {
       return window.electronAPI.sessions.gitPush(sessionId);
     },
 
+    async getRemoteUrl(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.getRemoteUrl(sessionId);
+    },
+
     async getGitStatus(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getGitStatus(sessionId);

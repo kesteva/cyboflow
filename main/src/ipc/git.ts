@@ -1346,6 +1346,29 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   });
 
+  ipcMain.handle('sessions:get-remote-url', async (_event, sessionId: string) => {
+    try {
+      const session = await sessionManager.getSession(sessionId);
+      if (!session || !session.worktreePath) {
+        return { success: false, error: 'Session or worktree path not found' };
+      }
+
+      const remoteUrl = execSync('git remote get-url origin', {
+        cwd: session.worktreePath,
+        encoding: 'utf8',
+      }).trim();
+
+      const branchName = execSync('git branch --show-current', {
+        cwd: session.worktreePath,
+        encoding: 'utf8',
+      }).trim();
+
+      return { success: true, data: { remoteUrl, branchName } };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get remote URL' };
+    }
+  });
+
   ipcMain.handle('sessions:get-git-status', async (_event, sessionId: string, nonBlocking?: boolean, isInitialLoad?: boolean) => {
     try {
       const session = await sessionManager.getSession(sessionId);

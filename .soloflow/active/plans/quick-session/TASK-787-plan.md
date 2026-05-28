@@ -1,7 +1,7 @@
 ---
 id: TASK-787
 idea: IDEA-027
-status: ready
+status: done
 created: "2026-05-27T18:00:00Z"
 files_owned:
   - main/src/database/migrations/012_quick_workflow_sentinel.sql
