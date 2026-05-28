@@ -92,9 +92,17 @@ function makeQuestion(overrides: Partial<Question> = {}): Question {
 // Test setup
 // ---------------------------------------------------------------------------
 
+const mockSaveImages = vi.fn<(sessionId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => Promise<string[]>>();
+
 beforeEach(() => {
   mockAnswerMutate.mockReset();
   mockAnswerMutate.mockResolvedValue({ success: true });
+  mockSaveImages.mockReset();
+  mockSaveImages.mockResolvedValue(['/abs/artifacts/run-1/shot.png']);
+  // Stub the saveImages IPC used by the attach-image answer flow.
+  (window as unknown as { electronAPI: { sessions: { saveImages: typeof mockSaveImages } } }).electronAPI = {
+    sessions: { saveImages: mockSaveImages },
+  };
   // Reset questionStore to clean state so bus values don't bleed between tests.
   useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
 });
@@ -639,5 +647,94 @@ describe('otherText bus integration', () => {
     expect((otherInputs[0] as HTMLInputElement).value).toBe('override');
     // Sub-question 1 still shows the bus value
     expect((otherInputs[1] as HTMLInputElement).value).toBe('from-bus');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image attachment on the answer path
+// ---------------------------------------------------------------------------
+
+describe('image attachment on answer', () => {
+  function singleQuestion(): Question {
+    return makeQuestion({
+      id: 'q-1',
+      runId: 'run-1',
+      questions: [
+        {
+          question: 'What color?',
+          header: 'Color',
+          multiSelect: false,
+          options: [{ label: 'Red' }],
+        },
+      ],
+    });
+  }
+
+  it('saves attached images and forwards their file paths as attachments', async () => {
+    render(<AskUserQuestionCard item={singleQuestion()} />);
+
+    // Provide a valid answer so submit is enabled.
+    fireEvent.click(screen.getByRole('radio', { name: /Red/i }));
+
+    // Attach an image via the hidden file input.
+    const file = new File(['png-bytes'], 'shot.png', { type: 'image/png' });
+    const input = screen.getByTestId('ask-question-image-input') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    // A thumbnail with a remove control should appear.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /remove shot\.png/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /submit answer/i }));
+
+    await waitFor(() => {
+      // saveImages is called with the runId as the namespacing id and the image payload.
+      expect(mockSaveImages).toHaveBeenCalledWith('run-1', [
+        { name: 'shot.png', dataUrl: expect.stringMatching(/^data:image\/png/), type: 'image/png' },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(mockAnswerMutate).toHaveBeenCalledWith({
+        questionId: 'q-1',
+        answers: { 'What color?': 'Red' },
+        attachments: ['/abs/artifacts/run-1/shot.png'],
+      });
+    });
+  });
+
+  it('omits the attachments field when no image is attached', async () => {
+    render(<AskUserQuestionCard item={singleQuestion()} />);
+
+    fireEvent.click(screen.getByRole('radio', { name: /Red/i }));
+    fireEvent.click(screen.getByRole('button', { name: /submit answer/i }));
+
+    await waitFor(() => {
+      expect(mockAnswerMutate).toHaveBeenCalledWith({
+        questionId: 'q-1',
+        answers: { 'What color?': 'Red' },
+      });
+    });
+    expect(mockSaveImages).not.toHaveBeenCalled();
+  });
+
+  it('removes an attached image when its remove button is clicked', async () => {
+    render(<AskUserQuestionCard item={singleQuestion()} />);
+
+    const file = new File(['png-bytes'], 'shot.png', { type: 'image/png' });
+    const input = screen.getByTestId('ask-question-image-input') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+
+    const removeBtn = await screen.findByRole('button', { name: /remove shot\.png/i });
+    fireEvent.click(removeBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /remove shot\.png/i })).toBeNull();
+    });
   });
 });

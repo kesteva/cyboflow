@@ -27,13 +27,45 @@
  * keyed by `(questionId, subIndex)` if the multi-sub-question case becomes
  * user-visible. This file is the bus is question-level reader.
  */
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { Paperclip, X } from 'lucide-react';
 import { Pill } from '../ui/Pill';
 import { Button } from '../ui/Button';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { trpc } from '../../trpc/client';
 import { useQuestionStore } from '../../stores/questionStore';
 import type { Question, QuestionPayload } from '../../../../shared/types/questions';
+import type { AttachedImage } from '../../types/session';
+
+// ---------------------------------------------------------------------------
+// Image attachment helpers
+// ---------------------------------------------------------------------------
+
+/** Max attachment size — mirrors the quick-session composer (10 MB). */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+function generateImageId(): string {
+  return `img_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/** Read one File into an AttachedImage (data URL). Rejects non-images / oversize. */
+function processImageFile(file: File): Promise<AttachedImage | null> {
+  if (!file.type.startsWith('image/')) return Promise.resolve(null);
+  if (file.size > MAX_IMAGE_BYTES) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const result = e.target?.result;
+      if (typeof result === 'string') {
+        resolve({ id: generateImageId(), name: file.name, dataUrl: result, size: file.size, type: file.type });
+      } else {
+        resolve(null);
+      }
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -245,6 +277,25 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
 
   const [busy, setBusy] = useState(false);
 
+  // Image attachments for this answer (saved to disk on submit, then their
+  // file paths are folded into the answer text via the <attachments> block).
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function addFiles(files: FileList | null): Promise<void> {
+    if (!files) return;
+    const next: AttachedImage[] = [];
+    for (const file of Array.from(files)) {
+      const img = await processImageFile(file);
+      if (img) next.push(img);
+    }
+    if (next.length > 0) setAttachedImages((prev) => [...prev, ...next]);
+  }
+
+  function removeImage(id: string): void {
+    setAttachedImages((prev) => prev.filter((img) => img.id !== id));
+  }
+
   // ---------------------------------------------------------------------------
   // Effective Other text — prefers bus value unless the user has locally edited
   // ---------------------------------------------------------------------------
@@ -379,18 +430,35 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
     }
 
     setBusy(true);
-    void trpc.cyboflow.questions.answer
-      .mutate({ questionId: item.id, answers })
-      .then(() => {
+    void (async () => {
+      try {
+        // Persist any attached images to disk first; the resulting absolute file
+        // paths are folded into the answer text server-side (QuestionRouter).
+        // Namespace the artifacts dir by runId (saveImages treats the id arg as
+        // an artifacts-dir key only).
+        let attachments: string[] = [];
+        if (attachedImages.length > 0) {
+          attachments = await window.electronAPI.sessions.saveImages(
+            item.runId,
+            attachedImages.map((img) => ({ name: img.name, dataUrl: img.dataUrl, type: img.type })),
+          );
+        }
+
+        await trpc.cyboflow.questions.answer.mutate({
+          questionId: item.id,
+          answers,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        });
+
         clearOtherText(item.id);
+        setAttachedImages([]);
         onAnswered?.();
-      })
-      .catch(() => {
-        // mutation error: leave card visible, do not call onAnswered
-      })
-      .finally(() => {
+      } catch {
+        // mutation / save error: leave card visible, do not call onAnswered
+      } finally {
         setBusy(false);
-      });
+      }
+    })();
   }
 
   // ---------------------------------------------------------------------------
@@ -425,7 +493,30 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
           ))}
         </div>
 
-        <div className="mt-4">
+        {/* Attached image thumbnails */}
+        {attachedImages.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {attachedImages.map((image) => (
+              <div key={image.id} className="relative group">
+                <img
+                  src={image.dataUrl}
+                  alt={image.name}
+                  className="h-12 w-12 object-cover rounded border border-border-primary"
+                />
+                <button
+                  type="button"
+                  onClick={() => { removeImage(image.id); }}
+                  aria-label={`Remove ${image.name}`}
+                  className="absolute -top-1 -right-1 bg-surface-primary border border-border-primary rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                >
+                  <X className="w-2.5 h-2.5 text-text-secondary" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-4 flex items-center gap-2">
           <Button
             variant="primary"
             type="submit"
@@ -433,6 +524,27 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
           >
             Submit answer
           </Button>
+          <Pill
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            icon={<Paperclip className="w-3.5 h-3.5" />}
+            title="Attach images"
+            disabled={busy}
+          >
+            Attach Image
+          </Pill>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            data-testid="ask-question-image-input"
+            onChange={(e) => {
+              void addFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
         </div>
       </form>
     </div>

@@ -53,6 +53,13 @@ export const questionsRouter = router({
         z.string(),
         z.union([z.string(), z.array(z.string())]),
       ),
+      /**
+       * Absolute file paths of images the user attached when answering (already
+       * saved to disk via `sessions:save-images` in the renderer). Folded into
+       * the answer text by QuestionRouter.respond via the `<attachments>`
+       * convention. Optional — absent when no image was attached.
+       */
+      attachments: z.array(z.string()).optional(),
     }))
     .mutation(async ({ input }): Promise<{ success: true }> => {
       try {
@@ -65,6 +72,9 @@ export const questionsRouter = router({
         }
         await QuestionRouter.getInstance().respond(input.questionId, {
           answers: normalizedAnswers,
+          ...(input.attachments && input.attachments.length > 0
+            ? { attachments: input.attachments }
+            : {}),
         });
         return { success: true };
       } catch (err) {

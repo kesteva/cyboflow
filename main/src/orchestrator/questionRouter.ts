@@ -63,6 +63,43 @@ export class QuestionNotFoundError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Attachment embedding
+// ---------------------------------------------------------------------------
+
+/**
+ * Embed attachment file paths into the answer the agent receives, using the
+ * SAME `<attachments>` convention as the quick-session composer
+ * (frontend/src/hooks/useClaudePanel.ts). The block is appended to the FIRST
+ * answer value so the paths arrive inline with the user's answer text. When
+ * there are no answer keys (defensive), the block is stored under a synthetic
+ * `__attachments__` key so the paths are not silently dropped.
+ *
+ * Returns a NEW QuestionAnswer; the input is not mutated. A no-op (returns the
+ * original reference) when there are no attachments.
+ */
+export function embedAttachmentsIntoAnswer(answer: QuestionAnswer): QuestionAnswer {
+  const paths = answer.attachments;
+  if (!paths || paths.length === 0) return answer;
+
+  const block =
+    `\n\n<attachments>\nPlease look at these files which may provide additional instructions or context:\n` +
+    `${paths.join('\n')}\n</attachments>`;
+
+  const answers = { ...answer.answers };
+  const keys = Object.keys(answers);
+  if (keys.length > 0) {
+    const firstKey = keys[0];
+    answers[firstKey] = `${answers[firstKey]}${block}`;
+  } else {
+    answers['__attachments__'] = block.trimStart();
+  }
+
+  // Drop `attachments` from the resolved payload — it has been folded into the
+  // answer text and is not part of the SDK `updatedInput.answers` contract.
+  return { answers, ...(answer.annotations ? { annotations: answer.annotations } : {}) };
+}
+
+// ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
@@ -288,6 +325,9 @@ export class QuestionRouter extends EventEmitter {
       const { request, socketReply, resolve } = entry;
       const now = new Date().toISOString();
 
+      // Fold any attachment file paths into the answer text the agent receives.
+      const effectiveAnswer = embedAttachmentsIntoAnswer(answer);
+
       const updateStmt = this.db.prepare(
         `UPDATE workflow_runs SET status = 'running', updated_at = ?
          WHERE id = ? AND status = 'awaiting_input'`,
@@ -319,10 +359,10 @@ export class QuestionRouter extends EventEmitter {
       this.db.prepare(
         `UPDATE questions SET status = 'answered', answered_at = ?, answer_json = ?
          WHERE id = ?`,
-      ).run(now, JSON.stringify(answer), questionId);
+      ).run(now, JSON.stringify(effectiveAnswer), questionId);
 
-      resolve(answer);
-      socketReply(answer);
+      resolve(effectiveAnswer);
+      socketReply(effectiveAnswer);
       this.emit('questionAnswered', { questionId, status: 'answered' });
     });
   }
