@@ -30,12 +30,14 @@
  *  - runId null + activeQuickSessionId null: "No active run" placeholder
  */
 import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
+import { History } from 'lucide-react';
 import { ChatInput } from './ChatInput';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
 import { ChatTranscript } from '../chat/ChatTranscript';
+import { PromptNavigation, type PromptMarker } from '../panels/claude/PromptNavigation';
 import { trpc } from '../../trpc/client';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import type { RichOutputSettings } from '../panels/ai/AbstractAIPanel';
@@ -82,6 +84,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const settings = useMemo<RichOutputSettings>(() => {
     try {
@@ -322,6 +325,42 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   }, [messages, settings.showSessionInit]);
 
   // -------------------------------------------------------------------------
+  // Prompt-history markers for the left rail. Derived from the SAME
+  // `filteredMessages` array ChatTranscript renders, counting user turns in
+  // order so each marker's index lines up with ChatTranscript's
+  // `userMessageIndex` keys in `userMessageRefs` (the scroll targets).
+  // -------------------------------------------------------------------------
+
+  const promptMarkers = useMemo<PromptMarker[]>(() => {
+    const markers: PromptMarker[] = [];
+    let userIdx = 0;
+    for (const msg of filteredMessages) {
+      if (msg.role !== 'user') continue;
+      const text = msg.segments
+        .filter((s) => s.type === 'text')
+        .map((s) => (s.type === 'text' ? s.content : ''))
+        .join('\n')
+        .trim();
+      markers.push({
+        id: userIdx,
+        prompt_text: text || '(no text)',
+        output_index: userIdx,
+        timestamp: msg.timestamp,
+      });
+      userIdx += 1;
+    }
+    return markers;
+  }, [filteredMessages]);
+
+  const handleNavigateToPrompt = useCallback((_marker: PromptMarker, index: number): void => {
+    const el = userMessageRefs.current.get(index);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('highlight-prompt');
+    setTimeout(() => el.classList.remove('highlight-prompt'), 2000);
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Render branches
   // -------------------------------------------------------------------------
 
@@ -341,37 +380,62 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     );
   }
 
-  // runId is non-null — full conversation view.
+  // runId is non-null — full conversation view (prompt rail + transcript column).
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex-1 overflow-hidden">
-        {loadError !== null ? (
-          <div className="p-4 text-xs text-status-error">Error loading history: {loadError}</div>
-        ) : (
-          <ChatTranscript
-            messages={filteredMessages}
-            settings={settings}
-            agentName="Claude"
-            isWaitingForResponse={false}
-            collapsedMessages={collapsedMessages}
-            onToggleMessageCollapse={toggleMessageCollapse}
-            expandedTools={expandedTools}
-            onToggleToolExpand={toggleToolExpand}
-            copiedMessageId={copiedMessageId}
-            onCopyMessage={copyMessageContent}
-            scrollContainerRef={scrollContainerRef}
-            messagesEndRef={messagesEndRef}
-            userMessageRefs={userMessageRefs}
-            showScrollButton={showScrollButton}
-            onScrollToBottom={scrollToBottom}
-            renderToolCallExtra={renderToolCallExtra}
+    <div className="flex h-full">
+      {/* Left prompt-history rail (collapsible) — controlled by promptMarkers. */}
+      {!sidebarCollapsed && (
+        <div className="w-64 shrink-0 h-full overflow-hidden">
+          <PromptNavigation
+            panelId={runId}
+            prompts={promptMarkers}
+            onNavigateToPrompt={handleNavigateToPrompt}
           />
-        )}
+        </div>
+      )}
+
+      {/* Main column: transcript + approvals + input. */}
+      <div className="relative flex flex-1 min-w-0 flex-col">
+        <button
+          type="button"
+          onClick={() => setSidebarCollapsed((v) => !v)}
+          title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+          aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+          data-testid="run-chat-prompt-rail-toggle"
+          className="absolute left-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
+        >
+          <History className="h-4 w-4" />
+        </button>
+
+        <div className="flex-1 overflow-hidden">
+          {loadError !== null ? (
+            <div className="p-4 text-xs text-status-error">Error loading history: {loadError}</div>
+          ) : (
+            <ChatTranscript
+              messages={filteredMessages}
+              settings={settings}
+              agentName="Claude"
+              isWaitingForResponse={false}
+              collapsedMessages={collapsedMessages}
+              onToggleMessageCollapse={toggleMessageCollapse}
+              expandedTools={expandedTools}
+              onToggleToolExpand={toggleToolExpand}
+              copiedMessageId={copiedMessageId}
+              onCopyMessage={copyMessageContent}
+              scrollContainerRef={scrollContainerRef}
+              messagesEndRef={messagesEndRef}
+              userMessageRefs={userMessageRefs}
+              showScrollButton={showScrollButton}
+              onScrollToBottom={scrollToBottom}
+              renderToolCallExtra={renderToolCallExtra}
+            />
+          )}
+        </div>
+
+        <PendingApprovalsForRun runId={runId} />
+
+        <ChatInput runId={runId} />
       </div>
-
-      <PendingApprovalsForRun runId={runId} />
-
-      <ChatInput runId={runId} />
     </div>
   );
 }

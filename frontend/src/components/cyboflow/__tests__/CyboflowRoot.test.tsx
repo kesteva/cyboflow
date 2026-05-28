@@ -39,6 +39,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        listUnifiedMessages: { query: vi.fn().mockResolvedValue([]) },
         start: {
           mutate: vi.fn().mockResolvedValue({
             runId: 'run-test-001',
@@ -197,14 +198,14 @@ describe('CyboflowRoot', () => {
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
   });
 
-  it('renders RunView when activeRunId is set and hides the empty-state CTA', () => {
+  it('renders the run pane when activeRunId is set and hides the empty-state CTA', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-abc-999');
     });
     render(<CyboflowRoot projectId={1} />);
 
-    // RunView renders the active run ID
-    expect(screen.getByText('run-abc-999')).toBeInTheDocument();
+    // RunBottomPane mounts (default Chat tab); its tab bar is the stable signal.
+    expect(screen.getByTestId('run-bottom-pane-tab-chat')).toBeInTheDocument();
     // Empty-state CTA text is gone
     expect(screen.queryByText('Choose a workflow to start')).not.toBeInTheDocument();
     // RunRightRail is always rendered (layout shell)
@@ -284,8 +285,8 @@ describe('CyboflowRoot', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
-    // RunView should now be rendered (activeRunId was set by the store)
-    expect(screen.getByText('run-auto-close')).toBeInTheDocument();
+    // The run pane should now be rendered (activeRunId was set by the store)
+    expect(screen.getByTestId('run-bottom-pane-tab-chat')).toBeInTheDocument();
   });
 
   it('does not call getPhaseState.query when activeRunId is null', () => {
@@ -307,9 +308,8 @@ describe('CyboflowRoot', () => {
 
     render(<CyboflowRoot projectId={1} />);
 
-    // RunView / RunBottomPane is rendered (run-bottom-pane-tab-* testids)
-    // The run-bottom-pane renders the RunView which has the run ID text
-    expect(screen.getByText('run-canvas-test')).toBeInTheDocument();
+    // RunBottomPane is rendered (run-bottom-pane-tab-* testids).
+    expect(screen.getByTestId('run-bottom-pane-tab-chat')).toBeInTheDocument();
 
     // After the getPhaseState query resolves, phaseState.definition is non-null
     // and WorkflowCanvas mounts (data-testid="workflow-canvas")
@@ -318,7 +318,7 @@ describe('CyboflowRoot', () => {
     });
 
     // Both workflow-canvas AND the RunBottomPane content coexist
-    expect(screen.getByText('run-canvas-test')).toBeInTheDocument();
+    expect(screen.getByTestId('run-bottom-pane-tab-chat')).toBeInTheDocument();
   });
 });
 
