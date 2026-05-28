@@ -34,6 +34,8 @@ vi.mock('../trpc/client', () => ({
       },
       events: {
         onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onApprovalCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onApprovalDecided: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         setBadgeCount: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
       },
       approvals: {
