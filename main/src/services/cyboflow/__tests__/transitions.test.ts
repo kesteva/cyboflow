@@ -16,6 +16,8 @@ import {
   transitionToAwaitingReview,
   transitionFromAwaitingReview,
   transitionToRunning,
+  transitionRunningToAwaitingReview,
+  transitionToCompleted,
   TransitionRejectedError,
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
@@ -444,6 +446,75 @@ describe('transitions', () => {
         .get(RUN_ID) as { status: string; started_at: string };
       expect(after.status).toBe('running');
       expect(after.started_at).toBe(FIXED_TS);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // transitionRunningToAwaitingReview — the REST transition (no approval row)
+  // -------------------------------------------------------------------------
+  describe('transitionRunningToAwaitingReview', () => {
+    it('rests a running run in awaiting_review WITHOUT inserting an approval row', () => {
+      seedRun(db, 'running');
+
+      transitionRunningToAwaitingReview(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(after.status).toBe('awaiting_review');
+
+      // Distinguishing signal: a REST awaiting_review has NO pending approval row
+      // (unlike the tool-approval gate via transitionToAwaitingReview).
+      const approvals = db
+        .prepare('SELECT COUNT(*) AS n FROM approvals WHERE run_id = ?')
+        .get(RUN_ID) as { n: number };
+      expect(approvals.n).toBe(0);
+    });
+
+    it('rejects when the run is not in running state', () => {
+      seedRun(db, 'awaiting_review');
+      expect(() => transitionRunningToAwaitingReview(db, { runId: RUN_ID })).toThrow(
+        TransitionRejectedError,
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // transitionToCompleted — user accept (Merge / Create-PR), now valid from
+  // running / awaiting_review / stuck.
+  // -------------------------------------------------------------------------
+  describe('transitionToCompleted', () => {
+    it('completes from awaiting_review (the rest state)', () => {
+      seedRun(db, 'awaiting_review');
+
+      transitionToCompleted(db, { runId: RUN_ID, fromStatus: 'awaiting_review' });
+
+      const after = db
+        .prepare('SELECT status, ended_at FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string; ended_at: string | null };
+      expect(after.status).toBe('completed');
+      expect(after.ended_at).not.toBeNull();
+    });
+
+    it('completes from stuck', () => {
+      seedRun(db, 'stuck');
+      transitionToCompleted(db, { runId: RUN_ID, fromStatus: 'stuck' });
+      const after = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(RUN_ID) as { status: string };
+      expect(after.status).toBe('completed');
+    });
+
+    it('completes from running', () => {
+      seedRun(db, 'running');
+      transitionToCompleted(db, { runId: RUN_ID, fromStatus: 'running' });
+      const after = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(RUN_ID) as { status: string };
+      expect(after.status).toBe('completed');
+    });
+
+    it('rejects when the row is not in the expected fromStatus', () => {
+      seedRun(db, 'running');
+      expect(() => transitionToCompleted(db, { runId: RUN_ID, fromStatus: 'awaiting_review' })).toThrow(
+        TransitionRejectedError,
+      );
     });
   });
 });

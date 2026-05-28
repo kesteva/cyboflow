@@ -589,16 +589,16 @@ import type { LifecycleTransitionsLike } from '../runExecutor';
 
 function makeLifecycleTransitions(): { mock: LifecycleTransitionsLike } & {
   running: ReturnType<typeof vi.fn>;
-  completed: ReturnType<typeof vi.fn>;
+  restAwaitingReview: ReturnType<typeof vi.fn>;
   failed: ReturnType<typeof vi.fn>;
   canceled: ReturnType<typeof vi.fn>;
 } {
   const running = vi.fn<(runId: string) => void>();
-  const completed = vi.fn<(runId: string, fromStatus: 'running') => void>();
+  const restAwaitingReview = vi.fn<(runId: string) => void>();
   const failed = vi.fn<(runId: string, fromStatus: 'starting' | 'running' | 'awaiting_review' | 'stuck', errorMessage: string) => void>();
   const canceled = vi.fn<(runId: string) => void>();
-  const mock: LifecycleTransitionsLike = { running, completed, failed, canceled };
-  return { mock, running, completed, failed, canceled };
+  const mock: LifecycleTransitionsLike = { running, restAwaitingReview, failed, canceled };
+  return { mock, running, restAwaitingReview, failed, canceled };
 }
 
 describe('lifecycle transitions', () => {
@@ -606,7 +606,7 @@ describe('lifecycle transitions', () => {
   // (i) onLifecycleTransition routes each phase to the right transition helper
   // -------------------------------------------------------------------------
   it('onLifecycleTransition routes each phase to the right transition helper', async () => {
-    const { mock: lt, running, completed, failed, canceled } = makeLifecycleTransitions();
+    const { mock: lt, running, restAwaitingReview, canceled } = makeLifecycleTransitions();
 
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
@@ -633,9 +633,11 @@ describe('lifecycle transitions', () => {
     expect(running).toHaveBeenCalledOnce();
     expect(running).toHaveBeenCalledWith(run.id);
 
-    await executor.testLifecycleTransition(run.id, 'completed');
-    expect(completed).toHaveBeenCalledOnce();
-    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+    // 'drained' is the SDK-iterator-drain phase: the executor NEVER completes;
+    // it RESTS the run in awaiting_review via restAwaitingReview().
+    await executor.testLifecycleTransition(run.id, 'drained');
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
 
     await executor.testLifecycleTransition(run.id, 'canceled');
     expect(canceled).toHaveBeenCalledOnce();
@@ -647,14 +649,15 @@ describe('lifecycle transitions', () => {
     await executor.testLifecycleTransition(run.id, 'pre_spawn');
     await executor.testLifecycleTransition(run.id, 'post_spawn');
     expect(running).toHaveBeenCalledTimes(2); // once for sdk_initialized, once for pre_spawn
-    expect(completed).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
   });
 
   // -------------------------------------------------------------------------
-  // (ii) execute() fires completed phase on normal terminate
+  // (ii) execute() rests the run in awaiting_review on normal terminate —
+  // it must NEVER auto-complete. `completed` is set only by a user accept.
   // -------------------------------------------------------------------------
-  it('execute() fires completed phase on normal terminate', async () => {
-    const { mock: lt, completed } = makeLifecycleTransitions();
+  it('execute() rests the run in awaiting_review on normal terminate (never completes)', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
 
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
@@ -667,8 +670,8 @@ describe('lifecycle transitions', () => {
     const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger(), undefined, lt);
     await executor.execute(run.id);
 
-    expect(completed).toHaveBeenCalledOnce();
-    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
   });
 
   // -------------------------------------------------------------------------
@@ -697,85 +700,16 @@ describe('lifecycle transitions', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GAP-A: a run must NOT be marked 'completed' while it has a pending approval
-// or question (or is parked awaiting human work) when the SDK iterator drains.
+// REST-on-drain: on a clean SDK iterator drain the executor RESTS the run in
+// awaiting_review (running -> awaiting_review). It NEVER auto-completes — the
+// `completed` status is set only by an explicit user accept (Merge / Create-PR).
 // ---------------------------------------------------------------------------
 
-import type { PendingWorkProbeLike } from '../runExecutor';
-
-function makePendingProbe(
-  overrides?: Partial<PendingWorkProbeLike>,
-): PendingWorkProbeLike {
-  return {
-    hasPendingApproval: vi.fn().mockReturnValue(false),
-    hasPendingQuestion: vi.fn().mockReturnValue(false),
-    ...overrides,
-  };
-}
-
-describe('RunExecutor.execute — GAP-A completion guard', () => {
-  // (i) drain with a pending approval does NOT complete.
-  it('does NOT complete when the run has a pending approval at iterator drain', async () => {
-    const { mock: lt, completed } = makeLifecycleTransitions();
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-    const probe = makePendingProbe({ hasPendingApproval: vi.fn().mockReturnValue(true) });
-
-    const executor = new TestableRunExecutor(
-      makeSpawner(),
-      registry,
-      makeSpyLogger(),
-      undefined, // promptReader
-      lt,
-      undefined, // publisher
-      undefined, // db
-      undefined, // source
-      undefined, // stepEmitter
-      probe,
-    );
-    await executor.execute(run.id);
-
-    expect(probe.hasPendingApproval).toHaveBeenCalledWith(run.id);
-    expect(completed).not.toHaveBeenCalled();
-  });
-
-  // (i') drain with a pending question does NOT complete.
-  it('does NOT complete when the run has a pending question at iterator drain', async () => {
-    const { mock: lt, completed } = makeLifecycleTransitions();
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-    const probe = makePendingProbe({ hasPendingQuestion: vi.fn().mockReturnValue(true) });
-
-    const executor = new TestableRunExecutor(
-      makeSpawner(),
-      registry,
-      makeSpyLogger(),
-      undefined,
-      lt,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      probe,
-    );
-    await executor.execute(run.id);
-
-    expect(completed).not.toHaveBeenCalled();
-  });
-
-  // (i'') drain while the run is parked awaiting_review (DB-status guard) does
-  // NOT complete, even with no pending-work probe injected.
-  it('does NOT complete when the live run status is awaiting_review at drain (no probe)', async () => {
-    const { mock: lt, completed } = makeLifecycleTransitions();
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'awaiting_review' });
+describe('RunExecutor.execute — rests in awaiting_review on drain', () => {
+  // (i) clean drain rests the run in awaiting_review.
+  it('calls restAwaitingReview() once on a clean drain', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
@@ -785,36 +719,29 @@ describe('RunExecutor.execute — GAP-A completion guard', () => {
     const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, lt);
     await executor.execute(run.id);
 
-    expect(completed).not.toHaveBeenCalled();
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
   });
 
-  // (ii) drain with NO pending work DOES complete (existing behavior preserved).
-  it('DOES complete when the run has no pending work at iterator drain', async () => {
-    const { mock: lt, completed } = makeLifecycleTransitions();
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running' });
+  // (ii) a rejected rest transition (run already parked) is swallowed, not escalated.
+  // restAwaitingReview is guarded on status='running', so when the run already moved
+  // to awaiting_review (open approval gate) the transition throws and the executor
+  // logs + swallows it. execute() must still resolve cleanly.
+  it('swallows a rejected rest transition (run already parked in awaiting_review)', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
+    (restAwaitingReview as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('not in running state');
+    });
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'awaiting_review' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    const probe = makePendingProbe(); // both false
 
-    const executor = new TestableRunExecutor(
-      makeSpawner(),
-      registry,
-      makeSpyLogger(),
-      undefined,
-      lt,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      probe,
-    );
-    await executor.execute(run.id);
-
-    expect(completed).toHaveBeenCalledOnce();
-    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, lt);
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
   });
 });
 
@@ -851,7 +778,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
    * real EventEmitter is used rather than the spawner adapter.
    */
   it('source arg: lifecycleTransitions.running() fires when source emits output event', async () => {
-    const { mock: lt, running, completed } = makeLifecycleTransitions();
+    const { mock: lt, running, restAwaitingReview } = makeLifecycleTransitions();
 
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
@@ -944,9 +871,9 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     expect(running).toHaveBeenCalledTimes(2);
     expect(running).toHaveBeenCalledWith(run.id);
 
-    // execute() completed normally → completed() fires too.
-    expect(completed).toHaveBeenCalledOnce();
-    expect(completed).toHaveBeenCalledWith(run.id, 'running');
+    // execute() drained normally → the run RESTS in awaiting_review (never completes).
+    expect(restAwaitingReview).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
 
     // TASK-664 cross-task interlock: exactly 1 raw_events row must exist.
     // The CCM-style pipeline inserts 1 row; the bridge with skipPersistence: true

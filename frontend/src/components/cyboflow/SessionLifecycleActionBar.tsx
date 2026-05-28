@@ -11,18 +11,21 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   const target = useLifecycleTarget();
   if (!target) return null;
 
-  // Merge/PR are disabled while the work is still in flight. For a session that
-  // is its status === 'running'; for a workflow run it is any non-terminal,
-  // non-completed status (still executing or awaiting human triage).
-  const isRunning =
+  // Merge / Create-PR accept the run's artifact. They are offered only once the
+  // work is finished and awaiting the user's decision:
+  //   - session: status === 'running' is still in flight → disabled while running.
+  //   - run: only a finished/awaiting-decision run (awaiting_review or stuck) may
+  //     be accepted. The executor never auto-completes; a clean drain rests the
+  //     run in awaiting_review. running / starting / queued / awaiting_input are
+  //     still executing, so accept is disabled.
+  const acceptDisabled =
     target.kind === 'session'
       ? target.session.status === 'running'
-      : target.status !== 'completed' && target.status !== 'failed' && target.status !== 'canceled';
+      : !(target.status === 'awaiting_review' || target.status === 'stuck');
 
-  // Create-PR currently has no run-scoped close-out (it needs the session-only
-  // gitPush / getRemoteUrl surface — see GAP-B report). Offer it for sessions
-  // only; runs surface Merge + Dismiss.
-  const showCreatePr = target.kind === 'session';
+  // Create-PR is now available for runs too (cyboflow.runs.createPr — GAP-B
+  // un-defer). Both surfaces offer Merge + Create-PR + Dismiss.
+  const showCreatePr = true;
 
   return (
     <div className="flex items-center gap-1.5" data-testid="session-lifecycle-action-bar">
@@ -30,10 +33,10 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
 
       <button
         data-testid="session-action-merge"
-        disabled={isRunning}
+        disabled={acceptDisabled}
         onClick={onMerge}
         className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-        title={isRunning ? 'Stop the session before merging' : 'Merge changes into base branch'}
+        title={acceptDisabled ? 'Wait for the work to finish before merging' : 'Merge changes into base branch'}
       >
         <GitMerge size={14} />
         Merge
@@ -42,10 +45,10 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       {showCreatePr && (
         <button
           data-testid="session-action-create-pr"
-          disabled={isRunning}
+          disabled={acceptDisabled}
           onClick={onCreatePR}
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          title={isRunning ? 'Stop the session before creating a PR' : 'Create a pull request'}
+          title={acceptDisabled ? 'Wait for the work to finish before creating a PR' : 'Create a pull request'}
         >
           <ExternalLink size={14} />
           Create PR

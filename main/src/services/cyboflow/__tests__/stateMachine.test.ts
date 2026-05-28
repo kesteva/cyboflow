@@ -78,6 +78,15 @@ describe('(a) positive sweep — every allowed transition returns true', () => {
     expect(isTransitionAllowed('awaiting_review', 'failed')).toBe(true);
   });
 
+  // User accept (Merge / Create-PR) completes from the rest state.
+  it('awaiting_review -> completed is allowed (user accept)', () => {
+    expect(isTransitionAllowed('awaiting_review', 'completed')).toBe(true);
+  });
+
+  it('stuck -> completed is allowed (user accept)', () => {
+    expect(isTransitionAllowed('stuck', 'completed')).toBe(true);
+  });
+
   it('stuck -> running is allowed', () => {
     expect(isTransitionAllowed('stuck', 'running')).toBe(true);
   });
@@ -128,16 +137,8 @@ describe('(b) negative sweep — explicit forbidden transitions return false', (
     expect(isTransitionAllowed('queued', 'running')).toBe(false);
   });
 
-  it('awaiting_review -> completed is forbidden (must return to running first)', () => {
-    expect(isTransitionAllowed('awaiting_review', 'completed')).toBe(false);
-  });
-
   it('starting -> awaiting_review is forbidden', () => {
     expect(isTransitionAllowed('starting', 'awaiting_review')).toBe(false);
-  });
-
-  it('stuck -> completed is forbidden (must return to running first)', () => {
-    expect(isTransitionAllowed('stuck', 'completed')).toBe(false);
   });
 
   it('awaiting_review -> queued is forbidden', () => {
@@ -228,7 +229,7 @@ describe('(c) assertTransitionAllowed throw semantics', () => {
   it('error name is IllegalTransitionError', () => {
     let caught: unknown;
     try {
-      assertTransitionAllowed('stuck', 'completed');
+      assertTransitionAllowed('stuck', 'awaiting_review');
     } catch (err) {
       caught = err;
     }

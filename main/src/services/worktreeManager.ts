@@ -929,6 +929,18 @@ export class WorktreeManager {
     }
   }
 
+  /**
+   * Resolve the `origin` remote URL and the current branch name for a worktree.
+   * Used by the run-scoped Create-PR flow (cyboflow.runs.createPr) to build the
+   * GitHub compare URL after pushing — the worktree-path twin of the session
+   * `sessions:get-remote-url` IPC handler (which does the same two git reads).
+   */
+  async getRemoteUrlAndBranch(worktreePath: string): Promise<{ remoteUrl: string; branchName: string }> {
+    const { stdout: remoteOut } = await execWithShellPath('git remote get-url origin', { cwd: worktreePath });
+    const { stdout: branchOut } = await execWithShellPath('git branch --show-current', { cwd: worktreePath });
+    return { remoteUrl: remoteOut.trim(), branchName: branchOut.trim() };
+  }
+
   async getLastCommits(worktreePath: string, count: number = 20): Promise<RawCommitData[]> {
     try {
       const { stdout } = await execWithShellPath(
