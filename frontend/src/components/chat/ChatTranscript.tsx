@@ -105,6 +105,16 @@ export interface ChatTranscriptProps {
   userMessageRefs: React.MutableRefObject<Map<number, HTMLDivElement>>;
   showScrollButton: boolean;
   onScrollToBottom: () => void;
+
+  /**
+   * Optional hook to inject extra UI directly beneath a tool_call at its
+   * matching tool_use position (keyed by the tool-call id). Used by the
+   * workflow-run chat to render the inline `AskUserQuestionCard` where the
+   * `AskUserQuestion` tool_use appears. Returns `null`/`undefined` for tool
+   * calls that need no extra UI. When omitted, ChatTranscript renders no
+   * extras (default behavior for RichOutputView).
+   */
+  renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
 }
 
 /**
@@ -134,8 +144,27 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   userMessageRefs,
   showScrollButton,
   onScrollToBottom,
+  renderToolCallExtra,
 }) => {
   const showSystemMessages = showSystemMessagesProp ?? true;
+
+  // Render any caller-supplied extras (e.g. inline AskUserQuestionCard) for the
+  // tool_call segments of a message, keyed by tool-call id. No-op when the
+  // caller does not pass `renderToolCallExtra` — preserves RichOutputView's
+  // existing behavior.
+  const renderToolCallExtras = (message: UnifiedMessage): React.ReactNode => {
+    if (!renderToolCallExtra) return null;
+    const extras = message.segments
+      .filter((seg): seg is Extract<typeof seg, { type: 'tool_call' }> => seg.type === 'tool_call')
+      .map((seg) => {
+        const extra = renderToolCallExtra(seg.tool.id);
+        if (extra == null) return null;
+        return <div key={`${message.id}-extra-${seg.tool.id}`}>{extra}</div>;
+      })
+      .filter((node): node is React.ReactElement => node !== null);
+    if (extras.length === 0) return null;
+    return <>{extras}</>;
+  };
 
   // Render a complete message
   const renderMessage = (message: UnifiedMessage, index: number, userMessageIndex?: number) => {
@@ -419,6 +448,9 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
               />
             ))
           }
+
+          {/* Caller-supplied per-tool extras (e.g. inline AskUserQuestionCard). */}
+          {renderToolCallExtras(message)}
         </div>
       </div>
     );
@@ -1097,6 +1129,17 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                   </div>
                 </div>
               );
+              // Inline tool-call extras (e.g. AskUserQuestionCard) for grouped tools.
+              group.messages.forEach((toolMsg) => {
+                const extras = renderToolCallExtras(toolMsg);
+                if (extras) {
+                  elements.push(
+                    <React.Fragment key={`tool-group-extra-${i}-${groupIdx}-${toolMsg.id}`}>
+                      {extras}
+                    </React.Fragment>,
+                  );
+                }
+              });
             } else if (group.messages.length === 1) {
               // Single tool message, render normally
               const element = renderMessage(group.messages[0], i);
@@ -1178,7 +1221,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
     return elements.filter(element => element !== null); // Filter out null elements
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredMessages, collapsedMessages, expandedTools, settings, onToggleToolExpand, agentName, showSystemMessages, copiedMessageId]);
+  }, [filteredMessages, collapsedMessages, expandedTools, settings, onToggleToolExpand, agentName, showSystemMessages, copiedMessageId, renderToolCallExtra]);
 
   return (
     <div className="h-full flex flex-col bg-bg-primary relative">

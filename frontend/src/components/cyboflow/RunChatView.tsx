@@ -1,170 +1,61 @@
 /**
  * RunChatView — Chat tab content for the per-run bottom pane.
  *
- * Renders a curated, scrollable conversation for the active run:
- *  - Historical text turns bootstrapped from `cyboflow.runs.listMessages`
- *  - Live `StreamEvent` deltas from `cyboflowStore.streamEvents`
- *  - Inline `AskUserQuestionCard` at AskUserQuestion tool_use positions
- *  - Per-run-filtered `PendingApprovalCard` instances at the bottom
+ * Renders the run's conversation through the SHARED <ChatTranscript>, fed by the
+ * fully-correlated `UnifiedMessage[]` projection from
+ * `cyboflow.runs.listUnifiedMessages`. This gives the workflow-run chat the same
+ * fidelity as the quick session (tool_use folded with its result, sub-agents
+ * nested, thinking blocks kept, internal tool_result "user" echoes suppressed) —
+ * replacing the bespoke raw-event bubble rendering this component used before
+ * (which leaked raw `toolu_` ids, JSON.stringify'd tool input, and rendered
+ * tool_result echoes as fake "user" turns).
  *
- * This component does NOT include a chat input bar (TASK-762) and does NOT
- * touch the QuestionRouter, tRPC, or DB layers.
+ * Data flow:
+ *  - Initial / runId-change fetch via `listUnifiedMessages({ runId })`.
+ *  - Debounced re-fetch whenever `cyboflowStore.streamEvents` for this run
+ *    changes (live updates) — same strategy as the quick session's debounced
+ *    reload. No renderer-side projector.
+ *
+ * This component owns the ChatTranscript presentational state (collapse/expand
+ * sets, scroll refs, scroll-button tracking, copy handler, settings) exactly the
+ * way RichOutputView does, and wraps the transcript with:
+ *  - the inline `AskUserQuestionCard` (injected at the AskUserQuestion tool_use
+ *    position via the transcript's `renderToolCallExtra` hook),
+ *  - the per-run `PendingApprovalsForRun` strip, and
+ *  - the `ChatInput` bar.
  *
  * Modes:
  *  - runId non-null: full conversation view (this file's main branch)
  *  - runId null + activeQuickSessionId non-null: quick-session placeholder
  *  - runId null + activeQuickSessionId null: "No active run" placeholder
  */
-import { useEffect, useRef, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
 import { ChatInput } from './ChatInput';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
-import { MarkdownPreview } from '../MarkdownPreview';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
+import { ChatTranscript } from '../chat/ChatTranscript';
 import { trpc } from '../../trpc/client';
-import type { StreamEvent } from '../../utils/cyboflowApi';
-import type { ChatMessage } from '../../../../shared/types/chatMessage';
-import type { Question } from '../../../../shared/types/questions';
+import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { RichOutputSettings } from '../panels/ai/AbstractAIPanel';
 
 // ---------------------------------------------------------------------------
-// Types
+// Constants
 // ---------------------------------------------------------------------------
 
-/** A merged timeline item — either a historical ChatMessage or a live StreamEvent. */
-type TimelineItem =
-  | { kind: 'historical'; message: ChatMessage }
-  | { kind: 'live'; event: StreamEvent };
+const RICH_OUTPUT_SETTINGS_KEY = 'richOutputSettings';
 
-// ---------------------------------------------------------------------------
-// Rendering helpers
-// ---------------------------------------------------------------------------
+const defaultSettings: RichOutputSettings = {
+  showToolCalls: true,
+  compactMode: false,
+  collapseTools: true,
+  showThinking: true,
+  showSessionInit: false,
+};
 
-interface EventRenderDeps {
-  questionQueue: Question[];
-  runId: string;
-}
-
-/**
- * Render a single assistant content block.
- * Returns null for 'thinking' blocks (intentionally skipped per plan step 4).
- */
-function renderAssistantBlock(
-  block: Extract<StreamEvent, { type: 'assistant' }>['payload']['message']['content'][number],
-  idx: number,
-  deps: EventRenderDeps,
-): ReactElement | null {
-  if (block.type === 'text') {
-    return (
-      <div key={idx} className="assistant-bubble mb-1 rounded border-l-2 border-pink-400 bg-bg-secondary p-2 text-xs">
-        <MarkdownPreview content={block.text} />
-      </div>
-    );
-  }
-
-  if (block.type === 'tool_use') {
-    if (block.name === 'AskUserQuestion') {
-      // Match by toolUseId (camelCase on Question) to block.id
-      const question = deps.questionQueue.find((q) => q.toolUseId === block.id);
-      if (question != null) {
-        return (
-          <div key={idx} className="mb-1">
-            <AskUserQuestionCard item={question} />
-          </div>
-        );
-      }
-      // Question already answered (no pending match)
-      return (
-        <div key={idx} className="mb-1 text-xs text-text-muted italic">
-          Question already answered
-        </div>
-      );
-    }
-
-    // Other tool_use blocks — compact tool-name + JSON preview (matches RunView pattern)
-    return (
-      <div key={idx} className="mb-1 rounded border border-border-primary bg-bg-secondary p-1 text-xs">
-        <span className="font-semibold text-text-secondary">tool:</span>{' '}
-        <span className="text-text-primary">{block.name}</span>
-        <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-text-secondary">
-          {JSON.stringify(block.input, null, 2)}
-        </pre>
-      </div>
-    );
-  }
-
-  // thinking blocks: skip
-  return null;
-}
-
-/**
- * Render a single timeline item.
- */
-function renderTimelineItem(
-  item: TimelineItem,
-  idx: number,
-  deps: EventRenderDeps,
-): ReactElement | null {
-  if (item.kind === 'historical') {
-    const { message } = item;
-    if (message.role === 'user') {
-      return (
-        <div key={`hist-${idx}`} className="user-bubble mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs">
-          <span className="font-semibold text-text-primary">user</span>
-          <p className="mt-1 text-text-primary whitespace-pre-wrap">{message.text}</p>
-        </div>
-      );
-    }
-    // assistant role
-    return (
-      <div key={`hist-${idx}`} className="assistant-bubble mb-1 rounded border-l-2 border-pink-400 bg-bg-secondary p-2 text-xs">
-        <MarkdownPreview content={message.text} />
-      </div>
-    );
-  }
-
-  // kind === 'live'
-  const { event } = item;
-
-  if (event.type === 'user') {
-    const content = event.payload.message?.content ?? [];
-    return (
-      <div key={`live-${idx}`} className="user-bubble mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs">
-        <span className="font-semibold text-text-primary">user</span>
-        <div className="mt-1">
-          {content.map((block, bi) => {
-            const shortId = block.tool_use_id.slice(0, 8);
-            const bodyText = typeof block.content === 'string'
-              ? block.content
-              : block.content.map((c) => c.text).join('');
-            return (
-              <div key={bi} className="mt-1">
-                {block.is_error === true && (
-                  <span className="mr-1 rounded bg-red-600 px-1 text-white">error</span>
-                )}
-                <span className="font-mono text-text-secondary">{shortId}…</span>
-                {' '}
-                <span className="text-text-primary">{bodyText}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
-  if (event.type === 'assistant') {
-    const content = event.payload.message?.content ?? [];
-    return (
-      <div key={`live-${idx}`}>
-        {content.map((block, bi) => renderAssistantBlock(block, bi, deps))}
-      </div>
-    );
-  }
-
-  // Other event types (system, result, stream_event, etc.) are not rendered in chat view
-  return null;
-}
+/** Debounce window for live re-fetch after a streamEvents delta lands. */
+const LIVE_REFETCH_DEBOUNCE_MS = 400;
 
 // ---------------------------------------------------------------------------
 // Public component
@@ -175,43 +66,122 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
   const questionQueue = useQuestionStore((s) => s.queue);
 
-  const [historicalMessages, setHistoricalMessages] = useState<ChatMessage[]>([]);
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  // -------------------------------------------------------------------------
+  // Messages + load state
+  // -------------------------------------------------------------------------
+
+  const [messages, setMessages] = useState<UnifiedMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // -------------------------------------------------------------------------
+  // ChatTranscript state — owned here exactly like RichOutputView owns it.
+  // -------------------------------------------------------------------------
+
+  const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+
+  const settings = useMemo<RichOutputSettings>(() => {
+    try {
+      const saved = localStorage.getItem(RICH_OUTPUT_SETTINGS_KEY);
+      return saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
+    } catch {
+      return defaultSettings;
+    }
+  }, []);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const userMessageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const wasAtBottomRef = useRef(true);
+  const previousMessageCountRef = useRef(0);
 
   // -------------------------------------------------------------------------
-  // Bootstrap from listMessages when runId changes
+  // Fetch — listUnifiedMessages. Result type is INFERRED from AppRouter; the
+  // local `UnifiedMessage` import is only used for the state annotation.
   // -------------------------------------------------------------------------
 
+  const loadMessages = useCallback(async (currentRunId: string): Promise<void> => {
+    const container = scrollContainerRef.current;
+    if (container) {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      wasAtBottomRef.current = distanceFromBottom < 50;
+    }
+
+    try {
+      const result = await trpc.cyboflow.runs.listUnifiedMessages.query({ runId: currentRunId });
+      setMessages(result);
+      setLoadError(null);
+
+      // Auto-expand sub-agent (Task) tools so nested sub-agent transcripts show.
+      const subAgentIds = new Set<string>();
+      for (const msg of result) {
+        for (const seg of msg.segments) {
+          if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
+            subAgentIds.add(seg.tool.id);
+          }
+        }
+      }
+      if (subAgentIds.size > 0) {
+        setExpandedTools((prev) => {
+          const next = new Set(prev);
+          subAgentIds.forEach((id) => next.add(id));
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setLoadError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Initial / runId-change load.
   useEffect(() => {
     if (runId === null) {
-      setHistoricalMessages([]);
+      setMessages([]);
       setLoadError(null);
+      setIsLoading(false);
       return;
     }
 
     let aborted = false;
-
-    setIsLoadingHistory(true);
+    setIsLoading(true);
     setLoadError(null);
-    setHistoricalMessages([]);
+    setMessages([]);
+    previousMessageCountRef.current = 0;
+    wasAtBottomRef.current = true;
 
-    trpc.cyboflow.runs.listMessages.query({ runId })
-      .then((result) => {
-        if (!aborted) {
-          setHistoricalMessages(result);
-          setIsLoadingHistory(false);
+    void (async () => {
+      try {
+        const result = await trpc.cyboflow.runs.listUnifiedMessages.query({ runId });
+        if (aborted) return;
+        setMessages(result);
+        const subAgentIds = new Set<string>();
+        for (const msg of result) {
+          for (const seg of msg.segments) {
+            if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
+              subAgentIds.add(seg.tool.id);
+            }
+          }
         }
-      })
-      .catch((err: unknown) => {
-        if (!aborted) {
-          const message = err instanceof Error ? err.message : String(err);
-          setLoadError(message);
-          setIsLoadingHistory(false);
+        if (subAgentIds.size > 0) {
+          setExpandedTools((prev) => {
+            const next = new Set(prev);
+            subAgentIds.forEach((id) => next.add(id));
+            return next;
+          });
         }
-      });
+      } catch (err: unknown) {
+        if (aborted) return;
+        setLoadError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!aborted) setIsLoading(false);
+      }
+    })();
 
     return () => {
       aborted = true;
@@ -219,79 +189,137 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   }, [runId]);
 
   // -------------------------------------------------------------------------
-  // Merge historical + live events into a single timeline
+  // Live re-fetch — debounced re-query whenever this run's streamEvents change.
+  // streamEvents is cleared on setActiveRun, so its length growing is a proxy
+  // for "new deltas for the active run arrived". We re-query the projection
+  // rather than building a renderer-side projector.
   // -------------------------------------------------------------------------
 
-  // mergedTimeline — historical messages (from listMessages query) merged
-  // with live stream events (from cyboflowStore.streamEvents). Both feeds
-  // derive from raw_events; the dedup pass below removes the overlap that
-  // accumulates between setActiveRun and the listMessages resolution.
-  // See FIND-SPRINT-039-11 for the original bug report.
-  const mergedTimeline = useMemo<TimelineItem[]>(() => {
-    const historicalItems: TimelineItem[] = historicalMessages.map((message) => ({
-      kind: 'historical',
-      message,
-    }));
+  const streamEventCount = streamEvents.length;
 
-    // ---- Deduplicate historical overlap with live ----
-    // Both feeds derive from raw_events. Any live event that arrived between
-    // setActiveRun (which begins streamEvents accumulation) and the
-    // listMessages query resolution (which populates historicalMessages)
-    // appears in BOTH arrays. We prefer LIVE events over historical ones
-    // because live events carry the full content blocks (including tool_use),
-    // while historical ChatMessages are text-only.
-    //
-    // Strategy: build a set of message ids present in live events, then drop
-    // matching historical messages. Non-overlapping historical messages
-    // (older turns from before the subscription started) are kept.
+  useEffect(() => {
+    if (runId === null) return;
+    if (streamEventCount === 0) return;
 
-    // cyboflowStore.streamEvents is already scoped to the active run
-    // (cleared on setActiveRun) — no runId filter needed.
-    const liveItems: TimelineItem[] = streamEvents
-      .filter((e) => e.type === 'assistant' || e.type === 'user')
-      .map((event) => ({ kind: 'live' as const, event }));
+    const timer = setTimeout(() => {
+      void loadMessages(runId);
+    }, LIVE_REFETCH_DEBOUNCE_MS);
 
-    const liveAssistantIds = new Set<string>();
-    const liveTimestamps: string[] = [];
-    for (const item of liveItems) {
-      if (item.kind !== 'live') continue;
-      liveTimestamps.push(item.event.timestamp);
-      if (item.event.type === 'assistant') {
-        const msgId = (item.event.payload as { message?: { id?: string } }).message?.id;
-        if (typeof msgId === 'string') {
-          liveAssistantIds.add(msgId);
-        }
-      }
-    }
-
-    // Earliest live event timestamp — used to gate historical user messages.
-    const earliestLiveTimestamp = liveTimestamps.length === 0
-      ? ''
-      : liveTimestamps.reduce((a, b) => (a < b ? a : b));
-
-    const dedupedHistorical: TimelineItem[] = historicalItems.filter((item) => {
-      if (item.kind !== 'historical') return true;
-      const { message } = item;
-      if (message.role === 'assistant') {
-        return !liveAssistantIds.has(message.id);
-      }
-      if (message.role === 'user' && earliestLiveTimestamp !== '') {
-        return message.createdAt < earliestLiveTimestamp;
-      }
-      return true;
-    });
-
-    return [...dedupedHistorical, ...liveItems];
-  }, [historicalMessages, streamEvents, runId]);
+    return () => clearTimeout(timer);
+  }, [runId, streamEventCount, loadMessages]);
 
   // -------------------------------------------------------------------------
-  // Auto-scroll to bottom when timeline changes
+  // Auto-scroll on new messages (mirrors RichOutputView).
   // -------------------------------------------------------------------------
 
   useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [mergedTimeline]);
+    const hasNewMessages = messages.length > previousMessageCountRef.current;
+    previousMessageCountRef.current = messages.length;
+
+    if (messagesEndRef.current && !isLoading && hasNewMessages && wasAtBottomRef.current) {
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+      });
+    }
+  }, [messages, isLoading]);
+
+  // -------------------------------------------------------------------------
+  // Scroll-button + at-bottom tracking.
+  // -------------------------------------------------------------------------
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      wasAtBottomRef.current = distanceFromBottom < 50;
+      setShowScrollButton(distanceFromBottom > clientHeight);
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
+
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [messages]);
+
+  // -------------------------------------------------------------------------
+  // ChatTranscript callbacks.
+  // -------------------------------------------------------------------------
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  const toggleMessageCollapse = useCallback((messageId: string) => {
+    setCollapsedMessages((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }, []);
+
+  const toggleToolExpand = useCallback((toolId: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(toolId)) next.delete(toolId);
+      else next.add(toolId);
+      return next;
+    });
+  }, []);
+
+  const copyMessageContent = useCallback(async (message: UnifiedMessage) => {
+    const contentParts: string[] = [];
+    message.segments.forEach((seg) => {
+      if (seg.type === 'text' && seg.content) {
+        contentParts.push(seg.content);
+      } else if (seg.type === 'thinking' && seg.content) {
+        contentParts.push(`*Thinking:*\n${seg.content}`);
+      } else if (seg.type === 'tool_call' && seg.tool) {
+        contentParts.push(`**Tool: ${seg.tool.name}**\n\`\`\`json\n${JSON.stringify(seg.tool.input, null, 2)}\n\`\`\``);
+        if (seg.tool.result) {
+          contentParts.push(`**Result:**\n${seg.tool.result.content}`);
+        }
+      } else if (seg.type === 'diff' && seg.diff) {
+        contentParts.push(`\`\`\`diff\n${seg.diff}\n\`\`\``);
+      }
+    });
+    try {
+      await navigator.clipboard.writeText(contentParts.join('\n\n'));
+      setCopiedMessageId(message.id);
+      setTimeout(() => setCopiedMessageId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err);
+    }
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Inline AskUserQuestionCard injection.
+  //
+  // MessageProjection keeps AskUserQuestion as a tool_call segment whose
+  // `tool.id` equals the Question's `toolUseId`. We render the interactive
+  // card at that exact tool_use position via ChatTranscript's
+  // `renderToolCallExtra` hook so the question stays inline in the transcript.
+  // -------------------------------------------------------------------------
+
+  const renderToolCallExtra = useCallback((toolCallId: string): ReactNode => {
+    const question = questionQueue.find((q) => q.toolUseId === toolCallId);
+    if (question != null) {
+      return <AskUserQuestionCard item={question} />;
+    }
+    return null;
+  }, [questionQueue]);
+
+  // -------------------------------------------------------------------------
+  // Filter session-init messages unless the setting opts in (mirrors RichOutputView).
+  // -------------------------------------------------------------------------
+
+  const filteredMessages = useMemo(() => {
+    if (settings.showSessionInit) return messages;
+    return messages.filter((msg) => !(msg.role === 'system' && msg.metadata?.systemSubtype === 'init'));
+  }, [messages, settings.showSessionInit]);
 
   // -------------------------------------------------------------------------
   // Render branches
@@ -313,20 +341,32 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     );
   }
 
-  // runId is non-null — full conversation view
-  const deps: EventRenderDeps = { questionQueue, runId };
-
+  // runId is non-null — full conversation view.
   return (
-    <div className="flex h-full flex-col gap-2">
-      <div ref={scrollContainerRef} className="flex-1 overflow-auto rounded border border-border-primary bg-bg-secondary p-2">
-        {isLoadingHistory && (
-          <p className="text-xs text-text-muted">Loading history...</p>
+    <div className="flex h-full flex-col">
+      <div className="flex-1 overflow-hidden">
+        {loadError !== null ? (
+          <div className="p-4 text-xs text-status-error">Error loading history: {loadError}</div>
+        ) : (
+          <ChatTranscript
+            messages={filteredMessages}
+            settings={settings}
+            agentName="Claude"
+            isWaitingForResponse={false}
+            collapsedMessages={collapsedMessages}
+            onToggleMessageCollapse={toggleMessageCollapse}
+            expandedTools={expandedTools}
+            onToggleToolExpand={toggleToolExpand}
+            copiedMessageId={copiedMessageId}
+            onCopyMessage={copyMessageContent}
+            scrollContainerRef={scrollContainerRef}
+            messagesEndRef={messagesEndRef}
+            userMessageRefs={userMessageRefs}
+            showScrollButton={showScrollButton}
+            onScrollToBottom={scrollToBottom}
+            renderToolCallExtra={renderToolCallExtra}
+          />
         )}
-        {loadError !== null && (
-          <p className="text-xs text-status-error">Error loading history: {loadError}</p>
-        )}
-
-        {mergedTimeline.map((item, idx) => renderTimelineItem(item, idx, deps))}
       </div>
 
       <PendingApprovalsForRun runId={runId} />
