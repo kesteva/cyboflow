@@ -5,7 +5,7 @@ import { API } from '../../../utils/api';
 import { PromptDetailModal } from '../../PromptDetailModal';
 // import type { Session } from '../../../types/session';
 
-interface PromptMarker {
+export interface PromptMarker {
   id: number;
   session_id?: string;
   panel_id?: string;
@@ -18,11 +18,20 @@ interface PromptMarker {
 
 interface PromptNavigationProps {
   panelId: string;
+  /**
+   * Controlled mode: when provided, these markers are rendered directly and the
+   * panel-specific fetch (`API.panels.getPrompts`) + panel event subscriptions
+   * are skipped. Used by the workflow-run chat, which derives markers from the
+   * run's projected `UnifiedMessage[]` user turns instead of panel storage.
+   */
+  prompts?: PromptMarker[];
   onNavigateToPrompt: (marker: PromptMarker, index: number) => void;
 }
 
-export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigationProps) {
-  const [prompts, setPrompts] = useState<PromptMarker[]>([]);
+export function PromptNavigation({ panelId, prompts: controlledPrompts, onNavigateToPrompt }: PromptNavigationProps) {
+  const isControlled = controlledPrompts !== undefined;
+  const [fetchedPrompts, setFetchedPrompts] = useState<PromptMarker[]>([]);
+  const prompts = controlledPrompts ?? fetchedPrompts;
   const [isLoading, setIsLoading] = useState(false);
   const [selectedPromptId, setSelectedPromptId] = useState<number | null>(null);
   const [modalPrompt, setModalPrompt] = useState<{ prompt: PromptMarker; index: number } | null>(null);
@@ -74,12 +83,12 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
 
   const fetchPrompts = useCallback(async () => {
     if (!panelId) return;
-    
+
     setIsLoading(true);
     try {
       const response = await API.panels.getPrompts(panelId);
       if (response.success) {
-        setPrompts(response.data as PromptMarker[]);
+        setFetchedPrompts(response.data as PromptMarker[]);
       }
     } catch (error) {
       console.error('Error fetching prompt markers:', error);
@@ -89,14 +98,16 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
   }, [panelId]);
 
   useEffect(() => {
+    if (isControlled) return; // markers supplied by parent
     if (!panelId) return;
     fetchPrompts();
-  }, [panelId, fetchPrompts]);
-  
+  }, [isControlled, panelId, fetchPrompts]);
+
   // Listen for new prompts being added
   useEffect(() => {
+    if (isControlled) return; // parent owns the marker list
     if (!panelId) return;
-    
+
     const unsubscribe = window.electronAPI?.events?.onPanelPromptAdded?.((data: { panelId: string; content: string }) => {
       if (data.panelId === panelId) {
         // Refresh the prompts list when a new prompt is added to this panel
@@ -113,8 +124,9 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
   
   // Listen for assistant responses to stop duration timers
   useEffect(() => {
+    if (isControlled) return; // parent owns the marker list
     if (!panelId) return;
-    
+
     const unsubscribe = window.electronAPI?.events?.onPanelResponseAdded?.((data: { panelId: string; content: string }) => {
       console.log('[PromptNavigation] Received panel:response-added event for panel:', data.panelId, 'current panel:', panelId);
       if (data.panelId === panelId) {
@@ -130,12 +142,13 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
         unsubscribe();
       }
     };
-  }, [panelId, fetchPrompts]);
+  }, [isControlled, panelId, fetchPrompts]);
 
   // Use requestAnimationFrame for smooth UI updates for ongoing durations
   useEffect(() => {
+    if (isControlled) return; // parent re-renders drive duration updates
     // Only run the animation if there's a prompt without a completion timestamp
-    const hasOngoingPrompt = prompts.length > 0 && 
+    const hasOngoingPrompt = prompts.length > 0 &&
       prompts[prompts.length - 1] && 
       !prompts[prompts.length - 1].completion_timestamp;
     
@@ -149,7 +162,7 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
 
     const updateOngoingDuration = (timestamp: number) => {
       if (timestamp - lastUpdate >= UPDATE_INTERVAL) {
-        setPrompts(prev => [...prev]); // Force re-render for duration updates
+        setFetchedPrompts(prev => [...prev]); // Force re-render for duration updates
         lastUpdate = timestamp;
       }
       animationId = requestAnimationFrame(updateOngoingDuration);
@@ -157,7 +170,7 @@ export function PromptNavigation({ panelId, onNavigateToPrompt }: PromptNavigati
 
     animationId = requestAnimationFrame(updateOngoingDuration);
     return () => cancelAnimationFrame(animationId);
-  }, [prompts]);
+  }, [isControlled, prompts]);
 
   const handlePromptClick = (marker: PromptMarker, index: number) => {
     setSelectedPromptId(marker.id);

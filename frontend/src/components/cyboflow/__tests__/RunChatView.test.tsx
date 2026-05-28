@@ -14,7 +14,7 @@
  *   8. A debounced live re-query fires after streamEvents change.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
@@ -232,8 +232,31 @@ describe('RunChatView', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Hello from the assistant.')).toBeInTheDocument();
-      expect(screen.getByText('A user prompt.')).toBeInTheDocument();
+      // User prompt appears in BOTH the transcript and the prompt-history rail.
+      expect(screen.getAllByText('A user prompt.').length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  it('renders the prompt-history rail from user turns and toggles it closed', async () => {
+    mockListUnifiedMessages.mockImplementationOnce(async () => [
+      userText('u-1', 'First prompt.'),
+      assistantText('a-1', 'Answer one.'),
+      userText('u-2', 'Second prompt.'),
+    ]);
+
+    render(<RunChatView runId="run-1" />);
+
+    // Rail header is unique to the rail; both user turns surface as markers
+    // (also present in the transcript, hence getAllByText).
+    await waitFor(() => {
+      expect(screen.getByText('Prompt History')).toBeInTheDocument();
+      expect(screen.getAllByText('First prompt.').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('Second prompt.').length).toBeGreaterThanOrEqual(1);
+    });
+
+    // Toggle collapses the rail (header disappears).
+    fireEvent.click(screen.getByTestId('run-chat-prompt-rail-toggle'));
+    expect(screen.queryByText('Prompt History')).not.toBeInTheDocument();
   });
 
   it('renders an inline AskUserQuestionCard at the AskUserQuestion tool_call position', async () => {
