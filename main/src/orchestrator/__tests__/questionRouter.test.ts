@@ -164,6 +164,64 @@ describe('QuestionRouter', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case 2b: respond with attachments folds the file paths into the answer text
+  //          (<attachments> block) the agent receives, and drops the raw
+  //          `attachments` field from the resolved payload.
+  // -------------------------------------------------------------------------
+  it('respond embeds attachment file paths into the answer text via <attachments>', async () => {
+    const db = createTestDb({ includeQuestionsTable: true });
+    const adapter = dbAdapter(db);
+    const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
+
+    const router = QuestionRouter.initialize(adapter);
+
+    const runId = 'qrun-002b';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const questions = [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        multiSelect: false,
+        options: [{ label: 'TDD' }, { label: 'BDD' }],
+      },
+    ];
+
+    const questionPromise = router.requestQuestion(runId, 'tool-use-id-002b', questions, socketReply);
+    await router['getQuestionQueue'](runId).onIdle();
+
+    const questionId = (db
+      .prepare("SELECT id FROM questions WHERE run_id = ?")
+      .get(runId) as { id: string }).id;
+
+    await router.respond(questionId, {
+      answers: { 'Which approach?': 'TDD' },
+      attachments: ['/abs/artifacts/qrun-002b/shot.png', '/abs/artifacts/qrun-002b/two.png'],
+    });
+    const resolved = await questionPromise;
+
+    // The first answer value carries the <attachments> block with both paths.
+    const answerText = resolved.answers['Which approach?'];
+    expect(answerText).toContain('TDD');
+    expect(answerText).toContain('<attachments>');
+    expect(answerText).toContain('/abs/artifacts/qrun-002b/shot.png');
+    expect(answerText).toContain('/abs/artifacts/qrun-002b/two.png');
+    // The raw attachments field is not part of the resolved payload.
+    expect(resolved.attachments).toBeUndefined();
+
+    // socketReply received the same embedded answer.
+    expect(socketReply.mock.calls[0][0].answers['Which approach?']).toContain('<attachments>');
+
+    // answer_json persisted with the embedded block, no raw attachments key.
+    const questionRow = db
+      .prepare("SELECT answer_json FROM questions WHERE id = ?")
+      .get(questionId) as { answer_json: string };
+    const persisted = JSON.parse(questionRow.answer_json) as QuestionAnswer;
+    expect(persisted.answers['Which approach?']).toContain('<attachments>');
+    expect(persisted.attachments).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
   // Case 3: Two concurrent requestQuestion calls for the same runId are
   //         serialized by the per-run questionQueues — ordering preserved
   // -------------------------------------------------------------------------

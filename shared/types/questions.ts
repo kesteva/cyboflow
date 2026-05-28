@@ -86,6 +86,14 @@ export interface Question {
 export interface QuestionAnswer {
   answers: Record<string, string>;
   annotations?: Record<string, { preview?: string; notes?: string }>;
+  /**
+   * Absolute file paths of images the user attached when answering (saved to
+   * disk via `sessions:save-images`). When present, QuestionRouter.respond
+   * embeds them into the answer text using the same `<attachments>` convention
+   * as the quick-session composer so the agent receives the file paths inline.
+   * Empty / absent when no attachment was made.
+   */
+  attachments?: string[];
 }
 
 /** Emitted on `cyboflow.questions.onQuestionCreated`. */
