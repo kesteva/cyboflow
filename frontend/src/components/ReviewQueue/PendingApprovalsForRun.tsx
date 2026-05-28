@@ -25,8 +25,7 @@ export function PendingApprovalsForRun({
   className?: string;
 }): ReactElement | null {
   const queue = useReviewQueueStore((s) => s.queue);
-  if (runId === null) return null;
-  const runApprovals = queue.filter((a) => a.runId === runId);
+  const runApprovals = runId === null ? [] : queue.filter((a) => a.runId === runId);
   if (runApprovals.length === 0) return null;
   return (
     <div className={`rounded border border-border-primary bg-bg-secondary p-2 ${className}`.trim()}>

@@ -169,8 +169,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                 </div>
               )}
               {/* Inline permission prompts for the active quick session — surfaces
-                  ApprovalRouter approvals in the chat instead of only the Review Queue. */}
-              <PendingApprovalsForRun runId={activeQuickSessionRunId} className="shrink-0 m-2" />
+                  ApprovalRouter approvals in the chat instead of only the Review Queue.
+                  Fall back to the rendered session's runId in case the store's
+                  activeQuickSessionRunId wasn't populated (e.g. sidebar re-select). */}
+              <PendingApprovalsForRun
+                runId={activeQuickSessionRunId ?? effectiveSession?.runId ?? null}
+                className="shrink-0 m-2"
+              />
             </SessionProvider>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
