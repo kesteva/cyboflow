@@ -80,8 +80,10 @@ vi.mock('../../../utils/api', () => ({
 import { ChatInput } from '../ChatInput';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useQuestionStore } from '../../../stores/questionStore';
+import { useActiveRunsStore } from '../../../stores/activeRunsStore';
 import { trpc } from '../../../trpc/client';
 import type { Question } from '../../../../../shared/types/questions';
+import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -92,6 +94,7 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
     useQuestionStore.getState().replaceAll([]);
+    useActiveRunsStore.setState({ runsByProject: {} });
   });
 
   mockSendInput.mockClear();
@@ -290,6 +293,60 @@ describe('ChatInput — workflow run, active question', () => {
 
     // The key assertion: tRPC answer.mutate must NOT have been called
     expect(vi.mocked(trpc.cyboflow.questions.answer.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — run status bar', () => {
+  function makeRunRow(overrides: Partial<ActiveRunRow>): ActiveRunRow {
+    return {
+      id: 'run-001',
+      workflow_id: 'wf-1',
+      project_id: 7,
+      status: 'running',
+      worktree_path: '/Users/me/worktrees/feature-x',
+      branch_name: 'feature/x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  it('renders folder basename + branch from the active run', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-001');
+      useActiveRunsStore.setState({ runsByProject: { 7: [makeRunRow({})] } });
+    });
+
+    render(<ChatInput runId="run-001" />);
+
+    const bar = screen.getByTestId('run-chat-status-bar');
+    expect(bar).toHaveTextContent('feature-x');
+    expect(bar).toHaveTextContent('feature/x');
+  });
+
+  it('hides the status bar when worktree and branch are null', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-001');
+      useActiveRunsStore.setState({
+        runsByProject: { 7: [makeRunRow({ worktree_path: null, branch_name: null })] },
+      });
+    });
+
+    render(<ChatInput runId="run-001" />);
+    expect(screen.queryByTestId('run-chat-status-bar')).toBeNull();
+  });
+
+  it('hides the status bar when the active run is not in the store', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-missing');
+    });
+
+    render(<ChatInput runId="run-missing" />);
+    expect(screen.queryByTestId('run-chat-status-bar')).toBeNull();
   });
 });
 
