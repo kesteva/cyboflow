@@ -11,6 +11,8 @@ import { Settings } from 'lucide-react';
 import { useConfigStore } from '../../../stores/configStore';
 import type { ClaudePanelState } from '../../../../../shared/types/panels';
 import { ResizablePanel } from '../../ResizablePanel';
+import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun';
+import { useSession } from '../../../contexts/SessionContext';
 
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
@@ -30,6 +32,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // Create transformer once and memoize it
   const transformer = React.useMemo(() => new ClaudeMessageTransformer(), []);
   const activeSession = hook.activeSession;
+  // Reliable run id for inline approvals: the surrounding SessionProvider holds
+  // the freshly-fetched session (effectiveSession), whose runId reflects the
+  // backfilled workflow_runs.id. The session-store copy (activeSession) can lag
+  // with a null runId for freshly-created quick sessions, so prefer context.
+  const sessionCtx = useSession();
+  const approvalRunId = sessionCtx?.session.runId ?? activeSession?.runId ?? null;
   const devModeEnabled = useConfigStore((state) => state.config?.devMode ?? false);
   const showDebugTabs = devModeEnabled;
 
@@ -185,6 +193,11 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           onClose={() => setShowSettings(false)}
         />
       )}
+
+      {/* Inline permission prompts — surfaces ApprovalRouter approvals directly
+          above the input (instead of only in the detached Review Queue). Returns
+          null when the session has no run or no pending approval for it. */}
+      <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
 
       {/* Claude Input - Always visible at bottom if not archived */}
       {!activeSession.archived && (

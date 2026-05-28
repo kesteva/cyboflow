@@ -38,7 +38,6 @@ import { SessionMergeDialog } from './SessionMergeDialog';
 import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
 import { SessionActionToast } from './SessionActionToast';
-import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -46,7 +45,6 @@ interface CyboflowRootProps {
 
 export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
-  const activeQuickSessionRunId = useCyboflowStore((s) => s.activeQuickSessionRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
 
@@ -168,14 +166,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                   />
                 </div>
               )}
-              {/* Inline permission prompts for the active quick session — surfaces
-                  ApprovalRouter approvals in the chat instead of only the Review Queue.
-                  Fall back to the rendered session's runId in case the store's
-                  activeQuickSessionRunId wasn't populated (e.g. sidebar re-select). */}
-              <PendingApprovalsForRun
-                runId={activeQuickSessionRunId ?? effectiveSession?.runId ?? null}
-                className="shrink-0 m-2"
-              />
+              {/* Inline permission prompts now render inside ClaudePanel, directly
+                  above the input (see PendingApprovalsForRun in ClaudePanel.tsx). */}
             </SessionProvider>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
