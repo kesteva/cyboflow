@@ -380,20 +380,9 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     );
   }
 
-  // runId is non-null — full conversation view (prompt rail + transcript column).
+  // runId is non-null — full conversation view (transcript column + right prompt rail).
   return (
     <div className="flex h-full">
-      {/* Left prompt-history rail (collapsible) — controlled by promptMarkers. */}
-      {!sidebarCollapsed && (
-        <div className="w-64 shrink-0 h-full overflow-hidden">
-          <PromptNavigation
-            panelId={runId}
-            prompts={promptMarkers}
-            onNavigateToPrompt={handleNavigateToPrompt}
-          />
-        </div>
-      )}
-
       {/* Main column: transcript + approvals + input. */}
       <div className="relative flex flex-1 min-w-0 flex-col">
         <button
@@ -402,7 +391,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
           title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
           aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
           data-testid="run-chat-prompt-rail-toggle"
-          className="absolute left-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
+          className="absolute right-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
         >
           <History className="h-4 w-4" />
         </button>
@@ -436,6 +425,17 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
 
         <ChatInput runId={runId} />
       </div>
+
+      {/* Right prompt-history rail (collapsible) — controlled by promptMarkers. */}
+      {!sidebarCollapsed && (
+        <div className="w-64 shrink-0 h-full overflow-hidden">
+          <PromptNavigation
+            panelId={runId}
+            prompts={promptMarkers}
+            onNavigateToPrompt={handleNavigateToPrompt}
+          />
+        </div>
+      )}
     </div>
   );
 }
