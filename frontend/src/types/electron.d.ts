@@ -126,6 +126,7 @@ interface ElectronAPI {
     // IPCDataResponse so callers can use response.data directly after success check
     hasChangesToRebase: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
     getGitCommands: (sessionId: string) => Promise<IPCDataResponse<GitCommands>>;
+    getRemoteUrl: (sessionId: string) => Promise<IPCDataResponse<{ remoteUrl: string; branchName: string }>>;
     generateName: (prompt: string) => Promise<IPCResponse<string>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;

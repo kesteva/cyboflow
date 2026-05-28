@@ -1,7 +1,7 @@
 ---
 id: TASK-793
 idea: IDEA-028
-status: ready
+status: done
 created: 2026-05-27T12:00:00Z
 files_owned:
   - frontend/src/components/cyboflow/SessionMergeDialog.tsx

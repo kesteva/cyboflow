@@ -143,6 +143,7 @@ vi.mock('../../../hooks/useQuickSession', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { CyboflowRoot } from '../CyboflowRoot';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useSessionStore } from '../../../stores/sessionStore';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 
@@ -413,5 +414,88 @@ describe('CyboflowRoot — Quick Session (TASK-790)', () => {
     // No mode picker dropdown ever appears
     expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
     expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SessionLifecycleActionBar tests (TASK-792)
+// ---------------------------------------------------------------------------
+
+const makeQuickSession = (overrides: Record<string, unknown> = {}) => ({
+  id: 'sess-qs-test',
+  name: 'quick-test',
+  projectId: 1,
+  status: 'stopped' as const,
+  isMainRepo: false,
+  worktreePath: '/tmp/qs-test',
+  prompt: 'test prompt',
+  output: [],
+  jsonMessages: [],
+  createdAt: new Date().toISOString(),
+  ...overrides,
+});
+
+describe('CyboflowRoot — SessionLifecycleActionBar (TASK-792)', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+    });
+  });
+
+  it('does not render action bar when no active quick session', () => {
+    render(<CyboflowRoot projectId={1} />);
+    expect(screen.queryByTestId('session-lifecycle-action-bar')).not.toBeInTheDocument();
+  });
+
+  it('does not render action bar when active session is main repo', () => {
+    const session = makeQuickSession({ isMainRepo: true });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+    expect(screen.queryByTestId('session-lifecycle-action-bar')).not.toBeInTheDocument();
+  });
+
+  it('renders action bar with three buttons when a non-main-repo quick session is active', () => {
+    const session = makeQuickSession();
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-lifecycle-action-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-merge')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-create-pr')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
+  });
+
+  it('disables Merge and Create PR when session is running; Dismiss stays enabled', () => {
+    const session = makeQuickSession({ status: 'running' });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-action-merge')).toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).toBeDisabled();
+    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+  });
+
+  it('enables Merge and Create PR when session is stopped', () => {
+    const session = makeQuickSession({ status: 'stopped' });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
+    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
   });
 });

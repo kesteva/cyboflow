@@ -1,0 +1,17 @@
+{
+  "id": "SPRINT-043",
+  "status": "complete",
+  "created": "2026-05-28T00:00:00Z",
+  "tasks": [
+    "TASK-787",
+    "TASK-785",
+    "TASK-792",
+    "TASK-793",
+    "TASK-794",
+    "TASK-795"
+  ],
+  "execution_mode": "serial",
+  "branch": "run/sprint-043",
+  "model": "opus",
+  "task_limit": 10
+}
