@@ -9,6 +9,9 @@
  *                    3. neither          → empty-state CTA
  *   right rail     — RunRightRail (always rendered, 296 px fixed)
  *   Modal overlay  — WorkflowPicker mounted inside Modal
+ *   Lifecycle      — SessionLifecycleActionBar (header) drives the merge / create-PR /
+ *                    dismiss dialogs + success toast, targeting the session resolved
+ *                    by useLifecycleSession (active quick session OR opened workflow run)
  */
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
@@ -29,7 +32,12 @@ import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../../hooks/useAddClaudeShortcut';
 import { useAddQuickSessionShortcut } from '../../hooks/useAddQuickSessionShortcut';
 import { useQuickSession } from '../../hooks/useQuickSession';
+import { useLifecycleSession } from '../../hooks/useLifecycleSession';
 import { SessionLifecycleActionBar } from './SessionLifecycleActionBar';
+import { SessionMergeDialog } from './SessionMergeDialog';
+import { SessionCreatePrDialog } from './SessionCreatePrDialog';
+import { SessionDismissDialog } from './SessionDismissDialog';
+import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -64,6 +72,26 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
 
+  // Session lifecycle dialogs (TASK-796) — target the session resolved from
+  // either the active quick session or the opened workflow run.
+  const lifecycleSession = useLifecycleSession();
+  const [isMergeOpen, setIsMergeOpen] = useState(false);
+  const [isCreatePrOpen, setIsCreatePrOpen] = useState(false);
+  const [isDismissOpen, setIsDismissOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const handleActionSuccess = useCallback((message: string) => {
+    setToastMessage(message);
+    // The session/worktree is gone after merge/PR/dismiss — drop whichever
+    // selection pointed at it so the view resets instead of dangling.
+    const store = useCyboflowStore.getState();
+    if (store.activeQuickSessionId) {
+      store.clearActiveQuickSession();
+    } else if (store.activeRunId) {
+      store.clearActiveRun();
+    }
+  }, []);
+
   useEffect(() => useQuestionStore.getState().init(), []);
 
   return (
@@ -91,7 +119,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
         <div className="flex-1" />
 
-        <SessionLifecycleActionBar />
+        <SessionLifecycleActionBar
+          onMerge={() => setIsMergeOpen(true)}
+          onCreatePR={() => setIsCreatePrOpen(true)}
+          onDismiss={() => setIsDismissOpen(true)}
+        />
       </div>
 
       {/* Main content area — two-column flex-row layout */}
@@ -167,6 +199,52 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             />
           </div>
         </Modal>
+      )}
+
+      {/* Session lifecycle dialogs — only mounted when a lifecycle session is resolved */}
+      {lifecycleSession && (
+        <>
+          <SessionMergeDialog
+            isOpen={isMergeOpen}
+            onClose={() => setIsMergeOpen(false)}
+            sessionId={lifecycleSession.id}
+            onSuccess={() => {
+              setIsMergeOpen(false);
+              handleActionSuccess('Session merged');
+            }}
+          />
+          <SessionCreatePrDialog
+            isOpen={isCreatePrOpen}
+            onClose={() => setIsCreatePrOpen(false)}
+            sessionId={lifecycleSession.id}
+            sessionName={lifecycleSession.name}
+            onSuccess={() => {
+              setIsCreatePrOpen(false);
+              handleActionSuccess('Pull request created');
+            }}
+          />
+          <SessionDismissDialog
+            isOpen={isDismissOpen}
+            onClose={() => setIsDismissOpen(false)}
+            sessionId={lifecycleSession.id}
+            onSuccess={() => {
+              setIsDismissOpen(false);
+              handleActionSuccess('Session dismissed');
+            }}
+          />
+        </>
+      )}
+
+      {/* Success toast — rendered outside the lifecycleSession gate so it
+          survives the session being cleared on action success */}
+      {toastMessage !== null && (
+        <div className="fixed bottom-4 right-4 z-50">
+          <SessionActionToast
+            message={toastMessage}
+            isVisible
+            onDismiss={() => setToastMessage(null)}
+          />
+        </div>
       )}
     </div>
   );
