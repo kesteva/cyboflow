@@ -1,58 +1,30 @@
 /**
- * DraggableProjectTreeView — run-centric tree renderer tests (TASK-687).
+ * DraggableProjectTreeView — active-session tree renderer tests.
  *
- * Covers:
- *   (a) 3 mocked runs render under an expanded project
- *   (b) ordering is newest-first by created_at (server returns DESC order)
- *   (c) each row shows the last-6 characters of the workflow_id
- *   (d) status indicator CSS class differs across statuses
- *   (e) clicking a row triggers useCyboflowStore.setActiveRun
- *   (f) empty listRuns response renders "No runs yet. Use Start Run."
+ * The rail lists active open sessions (reactive to the session store), not a
+ * historic log of workflow runs. Covers:
+ *   (a) session rows render under an expanded project (by name)
+ *   (b) main-repo sessions are excluded
+ *   (c) clicking a quick session (no runId) → setActiveQuickSession + setActiveProjectId
+ *   (d) clicking a workflow-backed session (runId) → setActiveRun + setActiveProjectId
+ *   (e) status indicator dot class differs across session statuses
+ *   (f) empty session list renders "No open sessions. Start one with Quick Session."
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
-import type { WorkflowRunListRow } from '../../../../shared/types/workflows';
+import type { Session } from '../../types/session';
 
 // ---------------------------------------------------------------------------
 // Shared mutable state for mocks
 // ---------------------------------------------------------------------------
 
-let mockRuns: WorkflowRunListRow[] = [];
+let mockSessions: Session[] = [];
 const mockSetActiveRun = vi.fn();
+const mockSetActiveQuickSession = vi.fn();
 const mockNavigateToSessions = vi.fn();
 const mockSetActiveProjectId = vi.fn();
-
-// ---------------------------------------------------------------------------
-// Mock tRPC client (runs.list)
-// ---------------------------------------------------------------------------
-
-vi.mock('../../trpc/client', () => ({
-  trpc: {
-    cyboflow: {
-      runs: {
-        list: {
-          query: vi.fn(async () => mockRuns),
-        },
-      },
-    },
-  },
-}));
-
-// ---------------------------------------------------------------------------
-// Mock cyboflowApi — only the IPC-backed functions remain (subscribeToStreamEvents,
-// approveRun). runs.start has been migrated to trpc in TASK-715.
-// ---------------------------------------------------------------------------
-
-vi.mock('../../utils/cyboflowApi', () => ({
-  subscribeToStreamEvents: vi.fn(() => () => {}),
-  approveRun: vi.fn(),
-  cyboflowApi: {
-    subscribeToStreamEvents: vi.fn(() => () => {}),
-    approveRun: vi.fn(),
-  },
-}));
 
 // ---------------------------------------------------------------------------
 // Mock API.projects.getAll
@@ -96,14 +68,31 @@ vi.mock('../../utils/api', () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock cyboflowStore
+// Mock sessionStore — supplies the rail's session rows
+// ---------------------------------------------------------------------------
+
+vi.mock('../../stores/sessionStore', () => ({
+  useSessionStore: Object.assign(
+    (selector: (s: { sessions: Session[] }) => unknown) => selector({ sessions: mockSessions }),
+    {
+      getState: () => ({ sessions: mockSessions }),
+    },
+  ),
+}));
+
+// ---------------------------------------------------------------------------
+// Mock cyboflowStore — selectors return null (no active highlight); getState
+// exposes the lifecycle navigation actions used by handleSessionClick.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../stores/cyboflowStore', () => ({
   useCyboflowStore: Object.assign(
     (_selector: unknown) => null,
     {
-      getState: () => ({ setActiveRun: mockSetActiveRun }),
+      getState: () => ({
+        setActiveRun: mockSetActiveRun,
+        setActiveQuickSession: mockSetActiveQuickSession,
+      }),
     },
   ),
 }));
@@ -222,6 +211,7 @@ function makeElectronAPI(expandedProjects: number[] = []) {
 
 beforeEach(() => {
   mockSetActiveRun.mockReset();
+  mockSetActiveQuickSession.mockReset();
   mockNavigateToSessions.mockReset();
   mockSetActiveProjectId.mockReset();
   // Default: project 1 pre-expanded
@@ -241,21 +231,21 @@ import { DraggableProjectTreeView } from '../DraggableProjectTreeView';
 // Test data factory
 // ---------------------------------------------------------------------------
 
-let runCounter = 0;
-function makeRun(overrides: Partial<WorkflowRunListRow> = {}): WorkflowRunListRow {
-  runCounter += 1;
+let sessionCounter = 0;
+function makeSession(overrides: Partial<Session> = {}): Session {
+  sessionCounter += 1;
   return {
-    id: `run-${runCounter}`,
-    workflow_id: `wf-${runCounter}-aabbccddee`,
-    project_id: 1,
-    status: 'running',
-    worktree_path: '/tmp/worktree',
-    branch_name: 'cyboflow/test',
-    created_at: '2026-01-01 12:00:00',
-    updated_at: '2026-01-01 12:00:00',
-    started_at: '2026-01-01 12:00:00',
-    ended_at: null,
-    stuck_reason: null,
+    id: `sess-${sessionCounter}`,
+    name: `session-${sessionCounter}`,
+    worktreePath: '/tmp/wt',
+    prompt: '',
+    status: 'stopped',
+    createdAt: '2026-01-01 12:00:00',
+    output: [],
+    jsonMessages: [],
+    projectId: 1,
+    isMainRepo: false,
+    runId: null,
     ...overrides,
   };
 }
@@ -270,7 +260,6 @@ async function renderExpanded() {
     const result = render(<DraggableProjectTreeView />);
     container = result.container;
   });
-  // Wait for async data loads to settle
   await waitFor(() => {
     expect(screen.getByText('Alpha Project')).toBeInTheDocument();
   });
@@ -281,123 +270,100 @@ async function renderExpanded() {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('DraggableProjectTreeView — run-centric tree', () => {
-  it('(a) renders 3 run rows under an expanded project', async () => {
-    mockRuns = [
-      makeRun({ workflow_id: 'wf-aaaaaa111111', created_at: '2026-01-03 12:00:00' }),
-      makeRun({ workflow_id: 'wf-aaaaaa222222', created_at: '2026-01-02 12:00:00' }),
-      makeRun({ workflow_id: 'wf-aaaaaa333333', created_at: '2026-01-01 12:00:00' }),
+describe('DraggableProjectTreeView — active-session tree', () => {
+  it('(a) renders session rows under an expanded project', async () => {
+    mockSessions = [
+      makeSession({ name: 'quick-aaa' }),
+      makeSession({ name: 'quick-bbb' }),
+      makeSession({ name: 'quick-ccc' }),
     ];
 
     await renderExpanded();
 
-    // Each run row renders the last-6 of its workflow_id
     await waitFor(() => {
-      expect(screen.getByText('111111')).toBeInTheDocument();
-      expect(screen.getByText('222222')).toBeInTheDocument();
-      expect(screen.getByText('333333')).toBeInTheDocument();
+      expect(screen.getByText('quick-aaa')).toBeInTheDocument();
+      expect(screen.getByText('quick-bbb')).toBeInTheDocument();
+      expect(screen.getByText('quick-ccc')).toBeInTheDocument();
     });
   });
 
-  it('(b) run rows appear newest-first (server returns DESC order)', async () => {
-    // Supply runs in newest-first order as the server would return them
-    mockRuns = [
-      makeRun({ workflow_id: 'wf-newest-aabbcc', created_at: '2026-01-03 12:00:00' }),
-      makeRun({ workflow_id: 'wf-middle-ddeeff', created_at: '2026-01-02 12:00:00' }),
-      makeRun({ workflow_id: 'wf-oldest-112233', created_at: '2026-01-01 12:00:00' }),
+  it('(b) excludes main-repo sessions from the rail', async () => {
+    mockSessions = [
+      makeSession({ name: 'real-session' }),
+      makeSession({ name: 'main-repo-session', isMainRepo: true }),
     ];
 
     await renderExpanded();
 
     await waitFor(() => {
-      expect(screen.getByText('aabbcc')).toBeInTheDocument();
-      expect(screen.getByText('112233')).toBeInTheDocument();
+      expect(screen.getByText('real-session')).toBeInTheDocument();
     });
-
-    // Verify DOM order: newest should appear before oldest in the markup
-    const allText = document.body.innerHTML;
-    const newestPos = allText.indexOf('aabbcc');
-    const oldestPos = allText.indexOf('112233');
-    expect(newestPos).toBeGreaterThan(-1);
-    expect(oldestPos).toBeGreaterThan(-1);
-    expect(newestPos).toBeLessThan(oldestPos);
+    expect(screen.queryByText('main-repo-session')).not.toBeInTheDocument();
   });
 
-  it('(c) each run row shows the last-6 characters of workflow_id', async () => {
-    mockRuns = [
-      makeRun({ workflow_id: 'wf-abcdef-LAST12', created_at: '2026-01-02 12:00:00' }),
-      makeRun({ workflow_id: 'wf-ghijkl-XYZUVW', created_at: '2026-01-01 12:00:00' }),
-    ];
+  it('(c) clicking a quick session (no runId) triggers setActiveQuickSession + setActiveProjectId', async () => {
+    mockSessions = [makeSession({ id: 'sess-quick', name: 'quick-CLICK', projectId: 1, runId: null })];
 
     await renderExpanded();
+    await waitFor(() => expect(screen.getByText('quick-CLICK')).toBeInTheDocument());
 
-    await waitFor(() => {
-      expect(screen.getByText('LAST12')).toBeInTheDocument();
-      expect(screen.getByText('XYZUVW')).toBeInTheDocument();
-    });
+    const row = screen.getByText('quick-CLICK').closest('[role="button"]');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-quick');
+    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
-  it('(d) status indicator dot class differs across statuses', async () => {
-    mockRuns = [
-      makeRun({ workflow_id: 'wf-running-rrrrr1', status: 'running', created_at: '2026-01-03 12:00:00' }),
-      makeRun({ workflow_id: 'wf-failed-ffffff', status: 'failed', created_at: '2026-01-02 12:00:00' }),
-      makeRun({ workflow_id: 'wf-completed-ccccc', status: 'completed', created_at: '2026-01-01 12:00:00' }),
+  it('(d) clicking a workflow-backed session (runId) triggers setActiveRun + setActiveProjectId', async () => {
+    mockSessions = [makeSession({ id: 'sess-wf', name: 'wf-CLICK', projectId: 1, runId: 'run-xyz' })];
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('wf-CLICK')).toBeInTheDocument());
+
+    const row = screen.getByText('wf-CLICK').closest('[role="button"]');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('run-xyz');
+    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+  });
+
+  it('(e) status indicator dot class differs across session statuses', async () => {
+    mockSessions = [
+      makeSession({ name: 'sess-running', status: 'running' }),
+      makeSession({ name: 'sess-error', status: 'error' }),
+      makeSession({ name: 'sess-ready', status: 'ready' }),
     ];
 
     await renderExpanded();
+    await waitFor(() => expect(screen.getByText('sess-running')).toBeInTheDocument());
 
-    await waitFor(() => {
-      expect(screen.getByText('rrrrr1')).toBeInTheDocument();
-    });
-
-    // Find status dots by their title attribute (we set title={run.status} on the dot)
     const runningDot = document.querySelector('span[title="running"]');
-    const failedDot = document.querySelector('span[title="failed"]');
-    const completedDot = document.querySelector('span[title="completed"]');
+    const errorDot = document.querySelector('span[title="error"]');
+    const readyDot = document.querySelector('span[title="ready"]');
 
     expect(runningDot).not.toBeNull();
-    expect(failedDot).not.toBeNull();
-    expect(completedDot).not.toBeNull();
+    expect(errorDot).not.toBeNull();
+    expect(readyDot).not.toBeNull();
 
     expect(runningDot!.className).toContain('bg-status-success');
-    expect(failedDot!.className).toContain('bg-status-error');
-    expect(completedDot!.className).toContain('bg-status-neutral');
+    expect(errorDot!.className).toContain('bg-status-error');
+    expect(readyDot!.className).toContain('bg-status-neutral');
 
-    // Statuses should have different CSS classes
-    expect(runningDot!.className).not.toEqual(failedDot!.className);
-    expect(runningDot!.className).not.toEqual(completedDot!.className);
+    expect(runningDot!.className).not.toEqual(errorDot!.className);
+    expect(runningDot!.className).not.toEqual(readyDot!.className);
   });
 
-  it('(e) clicking a run row triggers setActiveRun and setActiveProjectId, not navigateToSessions', async () => {
-    const runId = 'run-clickme-unique';
-    mockRuns = [
-      makeRun({ id: runId, workflow_id: 'wf-click-CLICK6', project_id: 1, created_at: '2026-01-01 12:00:00' }),
-    ];
+  it('(f) empty session list renders the empty state', async () => {
+    mockSessions = [];
 
     await renderExpanded();
 
     await waitFor(() => {
-      expect(screen.getByText('CLICK6')).toBeInTheDocument();
-    });
-
-    // Find the run row via role="button"
-    const runRow = screen.getByText('CLICK6').closest('[role="button"]');
-    expect(runRow).not.toBeNull();
-
-    fireEvent.click(runRow!);
-
-    expect(mockSetActiveRun).toHaveBeenCalledWith(runId);
-    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
-    expect(mockNavigateToSessions).not.toHaveBeenCalled();
-  });
-
-  it('(f) empty listRuns renders "No runs yet. Use Start Run."', async () => {
-    mockRuns = [];
-
-    await renderExpanded();
-
-    await waitFor(() => {
-      expect(screen.getByText('No runs yet. Use Start Run.')).toBeInTheDocument();
+      expect(screen.getByText('No open sessions. Start one with Quick Session.')).toBeInTheDocument();
     });
   });
 });
