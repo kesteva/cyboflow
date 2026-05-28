@@ -717,3 +717,153 @@ describe('TASK-758: AskUserQuestion wiring', () => {
     expect(requestApproval).toHaveBeenCalledWith('panel-bash', 'Bash', { command: 'ls' }, expect.any(Function));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue 2: honor user/project allow-list via canUseTool (interactive sessions)
+// ---------------------------------------------------------------------------
+
+describe('honorSettingsPermissions — canUseTool migration', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+
+  beforeEach(() => {
+    // Restore any getInstance spies leaked from prior describe blocks (their
+    // afterEach uses clearAllMocks, which does NOT undo vi.spyOn) so the
+    // integration test below sees the real, initialized ApprovalRouter.
+    vi.restoreAllMocks();
+    capturedQueryOptions = null;
+    db = createTestDb();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
+    vi.restoreAllMocks();
+  });
+
+  function makeMgr(): ClaudeCodeManager {
+    return new ClaudeCodeManager(
+      createMockSessionManager(),
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+  }
+
+  it('interactive spawn (spawnClaudeCode) wires canUseTool + permissionMode "default"', async () => {
+    const mgr = makeMgr();
+    await mgr.spawnClaudeCode('panel-int', 'session-int', '/tmp/test', 'do work', undefined, false, 'approve');
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const opts = capturedQueryOptions as unknown as {
+      canUseTool?: unknown;
+      permissionMode?: string;
+      hooks?: { PreToolUse?: unknown[] };
+      settingSources?: string[];
+    };
+    expect(typeof opts.canUseTool).toBe('function');
+    expect(opts.permissionMode).toBe('default');
+    // The PreToolUse hook is still present (for AskUserQuestion routing).
+    expect(opts.hooks?.PreToolUse).toBeDefined();
+    // settingSources must load user+project so allow-rules are honored by the CLI.
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('buildPermissionConfig: workflow run (no honorSettingsPermissions) routes all tools via PreToolUse, NO canUseTool', () => {
+    const mgr = makeMgr();
+    const mgrPrivate = mgr as unknown as {
+      buildPermissionConfig: (o: Record<string, unknown>) => { canUseTool?: unknown; permissionMode?: string; hooks?: { PreToolUse?: unknown[] } };
+    };
+    // Mirrors RunExecutor: honorSettingsPermissions absent → autonomous behavior unchanged.
+    const cfg = mgrPrivate.buildPermissionConfig({
+      panelId: 'panel-wf', sessionId: 'session-wf', worktreePath: '/tmp', prompt: '', permissionMode: 'approve',
+    });
+    expect(cfg.canUseTool).toBeUndefined();
+    expect(cfg.permissionMode).toBeUndefined();
+    expect(cfg.hooks?.PreToolUse).toBeDefined();
+  });
+
+  it('buildPermissionConfig: "ignore" omits all permission gating', () => {
+    const mgr = makeMgr();
+    const mgrPrivate = mgr as unknown as {
+      buildPermissionConfig: (o: Record<string, unknown>) => Record<string, unknown>;
+    };
+    const cfg = mgrPrivate.buildPermissionConfig({
+      panelId: 'p', sessionId: 's', worktreePath: '/tmp', prompt: '', permissionMode: 'ignore', honorSettingsPermissions: true,
+    });
+    expect(cfg).toEqual({});
+  });
+
+  it('makeCanUseTool maps ApprovalRouter allow → behavior:allow (with updatedInput)', async () => {
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval: vi.fn().mockResolvedValue({ behavior: 'allow', updatedInput: { command: 'git status' } }),
+    } as unknown as ApprovalRouter);
+
+    const mgr = makeMgr();
+    const mgrPrivate = mgr as unknown as {
+      makeCanUseTool: (runId: string) => (toolName: string, input: Record<string, unknown>) => Promise<{ behavior: string; updatedInput?: unknown; message?: string }>;
+    };
+    const canUseTool = mgrPrivate.makeCanUseTool('run-allow');
+    const result = await canUseTool('Bash', { command: 'git status' });
+
+    expect(result.behavior).toBe('allow');
+    expect(result.updatedInput).toEqual({ command: 'git status' });
+  });
+
+  it('makeCanUseTool maps ApprovalRouter deny → behavior:deny (with message)', async () => {
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval: vi.fn().mockResolvedValue({ behavior: 'deny', message: 'rejected by user' }),
+    } as unknown as ApprovalRouter);
+
+    const mgr = makeMgr();
+    const mgrPrivate = mgr as unknown as {
+      makeCanUseTool: (runId: string) => (toolName: string, input: Record<string, unknown>) => Promise<{ behavior: string; message?: string }>;
+    };
+    const canUseTool = mgrPrivate.makeCanUseTool('run-deny');
+    const result = await canUseTool('Bash', { command: 'rm -rf /' });
+
+    expect(result.behavior).toBe('deny');
+    expect(result.message).toBe('rejected by user');
+  });
+
+  it('makeAskUserQuestionHook routes AskUserQuestion to QuestionRouter and is non-deciding for other tools', async () => {
+    const requestApproval = vi.fn();
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
+    vi.spyOn(QuestionRouter, 'getInstance').mockReturnValue({
+      requestQuestion: vi.fn().mockResolvedValue({ answers: { Q: 'A' } }),
+    } as unknown as QuestionRouter);
+
+    const mgr = makeMgr();
+    const mgrPrivate = mgr as unknown as {
+      makeAskUserQuestionHook: (runId: string) => (input: unknown, toolUseId: string, ctx: unknown) => Promise<Record<string, unknown>>;
+    };
+    const hook = mgrPrivate.makeAskUserQuestionHook('run-ask');
+
+    const askResult = await hook(
+      { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_use_id: 't1', tool_input: { questions: [] } },
+      't1',
+      null,
+    ) as { hookSpecificOutput?: { permissionDecision?: string; updatedInput?: unknown } };
+    expect(askResult.hookSpecificOutput?.permissionDecision).toBe('allow');
+    expect(askResult.hookSpecificOutput?.updatedInput).toMatchObject({ answers: { Q: 'A' } });
+
+    // Non-AskUserQuestion: non-deciding (continue) so the CLI evaluates allow-rules.
+    const bashResult = await hook(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 't2', tool_input: { command: 'git status' } },
+      't2',
+      null,
+    ) as { continue?: boolean; hookSpecificOutput?: unknown };
+    expect(bashResult.continue).toBe(true);
+    expect(bashResult.hookSpecificOutput).toBeUndefined();
+    // The hook must NOT route Bash through ApprovalRouter (canUseTool does that).
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+});
