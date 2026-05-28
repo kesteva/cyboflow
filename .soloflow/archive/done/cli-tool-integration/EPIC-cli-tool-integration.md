@@ -1,7 +1,7 @@
 ---
 epic: cli-tool-integration
 created: 2026-05-21T00:00:00.000Z
-status: active
+status: complete
 originating_ideas: [SPRINT-029-compound]
 ---
 

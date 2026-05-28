@@ -1,7 +1,7 @@
 ---
 epic: workflow-step-id-contract
 created: 2026-05-26T00:00:00Z
-status: active
+status: complete
 originating_ideas: [SPRINT-040-compound/B2]
 ---
 

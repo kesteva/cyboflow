@@ -1,7 +1,7 @@
 ---
 epic: ask-user-question-roundtrip
 created: 2026-05-26T00:00:00Z
-status: active
+status: complete
 originating_ideas: [IDEA-025]
 ---
 
