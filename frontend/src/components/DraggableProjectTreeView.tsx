@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, Archive, GitBranch, RefreshCw } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, Archive, GitBranch, RefreshCw, Workflow as WorkflowIcon } from 'lucide-react';
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import { useActiveRunsStore } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
@@ -119,6 +120,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // Active open sessions drive the rail (reactive — dismiss/merge removes a row).
   const allSessions = useSessionStore((state) => state.sessions);
   const activeQuickSessionId = useCyboflowStore((state) => state.activeQuickSessionId);
+  // Active workflow runs (workflow_runs table) keyed by project — these have no
+  // session row, so they are sourced from a dedicated reactive store.
+  const activeRunId = useCyboflowStore((state) => state.activeRunId);
+  const runsByProject = useActiveRunsStore((state) => state.runsByProject);
+  const refreshActiveRuns = useActiveRunsStore((state) => state.refresh);
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // Performance monitoring
@@ -335,6 +341,23 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       loadFoldersForProjects(projectsWithRuns);
     }
   }, [projectsWithRuns.length]);
+
+  // Subscribe to global run-lifecycle events once so the active-run rows stay
+  // reactive (a run becoming stuck / awaiting review / completing refreshes the
+  // list). The store is the source of truth; deltas only trigger a re-fetch.
+  useEffect(() => {
+    const unsubscribe = useActiveRunsStore.getState().init();
+    return unsubscribe;
+  }, []);
+
+  // Fetch active workflow runs for every loaded project. Re-runs whenever the
+  // set of projects changes or a run is selected (run start routes through
+  // setActiveRun, so a new activeRunId is a cheap "a run just started" signal).
+  useEffect(() => {
+    for (const project of projectsWithRuns) {
+      void refreshActiveRuns(project.id);
+    }
+  }, [projectsWithRuns, activeRunId, refreshActiveRuns]);
 
   // Track running project scripts
   useEffect(() => {
@@ -842,6 +865,15 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     }
   };
 
+  // Active workflow runs (NON-quick) open the workflow-run pane — mirroring how
+  // WorkflowPicker opens a freshly-started run via setActiveRun(runId). Quick
+  // sessions are handled separately above (they must NOT route through
+  // setActiveRun, which throws on the __quick__ sentinel in getPhaseState).
+  const handleActiveRunClick = (runId: string, projectId: number) => {
+    useCyboflowStore.getState().setActiveRun(runId);
+    useNavigationStore.getState().setActiveProjectId(projectId);
+  };
+
   // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
@@ -998,9 +1030,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               const projectSessions = allSessions.filter(
                 (s) => s.projectId === project.id && !s.isMainRepo,
               );
+              const projectActiveRuns = runsByProject[project.id] ?? [];
               const sessionCount = projectSessions.length;
+              const runCount = projectActiveRuns.length;
               const folderCount = project.folders?.length ?? 0;
-              const hasChildren = sessionCount > 0 || folderCount > 0;
+              const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
 
@@ -1107,13 +1141,15 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
                       {/* Folder tree */}
                       {buildFolderTree(project.folders ?? []).map((folder, index, arr) => {
-                        const isLastItem = index === arr.length - 1 && sessionCount === 0;
+                        const isLastItem = index === arr.length - 1 && sessionCount === 0 && runCount === 0;
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
                       {/* Active session rows */}
                       {projectSessions.map((session, index) => {
-                        const isLastSession = index === projectSessions.length - 1;
+                        // A session is "last" only when no run rows follow it — keeps
+                        // the vertical connector line continuous down to the runs.
+                        const isLastSession = index === projectSessions.length - 1 && runCount === 0;
                         const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
                         const isActive = activeQuickSessionId === session.id;
 
@@ -1157,6 +1193,62 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                               </span>
                               <span className="text-xs text-text-tertiary truncate ml-auto">
                                 {relativeTime}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {/* Active workflow-run rows (workflow_runs table — no session row).
+                          Clicking opens the workflow-run pane via setActiveRun. */}
+                      {projectActiveRuns.map((run, index) => {
+                        const isLastRun = index === projectActiveRuns.length - 1;
+                        const shortId = run.id.slice(0, 8);
+                        const branchSuffix = run.branch_name ? ` · ${run.branch_name}` : ` · ${shortId}`;
+                        const label = `${run.workflowName}${branchSuffix}`;
+                        const isActive = activeRunId === run.id;
+
+                        return (
+                          <div
+                            key={`run-${run.id}`}
+                            className="relative"
+                            style={{ marginLeft: '16px' }}
+                          >
+                            <div className="absolute inset-0 pointer-events-none">
+                              {!isLastRun && (
+                                <div
+                                  className="absolute top-0 bottom-0 w-px bg-border-secondary"
+                                  style={{ left: '8px' }}
+                                />
+                              )}
+                              <div
+                                className="absolute h-px bg-border-secondary"
+                                style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
+                              />
+                            </div>
+
+                            {/* Active-run row — NOT draggable */}
+                            <div
+                              className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                                isActive ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                              }`}
+                              style={{ paddingLeft: '24px' }}
+                              onClick={() => handleActiveRunClick(run.id, project.id)}
+                              role="button"
+                              tabIndex={0}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleActiveRunClick(run.id, project.id); }}
+                            >
+                              {/* Status indicator dot — uses the workflow-run status colors */}
+                              <span
+                                className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(run.status)}`}
+                                title={run.status}
+                              />
+                              <WorkflowIcon className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                              <span className="text-sm text-text-primary truncate" title={label}>
+                                {label}
+                              </span>
+                              <span className="text-xs text-text-tertiary truncate ml-auto">
+                                {run.status}
                               </span>
                             </div>
                           </div>
