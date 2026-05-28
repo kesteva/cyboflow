@@ -33,11 +33,13 @@ import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../../hooks/useAddClaudeShortcut';
 import { useAddQuickSessionShortcut } from '../../hooks/useAddQuickSessionShortcut';
 import { useQuickSession } from '../../hooks/useQuickSession';
-import { useLifecycleSession } from '../../hooks/useLifecycleSession';
+import { useLifecycleTarget } from '../../hooks/useLifecycleTarget';
 import { SessionLifecycleActionBar } from './SessionLifecycleActionBar';
 import { SessionMergeDialog } from './SessionMergeDialog';
 import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
+import { RunMergeDialog } from './RunMergeDialog';
+import { RunDismissDialog } from './RunDismissDialog';
 import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
@@ -82,9 +84,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
 
-  // Session lifecycle dialogs (TASK-796) — target the session resolved from
-  // either the active quick session or the opened workflow run.
-  const lifecycleSession = useLifecycleSession();
+  // Lifecycle dialogs (TASK-796 / GAP-B) — target either the worktree-backed
+  // quick session OR the planner/workflow run resolved from the active selection.
+  const lifecycleTarget = useLifecycleTarget();
   const [isMergeOpen, setIsMergeOpen] = useState(false);
   const [isCreatePrOpen, setIsCreatePrOpen] = useState(false);
   const [isDismissOpen, setIsDismissOpen] = useState(false);
@@ -93,14 +95,18 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const handleActionSuccess = useCallback((message: string) => {
     setToastMessage(message);
     // The session/worktree is gone after merge/PR/dismiss — drop whichever
-    // selection pointed at it so the view resets instead of dangling.
+    // selection pointed at it so the view resets instead of dangling. For runs,
+    // also refresh the active-runs rail so the closed-out run drops from it.
     const store = useCyboflowStore.getState();
     if (store.activeQuickSessionId) {
       store.clearActiveQuickSession();
     } else if (store.activeRunId) {
       store.clearActiveRun();
+      if (projectId !== null) {
+        void useActiveRunsStore.getState().refresh(projectId);
+      }
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => useQuestionStore.getState().init(), []);
 
@@ -215,13 +221,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </Modal>
       )}
 
-      {/* Session lifecycle dialogs — only mounted when a lifecycle session is resolved */}
-      {lifecycleSession && (
+      {/* Lifecycle dialogs — session-scoped for quick sessions, run-scoped for
+          planner/workflow runs (GAP-B). Only mounted when a target resolves. */}
+      {lifecycleTarget?.kind === 'session' && (
         <>
           <SessionMergeDialog
             isOpen={isMergeOpen}
             onClose={() => setIsMergeOpen(false)}
-            sessionId={lifecycleSession.id}
+            sessionId={lifecycleTarget.session.id}
             onSuccess={() => {
               setIsMergeOpen(false);
               handleActionSuccess('Session merged');
@@ -230,8 +237,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           <SessionCreatePrDialog
             isOpen={isCreatePrOpen}
             onClose={() => setIsCreatePrOpen(false)}
-            sessionId={lifecycleSession.id}
-            sessionName={lifecycleSession.name}
+            sessionId={lifecycleTarget.session.id}
+            sessionName={lifecycleTarget.session.name}
             onSuccess={() => {
               setIsCreatePrOpen(false);
               handleActionSuccess('Pull request created');
@@ -240,10 +247,33 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           <SessionDismissDialog
             isOpen={isDismissOpen}
             onClose={() => setIsDismissOpen(false)}
-            sessionId={lifecycleSession.id}
+            sessionId={lifecycleTarget.session.id}
             onSuccess={() => {
               setIsDismissOpen(false);
               handleActionSuccess('Session dismissed');
+            }}
+          />
+        </>
+      )}
+
+      {lifecycleTarget?.kind === 'run' && (
+        <>
+          <RunMergeDialog
+            isOpen={isMergeOpen}
+            onClose={() => setIsMergeOpen(false)}
+            runId={lifecycleTarget.runId}
+            onSuccess={() => {
+              setIsMergeOpen(false);
+              handleActionSuccess('Run merged');
+            }}
+          />
+          <RunDismissDialog
+            isOpen={isDismissOpen}
+            onClose={() => setIsDismissOpen(false)}
+            runId={lifecycleTarget.runId}
+            onSuccess={() => {
+              setIsDismissOpen(false);
+              handleActionSuccess('Run dismissed');
             }}
           />
         </>

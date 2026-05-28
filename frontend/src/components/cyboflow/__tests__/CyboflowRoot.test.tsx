@@ -69,6 +69,8 @@ vi.mock('../../../trpc/client', () => ({
         onStepTransition: {
           subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
+        merge: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        dismiss: { mutate: vi.fn().mockResolvedValue({ success: true }) },
       },
       workflows: {
         list: {
@@ -592,5 +594,106 @@ describe('CyboflowRoot — lifecycle dialog wiring (TASK-796)', () => {
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.queryByTestId('session-lifecycle-action-bar')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GAP-B: workflow-run close-out (action bar + run dialogs resolved from
+// activeRunsStore, no `sessions` row)
+// ---------------------------------------------------------------------------
+
+import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+
+const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
+  id: 'run-planner-1',
+  workflow_id: 'wf-2',
+  project_id: 1,
+  status: 'completed' as const,
+  worktree_path: '/tmp/wt/planner/run-plan',
+  branch_name: 'cyboflow/planner/run-plan',
+  created_at: '',
+  updated_at: '',
+  started_at: null,
+  ended_at: null,
+  stuck_reason: null,
+  workflowName: 'planner',
+  ...overrides,
+});
+
+describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: {} });
+    });
+  });
+
+  const activateRun = (overrides: Record<string, unknown> = {}) => {
+    const run = makeActiveRun(overrides);
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: { 1: [run] } });
+      useCyboflowStore.getState().setActiveRun(run.id);
+    });
+    return run;
+  };
+
+  it('renders the action bar (Merge + Dismiss, no Create PR) for an active workflow run with no session', () => {
+    activateRun();
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-lifecycle-action-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-merge')).toBeInTheDocument();
+    expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
+    // Create-PR is session-only.
+    expect(screen.queryByTestId('session-action-create-pr')).not.toBeInTheDocument();
+  });
+
+  it('disables Merge while the run is still in flight (non-terminal status)', () => {
+    activateRun({ status: 'running' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.getByTestId('session-action-merge')).toBeDisabled();
+    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+  });
+
+  it('clicking Merge opens the RunMergeDialog', () => {
+    activateRun({ status: 'completed' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Merge run changes')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-merge'));
+    expect(screen.getByText('Merge run changes')).toBeInTheDocument();
+  });
+
+  it('clicking Dismiss opens the RunDismissDialog', () => {
+    activateRun({ status: 'completed' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('Dismiss run?')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('session-action-dismiss'));
+    expect(screen.getByText('Dismiss run?')).toBeInTheDocument();
+  });
+
+  it('confirming Dismiss calls cyboflow.runs.dismiss.mutate with the runId', async () => {
+    const run = activateRun({ status: 'completed' });
+    render(<CyboflowRoot projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('session-action-dismiss'));
+    // Two buttons are now labelled 'Dismiss' (the action-bar trigger and the
+    // ConfirmDialog confirm). Click the confirm one — the trigger carries the
+    // session-action-dismiss testid, so exclude it.
+    const actionBarBtn = screen.getByTestId('session-action-dismiss');
+    const confirmBtn = screen
+      .getAllByRole('button', { name: 'Dismiss' })
+      .find((b) => b !== actionBarBtn);
+    await act(async () => {
+      fireEvent.click(confirmBtn!);
+    });
+
+    const dismissMock = (trpc.cyboflow.runs as unknown as { dismiss: { mutate: ReturnType<typeof vi.fn> } }).dismiss.mutate;
+    expect(dismissMock).toHaveBeenCalledWith({ runId: run.id });
   });
 });

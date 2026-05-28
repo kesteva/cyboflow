@@ -98,6 +98,25 @@ export interface StepTransitionEmitterLike {
   emit(runId: string, status: 'pending' | 'running' | 'done'): void;
 }
 
+/**
+ * Narrow interface for probing whether a run still has unresolved
+ * human-in-the-loop work (a pending tool approval or a pending question gate)
+ * at the moment the SDK iterator drains.
+ *
+ * Injected at the index.ts boundary from ApprovalRouter / QuestionRouter
+ * `getPending()` so RunExecutor stays free of services/* imports and of a
+ * direct singleton dependency (preserves the standalone-typecheck invariant
+ * and keeps the executor unit-testable with a vi.fn() stub).
+ *
+ * GAP-A guard (run-completed-while-approval-pending): consulted in the
+ * 'completed' branch of onLifecycleTransition. When either returns true the
+ * executor MUST NOT complete the run — see the completion guard below.
+ */
+export interface PendingWorkProbeLike {
+  hasPendingApproval(runId: string): boolean;
+  hasPendingQuestion(runId: string): boolean;
+}
+
 // ---------------------------------------------------------------------------
 // RunExecutor
 // ---------------------------------------------------------------------------
@@ -162,6 +181,14 @@ export class RunExecutor {
      * silently skipped (backward-compat with callers that predate TASK-765).
      */
     private readonly stepEmitter?: StepTransitionEmitterLike,
+    /**
+     * Optional pending-work probe (GAP-A guard). When injected, the 'completed'
+     * branch of onLifecycleTransition checks it before completing the run and
+     * skips completion if the run still has a pending approval or question gate.
+     * When absent, the guard degrades to a DB-status re-read only (see
+     * onLifecycleTransition 'completed').
+     */
+    private readonly pendingWorkProbe?: PendingWorkProbeLike,
   ) {}
 
   /**
@@ -466,9 +493,64 @@ export class RunExecutor {
           // safely swallowed below.
           await this.lifecycleTransitions.running(runId);
           break;
-        case 'completed':
+        case 'completed': {
+          // GAP-A guard (run-completed-while-approval-pending):
+          //
+          // The SDK iterator can drain while the run is NOT genuinely finished:
+          //   1. A tool approval / question gate was opened, flipping the run to
+          //      'awaiting_review' / 'awaiting_input', and the run was torn down
+          //      mid-gate (e.g. cancel/abort). clearPendingForRun() in
+          //      runSdkQuery's finally settles the in-memory promise but does NOT
+          //      restore the DB status to 'running', so the run is legitimately
+          //      parked in a non-terminal state when the iterator drains.
+          //   2. A still-unresolved approval/question exists in the router's
+          //      in-memory pending map at drain time.
+          //
+          // In either case we must NOT complete: completing would either throw a
+          // swallowed TransitionRejectedError (the guarded UPDATE requires
+          // status='running') or — worse — race a state that should stay open and
+          // closable. Re-read the live DB status and consult the pending-work
+          // probe; only complete when the run is genuinely still 'running' with no
+          // pending human-in-the-loop work.
+          const current = this.registry.getRunById(runId);
+          const liveStatus = current?.status;
+
+          // Block completion only when the run is genuinely parked awaiting a
+          // human (awaiting_review / awaiting_input) or stuck. Any other status
+          // (running, or already terminal) is delegated to transitionToCompleted's
+          // own `WHERE status='running'` guard, which is a safe no-op when the run
+          // is no longer running. We deliberately do NOT block on 'starting' /
+          // 'queued' here — those are never the iterator-drain state in production
+          // and the underlying guarded UPDATE handles them.
+          const PARKED_STATUSES = new Set(['awaiting_review', 'awaiting_input', 'stuck']);
+          if (liveStatus !== undefined && PARKED_STATUSES.has(liveStatus)) {
+            // Parked in a non-terminal state — leave it open and closable so the
+            // human can triage. Do not force a completion.
+            this.logger.info(
+              '[RunExecutor] skipping completion — run is parked awaiting human work at iterator drain',
+              { runId, status: liveStatus },
+            );
+            break;
+          }
+
+          if (
+            this.pendingWorkProbe?.hasPendingApproval(runId) ||
+            this.pendingWorkProbe?.hasPendingQuestion(runId)
+          ) {
+            // A pending approval or question is still in flight for this run.
+            // Leave the run open (in its current non-terminal status) so the
+            // human can triage it; the gate's own resolution path will drive the
+            // run forward (or it will be cleaned up on cancel/teardown).
+            this.logger.info(
+              '[RunExecutor] skipping completion — run has pending approval/question at iterator drain',
+              { runId },
+            );
+            break;
+          }
+
           await this.lifecycleTransitions.completed(runId, 'running');
           break;
+        }
         case 'failed': {
           const fromStatus = this.pendingFailedFromStatus.get(runId) ?? 'running';
           const errorMessage = this.pendingFailedMessage.get(runId) ?? 'unknown error';

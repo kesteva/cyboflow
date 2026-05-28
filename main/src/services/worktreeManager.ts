@@ -238,6 +238,34 @@ export class WorktreeManager {
     });
   }
 
+  /**
+   * Remove a worktree by its ABSOLUTE path (GAP-B run close-out).
+   *
+   * `removeWorktree` above computes the path from a flat `name` + worktree
+   * folder, which matches the SESSION worktree layout. Workflow runs use a
+   * nested deterministic layout (`.cyboflow/worktrees/<workflow>/<runId8>`) that
+   * the name-based helper cannot reconstruct, so run close-out passes the
+   * absolute `workflow_runs.worktree_path` here instead. Idempotent: an
+   * already-removed / missing tree is treated as success.
+   */
+  async removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void> {
+    return await withLock(`worktree-remove-${worktreePath}`, async () => {
+      try {
+        await execWithShellPath(`git worktree remove "${worktreePath}" --force`, { cwd: projectPath });
+      } catch (error: unknown) {
+        const err = error as Error & { stderr?: string; stdout?: string };
+        const errorMessage = err.stderr || err.stdout || err.message || String(err);
+        if (errorMessage.includes('is not a working tree') ||
+            errorMessage.includes('does not exist') ||
+            errorMessage.includes('No such file or directory')) {
+          console.log(`Worktree ${worktreePath} already removed or doesn't exist, skipping...`);
+          return;
+        }
+        throw new Error(`Failed to remove worktree: ${errorMessage}`);
+      }
+    });
+  }
+
   async listWorktrees(projectPath: string): Promise<Array<{ path: string; branch: string }>> {
     try {
       const { stdout } = await execWithShellPath(`git worktree list --porcelain`, { cwd: projectPath });
