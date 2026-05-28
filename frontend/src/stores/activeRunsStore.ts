@@ -33,6 +33,7 @@ import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
 import type { AppRouter } from '../../../shared/types/trpc';
+import { useCyboflowStore } from './cyboflowStore';
 
 // ---------------------------------------------------------------------------
 // Types inferred from the router output — never a local mirror.
@@ -98,18 +99,24 @@ export interface ActiveRunsState {
 export function buildActiveRunRows(
   runs: WorkflowRunListRow[],
   workflows: WorkflowRow[],
+  pinnedRunId?: string | null,
 ): ActiveRunRow[] {
   const nameById = new Map<string, string>();
   for (const wf of workflows) nameById.set(wf.id, wf.name);
 
   return runs
-    .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status))
     // Exclude quick-session sentinel runs. They can't be filtered by resolved
     // name (the `__quick__` workflow is excluded from `workflows.list`, so
     // `nameById` never holds it — the old name-based check let every quick run
     // slip through with a "workflow" fallback label). Match the id suffix
     // instead, which is the only reliable signal here.
     .filter((run) => !run.workflow_id.endsWith(QUICK_WORKFLOW_ID_SUFFIX))
+    // Drop terminal runs so the rail stays an active-runs list, NOT a historic
+    // log — EXCEPT the currently-selected run (`pinnedRunId`). A run the user is
+    // viewing must stay reachable even after it completes/fails, otherwise it
+    // vanishes mid-session and can't be reopened (e.g. a planner that finished
+    // or got stuck with no merge prompt).
+    .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status) || run.id === pinnedRunId)
     .map((run) => ({
       ...run,
       workflowName: nameById.get(run.workflow_id) ?? 'workflow',
@@ -141,7 +148,11 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
           trpc.cyboflow.runs.list.query({ projectId }),
           trpc.cyboflow.workflows.list.query({ projectId }),
         ]);
-        const active = buildActiveRunRows(runs, workflows);
+        // Pin the currently-selected run so it stays reachable even when
+        // terminal (read non-reactively — refresh already re-runs on
+        // activeRunId change via the rail's effect).
+        const pinnedRunId = useCyboflowStore.getState().activeRunId;
+        const active = buildActiveRunRows(runs, workflows, pinnedRunId);
         set((state) => ({
           runsByProject: { ...state.runsByProject, [projectId]: active },
         }));

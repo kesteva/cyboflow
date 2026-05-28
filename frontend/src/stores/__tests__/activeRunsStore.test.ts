@@ -51,6 +51,29 @@ describe('buildActiveRunRows', () => {
     expect(rows.map((r) => r.id)).toEqual(['r-run']);
   });
 
+  it('(a2) keeps the pinned (currently-selected) run even when terminal', () => {
+    const rows = buildActiveRunRows(
+      [
+        makeRun({ id: 'r-run', status: 'running' }),
+        makeRun({ id: 'r-done', status: 'completed' }),
+        makeRun({ id: 'r-fail', status: 'failed' }),
+      ],
+      workflows,
+      'r-done', // the run the user is viewing
+    );
+    // Active run + the pinned terminal run remain; other terminals stay dropped.
+    expect(rows.map((r) => r.id).sort()).toEqual(['r-done', 'r-run']);
+  });
+
+  it('(a3) never resurrects a pinned __quick__ run', () => {
+    const rows = buildActiveRunRows(
+      [makeRun({ id: 'r-quick', workflow_id: 'wf-1-__quick__', status: 'completed' })],
+      workflows,
+      'r-quick',
+    );
+    expect(rows).toEqual([]);
+  });
+
   it('(b) excludes __quick__ sentinel-workflow runs by id suffix (absent from workflows.list)', () => {
     const rows = buildActiveRunRows(
       [
