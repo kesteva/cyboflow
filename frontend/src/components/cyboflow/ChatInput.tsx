@@ -22,10 +22,11 @@
  * Props:
  *   runId — the active workflow run id (null in quick-session or idle mode).
  */
-import { useState, useRef, useLayoutEffect } from 'react';
-import { Send } from 'lucide-react';
+import { useMemo, useState, useRef, useLayoutEffect } from 'react';
+import { Send, Folder, GitBranch } from 'lucide-react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { Button } from '../ui/Button';
 import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../utils/cn';
@@ -49,12 +50,33 @@ export interface ChatInputProps {
 
 export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null {
   const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
+  const activeRunId = useCyboflowStore((s) => s.activeRunId);
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
 
   // Inline selector: most-recently-created pending Question for this run.
   const activeQuestion = useQuestionStore((s) =>
     s.queue.find((q) => q.runId === runId && q.status === 'pending'),
   );
   const setOtherText = useQuestionStore((s) => s.setOtherText);
+
+  // -------------------------------------------------------------------------
+  // Active-run worktree folder + branch for the status bar. The active-run
+  // rows (with worktree_path + branch_name) live in activeRunsStore keyed by
+  // projectId; we don't have the projectId in this subtree, so we scan all
+  // projects for the row whose id === activeRunId (run ids are unique).
+  // -------------------------------------------------------------------------
+  const activeRun = useMemo(() => {
+    if (activeRunId === null) return null;
+    for (const rows of Object.values(runsByProject)) {
+      const found = rows.find((r) => r.id === activeRunId);
+      if (found) return found;
+    }
+    return null;
+  }, [activeRunId, runsByProject]);
+
+  const worktreePath = activeRun?.worktree_path ?? null;
+  const branchName = activeRun?.branch_name ?? null;
+  const folderName = worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
 
   const [text, setText] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -185,8 +207,33 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     </div>
   );
 
+  // Status bar — folder + branch chips for the active run, mirroring the
+  // quick-session composer's status bar position (directly above the input).
+  // Only shown in workflow modes and only when we have worktree/branch data.
+  const showStatusBar = runId !== null && (folderName !== null || branchName !== null);
+  const statusBar = showStatusBar ? (
+    <div
+      className="flex items-center gap-2 px-0.5 text-[10px] text-text-tertiary"
+      data-testid="run-chat-status-bar"
+    >
+      {folderName !== null && (
+        <span className="flex items-center gap-1" title={worktreePath ?? undefined}>
+          <Folder className="h-3 w-3" />
+          <span className="truncate max-w-[160px]">{folderName}</span>
+        </span>
+      )}
+      {branchName !== null && (
+        <span className="flex items-center gap-1 font-mono" title={branchName}>
+          <GitBranch className="h-3 w-3" />
+          <span className="truncate max-w-[160px]">{branchName}</span>
+        </span>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2">
+      {statusBar}
       {mode === 'workflow-idle' ? (
         <Tooltip content="Input enabled only when the agent asks a question">
           {composer}
