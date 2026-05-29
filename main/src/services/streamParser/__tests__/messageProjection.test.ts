@@ -679,4 +679,43 @@ describe('MessageProjection', () => {
       expect(parentToolSeg.tool.childToolCalls?.[0].name).toBe('Bash');
     }
   });
+
+  // -------------------------------------------------------------------------
+  // 22. Partial-message streaming: blocks of ONE logical message arrive as
+  //     separate `assistant` events that all share `message.id`. They must
+  //     coalesce into a SINGLE UnifiedMessage (no duplicate-keyed messages).
+  //
+  // Reproduces the real raw_events shape observed in prod: the SDK
+  // (`--include-partial-messages`) emits one `assistant` event per completed
+  // content block — e.g. thinking → text → tool_use × N — each with exactly
+  // one block but the same `message.id`. Pre-fix, project() returned N
+  // messages sharing one id → React "two children with the same key" warning.
+  // -------------------------------------------------------------------------
+
+  it('coalesces partial-streamed blocks sharing one message.id into a single message', () => {
+    const SHARED_ID = 'msg_01ARTvPr5GeVxDUBGbLoiVKf';
+    const mk = (content: AssistantEvent['message']['content']): AssistantEvent => ({
+      type: 'assistant',
+      message: { id: SHARED_ID, model: 'claude-opus-4-5', role: 'assistant', content },
+      session_id: SESSION_ID,
+    });
+
+    // Block 1: thinking → emits the message.
+    const first = projection.project(mk([{ type: 'thinking', thinking: 'Planning the work.' }]));
+    expect(first).not.toBeNull();
+    const msg = first as UnifiedMessage;
+    expect(msg.id).toBe(SHARED_ID);
+
+    // Block 2: text → coalesced (returns null), appended to the same message.
+    expect(projection.project(mk([{ type: 'text', text: 'Here is the plan.' }]))).toBeNull();
+
+    // Blocks 3 & 4: two tool_use blocks → also coalesced.
+    expect(projection.project(mk([{ type: 'tool_use', id: 'toolu_a', name: 'Agent', input: { x: 1 } }]))).toBeNull();
+    expect(projection.project(mk([{ type: 'tool_use', id: 'toolu_b', name: 'Agent', input: { x: 2 } }]))).toBeNull();
+
+    // The first message accumulated all four blocks via the shared segments ref.
+    expect(msg.segments.map((s) => s.type)).toEqual(['thinking', 'text', 'tool_call', 'tool_call']);
+    const toolCalls = msg.segments.filter((s) => s.type === 'tool_call');
+    expect(toolCalls).toHaveLength(2);
+  });
 });

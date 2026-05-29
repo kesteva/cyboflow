@@ -89,6 +89,17 @@ function assistantTextPayload(messageId: string, text: string): string {
   });
 }
 
+/** A single-content-block assistant event — mirrors partial-message streaming. */
+function assistantBlockPayload(
+  messageId: string,
+  block: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: { id: messageId, model: 'claude-opus-4', role: 'assistant', content: [block] },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -185,6 +196,31 @@ describe('selectRunUnifiedMessages', () => {
     const y = selectRunUnifiedMessages(db, 'run-y');
     expect(y).toHaveLength(1);
     expect(y[0].id).toBe('msg-y');
+  });
+
+  it('coalesces partial-streamed blocks (same message.id across rows) into ONE message', () => {
+    // Real prod shape: the SDK streams one logical assistant message as several
+    // `assistant` events, one completed content block each, all sharing
+    // message.id. Reconstruction must fold them into a single UnifiedMessage so
+    // the renderer doesn't see duplicate-keyed messages. This also exercises the
+    // shared-`segments`-ref contract across the helper's `{ ...projected }` copy.
+    const runId = 'run-partial';
+    const MID = 'msg_01ARTvPr5GeVxDUBGbLoiVKf';
+    const rows: MockRawRow[] = [
+      { id: 1, runId, createdAt: '2026-01-01T00:00:01Z', payloadJson: assistantBlockPayload(MID, { type: 'thinking', thinking: 'Plan it.' }) },
+      { id: 2, runId, createdAt: '2026-01-01T00:00:02Z', payloadJson: assistantBlockPayload(MID, { type: 'text', text: 'The plan:' }) },
+      { id: 3, runId, createdAt: '2026-01-01T00:00:03Z', payloadJson: assistantBlockPayload(MID, { type: 'tool_use', id: 'toolu_a', name: 'Agent', input: { i: 1 } }) },
+      { id: 4, runId, createdAt: '2026-01-01T00:00:04Z', payloadJson: assistantBlockPayload(MID, { type: 'tool_use', id: 'toolu_b', name: 'Agent', input: { i: 2 } }) },
+    ];
+
+    const result = selectRunUnifiedMessages(makeMockDb(rows), runId);
+
+    // Exactly one message, carrying all four blocks in order.
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(MID);
+    expect(result[0].segments.map((s) => s.type)).toEqual(['thinking', 'text', 'tool_call', 'tool_call']);
+    // First-row persisted timestamp wins (the message "started" there).
+    expect(result[0].timestamp).toBe(new Date('2026-01-01T00:00:01Z').toISOString());
   });
 
   it('threads the logger into the projection pipeline (verbose on unknown variant)', () => {
