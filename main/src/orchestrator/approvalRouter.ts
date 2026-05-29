@@ -414,18 +414,32 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
-   * Boot-time recovery. The Unix permission socket from the previous app
-   * session is gone (path is keyed on the previous process.pid), so any
-   * workflow_runs row in 'awaiting_review' cannot be resumed. Transition
-   * them to 'failed' with error_message='app_restart' and flip any orphaned
-   * pending approvals to 'timed_out' for audit consistency.
+   * Boot-time recovery for runs stuck mid-tool-approval. A run in
+   * 'awaiting_review' WITH a pending approval row was blocked on the Unix
+   * permission socket from the previous app session, which is gone (path is
+   * keyed on the previous process.pid) — the agent can never receive its
+   * socket reply, so the run cannot be resumed. Transition only those to
+   * 'failed' with error_message='app_restart' and flip their orphaned pending
+   * approvals to 'timed_out' for audit consistency.
+   *
+   * A clean-drain REST run (awaiting_review with NO pending approval) is NOT
+   * recovered here: its agent already finished and it needs no socket — it
+   * simply awaits the user's Merge / Create-PR / Dismiss decision, which the
+   * runs router serves from the DB + worktree. Failing it on boot would
+   * silently destroy a finished run waiting to be closed out (the bug this
+   * scoping fixes).
    *
    * Returns the number of workflow_runs rows transitioned.
    */
   recoverStaleAwaitingReview(): number {
     const transition = this.db.transaction(() => {
       const staleRunIds = this.db
-        .prepare(`SELECT id FROM workflow_runs WHERE status = 'awaiting_review'`)
+        .prepare(
+          `SELECT DISTINCT r.id
+             FROM workflow_runs r
+             JOIN approvals a ON a.run_id = r.id
+            WHERE r.status = 'awaiting_review' AND a.status = 'pending'`,
+        )
         .all() as { id: string }[];
       if (staleRunIds.length === 0) return 0;
       const placeholders = staleRunIds.map(() => '?').join(',');
