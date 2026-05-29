@@ -1,9 +1,12 @@
 # IDEA-013 probe findings — decision record (TASK-805)
 
-**Status:** TEMPLATE / DRAFT — verdicts marked `TBD` are filled by running the probe kit in
-`scratch/` (see `scratch/README.md`). Values marked `(planning estimate)` were observed during
-the 2026-05-29 design workflow and MUST be re-confirmed on the exact `--settings`-isolated,
-no-`-p` spawn config the future InteractiveClaudeManager uses.
+**Status:** PARTIAL — Probe **D** (Shannon) is RESOLVED, Probe **B** (encodeCwd) is confirmed, and an
+INDICATIVE Probe **E**/**C** run was done 2026-05-29 against a real on-disk transcript. Probes **A/A2**
+(live interactive session), **C**-authoritative (bare no-`-p` REPL + Stop hook), **B**-`DISCOVERY_TIMEOUT_MS`
+(spawn timing), **H** (real subscription + user sign-off), and **F/G** (IDEA-029 socket) remain `TBD`.
+Verdicts marked `TBD` are filled by running the probe kit in `scratch/` (see `scratch/README.md`).
+Values marked `(indicative)` were measured on a Claude-Code **agent-session** transcript and MUST be
+re-confirmed on the exact `--settings`-isolated, bare no-`-p` spawn config the InteractiveClaudeManager uses.
 
 This record resolves **Q1–Q4** and names, for each downstream slice **S1–S7**, the explicit
 fallback its gating probe selects. The SDK substrate keeps shipping while these run, so blocking
@@ -15,10 +18,10 @@ the epic here is zero-cost.
 
 | Q | Question | Resolution | Evidence |
 |---|----------|------------|----------|
-| **Q1** | Roll-our-own vs adopt Shannon? | **ROLL-OUR-OWN** behind a swappable `TranscriptSource` seam (a future `ShannonTranscriptSource` is a one-factory-branch swap). | Probe D — Shannon bridge "Planned, not started"; **Bun**+**tmux** runtime cost unacceptable for the 2026-06-15 deadline. `(planning estimate — re-confirm via fetch-shannon-status.sh)` |
-| **Q2** | Do interactive PreToolUse hooks fire + block synchronously? | `TBD` — **gates whether a GATED interactive substrate ships at all.** | Probe A (5 sub-claims) + Probe A2. |
-| **Q3** | Is the structured panel lost? | **NO** — preserved by tailing the transcript through a **normalizer**; coarser turn-level (not token-level) granularity. | Probe E (schema divergence). |
-| **Q4** | How is completion detected? | Deterministic **turn-end signal** (`Stop hook` PRIMARY; `stop_hook_summary`+`turn_duration` markers SECONDARY) → EOF/`/exit` to PTY stdin → PTY exit as teardown CONSEQUENCE. | Probe C. |
+| **Q1** | Roll-our-own vs adopt Shannon? | **ROLL-OUR-OWN** behind a swappable `TranscriptSource` seam (a future `ShannonTranscriptSource` is a one-factory-branch swap). | **CONFIRMED 2026-05-29 (Probe D):** GOAL_PROGRESS.md — bridge "Planned", *"no shannon-mcp-bridge binary yet, no oRPC Unix-socket host server yet"*; requires **Bun**+**tmux**; no Node/Electron build of `@dexh/shannon-agent-sdk`. |
+| **Q2** | Do interactive PreToolUse hooks fire + block synchronously? | `TBD` — **gates whether a GATED interactive substrate ships at all.** | Probe A (5 sub-claims) + Probe A2. **Needs a live interactive session.** |
+| **Q3** | Is the structured panel lost? | **NO** — preserved by tailing the transcript through a **normalizer**; coarser turn-level (not token-level) granularity. | Probe E (schema divergence) — normalizer-mandatory CORROBORATED (indicative 55.2% unknown, 2026-05-29). |
+| **Q4** | How is completion detected? | Deterministic **turn-end signal** (`Stop hook` PRIMARY; `stop_hook_summary`+`turn_duration` markers SECONDARY) → EOF/`/exit` to PTY stdin → PTY exit as teardown CONSEQUENCE. | Probe C — no `result` line + turn-end markers PRESENT (corroborated); Stop-hook firing still `TBD`. |
 
 ---
 
@@ -45,33 +48,37 @@ substrate picker surfaces "approval routing unavailable" on the interactive (sub
   (`updatedInput` is SDK-`HookJSONOutput`-only) → **native-TUI-only** v1 limit; no QuestionRouter
   wiring on the interactive substrate. `TBD (confirm)`.
 
-### Probe B — session-id discovery + encodeCwd (gates S1/S2) — `TBD`
-- `encodeCwd` live-verified example: `TBD` (e.g. `/Users/x/Developer/app` → `-Users-x-Developer-app`); non-ASCII case: `TBD`; **#19972** collision note recorded.
-- `DISCOVERY_TIMEOUT_MS` from measured spawn→first-`.jsonl` delay: `TBD ms` (with margin).
-- Session UUID is **filename-only** (`--session-id` ignored interactively, **#44607**): `TBD`.
+### Probe B — session-id discovery + encodeCwd (gates S1/S2) — PASS (encode) / `TBD` (timing)
+- `encodeCwd` live-verified example: **PASS (2026-05-29)** — `encodeCwd('/Users/raimundoesteva/.warp/worktrees/cyboflow/dusk-switchback')` = `-Users-raimundoesteva--warp-worktrees-cyboflow-dusk-switchback`, **EXACT match** to the live `~/.claude/projects/` dir (note `/.warp`→`--warp` double-dash; algorithm = `[^a-zA-Z0-9]→-`). Non-ASCII case: `TBD`; **#19972** collision note recorded.
+- `DISCOVERY_TIMEOUT_MS` from measured spawn→first-`.jsonl` delay: `TBD ms` (run `probe-transcript.ts watch` while launching claude; with margin).
+- Session UUID is **filename-only** (`--session-id` ignored interactively, **#44607**): **CONFIRMED** — UUID `356a22e0-…` was only the filename; `--session-id` interactive behavior still `TBD`.
 - First physical line is **`file-history-snapshot`** with NO `cwd`; disambiguation binds on the
-  first **cwd-bearing** line (NOT `system/init.cwd`, which never appears interactively): `TBD`.
+  first **cwd-bearing** line (NOT `system/init.cwd`, which never appears interactively): the agent-session sample's first line was `last-prompt` (also no `cwd`) and the first **cwd-bearing** line was **idx 4** → disambiguation-on-first-cwd-line CONFIRMED; the literal `file-history-snapshot`-first ordering is `TBD` on the bare REPL.
 
-### Probe C — how a no-`-p` turn ends (gates S3 completion) — `TBD`
-- The **REPL** does NOT self-exit after a turn (returns to the prompt): `TBD`.
-- NO `{type:'result'}` **result line** in the interactive transcript: `TBD`.
-- Turn-end mechanism: **`Stop hook`** fires (PRIMARY) `TBD`; `system/stop_hook_summary` +
-  `system/turn_duration` markers appear at turn end (SECONDARY) `TBD`.
+### Probe C — how a no-`-p` turn ends (gates S3 completion) — PARTIAL (corroborated)
+- The **REPL** does NOT self-exit after a turn (returns to the prompt): `TBD` (needs a bare interactive run).
+- NO `{type:'result'}` **result line** in the interactive transcript: **CONFIRMED** — `has result line: false` on the 2026-05-29 sample.
+- Turn-end mechanism: **`Stop hook`** fires (PRIMARY) `TBD` (needs the live Probe-A hook config); `system/stop_hook_summary` +
+  `system/turn_duration` markers appear at turn end (SECONDARY): **CONFIRMED PRESENT** — 8 such markers in the sample.
 - **hung-input** case distinguishes a finished turn from one waiting on input: `TBD`.
 
-### Probe D — Shannon bridge status (gates Q1) — `TBD (re-confirm)`
-- Bidirectional permission-gating bridge: **Planned / Implemented** `TBD`.
-- Runtime deps still **Bun** + **tmux**: `TBD`. `@dexh/shannon-agent-sdk` Node/Electron build: `TBD`.
-- → Q1 = **roll-our-own** behind the swappable `TranscriptSource` seam.
+### Probe D — Shannon bridge status (gates Q1) — PASS (RESOLVED 2026-05-29)
+- Bidirectional permission-gating bridge: **Planned** (NOT implemented). GOAL_PROGRESS.md: *"the generated `--settings` bridge is specified but not implemented: no `shannon-mcp-bridge` binary yet, no oRPC Unix-socket host server yet."*
+- Runtime deps still **Bun** + **tmux**: **YES** (`#!/usr/bin/env bun`; tested with `tmux 3.6a`, Claude Code 2.1.140). `@dexh/shannon-agent-sdk` Node/Electron build: **not documented** (published npm, no platform-build variants discussed).
+- → **Q1 = roll-our-own** behind the swappable `TranscriptSource` seam. ✓
 
-### Probe E — transcript-vs-wire `__unknown__` rate (HARD GATE, gates S2 normalizer) — `TBD`
-- `__unknown__` rate on the exact spawn config: `TBD %` `(planning estimate: 45%+)`.
-- Unmodeled top-level types: `last-prompt`, `mode`, `permission-mode`, `bridge-session`,
-  `attachment`, `ai-title`, `file-history-snapshot`, `queue-operation` `(planning — re-confirm)`.
-- Unmodeled `system` subtypes: `stop_hook_summary`, `turn_duration`, `local_command`,
-  `bridge_status`, `api_error` `(planning — re-confirm)`.
-- STRING-content `user` lines fail `userEventSchema`'s array requirement: `TBD`.
-- **CONCLUSION:** a **normalizer** + **noise-filter** is **MANDATORY** for S2 (not optional drift patching).
+### Probe E — transcript-vs-wire `__unknown__` rate (HARD GATE, gates S2 normalizer) — INDICATIVE PASS
+> Measured 2026-05-29 on a real 549-line Claude-Code **agent-session** transcript (NOT a bare no-`-p`
+> REPL run). Authoritative re-measure on the canonical `--settings`-isolated bare spawn config is `TBD`,
+> but the conclusion is already decisive.
+- `__unknown__` rate: **55.2%** (303/549 lines) `(indicative; planning estimate was 45%+)`.
+- Unmodeled top-level types (observed): `last-prompt`, `mode`, `permission-mode`, `bridge-session`,
+  `attachment`, `ai-title`, `file-history-snapshot`, `queue-operation` — matches the planning inventory.
+- Unmodeled `system` subtypes (observed): `stop_hook_summary`, `turn_duration`, `local_command`,
+  `bridge_status` (`api_error` not present in this sample).
+- STRING-content `user` lines fail `userEventSchema`'s array requirement: **CONFIRMED — 8 lines**.
+  camelCase top-level `sessionId` present: **YES**; `system/init` present: **NO** (as expected interactively).
+- **CONCLUSION:** a **normalizer** + **noise-filter** is **MANDATORY** for S2 (not optional drift patching). ✓
 
 ### Probe F — interactive MCP load + report_step fires (S6) — `TBD (gated on IDEA-029 socket up)`
 - `cyboflow_report_step` listed/callable from the MAIN interactive session: `TBD`.
