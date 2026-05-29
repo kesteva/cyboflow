@@ -136,8 +136,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
       (gitStatus.ahead && gitStatus.ahead > 0 && !gitStatus.hasUncommittedChanges && !gitStatus.hasUntrackedFiles && (!gitStatus.behind || gitStatus.behind === 0))) {
     const commitCount = gitStatus.totalCommits || gitStatus.ahead || 0;
     return {
-      color: 'text-green-600 dark:text-green-400',
-      bgColor: 'bg-green-100 dark:bg-green-900/30',
+      color: 'text-status-success',
+      bgColor: 'bg-status-success/10',
       icon: <GitMerge {...iconProps} />,
       label: 'Ready to Merge',
       description: `${commitCount} commit${commitCount !== 1 ? 's' : ''} ready to merge`
@@ -154,8 +154,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
     if (mostlyBehind) {
       // Show as "Mostly Behind" with gray color like other low-priority statuses
       return {
-        color: 'text-gray-500 dark:text-gray-400',
-        bgColor: 'bg-gray-100 dark:bg-gray-800/30',
+        color: 'text-text-tertiary',
+        bgColor: 'bg-bg-tertiary/30',
         icon: <CircleArrowDown {...iconProps} />,
         label: 'Mostly Behind',
         description: `${gitStatus.behind} behind, ${gitStatus.ahead} ahead - consider rebasing`
@@ -164,8 +164,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
     
     // Normal conflict risk for branches with significant divergence
     return {
-      color: 'text-amber-600 dark:text-amber-400',
-      bgColor: 'bg-amber-100 dark:bg-amber-900/30',
+      color: 'text-status-warning',
+      bgColor: 'bg-status-warning/10',
       icon: <AlertTriangle {...iconProps} />,
       label: 'Conflict Risk',
       description: `${gitStatus.ahead} ahead, ${gitStatus.behind} behind - potential conflicts`
@@ -177,8 +177,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
   // Active merge conflicts
   if (gitStatus.state === 'conflict') {
     return {
-      color: 'text-red-600 dark:text-red-400',
-      bgColor: 'bg-red-100 dark:bg-red-900/30',
+      color: 'text-status-error',
+      bgColor: 'bg-status-error/10',
       icon: <AlertTriangle {...iconProps} />,
       label: 'Conflicts',
       description: 'Has merge conflicts - resolve before continuing'
@@ -201,8 +201,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
     }
     
     return {
-      color: 'text-blue-600 dark:text-blue-400',
-      bgColor: 'bg-blue-100 dark:bg-blue-900/30',
+      color: 'text-status-info',
+      bgColor: 'bg-status-info/10',
       icon: <Edit {...iconProps} />,
       label: 'Uncommitted',
       description: description
@@ -214,8 +214,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
   // Behind only (no commits ahead)
   if (gitStatus.behind && gitStatus.behind > 0 && (!gitStatus.ahead || gitStatus.ahead === 0)) {
     return {
-      color: 'text-gray-500 dark:text-gray-400',
-      bgColor: 'bg-gray-100 dark:bg-gray-800/30',
+      color: 'text-text-tertiary',
+      bgColor: 'bg-bg-tertiary/30',
       icon: <CircleArrowDown {...iconProps} />,
       label: 'Behind Only',
       description: `${gitStatus.behind} commit${gitStatus.behind !== 1 ? 's' : ''} behind main`
@@ -226,8 +226,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
   const isFullySynced = isGitStatusFullySynced(gitStatus);
   if (isFullySynced) {
     return {
-      color: 'text-gray-500 dark:text-gray-400',
-      bgColor: 'bg-gray-100 dark:bg-gray-800/30',
+      color: 'text-text-tertiary',
+      bgColor: 'bg-bg-tertiary/30',
       icon: <Check {...iconProps} />,
       label: 'Up to Date',
       description: 'No changes - safe to remove'
@@ -236,8 +236,8 @@ function getGitStatusConfig(gitStatus: GitStatus): GitStatusConfig {
   
   // Fallback for unknown states
   return {
-    color: 'text-gray-500 dark:text-gray-400',
-    bgColor: 'bg-gray-100 dark:bg-gray-800/30',
+    color: 'text-text-tertiary',
+    bgColor: 'bg-bg-tertiary/30',
     icon: <HelpCircle {...iconProps} />,
     label: 'Unknown',
     description: 'Unable to determine git status'
@@ -274,7 +274,7 @@ const GitStatusIndicator: React.FC<GitStatusIndicatorProps> = React.memo(({ gitS
   if (isLoading === true) {
     return (
       <span 
-        className={`inline-flex items-center justify-center w-[5.5ch] ${sizeConfig.padding} ${sizeConfig.text} rounded-md border bg-gray-100 dark:bg-gray-900/30 text-gray-500 dark:text-gray-400 border-gray-300 dark:border-gray-600`}
+        className={`inline-flex items-center justify-center w-[5.5ch] ${sizeConfig.padding} ${sizeConfig.text} rounded-md border bg-bg-secondary text-text-tertiary border-border-secondary`}
         title="Checking git status..."
         data-testid={sessionId ? `session-${sessionId}-git-status` : 'git-status'}
         data-git-loading="true"
@@ -327,7 +327,7 @@ const GitStatusIndicator: React.FC<GitStatusIndicatorProps> = React.memo(({ gitS
 
   return (
     <span 
-      className={`inline-flex items-center ${primaryCount > 0 ? 'justify-center gap-0.5' : 'justify-center'} w-[5.5ch] ${sizeConfig.padding} ${sizeConfig.text} rounded-md border ${config.bgColor} ${config.color} border-gray-300 dark:border-gray-600 ${(onClick || sessionId) ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+      className={`inline-flex items-center ${primaryCount > 0 ? 'justify-center gap-0.5' : 'justify-center'} w-[5.5ch] ${sizeConfig.padding} ${sizeConfig.text} rounded-md border ${config.bgColor} ${config.color} border-border-secondary ${(onClick || sessionId) ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
       title={tooltipContent}
       onClick={handleClick}
       aria-label={ariaLabel}

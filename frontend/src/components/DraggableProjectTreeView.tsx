@@ -1091,12 +1091,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                     <button
                       onClick={(e) => handleRefreshProjectGitStatus(project, e)}
                       disabled={refreshingProjects.has(project.id)}
-                      className={`p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-all opacity-0 group-hover:opacity-100 ${
+                      className={`p-1 hover:bg-bg-hover rounded transition-all opacity-0 group-hover:opacity-100 ${
                         refreshingProjects.has(project.id) ? 'cursor-wait' : ''
                       }`}
                       title="Refresh git status for all sessions"
                     >
-                      <RefreshCw className={`w-3 h-3 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 ${
+                      <RefreshCw className={`w-3 h-3 text-text-tertiary hover:text-text-primary ${
                         refreshingProjects.has(project.id) ? 'animate-spin' : ''
                       }`} />
                     </button>

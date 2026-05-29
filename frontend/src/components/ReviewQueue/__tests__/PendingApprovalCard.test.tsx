@@ -261,17 +261,17 @@ describe('PendingApprovalCard — alert border for stuck runs', () => {
     vi.clearAllMocks();
   });
 
-  it('stuck card root element has a class containing "red"', () => {
+  it('stuck card root element has the status-error border class', () => {
     render(<PendingApprovalCard item={singleItem} runStatus="stuck" />);
     // The listitem is the card root
     const card = screen.getByRole('listitem');
-    expect(card.className).toMatch(/red/);
+    expect(card.className).toMatch(/status-error/);
   });
 
-  it('non-stuck card root element does not have a "red" class', () => {
+  it('non-stuck card root element does not have a status-error class', () => {
     render(<PendingApprovalCard item={singleItem} runStatus="running" />);
     const card = screen.getByRole('listitem');
-    expect(card.className).not.toMatch(/red/);
+    expect(card.className).not.toMatch(/status-error/);
   });
 });
 

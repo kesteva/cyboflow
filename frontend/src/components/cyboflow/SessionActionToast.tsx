@@ -19,7 +19,7 @@ export function SessionActionToast({ message, isVisible, onDismiss, durationMs =
   return (
     <div
       data-testid="session-action-toast"
-      className="bg-green-600 text-white rounded px-4 py-2 text-sm font-medium shadow-lg"
+      className="bg-status-success text-white rounded px-4 py-2 text-sm font-medium shadow-lg"
     >
       {message}
     </div>

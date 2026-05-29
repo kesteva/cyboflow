@@ -107,7 +107,7 @@ function CardChrome({
     ? ' ring-2 ring-interactive'
     : ' focus-within:ring-2 focus-within:ring-interactive';
 
-  const stuckClass = isStuck ? ' border-red-500' : '';
+  const stuckClass = isStuck ? ' border-status-error' : '';
 
   const truncated = truncatePayload(representative.payloadPreview);
 
