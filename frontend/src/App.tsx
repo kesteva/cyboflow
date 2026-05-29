@@ -4,6 +4,7 @@ import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
+import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
 import Help from './components/Help';
@@ -51,6 +52,7 @@ function App() {
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState('');
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();
@@ -302,12 +304,13 @@ function App() {
       {/* Outer: h-screen flex-col so StatusBar sits below the main row */}
       <div className="h-screen flex flex-col overflow-hidden bg-bg-primary">
         <MainProcessLogger />
-        {/* Draggable title bar area */}
-        <div
-          className="fixed top-0 left-0 right-0 h-8 z-50 flex items-center justify-end pr-4"
-          style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-        >
-        </div>
+        {/* 38px Protoflow title bar (flowed, drag region with native traffic-light gutter) */}
+        <TitleBar
+          searchQuery={globalSearch}
+          onSearchChange={setGlobalSearch}
+          onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
+          onHelpClick={() => setIsHelpOpen(true)}
+        />
         {/* Shell geometry (ReviewQueueView | Sidebar | CyboflowRoot) is documented in docs/SHELL-LAYOUT.md. */}
         {/* Main content row: review queue + sidebar + primary panel */}
         <div className="flex flex-1 overflow-hidden">
