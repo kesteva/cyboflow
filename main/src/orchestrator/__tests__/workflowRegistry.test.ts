@@ -19,7 +19,8 @@ import type Database from 'better-sqlite3';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
-import type { SoloFlowWorkflowName } from '../../../../shared/types/workflows';
+import type { SoloFlowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
+import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -46,6 +47,28 @@ function buildDescriptors(
     const path = writeTempMd(dir, `${name}.md`, content);
     return { name, path };
   });
+}
+
+/**
+ * Minimal structurally-valid `WorkflowDefinition` for the editor write-path
+ * tests (updateSpec / createCustom). The registry does NOT re-validate, so this
+ * only needs to round-trip through JSON.stringify and back via
+ * resolveWorkflowDefinition — but it is also a valid strict-schema shape.
+ */
+function makeDefinition(id: string): WorkflowDefinition {
+  return {
+    id,
+    phases: [
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#3b6dd6',
+        steps: [
+          { id: 'context', name: 'Get context', agent: 'idea-extractor', mcps: ['filesystem'], retries: 0 },
+        ],
+      },
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +506,221 @@ describe('WorkflowRegistry', () => {
         expect(run!.started_at).toBe('2026-05-18T10:00:00Z');
         expect(run!.ended_at).toBe('2026-05-18T11:30:00Z');
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // spec_json projection — getById / listByProject must SELECT the column
+  // -------------------------------------------------------------------------
+
+  describe('spec_json column projection', () => {
+    it('getById returns spec_json (default "{}") on a seeded row', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.seed(1, buildDescriptors(tmpDir));
+        const row = registry.getById('wf-1-soloflow');
+        expect(row).not.toBeNull();
+        // Seeded rows fall back to the schema default of '{}'.
+        expect(row!.spec_json).toBe('{}');
+      });
+    });
+
+    it('getById round-trips a non-default spec_json written directly', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-soloflow', 1, 'soloflow', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('soloflow')));
+
+      const row = registry.getById('wf-1-soloflow');
+      expect(row).not.toBeNull();
+      expect(JSON.parse(row!.spec_json)).toEqual(makeDefinition('soloflow'));
+    });
+
+    it('listByProject projects spec_json on every returned row', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.seed(1, buildDescriptors(tmpDir));
+        const rows = registry.listByProject(1);
+        expect(rows).toHaveLength(5);
+        for (const r of rows) {
+          // Field is present (typed string) — '{}' default for fresh seeds.
+          expect(typeof r.spec_json).toBe('string');
+          expect(r.spec_json).toBe('{}');
+        }
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // updateSpec (editor "Save")
+  // -------------------------------------------------------------------------
+
+  describe('updateSpec', () => {
+    it('persists the JSON-stringified definition onto spec_json', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-soloflow', 1, 'soloflow', '{}', 'default')`,
+      ).run();
+
+      const definition = makeDefinition('soloflow');
+      registry.updateSpec('wf-1-soloflow', definition);
+
+      interface SpecRow { spec_json: string }
+      const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-soloflow') as SpecRow;
+      expect(row.spec_json).toBe(JSON.stringify(definition));
+      expect(JSON.parse(row.spec_json)).toEqual(definition);
+    });
+
+    it('round-trips through getById so resolveWorkflowDefinition would prefer it', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
+      ).run();
+
+      const edited = makeDefinition('planner');
+      // Mutate one field so the edited graph clearly differs from the built-in.
+      edited.phases[0].label = 'Edited Plan';
+      registry.updateSpec('wf-1-planner', edited);
+
+      const row = registry.getById('wf-1-planner');
+      expect(row).not.toBeNull();
+      expect(JSON.parse(row!.spec_json)).toEqual(edited);
+    });
+
+    it('throws when the workflow id does not exist (0 rows updated)', () => {
+      expect(() => registry.updateSpec('nonexistent-id', makeDefinition('x'))).toThrow('not found');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // resetSpec (editor "Reset to default")
+  // -------------------------------------------------------------------------
+
+  describe('resetSpec', () => {
+    it('resets a built-in workflow spec_json back to "{}"', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-sprint', 1, 'sprint', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('sprint')));
+
+      registry.resetSpec('wf-1-sprint');
+
+      interface SpecRow { spec_json: string }
+      const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-sprint') as SpecRow;
+      expect(row.spec_json).toBe('{}');
+    });
+
+    it('throws when the workflow id does not exist', () => {
+      expect(() => registry.resetSpec('nonexistent-id')).toThrow('not found');
+    });
+
+    it('throws for a custom (non-built-in) workflow name', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-custom-abc12345', 1, 'My Custom Flow', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('my-custom-flow')));
+
+      expect(() => registry.resetSpec('wf-1-custom-abc12345')).toThrow(/cannot reset a custom workflow/i);
+    });
+
+    it('does NOT touch a custom workflow spec_json when the reset is rejected', () => {
+      const customSpec = JSON.stringify(makeDefinition('my-custom-flow'));
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-custom-def67890', 1, 'Another Flow', ?, 'default')`,
+      ).run(customSpec);
+
+      expect(() => registry.resetSpec('wf-1-custom-def67890')).toThrow();
+
+      interface SpecRow { spec_json: string }
+      const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-custom-def67890') as SpecRow;
+      expect(row.spec_json).toBe(customSpec);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // createCustom (editor "Save as new flow")
+  // -------------------------------------------------------------------------
+
+  describe('createCustom', () => {
+    it('inserts a row with a generated id and returns it with spec_json + permission_mode', () => {
+      const definition = makeDefinition('my-flow');
+      const row = registry.createCustom(1, 'My Flow', definition, 'acceptEdits');
+
+      // Generated id: wf-<projectId>-custom-<8 lowercase hex chars>.
+      expect(row.id).toMatch(/^wf-1-custom-[0-9a-f]{8}$/);
+      expect(row.project_id).toBe(1);
+      expect(row.name).toBe('My Flow');
+      expect(row.workflow_path).toBeNull();
+      expect(row.permission_mode).toBe('acceptEdits');
+      expect(JSON.parse(row.spec_json)).toEqual(definition);
+
+      // The returned row reflects what was actually persisted.
+      const reread = registry.getById(row.id);
+      expect(reread).not.toBeNull();
+      expect(reread!.id).toBe(row.id);
+      expect(JSON.parse(reread!.spec_json)).toEqual(definition);
+    });
+
+    it('defaults persisted permission_mode to whatever the caller passes (default)', () => {
+      const row = registry.createCustom(7, 'Default Mode Flow', makeDefinition('default-mode-flow'), 'default');
+      expect(row.permission_mode).toBe('default');
+    });
+
+    it('rejects a name that collides with a built-in workflow name', () => {
+      for (const builtIn of ['soloflow', 'planner', 'sprint', 'compound', 'prune']) {
+        expect(
+          () => registry.createCustom(1, builtIn, makeDefinition(builtIn), 'default'),
+          `built-in name '${builtIn}' should be rejected`,
+        ).toThrow(/reserved/i);
+      }
+    });
+
+    it('rejects the __quick__ sentinel name', () => {
+      expect(
+        () => registry.createCustom(1, QUICK_WORKFLOW_NAME, makeDefinition('quick'), 'default'),
+      ).toThrow(/reserved/i);
+    });
+
+    it('rejects a name that collides with an existing row in the SAME project', () => {
+      registry.createCustom(1, 'Duplicate', makeDefinition('duplicate'), 'default');
+      expect(
+        () => registry.createCustom(1, 'Duplicate', makeDefinition('duplicate'), 'default'),
+      ).toThrow(/already exists/i);
+    });
+
+    it('allows the same name in a DIFFERENT project (collision is per-project)', () => {
+      const rowA = registry.createCustom(1, 'Shared Name', makeDefinition('shared-name'), 'default');
+      const rowB = registry.createCustom(2, 'Shared Name', makeDefinition('shared-name'), 'default');
+      expect(rowA.project_id).toBe(1);
+      expect(rowB.project_id).toBe(2);
+      expect(rowA.id).not.toBe(rowB.id);
+    });
+
+    it('does NOT insert a row when the name is rejected', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-soloflow', 1, 'soloflow', '{}', 'default')`,
+      ).run();
+
+      expect(() => registry.createCustom(1, 'soloflow', makeDefinition('soloflow'), 'default')).toThrow();
+
+      interface CountRow { count: number }
+      const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
+      // Only the row we seeded directly — no custom row was inserted.
+      expect(count).toBe(1);
+    });
+
+    it('a created custom flow appears in listByProject', () => {
+      const row = registry.createCustom(3, 'Listed Flow', makeDefinition('listed-flow'), 'default');
+      const rows = registry.listByProject(3);
+      expect(rows.map((r) => r.id)).toContain(row.id);
+    });
+
+    it('resolveWorkflowDefinition-shaped: the persisted spec is the built-in clone when cloned from one', () => {
+      // Custom flows are commonly created by cloning a built-in then renaming.
+      // Confirm an arbitrary built-in definition survives the round-trip.
+      const cloned = WORKFLOW_DEFINITIONS.soloflow;
+      const row = registry.createCustom(9, 'Cloned Soloflow', cloned, 'default');
+      expect(JSON.parse(row.spec_json)).toEqual(cloned);
     });
   });
 });
