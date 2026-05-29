@@ -476,7 +476,7 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
                   onClick={handleOpenInNimbalyst}
                   variant="ghost"
                   size="sm"
-                  className="text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity hover:text-blue-500"
+                  className="text-text-tertiary opacity-0 group-hover:opacity-100 transition-opacity hover:text-interactive"
                   aria-label="Open in Nimbalyst"
                   icon={<NimbalystIcon size={18} className="text-current" />}
                 />
@@ -592,8 +592,8 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
         title={`Archive Session`}
         message={`Archive session "${session.name}"? This will:\n\n• Move the session to the archived sessions list\n• Preserve all session history and outputs\n${session.isMainRepo ? '• Close the active Claude Code connection' : `• Remove the git worktree locally (${session.worktreePath?.split('/').pop() || 'worktree'})`}`}
         confirmText="Archive"
-        confirmButtonClass="bg-amber-600 hover:bg-amber-700 text-white"
-        icon={<Archive className="w-6 h-6 text-amber-500 flex-shrink-0" />}
+        confirmButtonClass="bg-status-warning hover:bg-status-warning-hover text-white"
+        icon={<Archive className="w-6 h-6 text-status-warning flex-shrink-0" />}
       />
       
       <RunScriptConfigDialog

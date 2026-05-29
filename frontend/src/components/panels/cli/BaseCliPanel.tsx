@@ -94,21 +94,21 @@ const StatusIndicator: React.FC<{ status?: CliProcessStatus }> = ({ status }) =>
   const getStatusInfo = () => {
     switch (status) {
       case 'initializing':
-        return { icon: RefreshCw, color: 'text-blue-500', label: 'Initializing...', spinning: true };
+        return { icon: RefreshCw, color: 'text-status-info', label: 'Initializing...', spinning: true };
       case 'ready':
-        return { icon: CheckCircle, color: 'text-green-500', label: 'Ready' };
+        return { icon: CheckCircle, color: 'text-status-success', label: 'Ready' };
       case 'processing':
-        return { icon: Zap, color: 'text-yellow-500', label: 'Processing...', spinning: true };
+        return { icon: Zap, color: 'text-status-warning', label: 'Processing...', spinning: true };
       case 'waiting':
-        return { icon: Clock, color: 'text-blue-500', label: 'Waiting for input' };
+        return { icon: Clock, color: 'text-status-info', label: 'Waiting for input' };
       case 'error':
-        return { icon: AlertCircle, color: 'text-red-500', label: 'Error' };
+        return { icon: AlertCircle, color: 'text-status-error', label: 'Error' };
       case 'stopped':
-        return { icon: AlertCircle, color: 'text-gray-500', label: 'Stopped' };
+        return { icon: AlertCircle, color: 'text-text-tertiary', label: 'Stopped' };
       case 'restarting':
-        return { icon: RefreshCw, color: 'text-orange-500', label: 'Restarting...', spinning: true };
+        return { icon: RefreshCw, color: 'text-status-warning', label: 'Restarting...', spinning: true };
       default:
-        return { icon: AlertCircle, color: 'text-gray-400', label: 'Unknown' };
+        return { icon: AlertCircle, color: 'text-text-muted', label: 'Unknown' };
     }
   };
 
@@ -193,7 +193,7 @@ const ActionButton: React.FC<{
       case 'primary':
         return `${base} text-text-primary hover:bg-surface-hover bg-primary-subtle`;
       case 'danger':
-        return `${base} text-red-500 hover:bg-red-50 hover:text-red-600`;
+        return `${base} text-status-error hover:bg-status-error/10 hover:text-status-error`;
       default:
         return `${base} text-text-secondary hover:text-text-primary hover:bg-surface-hover`;
     }
@@ -271,14 +271,14 @@ export const BaseCliPanel: React.FC<BaseCliPanelProps> = ({
 
   // Handle error display
   const errorContent = error && (
-    <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-3">
+    <div className="bg-status-error/10 border border-status-error/30 rounded-lg p-3 mb-3">
       <div className="flex items-start gap-2">
-        <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+        <AlertCircle className="w-4 h-4 text-status-error mt-0.5 flex-shrink-0" />
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-red-700 dark:text-red-300">
+          <p className="text-sm font-medium text-status-error">
             {cliToolId.charAt(0).toUpperCase() + cliToolId.slice(1)} Error
           </p>
-          <p className="text-sm text-red-600 dark:text-red-400 mt-1">
+          <p className="text-sm text-status-error mt-1">
             {error}
           </p>
         </div>

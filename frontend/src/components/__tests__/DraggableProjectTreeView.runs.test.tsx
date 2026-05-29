@@ -26,6 +26,7 @@ const mockSetActiveRun = vi.fn();
 const mockSetActiveQuickSession = vi.fn();
 const mockNavigateToSessions = vi.fn();
 const mockSetActiveProjectId = vi.fn();
+const mockCloseHumanReview = vi.fn();
 
 // ---------------------------------------------------------------------------
 // Mock API.projects.getAll
@@ -111,6 +112,7 @@ vi.mock('../../stores/navigationStore', () => ({
         navigateToSessions: mockNavigateToSessions,
         navigateToProject: vi.fn(),
         setActiveProjectId: mockSetActiveProjectId,
+        closeHumanReview: mockCloseHumanReview,
       }),
     },
   ),
@@ -215,6 +217,7 @@ beforeEach(() => {
   mockSetActiveQuickSession.mockReset();
   mockNavigateToSessions.mockReset();
   mockSetActiveProjectId.mockReset();
+  mockCloseHumanReview.mockReset();
   // Default: project 1 pre-expanded
   Object.defineProperty(window, 'electronAPI', {
     writable: true,
@@ -315,6 +318,9 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-quick', undefined);
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockSetActiveRun).not.toHaveBeenCalled();
+    // Picking a session must dismiss the human-review pane (else the center
+    // stays pinned to the review queue — the reported navigation bug).
+    expect(mockCloseHumanReview).toHaveBeenCalled();
   });
 
   it('(d) clicking a runId-backed session opens the panel surface via setActiveQuickSession(id, runId)', async () => {
@@ -333,6 +339,7 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-wf', 'run-xyz');
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockSetActiveRun).not.toHaveBeenCalled();
+    expect(mockCloseHumanReview).toHaveBeenCalled();
   });
 
   it('(e) status indicator dot class differs across session statuses', async () => {

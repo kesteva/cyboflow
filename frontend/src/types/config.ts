@@ -9,7 +9,7 @@ export interface AppConfig {
   autoCheckUpdates?: boolean;
   stravuApiKey?: string;
   stravuServerUrl?: string;
-  theme?: 'light' | 'dark';
+  theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
     playSound: boolean;

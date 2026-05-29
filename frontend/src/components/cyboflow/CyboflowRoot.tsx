@@ -117,7 +117,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       <div className="flex items-center gap-2 border-b border-border-primary px-4 py-2">
         <button
           onClick={() => setIsPickerOpen(true)}
-          className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
           data-testid="open-workflow-picker"
         >
           Choose workflow
@@ -128,7 +128,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           onClick={handleStartQuickSession}
           disabled={projectId === null || quickSession.isStarting}
           title={projectId === null ? 'Select a project to start a quick session' : undefined}
-          className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="start-quick-session"
         >
           Quick Session
@@ -198,7 +198,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>
               <button
                 onClick={() => setIsPickerOpen(true)}
-                className="rounded bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+                className="rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
                 data-testid="open-workflow-picker-cta"
               >
                 Choose a workflow

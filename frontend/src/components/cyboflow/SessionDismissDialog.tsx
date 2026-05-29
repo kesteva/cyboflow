@@ -32,8 +32,8 @@ export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: 
       message="Any unmerged changes in this session will be lost. The worktree will be permanently removed and the session archived. This cannot be undone."
       confirmText="Dismiss"
       cancelText="Cancel"
-      confirmButtonClass="bg-red-600 hover:bg-red-700 text-white"
-      icon={<AlertTriangle className="w-6 h-6 text-red-500" />}
+      confirmButtonClass="bg-status-error hover:bg-status-error text-white"
+      icon={<AlertTriangle className="w-6 h-6 text-status-error" />}
     />
   );
 }

@@ -95,11 +95,11 @@ export const DiffPanel: React.FC<DiffPanelProps> = ({
   // Manual refresh button removed (redundant with header refresh in CombinedDiffView)
   
   return (
-    <div className="diff-panel h-full flex flex-col bg-gray-800">
+    <div className="diff-panel h-full flex flex-col bg-surface-primary">
       {/* Stale indicator bar */}
       {isStale && !isActive && (
-        <div className="bg-yellow-900/50 border-b border-yellow-700 px-3 py-2 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-yellow-400 text-sm">
+        <div className="bg-status-warning/15 border-b border-status-warning/40 px-3 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-status-warning text-sm">
             <AlertCircle className="w-4 h-4" />
             <span>Files changed - switch to diff panel to refresh</span>
           </div>

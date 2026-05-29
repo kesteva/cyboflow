@@ -58,7 +58,7 @@ export function StuckBadge({ reason, detectedAt }: StuckBadgeProps): React.React
   return (
     <span
       title={title}
-      className="ml-1 inline-flex items-center px-1.5 py-0.5 text-xs font-bold tracking-wide text-white bg-red-600 rounded"
+      className="ml-1 inline-flex items-center px-1.5 py-0.5 text-xs font-bold tracking-wide text-white bg-status-error rounded"
     >
       STUCK
     </span>

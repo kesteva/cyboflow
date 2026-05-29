@@ -251,7 +251,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
   // Handle missing session context (show after all hooks have been called)
   if (!sessionContext) {
     return (
-      <div className="flex items-center justify-center h-full text-red-500">
+      <div className="flex items-center justify-center h-full text-status-error">
         Session context not available
       </div>
     );
@@ -259,7 +259,7 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, 
 
   if (initError) {
     return (
-      <div className="flex items-center justify-center h-full text-red-500">
+      <div className="flex items-center justify-center h-full text-status-error">
         Terminal initialization failed: {initError}
       </div>
     );
