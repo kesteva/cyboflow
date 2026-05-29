@@ -183,7 +183,7 @@ export function PromptNavigation({ panelId, prompts: controlledPrompts, onNaviga
 
   if (isLoading && prompts.length === 0) {
     return (
-      <div className="w-64 bg-surface-secondary border-l border-border-primary p-4">
+      <div className="w-[230px] bg-surface-secondary border-l border-border-primary p-4">
         <h3 className="font-semibold text-text-primary mb-4">Prompt History</h3>
         <div className="text-text-tertiary text-sm">Loading prompts...</div>
       </div>
@@ -192,7 +192,7 @@ export function PromptNavigation({ panelId, prompts: controlledPrompts, onNaviga
 
   return (
     <>
-      <div className="w-64 bg-surface-secondary border-l border-border-primary flex flex-col h-full">
+      <div className="w-[230px] bg-surface-secondary border-l border-border-primary flex flex-col h-full">
         <div className="p-4 border-b border-border-primary">
           <h3 className="font-semibold text-text-primary">Prompt History</h3>
           <p className="text-xs text-text-tertiary mt-1">Click to navigate • Double-click for details</p>
@@ -210,10 +210,10 @@ export function PromptNavigation({ panelId, prompts: controlledPrompts, onNaviga
                 key={marker.id}
                 onClick={() => handlePromptClick(marker, index)}
                 onDoubleClick={() => handlePromptDoubleClick(marker, index)}
-                className={`w-full text-left p-3 rounded-lg transition-colors ${
+                className={`w-full text-left p-3 border-l-2 transition-colors ${
                   selectedPromptId === marker.id
-                    ? 'bg-interactive/20 border-interactive border'
-                    : 'hover:bg-bg-hover border border-transparent'
+                    ? 'border-interactive bg-bg-hover'
+                    : 'border-transparent hover:bg-bg-hover'
                 }`}
               >
                 <div className="flex items-start space-x-2">

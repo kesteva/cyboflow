@@ -428,7 +428,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
 
       {/* Right prompt-history rail (collapsible) — controlled by promptMarkers. */}
       {!sidebarCollapsed && (
-        <div className="w-64 shrink-0 h-full overflow-hidden">
+        <div className="w-[230px] shrink-0 h-full overflow-hidden">
           <PromptNavigation
             panelId={runId}
             prompts={promptMarkers}
