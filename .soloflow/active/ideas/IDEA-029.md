@@ -1,8 +1,10 @@
 ---
 id: IDEA-029
 type: FEATURE
-status: draft
+status: materialized
 created: 2026-05-29T00:00:00Z
+materialized_as: plans
+task_ids: [TASK-798, TASK-799, TASK-800, TASK-801, TASK-802, TASK-803, TASK-804]
 source: design_workflow_wf_473a7813-41c_2026-05-29
 slices:
   - title: "Stand up the cyboflow MCP server runtime (the gating infra, formerly 'epic 7')"
