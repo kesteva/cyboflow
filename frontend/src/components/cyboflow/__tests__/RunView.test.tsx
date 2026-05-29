@@ -1,17 +1,23 @@
 /**
- * RunView rendering tests (updated in TASK-682).
+ * RunView rendering tests.
  *
- * After TASK-667 confirmed H2 (renderer listener teardown), the stream-event
- * subscription was moved from RunView's useEffect into the cyboflowStore
- * module-level singleton. RunView is now subscription-free.
+ * RunView now backfills its raw event log from the durable `raw_events` store
+ * via `cyboflow.runs.listRawEvents` (re-queried on runId change + debounced on
+ * live deltas), instead of rendering the in-memory `cyboflowStore.streamEvents`
+ * buffer (which is wiped on every `setActiveRun`, erasing the stream when you
+ * clicked away from a run and returned). Tests therefore drive events through
+ * the `listRawEvents` query mock and assert asynchronously.
  *
  * Behaviors verified:
  *   1. Renders a "No active run" placeholder when activeRunId is null.
  *   2. Renders the runId when an active run is set.
- *   3. Renders "Waiting for events…" before any events arrive.
+ *   3. Renders "Waiting for events…" once the (empty) backfill resolves.
  *   4. Renders each SDK discriminator (system / assistant / user / result /
- *      stream_event / unknown) through its dedicated typed branch (no raw JSON dump).
+ *      stream_event / unknown / session_info / rate_limit_event / run_started)
+ *      through its dedicated typed branch (no raw JSON dump).
  *   5. Subscription is NOT managed by RunView (it is managed by the store).
+ *   6. Backfill survives a run switch: re-querying on runId change repopulates
+ *      the log instead of leaving it erased.
  *
  * Subscription lifecycle tests live in
  * frontend/src/stores/__tests__/cyboflowStore.test.ts.
@@ -33,17 +39,56 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// ---------------------------------------------------------------------------
+// Mock tRPC client — listRawEvents returns [] by default. Each test sets the
+// backfill payload via mockListRawEvents.mockResolvedValue([...]).
+// ---------------------------------------------------------------------------
+
+import type { StreamEvent } from '../../../utils/cyboflowApi';
+
+const mockListRawEvents = vi.fn<() => Promise<StreamEvent[]>>(async () => []);
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        listRawEvents: {
+          query: (...args: unknown[]) => mockListRawEvents(...(args as [])),
+        },
+      },
+    },
+  },
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { RunView } from '../RunView';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { subscribeToStreamEvents } from '../../../utils/cyboflowApi';
-import type { StreamEvent } from '../../../utils/cyboflowApi';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Set the backfill payload, activate the run, and render. Returns the render
+ * result. Callers then `await screen.findByText(...)` to let the async backfill
+ * settle before asserting.
+ */
+function renderWithEvents(events: StreamEvent[], runId = 'run-1') {
+  mockListRawEvents.mockResolvedValue(events);
+  act(() => {
+    useCyboflowStore.getState().setActiveRun(runId);
+  });
+  return render(<RunView />);
+}
 
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  mockListRawEvents.mockResolvedValue([]);
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
   });
@@ -63,29 +108,21 @@ describe('RunView', () => {
   });
 
   it('renders the active runId header when a run is set', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-abc-123');
-    });
-    render(<RunView />);
-
+    renderWithEvents([], 'run-abc-123');
     expect(screen.queryByText('No active run')).not.toBeInTheDocument();
     expect(screen.getByText('run-abc-123')).toBeInTheDocument();
   });
 
-  it('shows "Waiting for events…" before any events arrive', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-abc-123');
-    });
-    render(<RunView />);
-    expect(screen.getByText(/Waiting for events/)).toBeInTheDocument();
+  it('shows "Waiting for events…" once the empty backfill resolves', async () => {
+    renderWithEvents([], 'run-abc-123');
+    expect(await screen.findByText(/Waiting for events/)).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
-  // SDK discriminator branch tests (TASK-682)
+  // SDK discriminator branch tests
   // -------------------------------------------------------------------------
 
-  it('routes a system/init event to the typed system branch', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a system/init event to the typed system branch', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -101,17 +138,14 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-20T00:00:00Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/claude-sonnet-4-5/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/claude-sonnet-4-5/)).toBeInTheDocument();
     expect(screen.getByText(/\/tmp\/wt/)).toBeInTheDocument();
-    // Must NOT be a whole-event JSON dump — "session_id" key should not be
-    // rendered as a JSON property label.
+    // Must NOT be a whole-event JSON dump.
     expect(screen.queryByText(/"session_id"/)).not.toBeInTheDocument();
   });
 
-  it('routes an assistant event to the typed assistant branch', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes an assistant event to the typed assistant branch', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'assistant',
@@ -121,23 +155,17 @@ describe('RunView', () => {
           id: 'msg-001',
           model: 'claude-sonnet-4-5',
           role: 'assistant',
-          content: [
-            { type: 'text', text: 'Hello, I am working on your task now.' },
-          ],
+          content: [{ type: 'text', text: 'Hello, I am working on your task now.' }],
         },
       },
       timestamp: '2026-05-20T00:00:01Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The text block content should be visible
-    expect(screen.getByText('Hello, I am working on your task now.')).toBeInTheDocument();
-    // Should NOT be a whole-event JSON dump
+    renderWithEvents([event]);
+    expect(await screen.findByText('Hello, I am working on your task now.')).toBeInTheDocument();
     expect(screen.queryByText(/"msg-001"/)).not.toBeInTheDocument();
   });
 
-  it('routes a user event to the typed user branch and shows tool_result content', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a user event to the typed user branch and shows tool_result content', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'user',
@@ -146,29 +174,19 @@ describe('RunView', () => {
         message: {
           role: 'user',
           content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'toolu_01abc',
-              content: 'File written successfully.',
-              is_error: false,
-            },
+            { type: 'tool_result', tool_use_id: 'toolu_01abc', content: 'File written successfully.', is_error: false },
           ],
         },
       },
       timestamp: '2026-05-20T00:00:02Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The tool result content should be visible
-    expect(screen.getByText(/File written successfully/)).toBeInTheDocument();
-    // Short hash of tool_use_id should appear
+    renderWithEvents([event]);
+    expect(await screen.findByText(/File written successfully/)).toBeInTheDocument();
     expect(screen.getByText(/toolu_01/)).toBeInTheDocument();
-    // Should NOT be a whole-event JSON dump
     expect(screen.queryByText(/"tool_use_id"/)).not.toBeInTheDocument();
   });
 
-  it('routes a result event to the typed result branch and shows subtype and num_turns', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a result event to the typed result branch and shows subtype and num_turns', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'result',
@@ -182,104 +200,70 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-20T00:00:03Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // subtype and num_turns should appear as labeled fields
-    expect(screen.getByText(/success/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/success/)).toBeInTheDocument();
     expect(screen.getByText(/7/)).toBeInTheDocument();
-    // Should NOT be a whole-event JSON dump
     expect(screen.queryByText(/"is_error"/)).not.toBeInTheDocument();
   });
 
-  it('routes a stream_event to the typed stream_event branch as a compact one-line summary', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a stream_event to the typed stream_event branch as a compact one-line summary', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'stream_event',
       payload: {
         type: 'stream_event',
-        event: {
-          type: 'content_block_delta',
-          index: 2,
-          delta: { type: 'text_delta', text: 'partial text chunk' },
-        },
+        event: { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'partial text chunk' } },
       },
       timestamp: '2026-05-20T00:00:04Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The inner event type should be visible in the compact summary
-    expect(screen.getByText(/content_block_delta/)).toBeInTheDocument();
-    // Should NOT be a whole-event JSON dump (the outer "stream_event" type key)
+    renderWithEvents([event]);
+    expect(await screen.findByText(/content_block_delta/)).toBeInTheDocument();
     expect(screen.queryByText(/"type": "stream_event"/)).not.toBeInTheDocument();
   });
 
-  it('routes an unrecognized event type to the unknown branch with a visible warning', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes an unrecognized event type to the unknown branch with a visible warning', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'unknown',
       payload: { raw: { some_field: 'some_value' } },
       timestamp: '2026-05-20T00:00:05Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The warning label must be visible
-    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
-    // The raw event type string should be shown inline
+    renderWithEvents([event]);
+    expect(await screen.findByText(/Unrecognized event/)).toBeInTheDocument();
     expect(screen.getByText(/unknown/)).toBeInTheDocument();
-    // The payload should NOT be rendered without user expanding the <details>
-    // (it is inside a <details> element that is collapsed by default)
-    // Asserting that the raw payload key is not in the accessible document
-    // confirms the expand-to-view pattern is in place.
     const details = document.querySelector('details');
     expect(details).not.toBeNull();
   });
 
   // -------------------------------------------------------------------------
-  // Additional edge-case tests (added post-executor review)
+  // Additional edge-case tests
   // -------------------------------------------------------------------------
 
-  it('routes a retired api_retry payload to UnknownEventRow — Unrecognized event (post-TASK-681)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a retired api_retry payload to UnknownEventRow — Unrecognized event', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'unknown',
-      payload: {
-        type: 'system',
-        subtype: 'api_retry',
-        attempt: 2,
-        max_retries: 5,
-        retry_delay_ms: 1000,
-      },
+      payload: { type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 5, retry_delay_ms: 1000 },
       timestamp: '2026-05-20T00:00:10Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/Unrecognized event/)).toBeInTheDocument();
     expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);
   });
 
-  it('routes a retired compact payload to UnknownEventRow — Unrecognized event (post-TASK-681)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a retired compact payload to UnknownEventRow — Unrecognized event', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'unknown',
-      payload: {
-        type: 'system',
-        subtype: 'compact',
-        summary: 'Context compacted after 50k tokens.',
-      },
+      payload: { type: 'system', subtype: 'compact', summary: 'Context compacted after 50k tokens.' },
       timestamp: '2026-05-20T00:00:11Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/Unrecognized event/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/Unrecognized event/)).toBeInTheDocument();
     expect(screen.getAllByText(/unknown/).length).toBeGreaterThan(0);
   });
 
-  it('routes a system/compact_boundary event to the typed system branch (non-init subtype)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a system/compact_boundary event to the typed system branch (non-init subtype)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -290,15 +274,13 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-20T00:00:12Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/system\/compact_boundary/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/system\/compact_boundary/)).toBeInTheDocument();
     expect(screen.getByText(/trigger=auto/)).toBeInTheDocument();
     expect(screen.queryByText(/"compact_metadata"/)).not.toBeInTheDocument();
   });
 
-  it('renders assistant event with multiple mixed content blocks (text + tool_use + thinking)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('renders assistant event with multiple mixed content blocks (text + tool_use + thinking)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'assistant',
@@ -311,31 +293,20 @@ describe('RunView', () => {
           content: [
             { type: 'text', text: 'Let me think about that.' },
             { type: 'thinking', thinking: 'The user wants X, so I should do Y.' },
-            {
-              type: 'tool_use',
-              id: 'toolu_abc',
-              name: 'bash',
-              input: { command: 'echo hello' },
-            },
+            { type: 'tool_use', id: 'toolu_abc', name: 'bash', input: { command: 'echo hello' } },
           ],
         },
       },
       timestamp: '2026-05-20T00:00:13Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Text block
-    expect(screen.getByText('Let me think about that.')).toBeInTheDocument();
-    // Tool-use block: tool name visible
+    renderWithEvents([event]);
+    expect(await screen.findByText('Let me think about that.')).toBeInTheDocument();
     expect(screen.getByText('bash')).toBeInTheDocument();
-    // Thinking block: renders as a collapsed <details> with "thinking…" summary
     expect(screen.getByText(/thinking…/)).toBeInTheDocument();
-    // Must NOT be a whole-event JSON dump
     expect(screen.queryByText(/"msg-multi"/)).not.toBeInTheDocument();
   });
 
-  it('renders result event without total_cost_usd as "n/a"', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('renders result event without total_cost_usd as "n/a"', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'result',
@@ -345,48 +316,36 @@ describe('RunView', () => {
         is_error: true,
         duration_ms: 9999,
         num_turns: 20,
-        // total_cost_usd intentionally omitted
       },
       timestamp: '2026-05-20T00:00:14Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/error_max_turns/)).toBeInTheDocument();
-    // When total_cost_usd is absent the component renders the literal "n/a"
+    renderWithEvents([event]);
+    expect(await screen.findByText(/error_max_turns/)).toBeInTheDocument();
     expect(screen.getByText(/n\/a/)).toBeInTheDocument();
     expect(screen.queryByText(/"is_error"/)).not.toBeInTheDocument();
   });
 
-  it('renders stream_event content_block_delta text inline in the compact summary', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('renders stream_event content_block_delta text inline in the compact summary', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'stream_event',
       payload: {
         type: 'stream_event',
-        event: {
-          type: 'content_block_delta',
-          index: 0,
-          delta: { type: 'text_delta', text: 'streaming text token' },
-        },
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'streaming text token' } },
       },
       timestamp: '2026-05-20T00:00:15Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Inner event type appears in the compact summary
-    expect(screen.getByText(/content_block_delta/)).toBeInTheDocument();
-    // The delta text itself must appear inline (not behind a JSON dump)
+    renderWithEvents([event]);
+    expect(await screen.findByText(/content_block_delta/)).toBeInTheDocument();
     expect(screen.getByText(/streaming text token/)).toBeInTheDocument();
     expect(screen.queryByText(/"type": "stream_event"/)).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
-  // New typed event branch tests (TASK-696)
+  // Typed event branch tests (session_info / rate_limit / hooks / status)
   // -------------------------------------------------------------------------
 
-  it('routes a session_info event to the typed SessionInfoEventRow (shows "Run started" header and key fields)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a session_info event to the typed SessionInfoEventRow', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'session_info',
@@ -401,46 +360,31 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:00.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // "Run started" header card must be visible
-    expect(screen.getByText(/Run started/)).toBeInTheDocument();
-    // Worktree path must be visible
+    renderWithEvents([event]);
+    expect(await screen.findByText(/Run started/)).toBeInTheDocument();
     expect(screen.getByText(/\/tmp\/cyboflow-wt-test/)).toBeInTheDocument();
-    // Model must be visible
     expect(screen.getByText(/claude-sonnet-4-5/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('routes a rate_limit_event to the typed RateLimitEventRow (shows status text)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a rate_limit_event to the typed RateLimitEventRow (shows status text)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'rate_limit_event',
       payload: {
         type: 'rate_limit_event',
-        rate_limit_info: {
-          status: 'allowed_warning',
-          resetsAt: 1747776000,
-          rateLimitType: 'five_hour',
-          utilization: 0.85,
-        },
+        rate_limit_info: { status: 'allowed_warning', resetsAt: 1747776000, rateLimitType: 'five_hour', utilization: 0.85 },
         uuid: 'b2c3d4e5-0000-0000-0000-000000000001',
         session_id: 'sess-rl-test',
       },
       timestamp: '2026-05-21T00:00:01.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Rate limit status must be visible
-    expect(screen.getByText(/allowed_warning/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
+    renderWithEvents([event]);
+    expect(await screen.findByText(/allowed_warning/)).toBeInTheDocument();
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('routes a system/hook_started event to the typed SystemEventRow (shows hook_name)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a system/hook_started event to the typed SystemEventRow (shows hook_name)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -455,18 +399,13 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:02.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Type label must be visible
-    expect(screen.getByText(/system\/hook_started/)).toBeInTheDocument();
-    // Hook name must be visible
+    renderWithEvents([event]);
+    expect(await screen.findByText(/system\/hook_started/)).toBeInTheDocument();
     expect(screen.getByText(/pre-tool-use/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('routes a system/hook_response event to the typed SystemEventRow (shows outcome)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a system/hook_response event to the typed SystemEventRow (shows outcome)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -486,18 +425,13 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:03.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Type label must be visible
-    expect(screen.getByText(/system\/hook_response/)).toBeInTheDocument();
-    // Outcome must be visible
+    renderWithEvents([event]);
+    expect(await screen.findByText(/system\/hook_response/)).toBeInTheDocument();
     expect(screen.getByText(/success/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('routes a system/status event to the typed SystemEventRow (shows status value)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('routes a system/status event to the typed SystemEventRow (shows status value)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -510,22 +444,13 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:04.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Type label must be visible
-    expect(screen.getByText(/system\/status/)).toBeInTheDocument();
-    // Status value must be visible
+    renderWithEvents([event]);
+    expect(await screen.findByText(/system\/status/)).toBeInTheDocument();
     expect(screen.getByText(/requesting/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  // -------------------------------------------------------------------------
-  // Conditional-branch tests for TASK-696 new rows (test-writer additions)
-  // -------------------------------------------------------------------------
-
-  it('renders system/status with status=null as the literal "null" string (null-coalesce branch)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('renders system/status with status=null as the literal "null" string (null-coalesce branch)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -538,15 +463,12 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:05.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The null-coalesce branch renders "null" as a fallback string
-    expect(screen.getByText(/status=null/)).toBeInTheDocument();
+    renderWithEvents([event]);
+    expect(await screen.findByText(/status=null/)).toBeInTheDocument();
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('renders system/hook_response with outcome=error (error color branch, not UnknownEventRow)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('renders system/hook_response with outcome=error (error color branch, not UnknownEventRow)', async () => {
     const event: StreamEvent = {
       runId: 'run-1',
       type: 'system',
@@ -566,21 +488,15 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:06.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    expect(screen.getByText(/system\/hook_response/)).toBeInTheDocument();
-    // "outcome=" and "error" are in separate DOM nodes (span for color-coding).
-    // Assert both are visible independently.
+    renderWithEvents([event]);
+    expect(await screen.findByText(/system\/hook_response/)).toBeInTheDocument();
     expect(screen.getByText(/post-tool-use/)).toBeInTheDocument();
-    // The outcome value "error" is in a colored child span — use getAllByText to
-    // avoid collisions with the type label "system/hook_response" which also renders.
     const errorElements = screen.getAllByText(/^error$/);
     expect(errorElements.length).toBeGreaterThan(0);
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('truncates session_info initial_prompt longer than 120 chars with an ellipsis', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-1'); });
+  it('truncates session_info initial_prompt longer than 120 chars with an ellipsis', async () => {
     const longPrompt = 'A'.repeat(130);
     const event: StreamEvent = {
       runId: 'run-1',
@@ -596,21 +512,17 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:07.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // Full 130-char prompt must NOT appear verbatim
+    renderWithEvents([event]);
+    expect(await screen.findByText(`${'A'.repeat(120)}…`)).toBeInTheDocument();
     expect(screen.queryByText(longPrompt)).not.toBeInTheDocument();
-    // Truncated 120-char prefix + ellipsis character must appear
-    expect(screen.getByText(`${'A'.repeat(120)}…`)).toBeInTheDocument();
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
-  // run_started event branch test (TASK-700)
+  // run_started event branch tests
   // -------------------------------------------------------------------------
 
-  it('routes a run_started event to RunStartedEventRow (shows "Starting" placeholder)', () => {
-    act(() => { useCyboflowStore.getState().setActiveRun('run-started-test'); });
+  it('routes a run_started event to RunStartedEventRow (shows "Starting" placeholder)', async () => {
     const event: StreamEvent = {
       runId: 'run-started-test',
       type: 'run_started',
@@ -622,23 +534,14 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:08.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // "Starting" placeholder text must be visible
-    expect(screen.getByText(/Starting/)).toBeInTheDocument();
-    // Branch name must be visible
+    renderWithEvents([event], 'run-started-test');
+    expect(await screen.findByText(/Starting/)).toBeInTheDocument();
     expect(screen.getByText(/cyboflow\/my-workflow-abc12345/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('RunStartedEventRow truncates runId to 8 chars followed by an ellipsis (TASK-700)', () => {
-    // RunStartedEventRow renders payload.runId.slice(0, 8) + '…' in a compact <span>.
-    // This test locks in that truncation so a later refactor cannot silently drop it.
-    // Note: the full runId also appears verbatim in the RunView header (activeRunId label),
-    // so we assert the truncated form is present without asserting the full form is absent.
+  it('RunStartedEventRow truncates runId to 8 chars followed by an ellipsis', async () => {
     const longRunId = 'abcdef1234567890'; // 16 chars; first 8 = 'abcdef12'
-    act(() => { useCyboflowStore.getState().setActiveRun(longRunId); });
     const event: StreamEvent = {
       runId: longRunId,
       type: 'run_started',
@@ -650,22 +553,46 @@ describe('RunView', () => {
       },
       timestamp: '2026-05-21T00:00:09.000Z',
     };
-    act(() => { useCyboflowStore.getState().appendStreamEvent(event); });
-    render(<RunView />);
-    // The truncated form (8 chars + ellipsis) must appear in the event row
-    expect(screen.getByText('abcdef12…')).toBeInTheDocument();
-    // Branch name must be visible
+    renderWithEvents([event], longRunId);
+    expect(await screen.findByText('abcdef12…')).toBeInTheDocument();
     expect(screen.getByText(/cyboflow\/trunc-id-branch/)).toBeInTheDocument();
-    // Must NOT route to UnknownEventRow
     expect(screen.queryByText(/Unrecognized event/)).not.toBeInTheDocument();
   });
 
-  it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
-    // Get the mocked subscribeToStreamEvents from the module-level mock.
-    const mockSubFn = vi.mocked(subscribeToStreamEvents);
+  // -------------------------------------------------------------------------
+  // Backfill-on-return: the original bug — switching runs must repopulate the
+  // log from the durable store rather than leaving it erased.
+  // -------------------------------------------------------------------------
 
-    // Rendering RunView must NOT trigger any additional subscribeToStreamEvents calls
-    // (the store already called it when setActiveRun was invoked above).
+  it('re-queries listRawEvents when the active run changes (backfill survives a switch)', async () => {
+    const eventA: StreamEvent = {
+      runId: 'run-A',
+      type: 'assistant',
+      payload: { type: 'assistant', message: { id: 'm-a', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'History for run A' }] } },
+      timestamp: '2026-05-22T00:00:00Z',
+    };
+    const eventB: StreamEvent = {
+      runId: 'run-B',
+      type: 'assistant',
+      payload: { type: 'assistant', message: { id: 'm-b', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'History for run B' }] } },
+      timestamp: '2026-05-22T00:00:01Z',
+    };
+
+    const { rerender } = renderWithEvents([eventA], 'run-A');
+    expect(await screen.findByText('History for run A')).toBeInTheDocument();
+
+    // Switch to run B — its persisted history must repopulate (not stay erased).
+    mockListRawEvents.mockResolvedValue([eventB]);
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-B');
+    });
+    rerender(<RunView />);
+    expect(await screen.findByText('History for run B')).toBeInTheDocument();
+    expect(screen.queryByText('History for run A')).not.toBeInTheDocument();
+  });
+
+  it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
+    const mockSubFn = vi.mocked(subscribeToStreamEvents);
     const callsBefore = mockSubFn.mock.calls.length;
 
     act(() => {
