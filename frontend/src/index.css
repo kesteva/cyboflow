@@ -1,6 +1,12 @@
 /* Import markdown styles - must come first */
 /* Removed conflicting markdown.css - using markdown-preview.css instead */
 
+/* Bundled JetBrains Mono (self-hosted via @fontsource — offline-capable) */
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+@import '@fontsource/jetbrains-mono/700.css';
+
 /* Import design tokens - must come before Tailwind */
 @import './styles/tokens.css';
 
@@ -23,11 +29,25 @@ body {
 /* Body colors using design tokens */
 body {
   @apply bg-bg-primary text-text-primary;
+  font-family: var(--font-family-sans);
+  /* Tabular numerals on timestamps, token counts, line numbers (Protoflow spec) */
+  font-variant-numeric: tabular-nums;
 }
 
 /* Apply light theme when body has light class */
 body.light {
   @apply bg-bg-primary text-text-primary;
+}
+
+/* Uppercase section-label / eyebrow utility (Protoflow: 9–11px, wide tracking) */
+@layer components {
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 0.625rem;
+    line-height: 1.2;
+    font-weight: 700;
+  }
 }
 
 /* Scrollbar styling */

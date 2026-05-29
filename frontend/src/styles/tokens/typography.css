@@ -1,9 +1,11 @@
 /* Typography Design Tokens for Cyboflow */
 
 :root {
-  /* Font Families */
-  --font-family-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-family-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  /* Font Families — Protoflow is monospace everywhere (JetBrains Mono),
+     so the "sans" token resolves to the same mono stack. SF Mono / system
+     mono are fallbacks before the bundled webfont loads. */
+  --font-family-mono: 'JetBrains Mono', 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  --font-family-sans: var(--font-family-mono);
   
   /* Font Sizes - Following Tailwind's scale */
   --text-xs: 0.75rem;     /* 12px */
