@@ -78,6 +78,9 @@ function renderSidebar() {
       onPromptHistoryClick={() => undefined}
       width={240}
       onResize={() => undefined}
+      pendingReviewCount={0}
+      humanReviewActive={false}
+      onToggleHumanReview={() => undefined}
     />,
   );
 }

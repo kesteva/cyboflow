@@ -100,9 +100,9 @@ describe('ReviewQueueView', () => {
     useReviewQueueSlice.setState({ runStatusMap: {} });
   });
 
-  it('renders "No pending approvals" when queue is empty', () => {
+  it('renders "No pending reviews" when queue is empty', () => {
     render(<ReviewQueueView />);
-    expect(screen.getByText('No pending approvals')).toBeInTheDocument();
+    expect(screen.getByText('No pending reviews')).toBeInTheDocument();
   });
 
   it('calls init() once on mount', () => {
@@ -142,31 +142,31 @@ describe('ReviewQueueView', () => {
     expect(screen.getByText('Write')).toBeInTheDocument();
   });
 
-  it('renders "Review Queue" heading text', () => {
+  it('renders "Human review" heading text', () => {
     render(<ReviewQueueView />);
-    expect(screen.getByText('Review Queue')).toBeInTheDocument();
+    expect(screen.getByText('Human review')).toBeInTheDocument();
   });
 
-  it('shows "0 pending" count in header when queue is empty', () => {
+  it('shows "0 total" count in header when queue is empty', () => {
     render(<ReviewQueueView />);
-    expect(screen.getByText('0 pending')).toBeInTheDocument();
+    expect(screen.getByTestId('review-total-count')).toHaveTextContent('0 total');
   });
 
-  it('shows correct pending count in header when queue is populated', () => {
+  it('shows correct total count in header when queue is populated', () => {
     mockQueue = [
       { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
       { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
     ];
     render(<ReviewQueueView />);
-    expect(screen.getByText('2 pending')).toBeInTheDocument();
+    expect(screen.getByTestId('review-total-count')).toHaveTextContent('2 total');
   });
 
-  it('does not render "No pending approvals" when queue is populated', () => {
+  it('does not render "No pending reviews" when queue is populated', () => {
     mockQueue = [
       { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending' },
     ];
     render(<ReviewQueueView />);
-    expect(screen.queryByText('No pending approvals')).not.toBeInTheDocument();
+    expect(screen.queryByText('No pending reviews')).not.toBeInTheDocument();
   });
 
   it('renders "Pending" section header when queue is non-empty', () => {
