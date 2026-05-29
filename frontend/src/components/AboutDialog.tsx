@@ -186,10 +186,10 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
 
             {versionInfo?.worktreeName && (
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                <span className="text-sm font-medium text-text-secondary">
                   Worktree
                 </span>
-                <span className="text-sm text-gray-900 dark:text-white font-mono">
+                <span className="text-sm text-text-primary font-mono">
                   {versionInfo.worktreeName}
                 </span>
               </div>

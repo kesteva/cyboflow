@@ -58,7 +58,7 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       <button
         data-testid="session-action-dismiss"
         onClick={onDismiss}
-        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
         title="Dismiss this session and remove its worktree"
       >
         <Trash2 size={14} />

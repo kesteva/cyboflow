@@ -675,8 +675,8 @@ export const SessionInputWithImages: React.FC<SessionInputWithImagesProps> = mem
                     rounded-lg border
                     active:scale-[0.98]
                     focus:outline-none focus:ring-2 focus:ring-inset focus:ring-offset-0
-                    ${isSubmitting 
-                      ? 'bg-gray-500 text-gray-300 border-gray-500 cursor-not-allowed opacity-60'
+                    ${isSubmitting
+                      ? 'bg-surface-tertiary text-text-muted border-border-secondary cursor-not-allowed opacity-60'
                       : buttonConfig.isPrimary 
                         ? `bg-gradient-to-r from-interactive to-interactive-hover hover:from-interactive-hover hover:to-interactive 
                            text-white border-interactive shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] 
