@@ -93,7 +93,7 @@ export abstract class AbstractInputPanel<
       return (
         <div className="px-4 pb-2">
           <div className="flex items-center gap-2 text-xs text-text-secondary">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            <div className="w-2 h-2 bg-status-success rounded-full animate-pulse" />
             <span>Processing...</span>
           </div>
         </div>
@@ -400,9 +400,9 @@ export abstract class AbstractInputPanel<
                 onPaste={this.handlePaste}
                 placeholder={isDragging ? "Drop images here..." : this.getPlaceholder()}
                 disabled={isSubmitting || this.props.disabled}
-                className="w-full px-3 py-2 bg-bg-primary border border-border-primary rounded-lg 
+                className="w-full px-3 py-2 bg-bg-primary border border-border-primary rounded-lg
                          text-text-primary placeholder-text-tertiary resize-none
-                         focus:outline-none focus:ring-1 focus:ring-accent-primary focus:border-accent-primary
+                         focus:outline-none focus:ring-1 focus:ring-interactive focus:border-interactive
                          disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ 
                   minHeight: '40px', 
@@ -417,7 +417,7 @@ export abstract class AbstractInputPanel<
             {session.status === 'running' && onCancel ? (
               <button
                 onClick={onCancel}
-                className="p-2 text-red-500 hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
+                className="p-2 text-status-error hover:text-status-error/90 hover:bg-status-error/10 rounded-md transition-colors"
                 title="Cancel (Esc)"
               >
                 <Square className="w-4 h-4" />
@@ -426,7 +426,7 @@ export abstract class AbstractInputPanel<
               <button
                 onClick={this.handleSubmit}
                 disabled={!input.trim() || isSubmitting || this.props.disabled}
-                className="p-2 text-accent-primary hover:text-accent-hover hover:bg-accent-primary/10 
+                className="p-2 text-interactive hover:text-interactive-hover hover:bg-interactive/10
                          rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Send message (Enter)"
               >

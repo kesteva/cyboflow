@@ -2,9 +2,9 @@
  * McpHealthIndicator — colored dot reflecting CyboflowMcpServer health.
  *
  * Dot colors:
- *   healthy  → green  (bg-green-500)
- *   starting → yellow with pulse animation (bg-yellow-400)
- *   error    → red    (bg-red-500)
+ *   healthy  → green  (bg-status-success)
+ *   starting → yellow with pulse animation (bg-status-warning)
+ *   error    → red    (bg-status-error)
  *
  * Clicking the dot opens a diagnostics popover showing:
  *   - Status string
@@ -25,9 +25,9 @@ import type { McpHealthStatus } from '../stores/mcpHealthStore';
 // ---------------------------------------------------------------------------
 
 const DOT_COLOR: Record<McpHealthStatus, string> = {
-  healthy: 'bg-green-500',
-  starting: 'bg-yellow-400',
-  error: 'bg-red-500',
+  healthy: 'bg-status-success',
+  starting: 'bg-status-warning',
+  error: 'bg-status-error',
 };
 
 const STATUS_LABEL: Record<McpHealthStatus, string> = {
@@ -93,7 +93,7 @@ export function McpHealthIndicator() {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-white/10 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/30 transition-colors"
+        className="flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-bg-hover focus:outline-none focus-visible:ring-1 focus-visible:ring-interactive/30 transition-colors"
       >
         {/* Colored dot */}
         <span className="relative flex items-center justify-center w-2 h-2">
@@ -128,9 +128,9 @@ export function McpHealthIndicator() {
               <span
                 className={cn(
                   'font-medium',
-                  status === 'healthy' && 'text-green-400',
-                  status === 'starting' && 'text-yellow-400',
-                  status === 'error' && 'text-red-400',
+                  status === 'healthy' && 'text-status-success',
+                  status === 'starting' && 'text-status-warning',
+                  status === 'error' && 'text-status-error',
                 )}
               >
                 {STATUS_LABEL[status]}
@@ -151,7 +151,7 @@ export function McpHealthIndicator() {
           {lastError && (
             <div className="mt-2 pt-2 border-t border-border-primary">
               <p className="text-text-muted mb-1">Last error</p>
-              <p className="font-mono text-red-400 break-all whitespace-pre-wrap text-[10px] leading-tight">
+              <p className="font-mono text-status-error break-all whitespace-pre-wrap text-[10px] leading-tight">
                 {lastError}
               </p>
             </div>

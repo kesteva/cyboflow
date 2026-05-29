@@ -168,8 +168,8 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   const composer = (
     <div
       className={cn(
-        'flex flex-col rounded-lg border bg-surface-secondary transition-colors',
-        'focus-within:border-interactive focus-within:ring-2 focus-within:ring-interactive',
+        'flex flex-col border bg-surface-primary transition-colors',
+        'focus-within:border-border-hover',
         'border-border-primary',
         isDisabled && 'opacity-60',
       )}
@@ -213,17 +213,23 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   const showStatusBar = runId !== null && (folderName !== null || branchName !== null);
   const statusBar = showStatusBar ? (
     <div
-      className="flex items-center gap-2 px-0.5 text-[10px] text-text-tertiary"
+      className="flex items-center gap-2 px-0.5 text-[10px]"
       data-testid="run-chat-status-bar"
     >
       {folderName !== null && (
-        <span className="flex items-center gap-1" title={worktreePath ?? undefined}>
+        <span
+          className="inline-flex items-center gap-1 border border-border-primary bg-surface-primary px-2 py-0.5 text-interactive"
+          title={worktreePath ?? undefined}
+        >
           <Folder className="h-3 w-3" />
           <span className="truncate max-w-[160px]">{folderName}</span>
         </span>
       )}
       {branchName !== null && (
-        <span className="flex items-center gap-1 font-mono" title={branchName}>
+        <span
+          className="inline-flex items-center gap-1 border border-border-primary bg-surface-primary px-2 py-0.5 font-mono text-status-success"
+          title={branchName}
+        >
           <GitBranch className="h-3 w-3" />
           <span className="truncate max-w-[160px]">{branchName}</span>
         </span>

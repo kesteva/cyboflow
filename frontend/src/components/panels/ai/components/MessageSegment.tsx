@@ -99,12 +99,12 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
       if (!segment.error) return null;
       
       return (
-        <div className="my-2 p-3 bg-red-900/20 border border-red-700/50 rounded-lg">
-          <div className="text-red-400 font-semibold text-sm mb-2">
+        <div className="my-2 p-3 bg-status-error/20 border border-status-error/50 rounded-lg">
+          <div className="text-status-error font-semibold text-sm mb-2">
             {segment.error.message || 'Error'}
           </div>
           {segment.error.details && (
-            <div className="text-red-300 text-sm whitespace-pre-wrap font-mono">
+            <div className="text-status-error text-sm whitespace-pre-wrap font-mono">
               {segment.error.details}
             </div>
           )}
@@ -132,25 +132,25 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
             <span className="text-text-secondary font-medium">
               Diff: {fileCount} file{fileCount !== 1 ? 's' : ''} changed
             </span>
-            <span className="text-green-500">+{addedLines}</span>
-            <span className="text-red-500">-{removedLines}</span>
+            <span className="text-status-success">+{addedLines}</span>
+            <span className="text-status-error">-{removedLines}</span>
           </button>
-          
+
           {isDiffExpanded && (
-            <div className="mt-2 bg-black/20 rounded-lg p-3 overflow-hidden">
+            <div className="mt-2 bg-bg-tertiary/40 rounded-lg p-3 overflow-hidden">
               <pre className="text-xs font-mono overflow-x-auto">
                 {lines.map((line, i) => {
                   let className = 'text-text-tertiary';
                   if (line.startsWith('+++') || line.startsWith('---')) {
                     className = 'text-text-secondary font-semibold';
                   } else if (line.startsWith('@@')) {
-                    className = 'text-blue-400';
+                    className = 'text-interactive';
                   } else if (line.startsWith('+') && !line.startsWith('+++')) {
-                    className = 'text-green-400 bg-green-900/20';
+                    className = 'text-status-success bg-status-success/10';
                   } else if (line.startsWith('-') && !line.startsWith('---')) {
-                    className = 'text-red-400 bg-red-900/20';
+                    className = 'text-status-error bg-status-error/10';
                   } else if (line.startsWith('diff --git')) {
-                    className = 'text-purple-400 font-semibold mt-2';
+                    className = 'text-interactive font-semibold mt-2';
                   }
                   
                   return (

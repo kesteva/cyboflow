@@ -40,7 +40,7 @@ class CliPanelErrorBoundary extends React.Component<
       return (
         <div className="h-full w-full flex items-center justify-center p-8">
           <div className="text-center max-w-md">
-            <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            <AlertCircle className="w-12 h-12 text-status-error mx-auto mb-4" />
             <h3 className="text-lg font-medium text-text-primary mb-2">
               Panel Error
             </h3>
@@ -52,7 +52,7 @@ class CliPanelErrorBoundary extends React.Component<
             </p>
             <button
               onClick={() => this.setState({ hasError: false, error: null })}
-              className="px-4 py-2 bg-primary text-white rounded-md hover:bg-primary-hover transition-colors"
+              className="px-4 py-2 bg-interactive text-white rounded-md hover:bg-interactive-hover transition-colors"
             >
               Try Again
             </button>
@@ -111,7 +111,7 @@ export const CliPanelFactory: React.FC<CliPanelFactoryProps> = React.memo(({ pan
         return (
           <div className="h-full w-full flex items-center justify-center p-8">
             <div className="text-center max-w-md">
-              <AlertCircle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
+              <AlertCircle className="w-12 h-12 text-status-warning mx-auto mb-4" />
               <h3 className="text-lg font-medium text-text-primary mb-2">
                 Unsupported Panel Type
               </h3>

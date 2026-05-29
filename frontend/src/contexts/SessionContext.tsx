@@ -41,7 +41,7 @@ export const SessionProvider: React.FC<{
   // This prevents components that require session from rendering
   if (!session) {
     return (
-      <div className="flex items-center justify-center h-full text-gray-500">
+      <div className="flex items-center justify-center h-full text-text-tertiary">
         No session selected
       </div>
     );

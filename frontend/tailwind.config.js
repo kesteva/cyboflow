@@ -18,6 +18,12 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        // Mono everywhere (Protoflow). Both families resolve to the JetBrains
+        // Mono stack via the CSS token so `font-sans` and `font-mono` match.
+        sans: ['var(--font-family-sans)'],
+        mono: ['var(--font-family-mono)'],
+      },
       colors: {
         // Git-specific colors from main branch
         'git-synced': {

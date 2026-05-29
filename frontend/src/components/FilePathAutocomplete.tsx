@@ -468,7 +468,7 @@ const FilePathAutocomplete: React.FC<FilePathAutocompleteProps> = ({
                 onMouseEnter={() => setSelectedIndex(index)}
               >
                 {isSlashCommand ? (
-                  <Zap className="w-4 h-4 mr-3 flex-shrink-0 text-purple-500" />
+                  <Zap className="w-4 h-4 mr-3 flex-shrink-0 text-interactive" />
                 ) : suggestion.isDirectory ? (
                   <Folder className="w-4 h-4 mr-3 flex-shrink-0" />
                 ) : (

@@ -66,9 +66,9 @@ describe('StatusBar — McpHealthIndicator integration', () => {
     // The dot should carry the yellow class and be data-status="starting"
     const dot = document.querySelector('[data-status="starting"]');
     expect(dot).toBeInTheDocument();
-    expect(dot).toHaveClass('bg-yellow-400');
-    expect(dot).not.toHaveClass('bg-green-500');
-    expect(dot).not.toHaveClass('bg-red-500');
+    expect(dot).toHaveClass('bg-status-warning');
+    expect(dot).not.toHaveClass('bg-status-success');
+    expect(dot).not.toHaveClass('bg-status-error');
 
     // The Cyboflow label should be present
     expect(screen.getByText('Cyboflow')).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe('StatusBar — McpHealthIndicator integration', () => {
     // Dot should be green
     const dot = document.querySelector('[data-status="healthy"]');
     expect(dot).toBeInTheDocument();
-    expect(dot).toHaveClass('bg-green-500');
+    expect(dot).toHaveClass('bg-status-success');
 
     // Open popover by clicking the button
     const triggerButton = screen.getByRole('button', { name: /MCP server status: healthy/i });
@@ -106,7 +106,7 @@ describe('StatusBar — McpHealthIndicator integration', () => {
     // Dot should be red
     const dot = document.querySelector('[data-status="error"]');
     expect(dot).toBeInTheDocument();
-    expect(dot).toHaveClass('bg-red-500');
+    expect(dot).toHaveClass('bg-status-error');
 
     // Open popover
     const triggerButton = screen.getByRole('button', { name: /MCP server status: error/i });
