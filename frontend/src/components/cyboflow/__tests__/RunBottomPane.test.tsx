@@ -32,6 +32,26 @@ vi.mock('../RunChatView', () => ({
   RunChatView: () => <div data-testid="run-chat-view-mock">RunChatView</div>,
 }));
 
+// ---------------------------------------------------------------------------
+// Mock tRPC client — the Data Stream tab mounts the real RunView, whose
+// backfill effect calls trpc.cyboflow.runs.listRawEvents.query(...). Stub it to
+// resolve [] (mirrors RunView.test.tsx) so the effect does not throw on an
+// undefined trpc client (which surfaced as an Unhandled Rejection that failed
+// the run even though every assertion passed).
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        listRawEvents: {
+          query: async () => [],
+        },
+      },
+    },
+  },
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { RunBottomPane } from '../RunBottomPane';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
