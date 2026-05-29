@@ -1,0 +1,27 @@
+{
+  "_comment": "IDEA-013 PROBE settings (TASK-805) — throwaway. Apply via `claude --settings \"$(cat docs/probes/scratch/settings.json)\"` OR copy to .claude/settings.local.json transiently. Do NOT commit into the live .claude/settings.json. No `matcher` key => matches ALL tools (per Claude Code hooks docs). PreToolUse timeout 600s lets the multi-minute block test run; Stop hook (timeout 30s) logs turn-end for Probe C.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/docs/probes/scratch/probe-hook.mjs\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/docs/probes/scratch/probe-hook.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
