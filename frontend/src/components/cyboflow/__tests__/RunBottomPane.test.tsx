@@ -24,6 +24,21 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// Mock the tRPC client so the real RunView (mounted on the Data Stream tab)
+// can call cyboflow.runs.listRawEvents.query without a live backend. Mirrors
+// RunView.test.tsx; returns [] so the raw-event backfill resolves to empty.
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        listRawEvents: {
+          query: vi.fn(async () => []),
+        },
+      },
+    },
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Mock RunChatView so the Chat tab test does not require tRPC / stores
 // ---------------------------------------------------------------------------
