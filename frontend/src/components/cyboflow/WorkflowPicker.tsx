@@ -98,7 +98,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         <select
           value={selectedId ?? ''}
           onChange={(e) => setSelectedId(e.target.value)}
-          className="w-full rounded border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
+          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
           aria-label="Select workflow"
         >
           {workflows.map((wf) => (
@@ -110,7 +110,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       )}
 
       {combinedError && (
-        <p className="text-xs text-red-500" role="alert">
+        <p className="text-xs text-status-error" role="alert">
           {combinedError}
         </p>
       )}
@@ -118,7 +118,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       <button
         onClick={handleStartRun}
         disabled={selectedId === null || isLoading || isStarting || isQuickStarting}
-        className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
       >
         Start Run
       </button>
@@ -128,7 +128,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         <button
           onClick={() => void startQuickSession()}
           disabled={isQuickStarting || isStarting}
-          className="rounded border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"
         >
           Quick Session
