@@ -626,44 +626,49 @@ describe('ApprovalRouter', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Case G (TASK-305): recoverStaleAwaitingReview transitions awaiting_review
-  //                    rows to failed; leaves other statuses untouched.
+  // Case G (TASK-305, revised): recoverStaleAwaitingReview fails ONLY
+  //   gate-blocked awaiting_review runs (those with a pending approval whose
+  //   socket is dead). A clean-drain REST run (awaiting_review, NO pending
+  //   approval) is left untouched so the user can still close it out, and
+  //   other statuses are unaffected.
   //
-  //  Seed: 2 workflow_runs rows with status='awaiting_review', 1 with
-  //        status='running'. Call recovery. Assert:
-  //   (a) return value is 2.
-  //   (b) the 2 awaiting_review rows now have status='failed' and
-  //       error_message='app_restart'.
-  //   (c) the running row is unchanged.
+  //  Seed: run-G1 awaiting_review WITH a pending approval (gate-blocked),
+  //        run-G2 awaiting_review with NO pending approval (clean rest),
+  //        run-G3 running. Call recovery. Assert:
+  //   (a) return value is 1 (only G1).
+  //   (b) G1 now has status='failed' and error_message='app_restart'.
+  //   (c) G2 is still 'awaiting_review' (survives — closable after restart).
+  //   (d) the running row is unchanged.
   // -------------------------------------------------------------------------
-  it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
+  it("recoverStaleAwaitingReview fails only gate-blocked runs, sparing clean rests", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const router = ApprovalRouter.initialize(adapter);
 
     seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
+    seedApproval(db, { id: 'approval-G1', runId: 'run-G1', toolUseId: 'approval-G1' });
     seedRun(db, { id: 'run-G2', status: 'awaiting_review' });
     seedRun(db, { id: 'run-G3', status: 'running' });
 
     const count = router.recoverStaleAwaitingReview();
 
-    // (a) return value is 2
-    expect(count).toBe(2);
+    // (a) only the gate-blocked run is recovered
+    expect(count).toBe(1);
 
-    // (b) the two awaiting_review rows are now 'failed' with error_message='app_restart'
+    // (b) the gate-blocked run is now 'failed' with error_message='app_restart'
     const g1 = db
       .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
       .get('run-G1') as { status: string; error_message: string };
     expect(g1.status).toBe('failed');
     expect(g1.error_message).toBe('app_restart');
 
+    // (c) the clean-rest run survives — it needs no socket and stays closable
     const g2 = db
-      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
-      .get('run-G2') as { status: string; error_message: string };
-    expect(g2.status).toBe('failed');
-    expect(g2.error_message).toBe('app_restart');
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get('run-G2') as { status: string };
+    expect(g2.status).toBe('awaiting_review');
 
-    // (c) the running row is unchanged
+    // (d) the running row is unchanged
     const g3 = db
       .prepare("SELECT status FROM workflow_runs WHERE id = ?")
       .get('run-G3') as { status: string };
