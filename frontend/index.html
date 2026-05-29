@@ -8,16 +8,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Cyboflow</title>
     <script>
-      // Apply theme class before React loads to prevent flash
+      // Apply theme class before React loads to prevent flash.
+      // Default is the paper theme (Protoflow); dark/light are switchable.
       const savedTheme = localStorage.getItem('theme');
-      const theme = savedTheme === 'light' ? 'light' : 'dark';
+      const theme = ['paper', 'light', 'dark'].includes(savedTheme) ? savedTheme : 'paper';
       document.documentElement.classList.add(theme);
     </script>
   </head>
   <body>
     <script>
       // Also apply to body
-      document.body.classList.add(localStorage.getItem('theme') === 'light' ? 'light' : 'dark');
+      const savedBodyTheme = localStorage.getItem('theme');
+      document.body.classList.add(['paper', 'light', 'dark'].includes(savedBodyTheme) ? savedBodyTheme : 'paper');
     </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

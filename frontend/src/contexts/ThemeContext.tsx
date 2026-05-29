@@ -2,10 +2,16 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { API } from '../utils/api';
 
-type Theme = 'light' | 'dark';
+type Theme = 'paper' | 'dark' | 'light';
+
+// Order used by toggleTheme to cycle. `paper` is the default (Protoflow).
+const THEMES: readonly Theme[] = ['paper', 'dark', 'light'] as const;
+const isTheme = (v: unknown): v is Theme =>
+  v === 'paper' || v === 'dark' || v === 'light';
 
 interface ThemeContextType {
   theme: Theme;
+  setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
 }
 
@@ -16,17 +22,17 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [theme, setTheme] = useState<Theme>(() => {
     // Check localStorage for saved preference (for immediate access)
     const saved = localStorage.getItem('theme');
-    if (saved === 'light' || saved === 'dark') {
+    if (isTheme(saved)) {
       return saved;
     }
-    // Default to dark theme
-    return 'dark';
+    // Default to the paper theme (Protoflow)
+    return 'paper';
   });
   const [configLoaded, setConfigLoaded] = useState(false);
 
   // Sync theme from config when it loads
   useEffect(() => {
-    if (config?.theme && (config.theme === 'light' || config.theme === 'dark')) {
+    if (isTheme(config?.theme)) {
       setTheme(config.theme);
       localStorage.setItem('theme', config.theme);
       setConfigLoaded(true);
@@ -34,21 +40,14 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [config?.theme]);
 
   useEffect(() => {
-    // Update document root and body classes
+    // Update document root and body classes (3-way: paper | dark | light)
     const root = document.documentElement;
     const body = document.body;
 
-    if (theme === 'light') {
-      root.classList.remove('dark');
-      root.classList.add('light');
-      body.classList.remove('dark');
-      body.classList.add('light');
-    } else {
-      root.classList.remove('light');
-      root.classList.add('dark');
-      body.classList.remove('light');
-      body.classList.add('dark');
-    }
+    root.classList.remove(...THEMES);
+    body.classList.remove(...THEMES);
+    root.classList.add(theme);
+    body.classList.add(theme);
 
     // Save preference to localStorage for immediate access
     localStorage.setItem('theme', theme);
@@ -62,12 +61,13 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [theme, configLoaded]);
 
+  // Cycle paper → dark → light → paper
   const toggleTheme = () => {
-    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+    setTheme(prev => THEMES[(THEMES.indexOf(prev) + 1) % THEMES.length]);
   };
 
   return (
-    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
       {children}
     </ThemeContext.Provider>
   );
