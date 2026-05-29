@@ -35,6 +35,19 @@ export class MessageProjection {
   private parentToolMap = new Map<string, string>();
   /** Map from tool_use_id → ToolCall (built when we see assistant/tool_use blocks). */
   private allToolCalls = new Map<string, ToolCall>();
+  /**
+   * Map from assistant `message.id` → the first UnifiedMessage emitted for it.
+   *
+   * Partial-message streaming (SDK `--include-partial-messages`) emits ONE
+   * `assistant` event per completed content block — a single logical message
+   * (thinking + text + N tool_use blocks) arrives as N separate events that all
+   * carry the same `message.id`. Without coalescing, project() would emit N
+   * UnifiedMessages sharing one id, which the renderer keys on → React
+   * "two children with the same key" warnings and duplicate bubbles. We keep the
+   * first-emitted message here and append later blocks' segments to it in place,
+   * returning null for the follow-up events.
+   */
+  private emittedAssistantMessages = new Map<string, UnifiedMessage>();
 
   constructor(runId: string, logger?: Pick<ILogger, 'warn'>) {
     this.runId = runId;
@@ -239,8 +252,29 @@ export class MessageProjection {
       ? ((usage.input_tokens ?? 0) + (usage.output_tokens ?? 0))
       : undefined;
 
-    return {
-      id: event.message.id || `assistant_msg_${++this.messageIdCounter}`,
+    // Coalesce partial-streamed blocks of the same logical message (see
+    // `emittedAssistantMessages`). On a repeat `message.id`, append the new
+    // segments to the message we already emitted and return null so callers
+    // (the reconstruction helpers) don't push a duplicate-keyed entry.
+    //
+    // CONTRACT: both consumers push the returned object via `{ ...projected }`,
+    // a shallow copy that preserves the `segments` array + `metadata` object
+    // references — so mutating those in place here is visible in the pushed
+    // copy. Do NOT reassign `existing.segments`/`existing.metadata`; mutate them.
+    const messageId = event.message.id;
+    if (messageId) {
+      const existing = this.emittedAssistantMessages.get(messageId);
+      if (existing) {
+        existing.segments.push(...segments);
+        if (tokens && tokens > 0 && existing.metadata) {
+          existing.metadata.tokens = tokens;
+        }
+        return null;
+      }
+    }
+
+    const message: UnifiedMessage = {
+      id: messageId || `assistant_msg_${++this.messageIdCounter}`,
       role: isSyntheticError ? 'system' : 'assistant',
       timestamp: new Date().toISOString(),
       segments,
@@ -251,6 +285,12 @@ export class MessageProjection {
         systemSubtype: isSyntheticError ? 'error' : undefined,
       }
     };
+
+    if (messageId) {
+      this.emittedAssistantMessages.set(messageId, message);
+    }
+
+    return message;
   }
 
   // ---------------------------------------------------------------------------
