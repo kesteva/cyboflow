@@ -10,7 +10,7 @@
  * this single file (or injecting a session resolver at server-init time).
  */
 import type { DatabaseLike } from '../types';
-import type { WorkflowRow } from '../../../../shared/types/workflows';
+import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 
 /**
@@ -25,6 +25,17 @@ export interface WorkflowRegistryLike {
   listByProject(projectId: number): WorkflowRow[];
   getById(workflowId: string): WorkflowRow | null;
   seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
+  /** Persist an edited definition onto a workflow's `spec_json` (editor Save). */
+  updateSpec(workflowId: string, definition: WorkflowDefinition): void;
+  /** Reset a built-in workflow's spec back to its static default. */
+  resetSpec(workflowId: string): void;
+  /** Create a brand-new custom workflow row from an edited definition. */
+  createCustom(
+    projectId: number,
+    name: string,
+    definition: WorkflowDefinition,
+    permissionMode: PermissionMode,
+  ): WorkflowRow;
 }
 
 /**

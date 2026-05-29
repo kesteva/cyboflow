@@ -60,7 +60,7 @@ import { setStartRunDeps, setRunCloseoutDeps } from '../runs';
 import type { RunWorktreeManagerLike } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
-import type { WorkflowStepTransitionEvent } from '../../../../../../shared/types/workflows';
+import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
@@ -834,6 +834,137 @@ describe('cyboflow.runs.getPhaseState', () => {
     const contextStep = result.stepStates.find((s) => s.stepId === 'context');
     expect(contextStep, 'context step not found in stepStates').toBeDefined();
     expect(contextStep!.status).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.getPhaseState — spec_json resolution (blueprint editor)
+//
+// getPhaseState now resolves the effective WorkflowDefinition via
+// resolveWorkflowDefinition(name, spec_json): a valid spec_json override wins
+// over the built-in fallback, a custom (non-built-in) name resolves purely from
+// its spec_json, and a custom row whose spec_json='{}' has no fallback so it
+// throws NOT_FOUND.
+// ---------------------------------------------------------------------------
+
+/** Seed a workflow + run with an explicit spec_json (defaults vary per test). */
+function seedPhaseRunWithSpec(
+  db: Database.Database,
+  runId: string,
+  workflowName: string,
+  specJson: string,
+  currentStepId: string | null = null,
+  status = 'running',
+): { workflowId: string; runId: string } {
+  const workflowId = `wf-${runId}`;
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(workflowId, workflowName, specJson);
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+     VALUES (?, ?, 1, '/tmp/test', ?, '{}', ?)`,
+  ).run(runId, workflowId, status, currentStepId);
+
+  return { workflowId, runId };
+}
+
+/** A minimal one-phase one-step definition used for spec_json overrides. */
+function makeSpecDefinition(id: string): WorkflowDefinition {
+  return {
+    id,
+    phases: [
+      {
+        id: 'only',
+        label: 'Only Phase',
+        color: '#c96442',
+        steps: [
+          { id: 'edited-step', name: 'Edited step', agent: 'executor', mcps: ['filesystem'], retries: 0 },
+        ],
+      },
+    ],
+  };
+}
+
+describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDbWithStepTracking();
+  });
+
+  it('resolves a built-in workflow normally when spec_json is "{}"', async () => {
+    const runId = 'run-gps-spec-builtin';
+    seedPhaseRunWithSpec(db, runId, 'soloflow', '{}', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition.id).toBe('soloflow');
+    expect(result.definition.phases.length).toBeGreaterThan(0);
+  });
+
+  it('prefers a valid spec_json override over the built-in definition', async () => {
+    const runId = 'run-gps-spec-override';
+    const override = makeSpecDefinition('soloflow');
+    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    // The override (single 'only' phase / 'edited-step') replaces the built-in graph.
+    expect(result.definition).toEqual(override);
+    expect(result.definition.phases).toHaveLength(1);
+    expect(result.definition.phases[0].id).toBe('only');
+    expect(result.stepStates.map((s) => s.stepId)).toEqual(['edited-step']);
+  });
+
+  it('marks the override step running when current_step_id points into the override graph', async () => {
+    const runId = 'run-gps-spec-override-step';
+    const override = makeSpecDefinition('soloflow');
+    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), 'edited-step');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const edited = result.stepStates.find((s) => s.stepId === 'edited-step');
+    expect(edited).toBeDefined();
+    expect(edited!.status).toBe('running');
+  });
+
+  it('resolves a CUSTOM workflow (non-built-in name + valid spec_json) without throwing', async () => {
+    const runId = 'run-gps-spec-custom';
+    const custom = makeSpecDefinition('my-custom-flow');
+    seedPhaseRunWithSpec(db, runId, 'My Custom Flow', JSON.stringify(custom), null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition).toEqual(custom);
+    expect(result.definition.id).toBe('my-custom-flow');
+  });
+
+  it('throws NOT_FOUND when a CUSTOM row has spec_json="{}" (no built-in fallback)', async () => {
+    const runId = 'run-gps-spec-custom-empty';
+    // Non-built-in name + empty spec → resolveWorkflowDefinition returns null.
+    seedPhaseRunWithSpec(db, runId, 'Broken Custom Flow', '{}', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.getPhaseState({ runId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('falls back to the built-in when spec_json is malformed JSON for a built-in name', async () => {
+    const runId = 'run-gps-spec-malformed';
+    // Lenient READ path: invalid JSON parses to null → built-in fallback for 'sprint'.
+    seedPhaseRunWithSpec(db, runId, 'sprint', '{not valid json', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition.id).toBe('sprint');
   });
 });
 
