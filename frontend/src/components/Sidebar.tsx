@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge } from 'lucide-react';
+import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Cog } from 'lucide-react';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
@@ -13,9 +13,24 @@ interface SidebarProps {
   onPromptHistoryClick: () => void;
   width: number;
   onResize: (e: React.MouseEvent) => void;
+  /** Count of pending human-review approvals (drives the rail badge). */
+  pendingReviewCount: number;
+  /** Whether the human-review pane is the active center view. */
+  humanReviewActive: boolean;
+  /** Toggle the human-review center pane. */
+  onToggleHumanReview: () => void;
 }
 
-export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width, onResize }: SidebarProps) {
+export function Sidebar({
+  onHelpClick,
+  onAboutClick,
+  onPromptHistoryClick,
+  width,
+  onResize,
+  pendingReviewCount,
+  humanReviewActive,
+  onToggleHumanReview,
+}: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [version, setVersion] = useState<string>('');
@@ -109,6 +124,40 @@ export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width
           </div>
         </div>
 
+        {/* Human review — primary rail item; opens the full-width review pane */}
+        <button
+          type="button"
+          onClick={onToggleHumanReview}
+          aria-pressed={humanReviewActive}
+          data-testid="human-review-rail-item"
+          className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
+            humanReviewActive
+              ? 'border-border-emphasized bg-surface-primary'
+              : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
+          }`}
+          style={humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+        >
+          <span
+            className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full text-white"
+            style={{ background: 'repeating-linear-gradient(135deg, var(--human) 0 4px, var(--human-hatch) 4px 8px)' }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="6" cy="4" r="2" />
+              <path d="M2 11c.4-2.3 2-3.5 4-3.5s3.6 1.2 4 3.5" />
+            </svg>
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Human review</span>
+            <span className="block text-[10px] text-text-secondary">Pending approvals</span>
+          </span>
+          <span
+            className={`min-w-[20px] flex-shrink-0 rounded-[9px] px-1.5 py-px text-center text-[10px] font-bold text-text-on-interactive ${
+              pendingReviewCount > 0 ? 'bg-interactive' : 'bg-text-tertiary'
+            }`}
+          >
+            {pendingReviewCount}
+          </span>
+        </button>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
           <div className="px-4 py-2 text-sm uppercase flex items-center justify-between overflow-hidden">
@@ -133,6 +182,22 @@ export function Sidebar({ onHelpClick, onAboutClick, onPromptHistoryClick, width
         
         {/* Bottom section - always visible */}
         <div className="flex-shrink-0">
+          {/* User footer — avatar + name + settings (Protoflow rail foot) */}
+          <div className="flex items-center gap-2 px-4 py-2 border-t border-border-primary">
+            <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-[10px] font-bold text-text-on-interactive">
+              K
+            </span>
+            <span className="flex-1 truncate text-[10.5px] text-text-secondary">kesteva</span>
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              aria-label="Settings"
+              className="text-text-tertiary hover:text-text-primary transition-colors"
+            >
+              <Cog className="h-4 w-4" />
+            </button>
+          </div>
+
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
           

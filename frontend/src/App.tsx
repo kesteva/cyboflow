@@ -28,6 +28,7 @@ import ReviewQueueView from './components/ReviewQueueView';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
+import { useReviewQueueStore } from './stores/reviewQueueStore';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -53,6 +54,8 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [showHumanReview, setShowHumanReview] = useState(false);
+  const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();
@@ -89,6 +92,11 @@ function App() {
     const unsubscribe = subscribeToStuckEvents();
     return unsubscribe;
   }, [subscribeToStuckEvents]);
+
+  // Initialise the review queue at the app-shell level so the pending count
+  // (and the macOS dock badge) stays live even when the human-review pane is
+  // not mounted (it now mounts only when the rail item is active).
+  useEffect(() => useReviewQueueStore.getState().init(), []);
 
   // Load config on app startup
   useEffect(() => {
@@ -311,31 +319,38 @@ function App() {
           onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
           onHelpClick={() => setIsHelpOpen(true)}
         />
-        {/* Shell geometry (ReviewQueueView | Sidebar | CyboflowRoot) is documented in docs/SHELL-LAYOUT.md. */}
-        {/* Main content row: review queue + sidebar + primary panel */}
+        {/* Shell geometry: [agent rail | center]. Human review folds into the
+            rail as a primary item that swaps the center to a full-width review
+            pane (see docs/SHELL-LAYOUT.md). */}
         <div className="flex flex-1 overflow-hidden">
-          <ErrorBoundary fallback={(error) => (
-            <div className="w-[360px] h-full flex items-center justify-center p-4 border-r border-border-primary bg-bg-secondary">
-              <div className="text-center">
-                <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
-                <p className="text-xs text-text-muted">{error.message}</p>
-              </div>
-            </div>
-          )}>
-            <ReviewQueueView />
-          </ErrorBoundary>
           <Sidebar
             onHelpClick={() => setIsHelpOpen(true)}
             onAboutClick={() => setIsAboutOpen(true)}
             onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
             width={sidebarWidth}
             onResize={startResize}
+            pendingReviewCount={reviewQueueCount}
+            humanReviewActive={showHumanReview}
+            onToggleHumanReview={() => setShowHumanReview((v) => !v)}
           />
-          {/* Primary content area: CyboflowRoot is the only mount point for the
-              active-project surface. The legacy session view render branch was retired
-              in TASK-690 (IDEA-017 slice 3). */}
+          {/* Center: full-width human-review queue OR the active-project surface
+              (CyboflowRoot, the only mount point for the run surface — the legacy
+              SessionView branch was retired in TASK-690). */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            <CyboflowRoot projectId={activeProjectId} />
+            {showHumanReview ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <ReviewQueueView />
+              </ErrorBoundary>
+            ) : (
+              <CyboflowRoot projectId={activeProjectId} />
+            )}
           </div>
         </div>
         {/* Persistent status bar at the bottom of the app shell */}

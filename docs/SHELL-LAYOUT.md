@@ -1,23 +1,28 @@
 # Cyboflow Shell Layout
 
 Status: locked as of TASK-686 (IDEA-017, epic `cyboflow-shell-architecture`).
+Updated by the Protoflow UI refresh: human review folded into the rail (see below).
 
 ## Column geometry
 
-| Column        | Component         | Width   | Role                                                |
-|---------------|-------------------|---------|-----------------------------------------------------|
-| Left rail     | `ReviewQueueView` | ~360 px | Cross-workflow human review queue (LOAD-BEARING).   |
-| Second column | `Sidebar`         | ~256 px | Project tree (Crystal-derived; remodeled in TASK-687). |
-| Main area    | `CyboflowRoot`    | flex-1  | Run mount point — hosts the active workflow run.    |
+| Column     | Component                          | Width      | Role                                                                 |
+|------------|------------------------------------|------------|----------------------------------------------------------------------|
+| Left rail  | `Sidebar` (agent rail)             | resizable  | Project tree + sessions, a **Human review** primary item with pending-count badge, and the user footer (avatar · settings). |
+| Main area  | `CyboflowRoot` **or** `ReviewQueueView` | flex-1 | Run surface (CyboflowRoot) by default; swaps to the full-width human-review pane (`ReviewQueueView`) when the rail's Human-review item is active. |
 
-The `ReviewQueueView` left rail is the differentiator surface described in
-`docs/cyboflow_system_design.md` §5.7 (Human Review Queue).
+The human-review queue is the differentiator surface described in
+`docs/cyboflow_system_design.md` §5.7. Per the Protoflow refresh it is no longer a
+standing ~360px left column; it is reached via the rail's **Human review** item,
+which swaps the center to a full-width review pane (App-level `showHumanReview`
+state). The review queue store is initialised at the App-shell level
+(`useReviewQueueStore.getState().init()` in `App.tsx`) so the rail badge and the
+macOS dock badge stay live even when the pane is unmounted.
 
 ## Assumption order
 
-1. Review queue rail is load-bearing; width/position are fixed first.
-2. Project sidebar takes the next-widest band of fixed width.
-3. `CyboflowRoot` gets the remaining horizontal space via `flex-1`.
+1. The agent rail (Sidebar) is leftmost; the title bar (38px) spans above the row.
+2. The center takes the remaining horizontal space via `flex-1` and hosts either
+   the run surface or the full-width human-review pane.
 
 ## Deferred decisions (resolved by downstream tasks in this epic)
 
