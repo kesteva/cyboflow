@@ -54,7 +54,8 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
-  const [showHumanReview, setShowHumanReview] = useState(false);
+  const showHumanReview = useNavigationStore((s) => s.humanReviewOpen);
+  const toggleHumanReview = useNavigationStore((s) => s.toggleHumanReview);
   const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
@@ -331,7 +332,7 @@ function App() {
             onResize={startResize}
             pendingReviewCount={reviewQueueCount}
             humanReviewActive={showHumanReview}
-            onToggleHumanReview={() => setShowHumanReview((v) => !v)}
+            onToggleHumanReview={toggleHumanReview}
           />
           {/* Center: full-width human-review queue OR the active-project surface
               (CyboflowRoot, the only mount point for the run surface — the legacy
