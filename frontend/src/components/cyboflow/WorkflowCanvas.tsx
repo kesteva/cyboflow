@@ -268,6 +268,11 @@ export function WorkflowCanvas({
           gap: COL_GAP,
           padding: `${TOP}px 12px 12px`,
           minHeight: canvasInnerHeight,
+          // 24px dotted-grid backdrop (Protoflow flow canvas)
+          background:
+            'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+            'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+            'var(--color-bg-primary)',
         }}
         data-testid="workflow-canvas-inner"
       >
