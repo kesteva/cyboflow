@@ -17,7 +17,7 @@ export interface AppConfig {
   stravuApiKey?: string;
   stravuServerUrl?: string;
   // Theme preference
-  theme?: 'light' | 'dark';
+  theme?: 'paper' | 'light' | 'dark';
   // Notification settings
   notifications?: {
     enabled: boolean;
@@ -70,7 +70,7 @@ export interface UpdateConfigRequest {
   autoCheckUpdates?: boolean;
   stravuApiKey?: string;
   stravuServerUrl?: string;
-  theme?: 'light' | 'dark';
+  theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
     playSound: boolean;

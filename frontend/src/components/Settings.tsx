@@ -53,7 +53,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [analyticsEnabled, setAnalyticsEnabled] = useState(true);
   const [previousAnalyticsEnabled, setPreviousAnalyticsEnabled] = useState(true);
   const { updateSettings } = useNotifications();
-  const { theme, toggleTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
 
   useEffect(() => {
@@ -229,29 +229,33 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               defaultExpanded={true}
             >
               <SettingsSection
-                title="Theme Mode"
-                description="Choose between light and dark theme"
-                icon={theme === 'light' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                title="Theme"
+                description="Choose your color theme"
+                icon={<Palette className="w-4 h-4" />}
               >
-                <button
-                  type="button"
-                  onClick={toggleTheme}
-                  className="flex items-center gap-3 px-4 py-3 bg-surface-secondary hover:bg-surface-hover rounded-lg transition-colors border border-border-secondary w-full"
-                >
-                  {theme === 'light' ? (
-                    <>
-                      <Sun className="w-5 h-5 text-status-warning" />
-                      <span className="text-text-primary font-medium">Light Mode</span>
-                      <span className="ml-auto text-xs text-text-tertiary">Currently active</span>
-                    </>
-                  ) : (
-                    <>
-                      <Moon className="w-5 h-5 text-interactive" />
-                      <span className="text-text-primary font-medium">Dark Mode</span>
-                      <span className="ml-auto text-xs text-text-tertiary">Currently active</span>
-                    </>
-                  )}
-                </button>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { id: 'paper', label: 'Paper', Icon: FileText, hint: 'Warm paper · default' },
+                    { id: 'dark', label: 'Dark', Icon: Moon, hint: 'Classic dark' },
+                    { id: 'light', label: 'Light', Icon: Sun, hint: 'Lilac light' },
+                  ] as const).map(({ id, label, Icon, hint }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setTheme(id)}
+                      aria-pressed={theme === id}
+                      className={`flex flex-col items-start gap-1 px-3 py-3 rounded-button border transition-colors text-left ${
+                        theme === id
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <Icon className={`w-5 h-5 ${theme === id ? 'text-interactive' : 'text-text-tertiary'}`} />
+                      <span className="text-text-primary font-medium">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
               </SettingsSection>
             </CollapsibleCard>
 
