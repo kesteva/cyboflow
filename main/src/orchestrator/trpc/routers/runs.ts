@@ -22,6 +22,8 @@ import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
+import { selectRunRawStreamEvents } from '../../runRawEventsListing';
+import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -437,6 +439,29 @@ export const runsRouter = router({
         });
       }
       return selectRunUnifiedMessages(ctx.db, input.runId);
+    }),
+
+  /**
+   * Return the run's full RAW stream-event log as `StreamEnvelope[]` — the same
+   * envelope shape the live IPC bridge publishes — so the Data Stream tab can
+   * BACKFILL its history when a run is reopened. Without this the in-memory
+   * `streamEvents` buffer (wiped on every `setActiveRun`) made the stream
+   * appear erased after clicking away and returning.
+   *
+   * Unlike `listUnifiedMessages` (which folds events into correlated chat
+   * messages), this preserves every persisted event 1:1, including
+   * `stream_event` deltas — see `selectRunRawStreamEvents`.
+   */
+  listRawEvents: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(async ({ ctx, input }): Promise<StreamEnvelope[]> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return selectRunRawStreamEvents(ctx.db, input.runId);
     }),
 
   /**

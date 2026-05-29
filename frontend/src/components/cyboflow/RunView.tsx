@@ -1,24 +1,28 @@
 /**
- * RunView — renders the active run's scrollable event log.  Shows a
+ * RunView — renders the active run's scrollable raw event log.  Shows a
  * placeholder when no run is active.
  *
- * Stream-event subscription is managed by the cyboflowStore (module-level
- * singleton started in setActiveRun / torn down in clearActiveRun).  This
- * component is subscription-free and re-renders only when the store state
- * changes.  The previous useEffect-based subscription was vulnerable to
- * React Strict Mode's double-invoke tearing down the listener mid-run
- * (TASK-667: confirmed H2).
+ * History source: the persisted `raw_events` log via
+ * `cyboflow.runs.listRawEvents`, re-queried on runId change AND (debounced)
+ * whenever the live `cyboflowStore.streamEvents` buffer grows. This mirrors
+ * RunChatView's strategy: the in-memory `streamEvents` buffer is wiped on every
+ * `setActiveRun`, so rendering straight from it erased the stream when you
+ * clicked away from a run and returned. Re-querying the durable log keeps the
+ * full history on return while still reflecting live deltas (≤ debounce lag).
+ * `streamEvents.length` is used only as a "new events arrived" change signal.
  *
  * Events are rendered via a typed switch dispatch over StreamEvent.type —
  * each of the five SDK discriminators (system / assistant / user / result /
  * stream_event) routes to a dedicated row component; unrecognized types fall
  * through to the 'unknown' branch with a collapsed payload debug view.
- *
- * TODO(epic-7-trpc-cutover): migrate to trpc.cyboflow.events.onStreamEvent({ runId })
  */
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useEffect, useRef, useState, useCallback, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { trpc } from '../../trpc/client';
 import type { StreamEvent } from '../../utils/cyboflowApi';
+
+/** Debounce window for live re-fetch after a streamEvents delta lands. */
+const LIVE_REFETCH_DEBOUNCE_MS = 400;
 
 // ---------------------------------------------------------------------------
 // Row components — one per SDK discriminator
@@ -302,13 +306,63 @@ function renderEvent(event: StreamEvent): ReactElement {
 
 export function RunView() {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
-  const streamEvents = useCyboflowStore((s) => s.streamEvents);
+  // Live buffer is used ONLY as a change signal — actual rows come from the
+  // durable re-query so history survives clicking away and returning.
+  const streamEventCount = useCyboflowStore((s) => s.streamEvents.length);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const [events, setEvents] = useState<StreamEvent[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Re-query the durable raw_events log. Result type is INFERRED from AppRouter
+  // (StreamEnvelope[]); we attach runId to match the renderer's StreamEvent.
+  const loadEvents = useCallback(async (runId: string): Promise<void> => {
+    try {
+      const result = await trpc.cyboflow.runs.listRawEvents.query({ runId });
+      setEvents(result.map((envelope) => ({ ...envelope, runId })));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Initial / runId-change load.
+  useEffect(() => {
+    if (!activeRunId) {
+      setEvents([]);
+      setIsLoading(false);
+      return;
+    }
+    let aborted = false;
+    setIsLoading(true);
+    setEvents([]);
+    void (async () => {
+      try {
+        const result = await trpc.cyboflow.runs.listRawEvents.query({ runId: activeRunId });
+        if (aborted) return;
+        setEvents(result.map((envelope) => ({ ...envelope, runId: activeRunId })));
+      } finally {
+        if (!aborted) setIsLoading(false);
+      }
+    })();
+    return () => {
+      aborted = true;
+    };
+  }, [activeRunId]);
+
+  // Live re-fetch — debounced re-query whenever this run's streamEvents grow.
+  useEffect(() => {
+    if (!activeRunId) return;
+    if (streamEventCount === 0) return;
+    const timer = setTimeout(() => {
+      void loadEvents(activeRunId);
+    }, LIVE_REFETCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [activeRunId, streamEventCount, loadEvents]);
 
   // Auto-scroll to the bottom when new events arrive
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [streamEvents.length]);
+  }, [events.length]);
 
   if (!activeRunId) {
     return (
@@ -326,10 +380,12 @@ export function RunView() {
       </div>
 
       <div className="flex-1 overflow-auto rounded border border-border-primary bg-bg-secondary p-2">
-        {streamEvents.length === 0 ? (
-          <p className="text-xs text-text-secondary">Waiting for events…</p>
+        {events.length === 0 ? (
+          <p className="text-xs text-text-secondary">
+            {isLoading ? 'Loading events…' : 'Waiting for events…'}
+          </p>
         ) : (
-          streamEvents.map((event, idx) => (
+          events.map((event, idx) => (
             <div key={idx}>{renderEvent(event)}</div>
           ))
         )}
