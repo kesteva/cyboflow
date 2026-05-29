@@ -19,7 +19,7 @@ export function StatusBar() {
       aria-label="Application status bar"
     >
       {/* Left side: app label — extension point for future indicators */}
-      <span className="text-[10px] text-text-muted leading-none select-none">Cyboflow</span>
+      <span className="text-[10px] uppercase tracking-[0.14em] text-text-muted leading-none select-none">Cyboflow</span>
 
       {/* Right side: status indicators */}
       <div className="flex items-center gap-2">
