@@ -48,10 +48,199 @@
   /* Navigation-specific grays for dark theme */
   --gray-750: rgb(42 50 63);  /* Between gray-700 and gray-800 */
   --gray-850: rgb(24 32 44);  /* Between gray-800 and gray-900 */
+
+  /* ── Paper theme primitives (Protoflow warm-paper / terracotta) ── */
+  --paper:       #f5f1e8;  /* primary background / canvas */
+  --paper-2:     #ebe4d2;  /* rails, headers, title bar */
+  --paper-3:     #efeadc;  /* pending / disabled fill */
+  --paper-white: #ffffff;  /* cards / inputs sit on white */
+  --ink:         #1a1815;  /* primary text, emphasized borders, dark buttons */
+  --ink-2:       #6a5e44;  /* secondary text */
+  --ink-3:       #9c8e6c;  /* muted text, placeholders */
+  --line:        #d8cfb8;  /* default 1px borders / dividers */
+  --line-2:      #e6dec7;  /* dashed inner dividers */
+
+  /* Accent family (terracotta) + warm status hues — shared primitives */
+  --terracotta:      #c96442;
+  --terracotta-rgb:  201 100 66;
+  --terracotta-deep: #a8543a;
+  --green-accent:    #2d8a5b;
+  --amber-accent:    #d4a72c;
+  --warm-red:        #b5482f;
+  --human:           #d99a3d;  /* human-checkpoint fill */
+  --human-hatch:     #c98a2d;  /* hatched-head stripe */
+  --human-border:    #a86b1d;  /* human-checkpoint border */
+
+  /* Workflow phase colors — shared across themes; consumed by the flow graph */
+  --color-phase-plan:     #3b6dd6;
+  --color-phase-refine:   #5a4ad6;
+  --color-phase-execute:  #c96442;
+  --color-phase-verify:   #2d8a5b;
+  --color-phase-review:   #a87a2c;
+  --color-phase-compound: #8b5cf6;
+  --color-phase-prune:    #8a4a4a;
+
+  /* Cross-theme semantic accents — resolve against the active theme's
+     interactive/text tokens, so each theme keeps its own accent + emphasis. */
+  --color-accent:            var(--color-interactive-primary);
+  --color-accent-rgb:        var(--color-interactive-rgb);
+  --color-border-emphasized: var(--color-text-primary);
+  --color-human:             var(--human);
 }
 
-/* Dark Theme - Current Default */
+/* ───────────────────────────────────────────────────────────────
+ * Paper Theme — NEW DEFAULT (Protoflow warm-paper / terracotta).
+ * Lives on the bare :root so it applies pre-mount and whenever no
+ * theme class is set. `.dark` and `.light` override it (switchable).
+ * ─────────────────────────────────────────────────────────────── */
 :root {
+  /* Backgrounds */
+  --color-bg-primary: var(--paper);
+  --color-bg-secondary: var(--paper-2);
+  --color-bg-tertiary: var(--paper-3);
+  --color-bg-hover: var(--paper-2);
+  --color-bg-active: var(--line-2);
+
+  /* Surfaces — cards/inputs sit on white over the paper canvas */
+  --color-surface-primary: var(--paper-white);
+  --color-surface-secondary: var(--paper-2);
+  --color-surface-tertiary: var(--paper-3);
+  --color-surface-hover: var(--paper);
+
+  /* Text */
+  --color-text-primary: var(--ink);
+  --color-text-secondary: var(--ink-2);
+  --color-text-tertiary: var(--ink-3);
+  --color-text-muted: var(--ink-3);
+  --color-text-disabled: #b3a685;
+
+  /* Borders */
+  --color-border-primary: var(--line);
+  --color-border-secondary: var(--line);
+  --color-border-tertiary: var(--line-2);
+  --color-border-hover: var(--ink);
+  --color-border-focus: var(--terracotta);
+
+  /* Interactive (terracotta; CTAs invert to ink on hover per Protoflow) */
+  --color-interactive-primary: var(--terracotta);
+  --color-interactive-hover: var(--ink);
+  --color-interactive-active: var(--terracotta-deep);
+  --color-interactive-text: var(--terracotta);
+  --color-focus-ring: var(--terracotta);
+  --color-interactive-rgb: var(--terracotta-rgb);
+
+  --color-text-interactive-on-dark: var(--terracotta);
+  --color-text-interactive-on-dark-hover: var(--ink);
+  --color-text-interactive-on-dark-active: var(--terracotta-deep);
+  --color-text-interactive-on-dark-focus: var(--terracotta);
+
+  --color-surface-interactive: var(--paper-white);
+  --color-surface-interactive-hover: var(--paper-2);
+  --color-interactive-surface: rgba(var(--terracotta-rgb), 0.12);
+  --color-interactive-surface-hover: rgba(var(--terracotta-rgb), 0.2);
+
+  --color-border-interactive-subtle: var(--line);
+  --color-border-interactive: var(--ink-3);
+  --color-interactive-border: rgba(var(--terracotta-rgb), 0.5);
+  --color-interactive-border-hover: rgba(var(--terracotta-rgb), 0.7);
+
+  --color-text-interactive-muted: var(--ink-3);
+  --color-focus-ring-subtle: rgba(var(--terracotta-rgb), 0.4);
+
+  /* Status */
+  --color-status-success: var(--green-accent);
+  --color-status-success-hover: #246f49;
+  --color-status-warning: var(--amber-accent);
+  --color-status-warning-hover: #b88e22;
+  --color-status-error: var(--warm-red);
+  --color-status-error-hover: #913a26;
+  --color-status-info: var(--color-phase-plan);
+  --color-status-neutral: var(--ink-3);
+
+  /* Context-aware text — paper/ink backgrounds */
+  --color-text-on-primary: var(--ink);
+  --color-text-on-secondary: var(--ink);
+  --color-text-on-tertiary: var(--ink);
+  --color-text-on-surface: var(--ink);
+  --color-text-on-interactive: var(--paper);
+  --color-text-on-status-success: #ffffff;
+  --color-text-on-status-warning: var(--ink);
+  --color-text-on-status-error: #ffffff;
+  --color-text-on-status-info: #ffffff;
+  --color-text-on-navigation: var(--ink);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--terracotta);
+  --color-button-primary-hover: var(--ink);
+  --color-button-primary-text: var(--paper);
+  --color-button-secondary-bg: var(--paper-white);
+  --color-button-secondary-hover: var(--paper-2);
+  --color-button-secondary-text: var(--ink);
+  --color-button-ghost-hover: var(--paper-2);
+  --color-button-ghost-text: var(--ink-2);
+
+  /* Cards/Panels */
+  --color-card-bg: var(--paper-white);
+  --color-card-border: var(--line);
+  --color-card-nested-bg: var(--paper-2);
+
+  /* Forms — focus border goes ink (Protoflow .D-chat-box:focus-within) */
+  --color-input-bg: var(--paper-white);
+  --color-input-border: var(--line);
+  --color-input-focus: var(--ink);
+  --color-input-text: var(--ink);
+  --color-input-placeholder: var(--ink-3);
+
+  /* Modal */
+  --color-modal-overlay: rgba(26, 24, 21, 0.55);
+  --color-modal-bg: var(--paper);
+
+  /* Navigation / sidebar (paper-2 rails, terracotta selection accent) */
+  --color-surface-navigation: var(--paper-2);
+  --color-surface-navigation-hover: var(--paper);
+  --color-surface-navigation-active: var(--line-2);
+  --color-surface-navigation-selected: var(--paper);
+  --color-surface-navigation-selected-hover: var(--paper);
+  --color-text-navigation-primary: var(--ink);
+  --color-text-navigation-secondary: var(--ink-2);
+  --color-text-navigation-muted: var(--ink-3);
+  --color-text-navigation-selected: var(--ink);
+  --color-text-navigation-hover: var(--ink);
+  --color-text-navigation-section: var(--ink-3);
+  --color-text-navigation-brand: var(--ink-2);
+  --color-border-navigation: var(--line);
+  --color-divider-navigation: var(--line);
+  --color-divider-navigation-subtle: var(--line-2);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--paper-2);
+  --color-scrollbar-thumb: var(--line);
+  --color-scrollbar-thumb-hover: var(--ink-3);
+
+  /* Terminal — warm-paper ANSI */
+  --color-terminal-bg: var(--paper);
+  --color-terminal-fg: var(--ink);
+  --color-terminal-cursor: var(--terracotta);
+  --color-terminal-black: var(--ink);
+  --color-terminal-red: var(--warm-red);
+  --color-terminal-green: var(--green-accent);
+  --color-terminal-yellow: var(--amber-accent);
+  --color-terminal-blue: var(--color-phase-plan);
+  --color-terminal-magenta: var(--color-phase-compound);
+  --color-terminal-cyan: #2a7d8a;
+  --color-terminal-white: var(--ink-2);
+  --color-terminal-bright-black: var(--ink-3);
+  --color-terminal-bright-red: var(--terracotta);
+  --color-terminal-bright-green: #3fa56f;
+  --color-terminal-bright-yellow: #e0b53e;
+  --color-terminal-bright-blue: #5a84e0;
+  --color-terminal-bright-magenta: #9d6ef0;
+  --color-terminal-bright-cyan: #379aa8;
+  --color-terminal-bright-white: var(--ink);
+}
+
+/* Dark Theme (switchable — legacy Crystal default) */
+:root.dark {
   /* Semantic Tokens - Backgrounds */
   --color-bg-primary: var(--gray-900);
   --color-bg-secondary: var(--gray-800);
@@ -62,8 +251,9 @@
   /* Semantic Tokens - Surface Colors */
   --color-surface-primary: var(--gray-800);
   --color-surface-secondary: var(--gray-700);
+  --color-surface-tertiary: var(--gray-750);
   --color-surface-hover: var(--gray-700);
-  
+
   /* Semantic Tokens - Text */
   --color-text-primary: rgb(255 255 255);
   --color-text-secondary: var(--gray-100);
@@ -74,6 +264,7 @@
   /* Semantic Tokens - Borders */
   --color-border-primary: var(--gray-750);
   --color-border-secondary: var(--gray-700);
+  --color-border-tertiary: var(--gray-800);
   --color-border-hover: var(--gray-600);
   --color-border-focus: var(--blue-500);
   
@@ -242,6 +433,13 @@
   --color-interactive-active: var(--lilac-700); /* Active state */
   --color-interactive-text: var(--lilac-500);  /* Link text color */
   --color-interactive-rgb: 139 103 246;       /* RGB value for lilac-500 */
+
+  /* High-contrast interactive text on dark surfaces within light mode.
+     Defined explicitly so light no longer inherits these from the base. */
+  --color-text-interactive-on-dark: var(--lilac-500);
+  --color-text-interactive-on-dark-hover: var(--lilac-600);
+  --color-text-interactive-on-dark-active: var(--lilac-400);
+  --color-text-interactive-on-dark-focus: var(--lilac-500);
   
   /* Semantic Tokens - Status Colors */
   --color-status-success: rgb(22 163 74);    /* Softer green */
