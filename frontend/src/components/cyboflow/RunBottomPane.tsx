@@ -41,8 +41,8 @@ function LocalTabBar({ tabs, activeTab, onTabChange }: LocalTabBarProps) {
             onClick={() => onTabChange(tab.id)}
             className={
               isActive
-                ? 'border-b-2 border-interactive px-4 py-2 text-sm font-medium text-text-primary'
-                : 'px-4 py-2 text-sm font-medium text-text-secondary hover:text-text-primary'
+                ? 'border-b-2 border-interactive px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-text-primary'
+                : 'px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-text-tertiary hover:text-text-primary'
             }
           >
             {tab.label}
