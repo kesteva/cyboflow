@@ -157,7 +157,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     runLabel={activeRunId}
                     folderPath={activeRun?.worktree_path}
                     branchName={activeRun?.branch_name}
-                    isRunning={!phaseState.isLoading && phaseState.error === null}
+                    // Reflect the run's ACTUAL lifecycle status, not phaseState
+                    // load state (which is always "loaded, no error" once ready
+                    // and so pinned the badge to RUNNING even after the run
+                    // rested in awaiting_review). activeRun.status now stays
+                    // fresh via activeRunsStore's onRunStatusChanged subscription.
+                    isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
                   />
                 </div>
               )}

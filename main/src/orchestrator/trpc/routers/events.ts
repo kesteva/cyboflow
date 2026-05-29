@@ -12,6 +12,7 @@ import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { throttleAsyncIterator } from '../throttle';
 import type { ApprovalCreatedEvent, ApprovalDecidedEvent } from '../../../../../shared/types/approvals';
 import type { StuckDetectedEvent } from '../../../../../shared/types/stuckDetection';
+import type { RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
 // Placeholder event types — swapped out in stream-parser-to-main epic.
@@ -76,6 +77,21 @@ export const questionEvents = new EventEmitter();
  * circular imports.
  */
 export const stepTransitionEvents = new EventEmitter();
+
+/**
+ * Main-process EventEmitter for project-wide run-status changes.
+ *
+ * The RunExecutor's lifecycle-transition adapter (main/src/index.ts) emits on
+ * this emitter after every successful executor-driven status transition:
+ *   runStatusEvents.emit('changed', { runId, status } satisfies RunStatusChangedEvent);
+ *
+ * This is the missing "run status changed" signal noted in activeRunsStore: a
+ * clean-drain REST to awaiting_review creates no approval row, so none of the
+ * approval/stuck subscriptions fired and the rail/action-bar stayed stale on a
+ * finished run. Module-level singleton so the index.ts adapter and this router
+ * share one instance without a circular import.
+ */
+export const runStatusEvents = new EventEmitter();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -253,6 +269,32 @@ export const eventsRouter = router({
       const source = eventToAsyncIterable<StuckDetectedEvent>(
         stuckEvents,
         'detected',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    }),
+
+  /**
+   * Subscribe to project-wide run-status changes (all runs).
+   *
+   * Emitted by the RunExecutor lifecycle-transition adapter on every
+   * executor-driven status change — crucially the clean-drain REST to
+   * awaiting_review, which creates no approval row and so fired none of the
+   * approval/stuck events `activeRunsStore` previously relied on. The store
+   * uses this as an invalidation signal to re-fetch the active-run list, so a
+   * finished run's action bar (Merge / Create-PR / Dismiss) enables without a
+   * manual refresh.
+   *
+   * No throttle: lifecycle transitions are infrequent and each must surface.
+   */
+  onRunStatusChanged: protectedProcedure
+    .subscription(async function* ({ signal }): AsyncGenerator<RunStatusChangedEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<RunStatusChangedEvent>(
+        runStatusEvents,
+        'changed',
         abortSignal,
       );
       for await (const ev of source) {
