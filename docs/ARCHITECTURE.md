@@ -84,6 +84,41 @@ Core business logic services. Key components:
   `cyboflow_system_design.md:64`). Still owns the PTY spawn path (`spawnPtyProcess`); kept
   in place even though `ClaudeCodeManager` no longer routes through it, so future CLI tools
   can be added as additional subclasses.
+- **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
+  Claude substrate (IDEA-013), a sibling of the SDK `ClaudeCodeManager`. It drives a REAL
+  interactive `claude` REPL over the inherited `AbstractCliManager` PTY machinery (no headless
+  `-p` flag, no stream-json output flag) and recovers structured panel fidelity out of band via
+  a `TranscriptTailSource`. `workflow_runs.substrate` ('sdk' | 'interactive') is stamped at
+  launch and dispatched by the `SubstrateDispatchFacade`.
+
+#### Interactive-substrate workflow step tracking
+
+The Workflow Progress panel advances on interactive-substrate runs through the **exact same
+MCP-driven chain** the SDK substrate uses (scope decision #3: step tracking comes from
+`cyboflow_report_step`, NOT from parsing the transcript stream). The MAIN orchestrating
+interactive `claude` session calls the `cyboflow_report_step` MCP tool → `OrchSocketServer` →
+`handleReportStep` → `buildStepTransitionEvent` (`stepTransitionBridge.ts`) →
+`stepTransitionEvents.emit('transition', …)` → the `onStepTransition` subscription →
+`mergeTransition` (`useWorkflowPhaseState.ts`), advancing the panel with zero renderer changes.
+Two substrate-specific seams make this work and are the only interactive-side additions:
+- **`CYBOFLOW_RUN_ID = workflow_runs.id`** is injected into the interactive PTY env (the real
+  run id, NOT the discovered Claude session UUID) so the handler binds a real `workflow_runs`
+  row.
+- **Prompt-body prepend**: interactive `claude` has no SDK `systemPrompt.append` channel, so the
+  per-run step-reporting instruction (`buildStepReportingAppend`, built from the run's EFFECTIVE
+  `resolveWorkflowDefinition(name, spec_json)` — the dynamic, user-editable step-id model) is
+  concatenated to the HEAD of the prompt written to PTY stdin. This is the interactive analogue
+  of the SDK manager's `composeSystemPromptAppend` (`claudeCodeManager.ts:478`). Fail-soft: a
+  non-SoloFlow / broken-spec run resolves to a `null` definition and prepends nothing.
+
+**v1 limit — main-session-only step reporting.** Only the MAIN orchestrating session can call
+`cyboflow_report_step`. Agent-tool **subagents** run in isolated sub-sessions that inherit
+**neither** the `mcpServers` config **nor** the parent's hook scope (the same inherited IDEA-029
+limit), so they cannot report steps — even though the PreToolUse shell hook itself does fire for
+subagents (Probe A2). This ties directly to the **S5/TASK-810** subagent gating decision:
+interactive selection is restricted for subagent-spawning workflows OR the `Task` tool is
+force-denied, so a delegated step is always reported from the main session. Per-subagent step
+reporting is explicitly out of scope for v1.
 - **`terminalSessionManager.ts` / `terminalPanelManager.ts` / `runCommandManager.ts`** —
   These three services are the remaining live users of `@homebridge/node-pty-prebuilt-multiarch`
   (terminal panel and script execution surfaces — unrelated to Claude).

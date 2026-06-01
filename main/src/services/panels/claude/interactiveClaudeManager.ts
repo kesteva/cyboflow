@@ -12,6 +12,8 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
+import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
+import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 
 /**
  * InteractiveClaudeManager — the interactive (subscription-billed) Claude
@@ -498,10 +500,73 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // does not race/clobber the SDK path.
     this.persistDiscoveredSessionId(sessionId, tailSource);
 
-    // Write the initial prompt once the REPL is ready.
-    this.sendInput(panelId, options.prompt + '\n');
+    // Write the initial prompt once the REPL is ready. The step-reporting
+    // instruction (TASK-803) is PREPENDED to the prompt head here — the
+    // interactive analogue of the SDK manager's composeSystemPromptAppend
+    // (claudeCodeManager.ts:478), which interactive `claude` cannot use because
+    // the REPL has no SDK `systemPrompt.append` channel. See composePromptBody.
+    const promptToSend = this.composePromptBody(runId, options.prompt);
+    this.sendInput(panelId, promptToSend + '\n');
 
     return spawnPromise;
+  }
+
+  /**
+   * Compose the initial prompt body written to PTY stdin: the per-run
+   * step-reporting instruction (TASK-803 `buildStepReportingAppend`) prepended to
+   * the run prompt, separated by a blank line.
+   *
+   * This is the ONE new seam this slice owns. It is the interactive analogue of
+   * the SDK manager's `composeSystemPromptAppend` (claudeCodeManager.ts:478) /
+   * the index.ts promptReader adapter (index.ts:614) — the interactive REPL has
+   * no SDK `systemPrompt.append`, so the instruction reaches the MAIN session by
+   * concatenation to the prompt HEAD instead.
+   *
+   * Dynamic step-id model (post main-merge): step ids are per-row, user-editable
+   * data. `resolveWorkflowDefinition(name, spec_json)` is the RUNTIME source of
+   * truth (a FULL override of the static WORKFLOW_DEFINITIONS seed), so we resolve
+   * the run's EFFECTIVE definition from the run's workflow row BEFORE building the
+   * append — never keying WORKFLOW_DEFINITIONS[name] directly. Mirrors the JOIN in
+   * stepTransitionBridge.ts:134 / index.ts:617-622.
+   *
+   * Fail-soft: a missing run row, a non-SoloFlow name, or a broken/empty
+   * `spec_json` resolves to a `null` definition → `buildStepReportingAppend(null)`
+   * returns `''` → the prompt is sent UNCHANGED. Mirrors `resolveInitialStepId`'s
+   * null branch (stepTransitionBridge.ts:52); nothing is ever prepended as garbage.
+   */
+  private composePromptBody(runId: string, prompt: string): string {
+    const append = this.buildStepReportingAppendForRun(runId);
+    return append ? `${append}\n\n${prompt}` : prompt;
+  }
+
+  /**
+   * Resolve the run's effective WorkflowDefinition and build its step-reporting
+   * append. Returns `''` (fail-soft) when the run row cannot be found or its
+   * workflow has no resolvable definition (TASK-803 contract). No DB write, no
+   * emit — this is a pure read of the run's workflow row.
+   */
+  private buildStepReportingAppendForRun(runId: string): string {
+    let row: { name?: unknown; specJson?: unknown } | undefined;
+    try {
+      row = this.db
+        .prepare(
+          `SELECT w.name AS name, w.spec_json AS specJson
+             FROM workflow_runs r
+             JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
+        )
+        .get(runId) as { name?: unknown; specJson?: unknown } | undefined;
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] step-reporting workflow lookup failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return '';
+    }
+
+    if (!row) return '';
+    const name = typeof row.name === 'string' ? row.name : '';
+    const specJson = typeof row.specJson === 'string' ? row.specJson : null;
+    return buildStepReportingAppend(resolveWorkflowDefinition(name, specJson));
   }
 
   /**
