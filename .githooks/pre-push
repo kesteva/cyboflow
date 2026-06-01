@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Pre-push gate for main.
+#
+# Runs typecheck + lint before any push that updates origin/main, so the most
+# common breakage (type errors under the strict `any` ban, lint failures) never
+# reaches main. Pushes to other branches are not gated. The full unit suite
+# runs in CI (.github/workflows/quality.yml) as the backstop.
+#
+# Bypass intentionally with:  git push --no-verify
+#
+# Activate after a fresh clone with:  git config core.hooksPath .githooks
+#
+
+protected_ref="refs/heads/main"
+gate=0
+
+# stdin: <local_ref> <local_sha> <remote_ref> <remote_sha> per ref being pushed
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "$protected_ref" ]; then
+    gate=1
+  fi
+done
+
+if [ "$gate" -eq 0 ]; then
+  exit 0
+fi
+
+echo "[pre-push] gating push to main — typecheck + lint…"
+
+if ! pnpm typecheck; then
+  echo "[pre-push] ✗ typecheck failed — push aborted (use 'git push --no-verify' to override)"
+  exit 1
+fi
+
+if ! pnpm lint; then
+  echo "[pre-push] ✗ lint failed — push aborted (use 'git push --no-verify' to override)"
+  exit 1
+fi
+
+echo "[pre-push] ✓ checks passed"
+exit 0
