@@ -14,7 +14,7 @@ import {
   FileText,
   Eye
 } from 'lucide-react';
-import { Input, Textarea, Checkbox } from './ui/Input';
+import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
 import { useTheme } from '../contexts/ThemeContext';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
@@ -29,7 +29,6 @@ interface SettingsProps {
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const [_config, setConfig] = useState<AppConfig | null>(null);
   const [verbose, setVerbose] = useState(false);
-  const [anthropicApiKey, setAnthropicApiKey] = useState('');
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve'>('approve');
@@ -63,7 +62,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       const data = response.data;
       setConfig(data);
       setVerbose(data.verbose || false);
-      setAnthropicApiKey(data.anthropicApiKey || '');
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       // Only 'approve' is a valid UI selection; coerce any legacy 'ignore' value to 'approve'.
@@ -100,7 +98,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       
       const response = await API.config.update({
         verbose,
-        anthropicApiKey,
         systemPromptAppend: globalSystemPrompt,
         claudeExecutablePath,
         defaultPermissionMode,
@@ -211,22 +208,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               icon={<Zap className="w-5 h-5" />}
               defaultExpanded={true}
             >
-              <SettingsSection
-                title="Smart Session Names"
-                description="Let Claude automatically generate meaningful names for your sessions"
-                icon={<FileText className="w-4 h-4" />}
-              >
-                <Input
-                  label="Anthropic API Key"
-                  type="password"
-                  value={anthropicApiKey}
-                  onChange={(e) => setAnthropicApiKey(e.target.value)}
-                  placeholder="sk-ant-..."
-                  fullWidth
-                  helperText="Optional: Used only for generating session names. Your main Claude Code API key is separate."
-                />
-              </SettingsSection>
-
               <SettingsSection
                 title="Default Security Mode"
                 description="How Claude should handle potentially risky operations"

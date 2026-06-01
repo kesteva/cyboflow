@@ -18,7 +18,6 @@ export class ConfigManager extends EventEmitter {
     this.config = {
       gitRepoPath: defaultGitPath || os.homedir(),
       verbose: false,
-      anthropicApiKey: undefined,
       systemPromptAppend: undefined,
       runScript: undefined,
       defaultPermissionMode: 'approve',
@@ -137,10 +136,6 @@ export class ConfigManager extends EventEmitter {
 
   getDatabasePath(): string {
     return path.join(this.configDir, 'sessions.db');
-  }
-
-  getAnthropicApiKey(): string | undefined {
-    return this.config.anthropicApiKey;
   }
 
   getSystemPromptAppend(): string | undefined {

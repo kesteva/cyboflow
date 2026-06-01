@@ -1,6 +1,5 @@
 export interface AppConfig {
   verbose?: boolean;
-  anthropicApiKey?: string;
   // Legacy fields for backward compatibility
   gitRepoPath?: string;
   systemPromptAppend?: string;
@@ -50,7 +49,6 @@ export interface AppConfig {
 
 export interface UpdateConfigRequest {
   verbose?: boolean;
-  anthropicApiKey?: string;
   claudeExecutablePath?: string;
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';

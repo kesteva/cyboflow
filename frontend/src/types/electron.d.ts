@@ -119,7 +119,6 @@ interface ElectronAPI {
     hasChangesToRebase: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
     getGitCommands: (sessionId: string) => Promise<IPCDataResponse<GitCommands>>;
     getRemoteUrl: (sessionId: string) => Promise<IPCDataResponse<{ remoteUrl: string; branchName: string }>>;
-    generateName: (prompt: string) => Promise<IPCResponse<string>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
     toggleAutoCommit: (sessionId: string) => Promise<IPCResponse<void>>;

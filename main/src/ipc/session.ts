@@ -1489,23 +1489,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('sessions:generate-name', async (_event, prompt: string) => {
-    try {
-      // Generate a deterministic slug from the prompt (no API call)
-      const words = prompt
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter((word: string) => word.length > 2)
-        .slice(0, 3);
-      const name = words.join('-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 30) || 'new-task';
-      return { success: true, data: name };
-    } catch (error) {
-      console.error('Failed to generate session name:', error);
-      return { success: false, error: 'Failed to generate session name' };
-    }
-  });
-
   ipcMain.handle('sessions:rename', async (_event, sessionId: string, newName: string) => {
     try {
       // Update the session name in the database

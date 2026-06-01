@@ -222,11 +222,6 @@ export class API {
       return window.electronAPI.sessions.hasChangesToRebase(sessionId);
     },
 
-    async generateName(prompt: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.generateName(prompt);
-    },
-
     async rename(sessionId: string, newName: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.rename(sessionId, newName);
