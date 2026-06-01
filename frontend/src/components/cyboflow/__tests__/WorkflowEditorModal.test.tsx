@@ -287,6 +287,20 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('double-clicking "Run with modifications" starts exactly ONE run (no duplicate)', async () => {
+    await renderEditMode();
+
+    const runBtn = screen.getByTestId('editor-run-button');
+    // Two clicks in the same tick — before React re-renders the disabled button.
+    // The synchronous in-flight ref must reject the second one.
+    await act(async () => {
+      fireEvent.click(runBtn);
+      fireEvent.click(runBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces a server validation error inline when Save fails', async () => {
     mockUpdateSpec.mockRejectedValue(new Error('phase ids must be unique'));
     await renderEditMode();

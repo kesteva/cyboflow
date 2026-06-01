@@ -108,8 +108,10 @@ import { WorkflowPicker } from '../WorkflowPicker';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { panelApi } from '../../../services/panelApi';
 import { API } from '../../../utils/api';
+import { trpc } from '../../../trpc/client';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
+const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 
 beforeEach(() => {
   // Reset store state
@@ -270,5 +272,23 @@ describe('WorkflowPicker — Quick Session button', () => {
 
     // panelApi.createPanel must NOT have been called
     expect(panelApi.createPanel).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowPicker — Start Run double-submit guard', () => {
+  it('double-clicking "Start Run" starts exactly ONE run (no duplicate worktree)', async () => {
+    mockRunStart.mockClear();
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+
+    // Two clicks in the same tick — before React re-renders the disabled button.
+    // The synchronous in-flight ref must reject the second one.
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledTimes(1);
   });
 });
