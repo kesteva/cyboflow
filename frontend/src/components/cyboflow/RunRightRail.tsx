@@ -78,10 +78,10 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               data-testid={tab.testid}
               onClick={() => setActiveTab(tab.id)}
               className={[
-                'flex-1 px-2 py-1.5 text-xs font-medium transition-colors',
+                'flex-1 px-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] transition-colors',
                 isActive
                   ? 'border-b-2 border-interactive text-text-primary'
-                  : 'text-text-secondary hover:text-text-primary',
+                  : 'text-text-tertiary hover:text-text-primary',
               ].join(' ')}
             >
               {tab.label}

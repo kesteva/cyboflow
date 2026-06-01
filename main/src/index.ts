@@ -36,7 +36,8 @@ import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
-import { approvalEvents, questionEvents } from './orchestrator/trpc/routers/events';
+import { approvalEvents, questionEvents, runStatusEvents } from './orchestrator/trpc/routers/events';
+import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
@@ -581,12 +582,31 @@ async function initializeServices() {
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
   // delegating to the transitionTo* helpers at the index.ts boundary.
   const rawDb = databaseService.getDb();
+  // Emit a project-wide run-status-changed signal AFTER a successful transition.
+  // Placed after the (throwing) transition call so a rejected transition (e.g.
+  // restAwaitingReview when the run already left 'running') fires no false event.
+  // This is the signal activeRunsStore subscribes to so the rail/action-bar
+  // react to the clean-drain REST, which creates no approval row.
+  const emitRunStatus = (event: RunStatusChangedEvent): void => {
+    runStatusEvents.emit('changed', event);
+  };
   const lifecycleTransitions: LifecycleTransitionsLike = {
-    running: (runId) => transitionToRunning(rawDb, { runId }),
-    restAwaitingReview: (runId) => transitionRunningToAwaitingReview(rawDb, { runId }),
-    failed: (runId, fromStatus, errorMessage) =>
-      transitionToFailed(rawDb, { runId, fromStatus, errorMessage }),
-    canceled: (runId) => transitionToCanceled(rawDb, { runId }),
+    running: (runId) => {
+      transitionToRunning(rawDb, { runId });
+      emitRunStatus({ runId, status: 'running' });
+    },
+    restAwaitingReview: (runId) => {
+      transitionRunningToAwaitingReview(rawDb, { runId });
+      emitRunStatus({ runId, status: 'awaiting_review' });
+    },
+    failed: (runId, fromStatus, errorMessage) => {
+      transitionToFailed(rawDb, { runId, fromStatus, errorMessage });
+      emitRunStatus({ runId, status: 'failed' });
+    },
+    canceled: (runId) => {
+      transitionToCanceled(rawDb, { runId });
+      emitRunStatus({ runId, status: 'canceled' });
+    },
   };
 
   // StepTransitionEmitterLike adapter — delegates to buildStepTransitionEvent() +
@@ -828,6 +848,8 @@ app.whenReady().then(async () => {
           worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
         removeWorktreeByPath: (projectPath, worktreePath) =>
           worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
+        deleteBranch: (projectPath, branchName, opts) =>
+          worktreeManager.deleteBranch(projectPath, branchName, opts),
         gitPush: (worktreePath) => worktreeManager.gitPush(worktreePath),
         getRemoteUrlAndBranch: (worktreePath) => worktreeManager.getRemoteUrlAndBranch(worktreePath),
       },
@@ -837,6 +859,11 @@ app.whenReady().then(async () => {
           return p ? { path: p.path } : undefined;
         },
       },
+      // Close-out clears the run's pending approvals (settles in-memory entries
+      // + sweeps DB-only `pending` rows) so dismiss/merge/PR don't leave orphaned
+      // items in the review queue.
+      clearPendingApprovalsForRun: (runId) =>
+        ApprovalRouter.getInstance().clearPendingForRun(runId),
     });
     console.log('[Main] runs.merge/dismiss deps wired');
 

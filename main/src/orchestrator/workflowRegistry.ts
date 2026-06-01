@@ -17,7 +17,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
-import type { PermissionMode, WorkflowRow, WorkflowRunRow, SoloFlowWorkflowName } from '../../../shared/types/workflows';
+import type { PermissionMode, WorkflowRow, WorkflowRunRow, SoloFlowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
+import { isSoloFlowWorkflowName } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 
@@ -250,10 +251,122 @@ export class WorkflowRegistry {
    */
   getById(workflowId: string): WorkflowRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at FROM workflows WHERE id = ?',
     );
     const row = stmt.get(workflowId) as WorkflowRow | undefined;
     return row ?? null;
+  }
+
+  /**
+   * Persist an edited `WorkflowDefinition` onto a workflow's `spec_json` column.
+   *
+   * Used by the blueprint editor's "Save" action. The definition is the
+   * authoritative effective graph for the row from this point on — see
+   * `resolveWorkflowDefinition` (READ path) which prefers a parsed `spec_json`
+   * over the built-in fallback.
+   *
+   * Caller must have validated the definition with the strict zod write-path
+   * schema (`workflowDefinitionSchema`) before calling this — the registry does
+   * NOT re-validate, it only serialises.
+   *
+   * Throws if no row matches `workflowId` (0 rows updated).
+   */
+  updateSpec(workflowId: string, definition: WorkflowDefinition): void {
+    const stmt = this.db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?');
+    const tx = this.db.transaction(() => stmt.run(JSON.stringify(definition), workflowId));
+    const result = tx();
+    if (result.changes === 0) {
+      throw new Error(`WorkflowRegistry.updateSpec: workflow ${workflowId} not found`);
+    }
+  }
+
+  /**
+   * Reset a BUILT-IN workflow's `spec_json` to `'{}'` so it falls back to its
+   * static `WORKFLOW_DEFINITIONS` definition.
+   *
+   * Refuses to reset a custom ("save as new") flow: those rows have no built-in
+   * fallback, so clearing `spec_json` would leave `resolveWorkflowDefinition`
+   * returning null (an error state). The editor only offers "Reset to default"
+   * for built-in flows for this reason.
+   *
+   * Throws if the row is missing or its name is not a built-in.
+   */
+  resetSpec(workflowId: string): void {
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.resetSpec: workflow ${workflowId} not found`);
+    }
+    if (!isSoloFlowWorkflowName(row.name)) {
+      throw new Error(
+        `WorkflowRegistry.resetSpec: cannot reset a custom workflow to default (${workflowId})`,
+      );
+    }
+    const stmt = this.db.prepare("UPDATE workflows SET spec_json = '{}' WHERE id = ?");
+    const tx = this.db.transaction(() => {
+      stmt.run(workflowId);
+    });
+    tx();
+  }
+
+  /**
+   * Create a brand-new custom workflow row from an edited definition
+   * ("Save as new flow").
+   *
+   * The name must not collide with a built-in name, the `__quick__` sentinel,
+   * or any existing workflow name in the same project — collisions throw so the
+   * router can map to a CONFLICT.
+   *
+   * The generated id mirrors the seed/sentinel convention but adds a random
+   * suffix so multiple custom flows can coexist:
+   *   `wf-<projectId>-custom-<8 lowercase hex chars>`.
+   *
+   * Caller must have validated the definition with `workflowDefinitionSchema`.
+   *
+   * @returns The freshly inserted `WorkflowRow`.
+   */
+  createCustom(
+    projectId: number,
+    name: string,
+    definition: WorkflowDefinition,
+    permissionMode: PermissionMode,
+  ): WorkflowRow {
+    if (isSoloFlowWorkflowName(name) || name === QUICK_WORKFLOW_NAME) {
+      throw new Error(
+        `WorkflowRegistry.createCustom: name '${name}' is reserved`,
+      );
+    }
+
+    const collisionStmt = this.db.prepare(
+      'SELECT 1 FROM workflows WHERE project_id = ? AND name = ? LIMIT 1',
+    );
+    const existing = collisionStmt.get(projectId, name);
+    if (existing !== undefined) {
+      throw new Error(
+        `WorkflowRegistry.createCustom: a workflow named '${name}' already exists in this project`,
+      );
+    }
+
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 8);
+    const newId = `wf-${projectId}-custom-${suffix}`;
+
+    const insert = this.db.prepare(`
+      INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+      VALUES (?, ?, ?, ?, NULL, ?)
+    `);
+
+    const tx = this.db.transaction(() => {
+      insert.run(newId, projectId, name, JSON.stringify(definition), permissionMode);
+    });
+    tx();
+
+    const row = this.getById(newId);
+    if (!row) {
+      // Should be unreachable — the INSERT just succeeded inside a transaction.
+      throw new Error(
+        `WorkflowRegistry.createCustom: inserted workflow ${newId} could not be read back`,
+      );
+    }
+    return row;
   }
 
   /**
@@ -266,7 +379,7 @@ export class WorkflowRegistry {
    */
   listByProject(projectId: number): WorkflowRow[] {
     const stmt = this.db.prepare(
-      `SELECT id, project_id, name, workflow_path, permission_mode, created_at
+      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
        FROM workflows
        WHERE project_id = ? AND name != ?
        ORDER BY name`,

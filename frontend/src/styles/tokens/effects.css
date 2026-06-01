@@ -12,11 +12,14 @@
   --radius-3xl: 1.5rem;     /* 24px */
   --radius-full: 9999px;
   
-  /* Component-Specific Border Radius */
-  --button-radius: var(--radius-md);
-  --card-radius: var(--radius-lg);
-  --input-radius: var(--radius-md);
-  --modal-radius: var(--radius-lg);
+  /* Component-Specific Border Radius
+     Paper (default) is sharp — 0 everywhere except true pills/dots/avatars
+     (which keep --radius-full). The .dark / .light themes restore the
+     original rounded values below so they keep their identity. */
+  --button-radius: var(--radius-none);
+  --card-radius: var(--radius-none);
+  --input-radius: var(--radius-none);
+  --modal-radius: var(--radius-none);
   --badge-radius: var(--radius-full);
   
   /* Border Widths */
@@ -135,4 +138,13 @@
   --disabled-opacity: var(--opacity-50);
   --hover-opacity: var(--opacity-80);
   --modal-overlay-opacity: var(--opacity-50);
+}
+
+/* Switchable themes keep the original rounded radii (paper stays sharp). */
+:root.dark,
+:root.light {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --modal-radius: var(--radius-lg);
 }

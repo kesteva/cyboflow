@@ -611,7 +611,9 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // ---------------------------------------------------------------------------
 
   const handleProjectClick = async (project: Project) => {
-    const { navigateToProject } = useNavigationStore.getState();
+    const { navigateToProject, closeHumanReview } = useNavigationStore.getState();
+    // Picking a project leaves the human-review overview for that project's surface.
+    closeHumanReview();
     navigateToProject(project.id);
   };
 
@@ -859,6 +861,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // backfilled per TASK-788) starts the approval subscription; routing through
     // setActiveRun instead would drive the workflow-run pane, which throws on the
     // __quick__ sentinel in getPhaseState and renders a degraded text-only history.
+    // Picking a session leaves the human-review overview for its panel surface.
+    // Done unconditionally (not gated on projectId) so a quick session with a
+    // null projectId still dismisses the review pane.
+    useNavigationStore.getState().closeHumanReview();
     useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
@@ -870,6 +876,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // sessions are handled separately above (they must NOT route through
   // setActiveRun, which throws on the __quick__ sentinel in getPhaseState).
   const handleActiveRunClick = (runId: string, projectId: number) => {
+    // Picking a run leaves the human-review overview for the workflow-run pane.
+    useNavigationStore.getState().closeHumanReview();
     useCyboflowStore.getState().setActiveRun(runId);
     useNavigationStore.getState().setActiveProjectId(projectId);
   };
@@ -1091,12 +1099,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                     <button
                       onClick={(e) => handleRefreshProjectGitStatus(project, e)}
                       disabled={refreshingProjects.has(project.id)}
-                      className={`p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded transition-all opacity-0 group-hover:opacity-100 ${
+                      className={`p-1 hover:bg-bg-hover rounded transition-all opacity-0 group-hover:opacity-100 ${
                         refreshingProjects.has(project.id) ? 'cursor-wait' : ''
                       }`}
                       title="Refresh git status for all sessions"
                     >
-                      <RefreshCw className={`w-3 h-3 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 ${
+                      <RefreshCw className={`w-3 h-3 text-text-tertiary hover:text-text-primary ${
                         refreshingProjects.has(project.id) ? 'animate-spin' : ''
                       }`} />
                     </button>

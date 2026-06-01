@@ -102,53 +102,60 @@ export default function ReviewQueueView() {
   const totalCount = queue.length;
 
   return (
-    <div className="w-[360px] h-full flex flex-col border-r border-border-primary bg-bg-secondary overflow-y-auto">
-      <div className="px-4 py-3 border-b border-border-primary">
-        <h2 className="text-sm font-semibold text-text-primary">Review Queue</h2>
-        <span className="text-xs text-text-muted">{totalCount} pending</span>
+    <div className="w-full h-full flex flex-col bg-bg-primary overflow-hidden">
+      {/* Protoflow human-review header */}
+      <div className="flex-shrink-0 border-b border-border-primary bg-bg-secondary px-7 py-4">
+        <div className="eyebrow text-text-tertiary">Pending checkpoints</div>
+        <h2 className="mt-1 text-[22px] font-bold tracking-[-0.01em] text-text-primary">Human review</h2>
+        <div className="mt-1 flex items-center gap-3.5 text-xs text-text-secondary">
+          <span data-testid="review-total-count"><b className="font-bold text-text-primary">{totalCount}</b> total</span>
+          <span data-testid="review-blocking-count"><b className="font-bold text-interactive">{blocking.length}</b> blocking a sprint</span>
+        </div>
       </div>
-      <OnboardingCard
-        dismissed={onboardingDismissed}
-        onDismiss={handleDecide}
-      />
-      {totalCount === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
-          No pending approvals
-        </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto">
-          {blocking.length > 0 && (
-            <section>
-              <h3 className="px-4 py-1 text-xs font-semibold text-status-error bg-bg-tertiary">
-                Blocking
-              </h3>
-              {blocking.map((item, i) => (
-                <QueueRow
-                  key={itemId(item)}
-                  item={item}
-                  isFocused={i === focusedIndex}
-                  runStatus={runStatusMap[itemRunId(item)]}
-                  onDecide={handleDecide}
-                />
-              ))}
-            </section>
+
+      <div className="flex-1 overflow-y-auto px-7 py-4">
+        <div className="mx-auto w-full max-w-[860px]">
+          <OnboardingCard
+            dismissed={onboardingDismissed}
+            onDismiss={handleDecide}
+          />
+          {totalCount === 0 ? (
+            <div className="py-16 text-center text-sm text-text-muted">
+              <b className="mb-1.5 block text-base text-text-primary">No pending reviews</b>
+              All workflows are unblocked. New checkpoints land here as agents pause.
+            </div>
+          ) : (
+            <>
+              {blocking.length > 0 && (
+                <section>
+                  <h3 className="eyebrow mb-2 mt-3 text-status-error">Blocking</h3>
+                  {blocking.map((item, i) => (
+                    <QueueRow
+                      key={itemId(item)}
+                      item={item}
+                      isFocused={i === focusedIndex}
+                      runStatus={runStatusMap[itemRunId(item)]}
+                      onDecide={handleDecide}
+                    />
+                  ))}
+                </section>
+              )}
+              <section>
+                <h3 className="eyebrow mb-2 mt-3 text-text-tertiary">Pending</h3>
+                {normal.map((item, i) => (
+                  <QueueRow
+                    key={itemId(item)}
+                    item={item}
+                    isFocused={blocking.length + i === focusedIndex}
+                    runStatus={runStatusMap[itemRunId(item)]}
+                    onDecide={handleDecide}
+                  />
+                ))}
+              </section>
+            </>
           )}
-          <section>
-            <h3 className="px-4 py-1 text-xs font-semibold text-text-muted bg-bg-tertiary">
-              Pending
-            </h3>
-            {normal.map((item, i) => (
-              <QueueRow
-                key={itemId(item)}
-                item={item}
-                isFocused={blocking.length + i === focusedIndex}
-                runStatus={runStatusMap[itemRunId(item)]}
-                onDecide={handleDecide}
-              />
-            ))}
-          </section>
         </div>
-      )}
+      </div>
     </div>
   );
 }

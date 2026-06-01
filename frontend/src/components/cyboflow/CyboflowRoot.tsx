@@ -16,6 +16,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
@@ -29,6 +30,7 @@ import { PanelTabBar } from '../panels/PanelTabBar';
 import { PanelContainer } from '../panels/PanelContainer';
 import { useAddTerminalPanel } from '../../hooks/useAddTerminalPanel';
 import { useAddTerminalShortcut } from '../../hooks/useAddTerminalShortcut';
+import { useEditWorkflowShortcut } from '../../hooks/useEditWorkflowShortcut';
 import { useEnsureClaudePanel } from '../../hooks/useEnsureClaudePanel';
 import { useAddClaudeShortcut } from '../../hooks/useAddClaudeShortcut';
 import { useAddQuickSessionShortcut } from '../../hooks/useAddQuickSessionShortcut';
@@ -85,6 +87,30 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
 
+  // Blueprint editor — open for the active run's workflow (header button + ⌘E).
+  // Only meaningful when a run with a resolvable workflow_id is active.
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const editWorkflowId = activeRun?.workflow_id ?? null;
+  const canEditWorkflow = projectId !== null && editWorkflowId !== null;
+
+  const handleOpenEditor = useCallback(() => {
+    if (!canEditWorkflow) return;
+    setIsEditorOpen(true);
+  }, [canEditWorkflow]);
+
+  useEditWorkflowShortcut(handleOpenEditor, { enabled: canEditWorkflow });
+
+  const handleEditorSaved = useCallback(() => {
+    setIsEditorOpen(false);
+    // Force the canvas to re-resolve its phase state: clear + reselect the run so
+    // useWorkflowPhaseState re-runs getPhaseState (which re-reads spec_json).
+    if (activeRunId !== null) {
+      const store = useCyboflowStore.getState();
+      store.clearActiveRun();
+      store.setActiveRun(activeRunId);
+    }
+  }, [activeRunId]);
+
   // Lifecycle dialogs (TASK-796 / GAP-B) — target either the worktree-backed
   // quick session OR the planner/workflow run resolved from the active selection.
   const lifecycleTarget = useLifecycleTarget();
@@ -117,7 +143,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       <div className="flex items-center gap-2 border-b border-border-primary px-4 py-2">
         <button
           onClick={() => setIsPickerOpen(true)}
-          className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
           data-testid="open-workflow-picker"
         >
           Choose workflow
@@ -128,10 +154,21 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           onClick={handleStartQuickSession}
           disabled={projectId === null || quickSession.isStarting}
           title={projectId === null ? 'Select a project to start a quick session' : undefined}
-          className="rounded bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="start-quick-session"
         >
           Quick Session
+        </button>
+
+        {/* Edit flow — opens the blueprint editor for the active run's workflow (⌘E). */}
+        <button
+          onClick={handleOpenEditor}
+          disabled={!canEditWorkflow}
+          title={canEditWorkflow ? 'Edit the active workflow (⌘E)' : 'Start a workflow run to edit its blueprint'}
+          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="open-workflow-editor"
+        >
+          Edit flow
         </button>
 
         <div className="flex-1" />
@@ -157,7 +194,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     runLabel={activeRunId}
                     folderPath={activeRun?.worktree_path}
                     branchName={activeRun?.branch_name}
-                    isRunning={!phaseState.isLoading && phaseState.error === null}
+                    // Reflect the run's ACTUAL lifecycle status, not phaseState
+                    // load state (which is always "loaded, no error" once ready
+                    // and so pinned the badge to RUNNING even after the run
+                    // rested in awaiting_review). activeRun.status now stays
+                    // fresh via activeRunsStore's onRunStatusChanged subscription.
+                    isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
                   />
                 </div>
               )}
@@ -193,7 +235,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>
               <button
                 onClick={() => setIsPickerOpen(true)}
-                className="rounded bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+                className="rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
                 data-testid="open-workflow-picker-cta"
               >
                 Choose a workflow
@@ -220,6 +262,20 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             />
           </div>
         </Modal>
+      )}
+
+      {/* Workflow blueprint editor — opened from the "Edit flow" header button /
+          ⌘E for the active run's workflow. Only mounted when a run with a
+          resolvable workflow_id is active. */}
+      {projectId !== null && editWorkflowId !== null && (
+        <WorkflowEditorModal
+          isOpen={isEditorOpen}
+          mode="edit"
+          workflowId={editWorkflowId}
+          projectId={projectId}
+          onClose={() => setIsEditorOpen(false)}
+          onSaved={handleEditorSaved}
+        />
       )}
 
       {/* Lifecycle dialogs — session-scoped for quick sessions, run-scoped for

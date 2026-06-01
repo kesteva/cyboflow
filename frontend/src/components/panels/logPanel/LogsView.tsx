@@ -28,29 +28,31 @@ export const LogsView: React.FC<LogsViewProps> = ({ sessionId, isVisible }) => {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastLogCount = useRef(0);
   
-  // Create ANSI to HTML converter with dark theme colors
+  // Create ANSI to HTML converter; default fg/bg track the active theme so
+  // logs stay legible on the warm-paper background, while the 16 ANSI colors
+  // keep their terminal meaning (mapped to paper-legible values).
   const ansiConverter = useMemo(() => new AnsiToHtml({
-    fg: '#e5e7eb', // text-gray-200
-    bg: '#0a0a0a', // bg-primary
+    fg: 'var(--color-text-primary)',
+    bg: 'var(--color-bg-primary)',
     newline: true,
     escapeXML: true,
     colors: {
-      0: '#000000', // Black
-      1: '#ef4444', // Red
-      2: '#10b981', // Green  
-      3: '#f59e0b', // Yellow
-      4: '#3b82f6', // Blue
-      5: '#a855f7', // Magenta
-      6: '#06b6d4', // Cyan
-      7: '#e5e7eb', // White
+      0: '#1f2933', // Black (paper-legible, not pure #000)
+      1: '#dc2626', // Red
+      2: '#059669', // Green
+      3: '#b45309', // Yellow (darkened for light bg)
+      4: '#2563eb', // Blue
+      5: '#9333ea', // Magenta
+      6: '#0891b2', // Cyan
+      7: '#4b5563', // White -> mid gray so it reads on paper
       8: '#6b7280', // Bright Black (Gray)
-      9: '#f87171', // Bright Red
-      10: '#34d399', // Bright Green
-      11: '#fbbf24', // Bright Yellow
-      12: '#60a5fa', // Bright Blue
-      13: '#c084fc', // Bright Magenta
-      14: '#22d3ee', // Bright Cyan
-      15: '#ffffff', // Bright White
+      9: '#ef4444', // Bright Red
+      10: '#10b981', // Bright Green
+      11: '#d97706', // Bright Yellow (darkened for light bg)
+      12: '#3b82f6', // Bright Blue
+      13: '#a855f7', // Bright Magenta
+      14: '#06b6d4', // Bright Cyan
+      15: '#374151', // Bright White -> dark gray so it reads on paper
     }
   }), []);
 
@@ -403,8 +405,8 @@ export const LogsView: React.FC<LogsViewProps> = ({ sessionId, isVisible }) => {
                   key={index} 
                   className={cn(
                     "log-line",
-                    isCurrentMatch && "bg-yellow-500/30",
-                    isMatch && !isCurrentMatch && "bg-yellow-500/10"
+                    isCurrentMatch && "bg-status-warning/30",
+                    isMatch && !isCurrentMatch && "bg-status-warning/10"
                   )}
                 >
                   {isHighlighted ? (
@@ -413,7 +415,7 @@ export const LogsView: React.FC<LogsViewProps> = ({ sessionId, isVisible }) => {
                     log.message.split(new RegExp(`(${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'))
                       .map((part, i) => 
                         part.toLowerCase() === searchTerm.toLowerCase() ? (
-                          <span key={i} className="bg-yellow-500/50 text-black px-0.5">
+                          <span key={i} className="bg-status-warning/50 text-text-primary px-0.5">
                             {part}
                           </span>
                         ) : (

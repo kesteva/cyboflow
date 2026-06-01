@@ -29,6 +29,20 @@ export const TERMINAL_RUN_STATUSES_SQL_IN = `('${TERMINAL_RUN_STATUSES.join(
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'timed_out';
 
+/**
+ * Emitted on the global `runStatusEvents` emitter whenever the RunExecutor
+ * drives a workflow_run through a lifecycle transition (running, awaiting_review
+ * on clean drain, failed, canceled). This is the project-wide "run status
+ * changed" signal that the rail/action-bar reactivity (`activeRunsStore`) was
+ * previously missing — a clean-drain REST to awaiting_review creates no approval
+ * row and so fired none of the approval/stuck events the store listened to,
+ * leaving the action bar disabled on a finished run.
+ */
+export interface RunStatusChangedEvent {
+  runId: string;
+  status: WorkflowRunStatus;
+}
+
 export interface WorkflowRow {
   id: string;
   project_id: number;

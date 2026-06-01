@@ -23,7 +23,7 @@
  * end-to-end without spinning up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
+import { ApprovalRouter, RunNotRunningError, ApprovalNotFoundError, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -626,44 +626,49 @@ describe('ApprovalRouter', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Case G (TASK-305): recoverStaleAwaitingReview transitions awaiting_review
-  //                    rows to failed; leaves other statuses untouched.
+  // Case G (TASK-305, revised): recoverStaleAwaitingReview fails ONLY
+  //   gate-blocked awaiting_review runs (those with a pending approval whose
+  //   socket is dead). A clean-drain REST run (awaiting_review, NO pending
+  //   approval) is left untouched so the user can still close it out, and
+  //   other statuses are unaffected.
   //
-  //  Seed: 2 workflow_runs rows with status='awaiting_review', 1 with
-  //        status='running'. Call recovery. Assert:
-  //   (a) return value is 2.
-  //   (b) the 2 awaiting_review rows now have status='failed' and
-  //       error_message='app_restart'.
-  //   (c) the running row is unchanged.
+  //  Seed: run-G1 awaiting_review WITH a pending approval (gate-blocked),
+  //        run-G2 awaiting_review with NO pending approval (clean rest),
+  //        run-G3 running. Call recovery. Assert:
+  //   (a) return value is 1 (only G1).
+  //   (b) G1 now has status='failed' and error_message='app_restart'.
+  //   (c) G2 is still 'awaiting_review' (survives — closable after restart).
+  //   (d) the running row is unchanged.
   // -------------------------------------------------------------------------
-  it("recoverStaleAwaitingReview transitions awaiting_review rows to failed", () => {
+  it("recoverStaleAwaitingReview fails only gate-blocked runs, sparing clean rests", () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
     const router = ApprovalRouter.initialize(adapter);
 
     seedRun(db, { id: 'run-G1', status: 'awaiting_review' });
+    seedApproval(db, { id: 'approval-G1', runId: 'run-G1', toolUseId: 'approval-G1' });
     seedRun(db, { id: 'run-G2', status: 'awaiting_review' });
     seedRun(db, { id: 'run-G3', status: 'running' });
 
     const count = router.recoverStaleAwaitingReview();
 
-    // (a) return value is 2
-    expect(count).toBe(2);
+    // (a) only the gate-blocked run is recovered
+    expect(count).toBe(1);
 
-    // (b) the two awaiting_review rows are now 'failed' with error_message='app_restart'
+    // (b) the gate-blocked run is now 'failed' with error_message='app_restart'
     const g1 = db
       .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
       .get('run-G1') as { status: string; error_message: string };
     expect(g1.status).toBe('failed');
     expect(g1.error_message).toBe('app_restart');
 
+    // (c) the clean-rest run survives — it needs no socket and stays closable
     const g2 = db
-      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
-      .get('run-G2') as { status: string; error_message: string };
-    expect(g2.status).toBe('failed');
-    expect(g2.error_message).toBe('app_restart');
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get('run-G2') as { status: string };
+    expect(g2.status).toBe('awaiting_review');
 
-    // (c) the running row is unchanged
+    // (d) the running row is unchanged
     const g3 = db
       .prepare("SELECT status FROM workflow_runs WHERE id = ?")
       .get('run-G3') as { status: string };
@@ -877,5 +882,81 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     // Clean up: respond to avoid dangling promises.
     await router.respond(req.id, { behavior: 'deny' });
     await helperPromise;
+  });
+
+  // -------------------------------------------------------------------------
+  // Stale-approval handling (review-queue cleanup):
+  //   - respond() settles a `pending` DB row that has no in-memory entry
+  //     (its decisionPromise died with the process / the run was closed out)
+  //   - respond() still throws ApprovalNotFoundError when nothing is pending
+  //   - clearPendingForRun sweeps DB-only `pending` rows, scoped to the run
+  // -------------------------------------------------------------------------
+  it('respond settles a stale (DB-only) pending approval and emits approvalDecided', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-stale';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-stale', runId, status: 'pending' });
+
+    const decided: Array<{ approvalId: string; decision: string }> = [];
+    router.on('approvalDecided', (e: { approvalId: string; decision: string }) => decided.push(e));
+
+    // No requestApproval → no in-memory entry. respond must settle the DB row
+    // directly so the review queue can drop it.
+    await router.respond('appr-stale', { behavior: 'deny', message: 'Rejected by user' });
+
+    const row = db
+      .prepare('SELECT status, decided_by FROM approvals WHERE id = ?')
+      .get('appr-stale') as { status: string; decided_by: string };
+    expect(row.status).toBe('rejected');
+    expect(row.decided_by).toBe('user');
+    expect(decided).toEqual([{ approvalId: 'appr-stale', decision: 'rejected' }]);
+  });
+
+  it('respond (stale allow) settles the DB row to approved', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-stale-allow';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-allow', runId, status: 'pending' });
+
+    await router.respond('appr-allow', { behavior: 'allow' });
+
+    const row = db.prepare('SELECT status FROM approvals WHERE id = ?').get('appr-allow') as { status: string };
+    expect(row.status).toBe('approved');
+  });
+
+  it('respond throws ApprovalNotFoundError when nothing pending exists (unknown or already-terminal)', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-none';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-done', runId, status: 'rejected' });
+
+    await expect(router.respond('does-not-exist', { behavior: 'deny' })).rejects.toBeInstanceOf(ApprovalNotFoundError);
+    await expect(router.respond('appr-done', { behavior: 'deny' })).rejects.toBeInstanceOf(ApprovalNotFoundError);
+  });
+
+  it('clearPendingForRun sweeps DB-only pending approvals (scoped to the run) and emits approvalDecided', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-sweep';
+    seedRun(db, { id: runId, status: 'awaiting_review' });
+    seedApproval(db, { id: 'sweep-a', runId, status: 'pending' });
+    seedApproval(db, { id: 'sweep-b', runId, status: 'pending' });
+    // A different run's pending approval must be left untouched.
+    seedRun(db, { id: 'run-other', status: 'awaiting_review' });
+    seedApproval(db, { id: 'other-a', runId: 'run-other', status: 'pending' });
+
+    const decided: string[] = [];
+    router.on('approvalDecided', (e: { approvalId: string; decision: string }) => decided.push(e.approvalId));
+
+    router.clearPendingForRun(runId);
+
+    const swept = db.prepare('SELECT status FROM approvals WHERE run_id = ?').all(runId) as Array<{ status: string }>;
+    expect(swept.every((r) => r.status === 'rejected')).toBe(true);
+    const other = db.prepare("SELECT status FROM approvals WHERE id = 'other-a'").get() as { status: string };
+    expect(other.status).toBe('pending');
+    expect(decided.sort()).toEqual(['sweep-a', 'sweep-b']);
   });
 });

@@ -18,11 +18,15 @@
  * There is no single project-wide "run status changed" tRPC subscription. We
  * reuse the existing GLOBAL lifecycle subscriptions as invalidation signals and
  * re-fetch on each:
- *   - `cyboflow.events.onStuckDetected`   (run → stuck)
- *   - `cyboflow.events.onApprovalCreated` (run → awaiting_review)
- *   - `cyboflow.events.onApprovalDecided` (review resolved / run advances)
- * Run start and run completion are picked up by an explicit `refresh()` call
- * from `cyboflowStore.setActiveRun` (start) and from the rail's own
+ *   - `cyboflow.events.onStuckDetected`     (run → stuck)
+ *   - `cyboflow.events.onApprovalCreated`   (run → awaiting_review via a gate)
+ *   - `cyboflow.events.onApprovalDecided`   (review resolved / run advances)
+ *   - `cyboflow.events.onRunStatusChanged`  (any executor lifecycle transition —
+ *       crucially the clean-drain REST to awaiting_review, which creates NO
+ *       approval row and so fired none of the events above, leaving a finished
+ *       run's action bar disabled. See RunStatusChangedEvent.)
+ * Run start and run completion are also picked up by an explicit `refresh()`
+ * call from `cyboflowStore.setActiveRun` (start) and from the rail's own
  * project-expand effect. This avoids inventing a polling loop.
  *
  * ## Filtering
@@ -185,11 +189,20 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
         onError: (err: unknown) =>
           console.warn('[activeRunsStore] onApprovalDecided error:', err),
       });
+      // The clean-drain REST (running → awaiting_review) and the failed/canceled
+      // executor transitions emit no approval row, so this is the only signal
+      // that re-enables a finished run's action bar without a manual refresh.
+      const runStatusSub = trpc.cyboflow.events.onRunStatusChanged.subscribe(undefined, {
+        onData: onLifecycle,
+        onError: (err: unknown) =>
+          console.warn('[activeRunsStore] onRunStatusChanged error:', err),
+      });
 
       const unsubscribe = () => {
         stuckSub.unsubscribe();
         approvalCreatedSub.unsubscribe();
         approvalDecidedSub.unsubscribe();
+        runStatusSub.unsubscribe();
         initialized = false;
         cachedUnsubscribe = null;
       };

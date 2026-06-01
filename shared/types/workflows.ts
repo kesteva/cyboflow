@@ -16,6 +16,12 @@ export interface WorkflowRow {
   name: string;
   workflow_path: string | null;
   permission_mode: PermissionMode;
+  /**
+   * JSON-encoded `WorkflowDefinition` for an edited or custom flow.
+   * `'{}'` (or empty/invalid JSON) means "use the built-in definition".
+   * See `resolveWorkflowDefinition`.
+   */
+  spec_json: string;
   created_at: string;
 }
 
@@ -150,12 +156,17 @@ export interface WorkflowPhase {
 }
 
 /**
- * Top-level definition for one of the five named cyboflow workflows.
- * The `id` is constrained to `SoloFlowWorkflowName` so the compiler can
- * enforce completeness of `WORKFLOW_DEFINITIONS`.
+ * Top-level definition for a cyboflow workflow.
+ *
+ * `id` is a free-form `string`: for the five built-ins it is the
+ * `SoloFlowWorkflowName`, but a user-edited or "save as new" custom flow may
+ * carry any id. `WORKFLOW_DEFINITIONS` is still typed
+ * `Readonly<Record<SoloFlowWorkflowName, WorkflowDefinition>>`, so the literal
+ * built-in ids satisfy this wider type and the Record key set still forces all
+ * five built-ins to be present.
  */
 export interface WorkflowDefinition {
-  id: SoloFlowWorkflowName;
+  id: string;
   phases: WorkflowPhase[];
 }
 
@@ -180,10 +191,13 @@ export interface WorkflowStepTransitionEvent {
   timestamp: string;
 }
 
-// ─── Hardcoded starter definitions ──────────────────────────────────────────
+// ─── Built-in starter definitions ───────────────────────────────────────────
 // Source of truth: docs/protoflow-design/data.js (IDEA-026).
-// These are static in v1; a future task will migrate them to a user-editable
-// store (TASK-764).
+// These are the fallback definitions used whenever a workflow row has no usable
+// `spec_json`. Users may now edit a flow's graph (persisted to
+// `workflows.spec_json`) or save an edited graph as a brand-new custom flow;
+// `resolveWorkflowDefinition` picks the effective definition at read time.
+// The v1 loopback invariant still holds: `loopback` is intra-phase only.
 
 /**
  * The five built-in workflow definitions, keyed by `SoloFlowWorkflowName`.
@@ -624,3 +638,101 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<SoloFlowWorkflowName, Workflo
     ],
   },
 };
+
+// ─── Effective-definition resolution helpers ─────────────────────────────────
+// Pure functions consumed on READ paths in both processes. Intentionally free
+// of zod and of Node built-ins (fs/path/os) so they import in any environment;
+// the STRICT write-path validation lives in
+// main/src/orchestrator/workflowDefinitionSchema.ts (zod, main-only).
+
+/**
+ * Type guard: is `name` one of the five built-in `SoloFlowWorkflowName`s?
+ */
+export function isSoloFlowWorkflowName(name: string): name is SoloFlowWorkflowName {
+  return (SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name);
+}
+
+/**
+ * Narrow an unknown value to a structurally-valid `WorkflowStep`.
+ * Lenient on optional fields; only the required `id`/`name`/`agent` are checked.
+ */
+function isValidStep(value: unknown): value is WorkflowStep {
+  if (typeof value !== 'object' || value === null) return false;
+  const step = value as Record<string, unknown>;
+  return (
+    typeof step.id === 'string' &&
+    step.id.length > 0 &&
+    typeof step.name === 'string' &&
+    step.name.length > 0 &&
+    typeof step.agent === 'string' &&
+    step.agent.length > 0
+  );
+}
+
+/**
+ * Narrow an unknown value to a structurally-valid `WorkflowPhase`
+ * (id/label/color present and at least one valid step).
+ */
+function isValidPhase(value: unknown): value is WorkflowPhase {
+  if (typeof value !== 'object' || value === null) return false;
+  const phase = value as Record<string, unknown>;
+  if (typeof phase.id !== 'string' || phase.id.length === 0) return false;
+  if (typeof phase.label !== 'string' || phase.label.length === 0) return false;
+  if (typeof phase.color !== 'string' || phase.color.length === 0) return false;
+  if (!Array.isArray(phase.steps) || phase.steps.length === 0) return false;
+  return phase.steps.every(isValidStep);
+}
+
+/**
+ * Defensively parse a `spec_json` column into a `WorkflowDefinition`.
+ *
+ * Runs on READ paths, so it is lenient and never throws. Returns `null` for
+ * `null`/`undefined`/`''`/`'{}'`, for non-object or invalid JSON, and for any
+ * structurally-invalid definition (no phases, or a phase/step missing required
+ * fields). A non-null result is a structurally-valid `WorkflowDefinition`.
+ *
+ * NOTE: this is intentionally weaker than the zod write-path schema (which also
+ * enforces kebab-case ids, hex colours, unique-id and loopback invariants).
+ * Authoritative validation happens on the write path before persistence.
+ */
+export function parseWorkflowDefinition(
+  specJson: string | null | undefined,
+): WorkflowDefinition | null {
+  if (specJson === null || specJson === undefined) return null;
+  const trimmed = specJson.trim();
+  if (trimmed === '' || trimmed === '{}') return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const candidate = parsed as Record<string, unknown>;
+
+  if (typeof candidate.id !== 'string' || candidate.id.length === 0) return null;
+  if (!Array.isArray(candidate.phases) || candidate.phases.length === 0) return null;
+  if (!candidate.phases.every(isValidPhase)) return null;
+
+  return candidate as unknown as WorkflowDefinition;
+}
+
+/**
+ * Resolve the effective `WorkflowDefinition` for a workflow row.
+ *
+ * Resolution order:
+ *   1. `spec_json` parses to a valid non-empty definition -> use it.
+ *   2. else if `name` is a built-in -> `WORKFLOW_DEFINITIONS[name]`.
+ *   3. else -> `null` (a custom flow whose spec is missing/broken is an error).
+ */
+export function resolveWorkflowDefinition(
+  name: string,
+  specJson: string | null | undefined,
+): WorkflowDefinition | null {
+  return (
+    parseWorkflowDefinition(specJson) ??
+    (isSoloFlowWorkflowName(name) ? WORKFLOW_DEFINITIONS[name] : null)
+  );
+}

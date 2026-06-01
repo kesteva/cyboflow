@@ -69,9 +69,9 @@ function SystemEventRow({ event }: { event: Extract<StreamEvent, { type: 'system
   if (payload.subtype === 'hook_response') {
     const hr = payload;
     const outcomeColor = hr.outcome === 'success'
-      ? 'text-green-500'
+      ? 'text-status-success'
       : hr.outcome === 'error'
-        ? 'text-red-500'
+        ? 'text-status-error'
         : 'text-text-secondary';
     return (
       <div className="mb-1 rounded border border-border-primary bg-bg-secondary p-2 text-xs text-text-secondary">
@@ -109,7 +109,7 @@ function AssistantEventRow({ event }: { event: Extract<StreamEvent, { type: 'ass
   const content = payload.message?.content ?? [];
 
   return (
-    <div className="mb-1 rounded border-l-2 border-pink-400 bg-bg-secondary p-2 text-xs">
+    <div className="mb-1 rounded border-l-2 border-interactive bg-bg-secondary p-2 text-xs">
       <span className="font-semibold text-text-primary">assistant</span>
       <div className="mt-1">
         {content.map((block, i) => {
@@ -160,7 +160,7 @@ function UserEventRow({ event }: { event: Extract<StreamEvent, { type: 'user' }>
           return (
             <div key={i} className="mt-1">
               {block.is_error && (
-                <span className="mr-1 rounded bg-red-600 px-1 text-white">error</span>
+                <span className="mr-1 rounded bg-status-error px-1 text-white">error</span>
               )}
               <span className="font-mono text-text-secondary">{shortId}…</span>
               {' '}
@@ -217,8 +217,8 @@ function SessionInfoEventRow({ event }: { event: Extract<StreamEvent, { type: 's
     : payload.initial_prompt;
 
   return (
-    <div className="mb-1 rounded border-l-4 border-emerald-500 bg-bg-secondary p-2 text-xs">
-      <span className="font-semibold text-emerald-500">Run started</span>
+    <div className="mb-1 rounded border-l-4 border-status-success bg-bg-secondary p-2 text-xs">
+      <span className="font-semibold text-status-success">Run started</span>
       <div className="mt-1 flex flex-wrap gap-3 text-text-secondary">
         <span><span className="text-text-primary">worktree:</span> {payload.worktree_path}</span>
         <span><span className="text-text-primary">model:</span> {payload.model}</span>
@@ -239,8 +239,8 @@ function RateLimitEventRow({ event }: { event: Extract<StreamEvent, { type: 'rat
     : 'n/a';
 
   return (
-    <div className="mb-1 rounded border border-yellow-500 bg-bg-secondary p-2 text-xs">
-      <span className="font-semibold text-yellow-500">rate_limit_event</span>
+    <div className="mb-1 rounded border border-status-warning bg-bg-secondary p-2 text-xs">
+      <span className="font-semibold text-status-warning">rate_limit_event</span>
       <div className="mt-1 flex flex-wrap gap-3 text-text-secondary">
         <span><span className="text-text-primary">status:</span> {info.status}</span>
         <span><span className="text-text-primary">resets:</span> {resetsAtStr}</span>
@@ -268,8 +268,8 @@ function RunStartedEventRow({ event }: { event: Extract<StreamEvent, { type: 'ru
 function UnknownEventRow({ event }: { event: Extract<StreamEvent, { type: 'unknown' }> }): ReactElement {
   const rawPayload = event.payload;
   return (
-    <div className="mb-1 rounded border border-amber-500 bg-bg-secondary p-2 text-xs">
-      <span className="font-semibold text-amber-500">Unrecognized event</span>
+    <div className="mb-1 rounded border border-status-warning bg-bg-secondary p-2 text-xs">
+      <span className="font-semibold text-status-warning">Unrecognized event</span>
       {' '}
       <span className="font-mono text-text-secondary">{event.type}</span>
       <details className="mt-1">

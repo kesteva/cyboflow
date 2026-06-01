@@ -13,7 +13,7 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
-import { WORKFLOW_DEFINITIONS, SOLOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
+import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
@@ -122,6 +122,11 @@ export interface RunWorktreeManagerLike {
   mergeWorktreeToMain(projectPath: string, worktreePath: string, mainBranch: string): Promise<void>;
   /** `git worktree remove "<worktreePath>" --force` — idempotent on already-gone trees. */
   removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
+  /**
+   * `git branch -d/-D "<branch>"` — idempotent on already-gone branches. Called
+   * AFTER the worktree is removed so the branch is no longer checked out.
+   */
+  deleteBranch(projectPath: string, branchName: string, opts?: { force?: boolean }): Promise<void>;
   /** `git push` from the worktree — pushes the run's branch to origin (Create-PR). */
   gitPush(worktreePath: string): Promise<{ output: string }>;
   /** Resolve the origin remote URL + current branch of the worktree (Create-PR). */
@@ -135,6 +140,13 @@ export interface RunCloseoutSessionManagerLike {
 export interface RunCloseoutDeps {
   worktreeManager: RunWorktreeManagerLike;
   sessionManager: RunCloseoutSessionManagerLike;
+  /**
+   * Settle + drop any pending approvals for the run so close-out doesn't leave
+   * orphaned items stuck in the review queue. Backed by
+   * ApprovalRouter.clearPendingForRun (settles in-memory entries + sweeps any
+   * DB-only `pending` rows, emitting approvalDecided for each).
+   */
+  clearPendingApprovalsForRun: (runId: string) => void;
 }
 
 let runCloseoutDeps: RunCloseoutDeps | null = null;
@@ -291,7 +303,7 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -313,6 +325,16 @@ export const runsRouter = router({
       // idempotent; mark-completed is guarded so it no-ops on an already-terminal
       // run rather than throwing.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
+      // The content is now in main; delete the run's branch so close-out doesn't
+      // leave an orphaned ref. Force-delete because a squash merge leaves the
+      // branch a non-ancestor of main (safe `-d` would refuse it). Skip when the
+      // run never recorded a branch name.
+      if (branchName) {
+        await wm.deleteBranch(projectPath, branchName, { force: true });
+      }
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -355,7 +377,12 @@ export const runsRouter = router({
 
       // Artifact delivered to origin — close the run out. Remove the local
       // worktree (the branch now lives on origin) and mark the run completed.
+      // The local branch is intentionally NOT deleted here: it tracks the
+      // pushed origin branch the user is about to open a PR from.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -380,8 +407,17 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
+      // Dismiss discards the run — force-delete its branch too (its commits go
+      // with it), so close-out doesn't leave an orphaned ref. No-op when the run
+      // never recorded a branch name.
+      if (branchName) {
+        await deps!.worktreeManager.deleteBranch(projectPath, branchName, { force: true });
+      }
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -501,7 +537,9 @@ export const runsRouter = router({
    * Throws:
    *   PRECONDITION_FAILED — ctx.db is undefined.
    *   NOT_FOUND           — runId does not exist in workflow_runs.
-   *   NOT_FOUND           — workflow.name is not a recognized SoloFlowWorkflowName.
+   *   NOT_FOUND           — no effective WorkflowDefinition resolves for the run
+   *                         (resolveWorkflowDefinition returned null: a custom
+   *                         flow with a missing/broken spec, or an unknown name).
    */
   getPhaseState: protectedProcedure
     .input(z.object({ runId: z.string() }))
@@ -520,12 +558,14 @@ export const runsRouter = router({
       // useWorkflowPhaseState's mergeTransition (definition is null at that point).
       const row = ctx.db
         .prepare(
-          `SELECT wr.current_step_id, wr.status AS run_status, w.name AS workflow_name
+          `SELECT wr.current_step_id, wr.status AS run_status, w.name AS workflow_name, w.spec_json AS spec_json
              FROM workflow_runs wr
              JOIN workflows w ON wr.workflow_id = w.id
             WHERE wr.id = ?`,
         )
-        .get(input.runId) as { current_step_id: string | null; run_status: string; workflow_name: string } | undefined;
+        .get(input.runId) as
+        | { current_step_id: string | null; run_status: string; workflow_name: string; spec_json: string | null }
+        | undefined;
 
       if (row === undefined) {
         throw new TRPCError({
@@ -534,17 +574,16 @@ export const runsRouter = router({
         });
       }
 
-      // Narrow workflow name to SoloFlowWorkflowName.
-      if (!(SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(row.workflow_name)) {
+      // Resolve the effective definition: an edited/custom `spec_json` wins, else
+      // the built-in fallback for a SoloFlowWorkflowName, else null.
+      const definition = resolveWorkflowDefinition(row.workflow_name, row.spec_json);
+      if (definition === null) {
         throw new TRPCError({
           code: 'NOT_FOUND',
-          message: `Workflow name '${row.workflow_name}' is not a recognized SoloFlowWorkflowName`,
+          message: `No workflow definition for run ${input.runId} (workflow name '${row.workflow_name}')`,
         });
       }
 
-      // TypeScript narrowing: cast is safe because we validated membership above.
-      const workflowName = row.workflow_name as (typeof SOLOFLOW_WORKFLOW_NAMES)[number];
-      const definition = WORKFLOW_DEFINITIONS[workflowName];
       const currentStepId = row.current_step_id;
 
       // Terminal run statuses: when the run has completed, failed, or been canceled,

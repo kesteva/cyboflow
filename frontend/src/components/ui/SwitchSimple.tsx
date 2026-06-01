@@ -90,7 +90,7 @@ export const SwitchSimple = forwardRef<
             'pointer-events-none block rounded-full shadow-md ring-0 transition-all duration-200',
             'data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0',
             // Thumb colors
-            'data-[state=unchecked]:bg-white data-[state=unchecked]:border data-[state=unchecked]:border-gray-200',
+            'data-[state=unchecked]:bg-white data-[state=unchecked]:border data-[state=unchecked]:border-border-secondary',
             'data-[state=checked]:bg-white data-[state=checked]:shadow-lg',
             // Add elevation on hover
             'group-hover:shadow-lg',

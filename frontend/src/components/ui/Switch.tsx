@@ -105,8 +105,8 @@ export const Switch = forwardRef<
           // Position
           'data-[state=unchecked]:translate-x-0.5',
           sizeConfig.thumbTranslate,
-          // Colors
-          'data-[state=unchecked]:bg-gray-100',
+          // Colors (paper: white knob on both states; dark theme keeps its grays)
+          'data-[state=unchecked]:bg-surface-primary',
           'data-[state=checked]:bg-white',
           // Dark mode colors
           'dark:data-[state=unchecked]:bg-gray-600',

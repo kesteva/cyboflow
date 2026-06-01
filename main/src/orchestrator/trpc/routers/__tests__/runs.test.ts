@@ -60,7 +60,7 @@ import { setStartRunDeps, setRunCloseoutDeps } from '../runs';
 import type { RunWorktreeManagerLike } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
-import type { WorkflowStepTransitionEvent } from '../../../../../../shared/types/workflows';
+import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
@@ -341,6 +341,7 @@ describe('cyboflow.runs.start', () => {
 
 describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
   let db: Database.Database;
+  let clearApprovals: ReturnType<typeof vi.fn>;
 
   function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
     return {
@@ -348,6 +349,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
       gitPush: vi.fn().mockResolvedValue({ output: 'pushed' }),
       getRemoteUrlAndBranch: vi.fn().mockResolvedValue({
         remoteUrl: 'https://github.com/acme/repo.git',
@@ -360,6 +362,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     setRunCloseoutDeps({
       worktreeManager: wm,
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: clearApprovals,
     });
   }
 
@@ -369,6 +372,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
   beforeEach(() => {
     db = createTestDb({ includeStuckDetectedAt: true });
+    clearApprovals = vi.fn();
   });
 
   afterEach(() => {
@@ -377,6 +381,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     setRunCloseoutDeps({
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: () => undefined },
+      clearPendingApprovalsForRun: vi.fn(),
     });
   });
 
@@ -439,7 +444,66 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
     expect(result).toEqual({ success: true });
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-1');
+    // This run has no branch_name → branch deletion must be skipped (no throw).
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
     expect(getStatus('run-dismiss-1')).toBe('canceled');
+  });
+
+  it('dismiss force-deletes the run branch after removing the worktree', async () => {
+    seedRun(db, {
+      id: 'run-dismiss-br',
+      status: 'stuck',
+      worktreePath: '/tmp/wt/run-dismiss-br',
+      branchName: 'cyboflow/sprint/dismissbr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-dismiss-br' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-br');
+    expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/dismissbr', { force: true });
+    expect(clearApprovals).toHaveBeenCalledWith('run-dismiss-br');
+    expect(getStatus('run-dismiss-br')).toBe('canceled');
+  });
+
+  it('merge force-deletes the run branch (squash-safe) after removing the worktree', async () => {
+    seedRun(db, {
+      id: 'run-merge-br',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-merge-br',
+      branchName: 'cyboflow/sprint/mergebr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-merge-br', strategy: 'preserve' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-br');
+    expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/mergebr', { force: true });
+    expect(clearApprovals).toHaveBeenCalledWith('run-merge-br');
+    expect(getStatus('run-merge-br')).toBe('completed');
+  });
+
+  it('createPr preserves the local branch (no deleteBranch — it lives on origin)', async () => {
+    seedRun(db, {
+      id: 'run-pr-br',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-pr-br',
+      branchName: 'cyboflow/sprint/prbr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.createPr({ runId: 'run-pr-br' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-pr-br');
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(clearApprovals).toHaveBeenCalledWith('run-pr-br');
+    expect(getStatus('run-pr-br')).toBe('completed');
   });
 
   it('merge on a missing run → NOT_FOUND', async () => {
@@ -834,6 +898,137 @@ describe('cyboflow.runs.getPhaseState', () => {
     const contextStep = result.stepStates.find((s) => s.stepId === 'context');
     expect(contextStep, 'context step not found in stepStates').toBeDefined();
     expect(contextStep!.status).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.getPhaseState — spec_json resolution (blueprint editor)
+//
+// getPhaseState now resolves the effective WorkflowDefinition via
+// resolveWorkflowDefinition(name, spec_json): a valid spec_json override wins
+// over the built-in fallback, a custom (non-built-in) name resolves purely from
+// its spec_json, and a custom row whose spec_json='{}' has no fallback so it
+// throws NOT_FOUND.
+// ---------------------------------------------------------------------------
+
+/** Seed a workflow + run with an explicit spec_json (defaults vary per test). */
+function seedPhaseRunWithSpec(
+  db: Database.Database,
+  runId: string,
+  workflowName: string,
+  specJson: string,
+  currentStepId: string | null = null,
+  status = 'running',
+): { workflowId: string; runId: string } {
+  const workflowId = `wf-${runId}`;
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(workflowId, workflowName, specJson);
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
+     VALUES (?, ?, 1, '/tmp/test', ?, '{}', ?)`,
+  ).run(runId, workflowId, status, currentStepId);
+
+  return { workflowId, runId };
+}
+
+/** A minimal one-phase one-step definition used for spec_json overrides. */
+function makeSpecDefinition(id: string): WorkflowDefinition {
+  return {
+    id,
+    phases: [
+      {
+        id: 'only',
+        label: 'Only Phase',
+        color: '#c96442',
+        steps: [
+          { id: 'edited-step', name: 'Edited step', agent: 'executor', mcps: ['filesystem'], retries: 0 },
+        ],
+      },
+    ],
+  };
+}
+
+describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDbWithStepTracking();
+  });
+
+  it('resolves a built-in workflow normally when spec_json is "{}"', async () => {
+    const runId = 'run-gps-spec-builtin';
+    seedPhaseRunWithSpec(db, runId, 'soloflow', '{}', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition.id).toBe('soloflow');
+    expect(result.definition.phases.length).toBeGreaterThan(0);
+  });
+
+  it('prefers a valid spec_json override over the built-in definition', async () => {
+    const runId = 'run-gps-spec-override';
+    const override = makeSpecDefinition('soloflow');
+    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    // The override (single 'only' phase / 'edited-step') replaces the built-in graph.
+    expect(result.definition).toEqual(override);
+    expect(result.definition.phases).toHaveLength(1);
+    expect(result.definition.phases[0].id).toBe('only');
+    expect(result.stepStates.map((s) => s.stepId)).toEqual(['edited-step']);
+  });
+
+  it('marks the override step running when current_step_id points into the override graph', async () => {
+    const runId = 'run-gps-spec-override-step';
+    const override = makeSpecDefinition('soloflow');
+    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), 'edited-step');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const edited = result.stepStates.find((s) => s.stepId === 'edited-step');
+    expect(edited).toBeDefined();
+    expect(edited!.status).toBe('running');
+  });
+
+  it('resolves a CUSTOM workflow (non-built-in name + valid spec_json) without throwing', async () => {
+    const runId = 'run-gps-spec-custom';
+    const custom = makeSpecDefinition('my-custom-flow');
+    seedPhaseRunWithSpec(db, runId, 'My Custom Flow', JSON.stringify(custom), null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition).toEqual(custom);
+    expect(result.definition.id).toBe('my-custom-flow');
+  });
+
+  it('throws NOT_FOUND when a CUSTOM row has spec_json="{}" (no built-in fallback)', async () => {
+    const runId = 'run-gps-spec-custom-empty';
+    // Non-built-in name + empty spec → resolveWorkflowDefinition returns null.
+    seedPhaseRunWithSpec(db, runId, 'Broken Custom Flow', '{}', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.getPhaseState({ runId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('falls back to the built-in when spec_json is malformed JSON for a built-in name', async () => {
+    const runId = 'run-gps-spec-malformed';
+    // Lenient READ path: invalid JSON parses to null → built-in fallback for 'sprint'.
+    seedPhaseRunWithSpec(db, runId, 'sprint', '{not valid json', null);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    expect(result.definition.id).toBe('sprint');
   });
 });
 
