@@ -212,7 +212,7 @@ interface MockDb {
   updateSession: MockInstance;
 }
 
-function createMockSessionManager(overrides?: Partial<SessionManager> & { db?: MockDb }): SessionManager {
+function createMockSessionManager(overrides?: Partial<Omit<SessionManager, 'db'>> & { db?: MockDb }): SessionManager {
   return {
     getDbSession: vi.fn(() => undefined),
     getPanelClaudeSessionId: vi.fn(() => undefined),
