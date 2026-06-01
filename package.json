@@ -106,7 +106,8 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/**/*.node",
-      "main/dist/main/src/orchestrator/mcpServer/**/*.js"
+      "main/dist/main/src/orchestrator/mcpServer/**/*.js",
+      "main/dist/main/src/orchestrator/shellHooks/**/*.js"
     ],
     "afterSign": "build/afterSign.js",
     "mac": {
