@@ -13,8 +13,7 @@ import {
   Zap,
   RefreshCw,
   FileText,
-  Eye,
-  BarChart3
+  Eye
 } from 'lucide-react';
 import { Input, Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -48,9 +47,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'analytics'>('general');
-  const [analyticsEnabled, setAnalyticsEnabled] = useState(true);
-  const [previousAnalyticsEnabled, setPreviousAnalyticsEnabled] = useState(true);
+  const [activeTab, setActiveTab] = useState<'general' | 'notifications'>('general');
   const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
@@ -87,13 +84,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         // Update the useNotifications hook with loaded settings
         updateSettings(data.notifications);
       }
-
-      // Load analytics settings
-      if (data.analytics) {
-        const enabled = data.analytics.enabled !== false; // Default to true
-        setAnalyticsEnabled(enabled);
-        setPreviousAnalyticsEnabled(enabled);
-      }
     } catch (err) {
       setError('Failed to load configuration');
     }
@@ -111,23 +101,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         .map(p => p.trim())
         .filter(p => p.length > 0);
       
-      // Track analytics opt-in/opt-out events if the preference changed
-      if (previousAnalyticsEnabled !== analyticsEnabled) {
-        if (analyticsEnabled) {
-          // User opted back in
-          await window.electronAPI.analytics.trackUIEvent({
-            event: 'analytics_opted_in',
-            properties: {}
-          });
-        } else {
-          // User opted out - send final event before disabling
-          await window.electronAPI.analytics.trackUIEvent({
-            event: 'analytics_opted_out',
-            properties: {}
-          });
-        }
-      }
-
       const response = await API.config.update({
         verbose,
         anthropicApiKey,
@@ -138,10 +111,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         devMode,
         enableCyboflowFooter,
         additionalPaths: parsedPaths,
-        notifications: notificationSettings,
-        analytics: {
-          enabled: analyticsEnabled
-        }
+        notifications: notificationSettings
       });
 
       if (!response.success) {
@@ -195,16 +165,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             }`}
           >
             Notifications
-          </button>
-          <button
-            onClick={() => setActiveTab('analytics')}
-            className={`px-4 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'analytics'
-                ? 'text-interactive border-b-2 border-interactive bg-interactive/5'
-                : 'text-text-tertiary hover:text-text-primary hover:bg-surface-hover'
-            }`}
-          >
-            Analytics
           </button>
         </div>
 
@@ -488,93 +448,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             }}
           />
         )}
-
-        {activeTab === 'analytics' && (
-          <form id="analytics-form" onSubmit={handleSubmit} className="space-y-6">
-            {/* Analytics Overview */}
-            <CollapsibleCard
-              title="About Analytics"
-              subtitle="Help improve Cyboflow by sharing anonymous usage data"
-              icon={<BarChart3 className="w-5 h-5" />}
-              defaultExpanded={true}
-              variant="subtle"
-            >
-              <div className="space-y-4">
-                <p className="text-sm text-text-secondary leading-relaxed">
-                  Cyboflow collects anonymous usage analytics to understand how the application is used and to help prioritize improvements. All data is completely anonymous and privacy-focused.
-                </p>
-
-                <div className="bg-surface-tertiary rounded-lg p-4 border border-border-secondary">
-                  <h4 className="font-medium text-text-primary mb-3 text-sm">✅ What we track:</h4>
-                  <ul className="space-y-1 text-xs text-text-secondary">
-                    <li>• Feature usage patterns (which features are used)</li>
-                    <li>• Session counts and statuses</li>
-                    <li>• Git operation types (rebase, squash, etc.)</li>
-                    <li>• UI interactions (view switches, button clicks)</li>
-                    <li>• Error types (generic categories only)</li>
-                    <li>• Performance metrics (categorized durations)</li>
-                  </ul>
-                </div>
-
-                <div className="bg-status-error/10 rounded-lg p-4 border border-status-error/30">
-                  <h4 className="font-medium text-text-primary mb-3 text-sm">❌ What we NEVER track:</h4>
-                  <ul className="space-y-1 text-xs text-text-secondary">
-                    <li>• Your prompts or AI responses</li>
-                    <li>• File paths, names, or directory structures</li>
-                    <li>• Project names or descriptions</li>
-                    <li>• Git commit messages or code diffs</li>
-                    <li>• Terminal output or commands</li>
-                    <li>• Personal identifiers (emails, usernames, API keys)</li>
-                  </ul>
-                </div>
-
-                <p className="text-xs text-text-tertiary italic">
-                  You can opt-out at any time. When disabled, no analytics data will be collected or sent.
-                </p>
-              </div>
-            </CollapsibleCard>
-
-            {/* Analytics Settings */}
-            <CollapsibleCard
-              title="Analytics Settings"
-              subtitle="Configure anonymous usage tracking"
-              icon={<BarChart3 className="w-5 h-5" />}
-              defaultExpanded={true}
-            >
-              <SettingsSection
-                title="Enable Analytics"
-                description="Allow Cyboflow to collect anonymous usage data to improve the product"
-                icon={<BarChart3 className="w-4 h-4" />}
-              >
-                <Checkbox
-                  label="Enable anonymous analytics tracking"
-                  checked={analyticsEnabled}
-                  onChange={(e) => setAnalyticsEnabled(e.target.checked)}
-                />
-                {!analyticsEnabled && (
-                  <p className="text-xs text-status-warning mt-2">
-                    Analytics is disabled. No data will be collected or sent.
-                  </p>
-                )}
-                {analyticsEnabled && (
-                  <p className="text-xs text-status-success mt-2">
-                    Analytics is enabled. Thank you for helping improve Cyboflow!
-                  </p>
-                )}
-              </SettingsSection>
-            </CollapsibleCard>
-
-            {error && (
-              <div className="text-status-error text-sm bg-status-error/10 border border-status-error/30 rounded-lg p-4">
-                {error}
-              </div>
-            )}
-          </form>
-        )}
       </ModalBody>
 
       {/* Footer */}
-      {(activeTab === 'general' || activeTab === 'notifications' || activeTab === 'analytics') && (
+      {(activeTab === 'general' || activeTab === 'notifications') && (
         <ModalFooter>
           <Button
             type="button"

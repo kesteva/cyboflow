@@ -38,10 +38,4 @@ export interface AppConfig {
   additionalPaths?: string[];
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-  };
 }

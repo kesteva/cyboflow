@@ -357,16 +357,6 @@ interface ElectronAPI {
     checkInstalled: () => Promise<IPCResponse<boolean>>;
     openWorktree: (worktreePath: string) => Promise<IPCResponse<void>>;
   };
-
-  // Analytics tracking
-  analytics: {
-    trackUIEvent: (eventData: {
-      event: string;
-      properties: Record<string, string | number | boolean | string[] | undefined>;
-    }) => Promise<IPCResponse<void>>;
-    categorizeResultCount: (count: number) => Promise<IPCResponse<string>>;
-    hashSessionId: (sessionId: string) => Promise<IPCResponse<string>>;
-  };
 }
 
 // Additional electron interface for IPC event listeners

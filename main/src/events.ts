@@ -4,7 +4,6 @@ import type { AppServices } from './ipc/types';
 import type { VersionInfo } from './services/versionChecker';
 import { addSessionLog } from './ipc/logs';
 import { panelManager } from './services/panelManager';
-import { terminalPanelManager } from './services/terminalPanelManager';
 import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
 import type { ClaudePanelManager } from './services/panels/claude/claudePanelManager';
 import type { SessionOutput } from './types/session';
@@ -45,15 +44,8 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     worktreeManager,
     archiveProgressManager,
     databaseService,
-    logger,
-    analyticsManager
+    logger
   } = services;
-
-  // Wire up analytics manager to panel managers
-  if (analyticsManager) {
-    panelManager.setAnalyticsManager(analyticsManager);
-    terminalPanelManager.setAnalyticsManager(analyticsManager);
-  }
 
   let cachedClaudePanelManager: ClaudePanelManager | undefined;
   let attemptedClaudeManagerResolve = false;

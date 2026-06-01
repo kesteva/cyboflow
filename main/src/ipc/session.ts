@@ -487,9 +487,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 archiveProgressManager.updateTaskStatus(sessionId, 'removing-worktree');
               }
 
-              // Pass session creation date for analytics tracking
-              const sessionCreatedAt = dbSession.created_at ? new Date(dbSession.created_at) : undefined;
-              await worktreeManager.removeWorktree(project.path, dbSession.worktree_name, project.worktree_folder || undefined, sessionCreatedAt);
+              await worktreeManager.removeWorktree(project.path, dbSession.worktree_name, project.worktree_folder || undefined);
 
               cleanupMessage += `\x1b[32m✓ Worktree removed successfully\x1b[0m\r\n`;
             } catch (worktreeError) {

@@ -48,13 +48,6 @@ export interface AppConfig {
   };
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-    distinctId?: string; // Random UUID for anonymous user identification
-  };
 }
 
 export interface UpdateConfigRequest {
@@ -94,11 +87,4 @@ export interface UpdateConfigRequest {
     };
   };
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-    distinctId?: string; // Random UUID for anonymous user identification
-  };
 }

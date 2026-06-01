@@ -68,7 +68,6 @@
     "electron-updater": "^6.6.8",
     "glob": "^11.0.0",
     "p-queue": "^7.4.1",
-    "posthog-node": "^5.11.2",
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
     "zod": "^3.23.8"

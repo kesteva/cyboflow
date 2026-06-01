@@ -144,7 +144,7 @@ function makeClaudePanel(): ToolPanel {
 }
 
 /** Minimal AppServices stub — panels:initialize does not use services. */
-const stubServices = { analyticsManager: undefined } as unknown as AppServices;
+const stubServices = {} as unknown as AppServices;
 
 // ---------------------------------------------------------------------------
 // Tests
