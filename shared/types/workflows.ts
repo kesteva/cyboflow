@@ -45,6 +45,16 @@ export interface WorkflowRunRow {
   error_message?: string | null;
   /** Id of the workflow step currently executing, e.g. 'context'. Bare WorkflowStep.id from WORKFLOW_DEFINITIONS. NULL when no step is active. IDEA-026 / TASK-764. */
   current_step_id?: string | null;
+  /** Native-task link: the task this run executes. One run -> one task; a task has 0..N runs. NULL for runs launched without a task (migration 013). */
+  task_id?: string | null;
+  /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 013). */
+  outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
+  /** Base branch captured at launch — future git triage only, NOT a hot path (migration 013). */
+  base_branch?: string | null;
+  /** Base SHA captured at launch — future git triage only (migration 013). */
+  base_sha?: string | null;
+  /** step->agent map frozen at launch; stable overlay across mid-run workflow edits (migration 013). */
+  steps_snapshot_json?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;

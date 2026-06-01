@@ -182,3 +182,101 @@ export interface CreatePanelExecutionDiffData {
   after_commit_hash?: string;
   commit_message?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Native task backlog row interfaces (migration 013_native_tasks.sql).
+//
+// These mirror the SQL columns 1:1. SQLite stores BOOLEAN as 0/1, so boolean
+// columns surface as `number` (0|1) on read — consumers normalize to boolean.
+// The shared READ-model + chokepoint types live in shared/types/tasks.ts; the
+// schema-parity test pins TaskRow field names against the `tasks` columns.
+// ---------------------------------------------------------------------------
+
+export interface BoardRow {
+  id: string; // 'board-{projectId}-default'
+  project_id: number;
+  name: string;
+  kind: 'default' | 'custom';
+  is_default: number; // 0 | 1
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BoardStageRow {
+  id: string; // 'stage-{boardId}-{position}'
+  board_id: string;
+  label: string;
+  color_oklch: string;
+  hint: string | null;
+  position: number;
+  write_policy: 'asserted' | 'derived';
+  is_terminal: number; // 0 | 1
+  hidden_by_default: number; // 0 | 1
+}
+
+export interface TaskRow {
+  id: string;
+  project_id: number;
+  type: 'idea' | 'epic' | 'task';
+  ref: string;
+  parent_epic_id: string | null;
+  board_id: string;
+  stage_id: string;
+  entry_stage_id: string | null;
+  title: string;
+  summary: string | null;
+  priority: 'P0' | 'P1' | 'P2';
+  repo: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskRefCounterRow {
+  project_id: number;
+  type: string;
+  next_seq: number;
+}
+
+export interface TaskEventRow {
+  id: number;
+  task_id: string;
+  seq: number;
+  kind: string;
+  actor: string; // 'user' | 'orchestrator' | 'agent:<role>' | 'linear'
+  run_id: string | null;
+  changes_json: string | null;
+  created_at: string;
+}
+
+export interface TaskAcceptanceCriterionRow {
+  id: number;
+  task_id: string;
+  criterion: string;
+  completed: number; // 0 | 1
+  created_at: string;
+}
+
+export interface TaskDependencyRow {
+  id: number;
+  task_id: string;
+  depends_on_task_id: string;
+  kind: 'blocking' | 'related';
+}
+
+export interface TaskFileRow {
+  id: number;
+  task_id: string;
+  file_path: string;
+  ownership: 'owned' | 'readonly';
+}
+
+export interface TaskExternalLinkRow {
+  id: number;
+  task_id: string;
+  provider: string;
+  external_id: string | null;
+  external_url: string | null;
+  synced_cursor: string | null;
+  baseline_json: string | null;
+}

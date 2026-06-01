@@ -1645,7 +1645,65 @@ export class DatabaseService {
     if (!project) {
       throw new Error('Failed to create project');
     }
+    // Seed the default board + 11 stages for the new project (migration 013).
+    this.seedDefaultBoard(project.id);
     return project;
+  }
+
+  /**
+   * Seed the default board and its 11 canonical stages for a project.
+   *
+   * Mirrors the seed block in migration 013_native_tasks.sql (the migration
+   * seeds all EXISTING projects; this seeds each NEW project on creation).
+   * Uses deterministic ids + INSERT OR IGNORE so it is idempotent and safe to
+   * call more than once. Wrapped in a single transaction.
+   *
+   * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
+   * MUST stay field-for-field in sync with migration 013's seed block.
+   */
+  seedDefaultBoard(projectId: number): void {
+    const boardId = `board-${projectId}-default`;
+    // [position, label, color_oklch, hint, write_policy, is_terminal, hidden_by_default]
+    const stages: Array<[number, string, string, string, 'asserted' | 'derived', 0 | 1, 0 | 1]> = [
+      [1, 'Idea', 'oklch(0.58 0.15 262)', 'Raw input captured', 'asserted', 0, 0],
+      [2, 'Research', 'oklch(0.58 0.15 284)', 'Optional · prior art', 'asserted', 0, 0],
+      [3, 'Idea spec', 'oklch(0.58 0.15 306)', 'Spec drafted', 'asserted', 0, 0],
+      [4, 'Epics extracted', 'oklch(0.58 0.16 330)', 'Grouped into epics', 'asserted', 0, 0],
+      [5, 'Tasks extracted', 'oklch(0.59 0.16 354)', 'Tasks written', 'asserted', 0, 0],
+      [6, 'Ready for development', 'oklch(0.64 0.15 28)', 'Approved · queued', 'asserted', 0, 0],
+      [7, 'In development', 'oklch(0.63 0.16 45)', 'Executor verifier loop', 'derived', 0, 0],
+      [8, 'Ready to merge', 'oklch(0.64 0.13 120)', 'Checks green · awaiting merge', 'derived', 0, 0],
+      [9, 'Done', 'oklch(0.56 0.13 152)', 'Merged & archived', 'asserted', 1, 0],
+      [10, "Won't do", 'oklch(0.55 0.02 30)', 'Decided not to pursue', 'asserted', 1, 1],
+      [11, 'Archived', 'oklch(0.50 0.01 0)', 'Parked / cleaned up', 'asserted', 1, 1],
+    ];
+
+    const insertBoard = this.db.prepare(`
+      INSERT OR IGNORE INTO boards (id, project_id, name, kind, is_default)
+      VALUES (?, ?, 'Default board', 'default', 1)
+    `);
+    const insertStage = this.db.prepare(`
+      INSERT OR IGNORE INTO board_stages
+        (id, board_id, label, color_oklch, hint, position, write_policy, is_terminal, hidden_by_default)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    this.transaction(() => {
+      insertBoard.run(boardId, projectId);
+      for (const [position, label, color, hint, writePolicy, isTerminal, hidden] of stages) {
+        insertStage.run(
+          `stage-${boardId}-${position}`,
+          boardId,
+          label,
+          color,
+          hint,
+          position,
+          writePolicy,
+          isTerminal,
+          hidden,
+        );
+      }
+    });
   }
 
   getProject(id: number): Project | undefined {

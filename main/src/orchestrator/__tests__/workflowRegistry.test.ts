@@ -81,7 +81,9 @@ describe('WorkflowRegistry', () => {
   let logger: ReturnType<typeof makeSpyLogger>;
 
   beforeEach(() => {
-    db = createTestDb();
+    // getRunById now SELECTs current_step_id + the migration-013 run->task
+    // columns; opt the fixture into those columns so the projection resolves.
+    db = createTestDb({ includeWorkflowRunTaskColumns: true });
     logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });

@@ -49,6 +49,18 @@ export interface CreateTestDbOptions {
    * a future CHECK widening only has to update the canonical migration file.
    */
   includeQuestionsTable?: boolean;
+  /**
+   * If true, additionally layer migration 011's `current_step_id` column and
+   * migration 013's run->task link columns (task_id, outcome, base_branch,
+   * base_sha, steps_snapshot_json) onto workflow_runs. Additive SQL on top of
+   * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test in
+   * __tests__/orchestratorTestDb.test.ts will drift.
+   *
+   * Tests that exercise getRunById (which SELECTs all of these columns) opt in
+   * via this flag. The ALTER statements do NOT use IF NOT EXISTS; do not pass
+   * this option twice on the same DB.
+   */
+  includeWorkflowRunTaskColumns?: boolean;
 }
 
 /**
@@ -83,6 +95,17 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     const migration010Path = path.resolve(__dirname, '../../database/migrations/010_questions.sql');
     const sql = fs.readFileSync(migration010Path, 'utf8');
     db.exec(sql);
+  }
+  if (options?.includeWorkflowRunTaskColumns) {
+    // Mirror migration 011 (current_step_id) + migration 013's workflow_runs
+    // ALTERs. Inlined here (rather than reading the files) so this layering is
+    // resilient to migration 010's table-recreation recipe ordering.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN task_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN outcome TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN base_branch TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN base_sha TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN steps_snapshot_json TEXT');
   }
   return db;
 }
