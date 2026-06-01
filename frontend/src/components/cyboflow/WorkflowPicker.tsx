@@ -16,11 +16,25 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
+import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 
 interface WorkflowPickerProps {
   projectId: number;
   onWorkflowStarted?: (runId: string) => void;
 }
+
+/**
+ * The v1 limits of the interactive PTY substrate, surfaced when the user picks
+ * 'interactive' (IDEA-013 / TASK-812). These are the UNCONDITIONAL caveats —
+ * the interactive PreToolUse approval gating DID ship (Probe A passed via
+ * TASK-810's shell-hook + async-deferred socket handler), so the
+ * "approval routing unavailable" caveat is intentionally NOT listed here.
+ */
+const INTERACTIVE_CAVEATS: readonly string[] = [
+  'AskUserQuestion is native-TUI-only — multiple-choice questions surface in the terminal, not the structured panel.',
+  'Subagent gating is limited — only the main session reports step transitions; subagent tool calls are gated but not separately surfaced.',
+  'Streaming is coarser — output arrives at turn-level granularity, not token-level deltas.',
+];
 
 export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerProps) {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
@@ -28,6 +42,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [isLoading, setIsLoading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * The per-run CLI substrate choice. Defaults to DEFAULT_SUBSTRATE ('sdk') —
+   * the global ConfigManager.defaultSubstrate floor — and is threaded into
+   * runs.start.mutate. The mutate input type is AppRouter-inferred (no local
+   * mirror of the substrate field), and CliSubstrate is imported from the S1
+   * shared type, never re-declared here.
+   */
+  const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -102,7 +125,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     setError(null);
     setIsStarting(true);
     try {
-      const result = await trpc.cyboflow.runs.start.mutate({ workflowId: selectedId, projectId });
+      const result = await trpc.cyboflow.runs.start.mutate({ workflowId: selectedId, projectId, substrate });
       useCyboflowStore.getState().setActiveRun(result.runId);
       onWorkflowStarted?.(result.runId);
     } catch (err: unknown) {
@@ -136,6 +159,44 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
             </option>
           ))}
         </select>
+      )}
+
+      {/* Substrate selector — per-run CLI substrate choice (IDEA-013 / TASK-812). */}
+      <div className="flex flex-col gap-1">
+        <label
+          htmlFor="workflow-picker-substrate"
+          className="text-xs font-medium text-text-secondary"
+        >
+          CLI substrate
+        </label>
+        <select
+          id="workflow-picker-substrate"
+          value={substrate}
+          onChange={(e) => setSubstrate(e.target.value === 'interactive' ? 'interactive' : 'sdk')}
+          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
+          aria-label="Select CLI substrate"
+        >
+          <option value="sdk">SDK (default)</option>
+          <option value="interactive">Interactive (PTY)</option>
+        </select>
+      </div>
+
+      {/* Interactive-substrate v1 caveats — surfaced prominently ONLY when the
+          user selects 'interactive'. Approval routing DID ship for interactive
+          (Probe A passed), so that caveat is intentionally not listed. */}
+      {substrate === 'interactive' && (
+        <div
+          data-testid="workflow-picker-substrate-caveats"
+          role="note"
+          className="rounded-input border border-status-warning bg-bg-secondary px-3 py-2 text-xs text-text-secondary"
+        >
+          <p className="mb-1 font-semibold text-text-primary">Interactive substrate — v1 limits</p>
+          <ul className="list-disc space-y-1 pl-4">
+            {INTERACTIVE_CAVEATS.map((caveat) => (
+              <li key={caveat}>{caveat}</li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {combinedError && (

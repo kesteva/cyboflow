@@ -24,6 +24,7 @@ import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
+import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -63,7 +64,16 @@ export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
 // ---------------------------------------------------------------------------
 
 export interface RunLauncherLike {
-  launch(workflowId: string, projectPath: string): Promise<{
+  /**
+   * Launch a workflow run. The optional `substrate` carries the user's per-run
+   * CLI choice from the renderer down to the S1 resolver/stamp inside
+   * WorkflowRegistry.createRun. It is OPTIONAL so a concrete RunLauncher whose
+   * `launch` does not yet read the parameter remains structurally assignable
+   * (extra params on the interface side are accepted) — when omitted, the run
+   * falls through the resolver's override ladder to DEFAULT_SUBSTRATE ('sdk'),
+   * the zero-behavior-change floor (see substrateResolver.ts).
+   */
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -208,11 +218,21 @@ export const runsRouter = router({
       return listRunsHandler(ctx.db, input.projectId);
     }),
 
-  /** Start a new workflow run for the given workflow and project. */
+  /**
+   * Start a new workflow run for the given workflow and project.
+   *
+   * `substrate` is the user's per-run CLI choice (IDEA-013 / TASK-812). It is
+   * OPTIONAL and validated against the CliSubstrate union via z.enum; when the
+   * renderer omits it, resolution falls through the override ladder to
+   * DEFAULT_SUBSTRATE ('sdk'). The value is carried into runLauncher.launch and
+   * stamped (immutably, once) onto workflow_runs.substrate by the S1 resolver
+   * inside WorkflowRegistry.createRun — this router only forwards the choice.
+   */
   start: protectedProcedure
     .input(z.object({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
+      substrate: z.enum(['sdk', 'interactive']).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -228,10 +248,14 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
-        input.workflowId,
-        project.path,
-      );
+      // Forward the user's per-run substrate choice to launch(). When the
+      // renderer omits it, call launch with the legacy 2-arg shape (no trailing
+      // `undefined`) so the resolver's override ladder owns the decision and the
+      // SDK-default call site stays byte-identical (zero-behavior-change floor).
+      const { runId, worktreePath, branchName } =
+        input.substrate !== undefined
+          ? await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate)
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path);
       return { runId, worktreePath, branchName };
     }),
 
