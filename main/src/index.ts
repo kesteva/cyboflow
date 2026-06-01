@@ -63,6 +63,8 @@ import {
   transitionToCanceled,
 } from './services/cyboflow/transitions';
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
+import { buildStepReportingAppend } from './orchestrator/prompts/step-reporting-instructions';
+import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans } from './orchestrator/runRecovery';
 import * as fs from 'fs';
@@ -582,7 +584,33 @@ async function initializeServices() {
 
   // Concrete WorkflowPromptReaderLike adapter — delegates to readWorkflowPrompt()
   // while keeping RunExecutor free of direct fs/concrete-module imports.
-  const promptReader = { read: (workflowPath: string) => readWorkflowPrompt(workflowPath) };
+  //
+  // TASK-803: on top of the `.md` body + its `system_prompt_append` frontmatter,
+  // concatenate the per-run cyboflow step-reporting instructions. The adapter
+  // resolves the workflow row by `workflow_path` (the only key RunExecutor.getPrompt
+  // passes through the read-only WorkflowPromptReaderLike seam), then resolves the
+  // EFFECTIVE definition via resolveWorkflowDefinition(name, spec_json) — honoring
+  // user edits in spec_json, never WORKFLOW_DEFINITIONS[name] directly — and passes
+  // the resolved def to buildStepReportingAppend. Fail-soft: an unresolved row or a
+  // non-SoloFlow/broken-spec workflow yields '' so nothing extra is injected.
+  const promptReader = {
+    read: (workflowPath: string) => {
+      const base = readWorkflowPrompt(workflowPath);
+      const row = databaseService
+        .getDb()
+        .prepare('SELECT name, spec_json FROM workflows WHERE workflow_path = ? LIMIT 1')
+        .get(workflowPath) as { name: string; spec_json: string } | undefined;
+      if (!row) return base;
+      const resolvedDef = resolveWorkflowDefinition(row.name, row.spec_json);
+      const stepReportingAppend = buildStepReportingAppend(resolvedDef);
+      if (stepReportingAppend === '') return base;
+      const systemPromptAppend =
+        base.systemPromptAppend.length > 0
+          ? `${base.systemPromptAppend}\n\n${stepReportingAppend}`
+          : stepReportingAppend;
+      return { prompt: base.prompt, systemPromptAppend };
+    },
+  };
 
   // ClaudeSpawnerLike adapter — wraps defaultCliManager so RunExecutor can call
   // spawnCliProcess() and abort() via the narrow interface without importing the
