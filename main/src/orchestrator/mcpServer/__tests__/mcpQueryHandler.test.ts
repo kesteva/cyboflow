@@ -19,12 +19,14 @@
  * inline `MINIMAL_SCHEMA` const declared below (no real migration runner — tests are hermetic). A writes-capturing
  * socket test double is used to assert on the JSON response bodies.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
+import { stepTransitionEvents } from '../../trpc/routers/events';
+import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -398,6 +400,196 @@ describe('McpQueryHandler', () => {
         .prepare(`SELECT id FROM raw_events WHERE run_id = ?`)
         .all(quickSessionId);
       expect(rows).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. mcp-report-step (TASK-802)
+  // -------------------------------------------------------------------------
+
+  describe('mcp-report-step', () => {
+    /**
+     * createTestDb's GATE_SCHEMA does NOT include current_step_id (added by
+     * migration 011). orchestratorTestDb.ts is files_readonly, so we ALTER it
+     * in here per the plan. FK enforcement is left ON so a vanished-run path is
+     * exercised faithfully; report-step tests seed their own rows.
+     */
+    function createReportStepDb(): Database.Database {
+      const reportDb = createTestDb({ includeQuestionsTable: true });
+      reportDb.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');
+      return reportDb;
+    }
+
+    /**
+     * Seed a workflows + workflow_runs pair for report-step tests. Uses spec_json
+     * '{}' (the built-in fallback resolution path) by default; pass a real edited
+     * spec to exercise the custom-accept path.
+     */
+    function seedReportRun(
+      reportDb: Database.Database,
+      workflowName: string,
+      specJson = '{}',
+    ): string {
+      const workflowId = `wf-${workflowName}-${Math.random().toString(36).slice(2)}`;
+      const runId = `run-${workflowName}-${Math.random().toString(36).slice(2)}`;
+      reportDb
+        .prepare(
+          `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+        )
+        .run(workflowId, workflowName, specJson);
+      reportDb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status)
+           VALUES (?, ?, 1, '/tmp/test', 'running')`,
+        )
+        .run(runId, workflowId);
+      return runId;
+    }
+
+    function currentStepId(reportDb: Database.Database, runId: string): string | null {
+      const row = reportDb
+        .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+        .get(runId) as { current_step_id: string | null } | undefined;
+      return row?.current_step_id ?? null;
+    }
+
+    let reportDb: Database.Database;
+    let reportHandler: McpQueryHandler;
+    let emitted: WorkflowStepTransitionEvent[];
+
+    beforeEach(() => {
+      reportDb = createReportStepDb();
+      reportHandler = new McpQueryHandler(dbAdapter(reportDb));
+      emitted = [];
+      stepTransitionEvents.on('transition', (ev: WorkflowStepTransitionEvent) => {
+        emitted.push(ev);
+      });
+    });
+
+    afterEach(() => {
+      stepTransitionEvents.removeAllListeners('transition');
+    });
+
+    it('returns ok:false "report_step_requires_real_run" for the orchestrator sentinel and writes nothing', async () => {
+      // The singleton MCP server runs with CYBOFLOW_RUN_ID='orchestrator', which
+      // has no workflow_runs row and must be rejected before any DB touch.
+      const runId = seedReportRun(reportDb, 'sprint');
+      expect(currentStepId(reportDb, runId)).toBeNull();
+
+      const { socket, writes } = makeSocketDouble();
+      await reportHandler.handleMessage(
+        { type: 'mcp-report-step', requestId: 'rs-1', runId: 'orchestrator', stepId: 'implement' },
+        socket,
+      );
+
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('report_step_requires_real_run');
+
+      // The seeded run is untouched and no transition fired.
+      expect(currentStepId(reportDb, runId)).toBeNull();
+      expect(emitted).toHaveLength(0);
+    });
+
+    it('writes current_step_id and emits exactly one transition for a valid stepId', async () => {
+      const runId = seedReportRun(reportDb, 'sprint');
+
+      const { socket, writes } = makeSocketDouble();
+      await reportHandler.handleMessage(
+        { type: 'mcp-report-step', requestId: 'rs-2', runId, stepId: 'write-tests', status: 'running' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ step_id: 'write-tests', status: 'running' });
+
+      expect(currentStepId(reportDb, runId)).toBe('write-tests');
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]).toMatchObject({ runId, stepId: 'write-tests', status: 'running' });
+    });
+
+    it('defaults status to "running" when omitted', async () => {
+      const runId = seedReportRun(reportDb, 'sprint');
+
+      const { socket, writes } = makeSocketDouble();
+      await reportHandler.handleMessage(
+        { type: 'mcp-report-step', requestId: 'rs-3', runId, stepId: 'implement' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ step_id: 'implement', status: 'running' });
+      expect(emitted[0].status).toBe('running');
+    });
+
+    it('accepts an EDITED/custom stepId present only in spec_json (absent from the static built-in)', async () => {
+      // Custom sprint def whose step id 'discovery-call' exists nowhere in the
+      // static WORKFLOW_DEFINITIONS.sprint — proving validation resolves from
+      // spec_json (resolveWorkflowDefinition), not the seed constant.
+      const customDef: WorkflowDefinition = {
+        id: 'sprint',
+        phases: [
+          {
+            id: 'execute',
+            label: 'Execute',
+            color: '#c96442',
+            steps: [
+              { id: 'discovery-call', name: 'Discovery call', agent: 'executor', mcps: [], retries: 0 },
+            ],
+          },
+        ],
+      };
+      const runId = seedReportRun(reportDb, 'sprint', JSON.stringify(customDef));
+
+      const { socket, writes } = makeSocketDouble();
+      await reportHandler.handleMessage(
+        { type: 'mcp-report-step', requestId: 'rs-4', runId, stepId: 'discovery-call', status: 'done' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ step_id: 'discovery-call', status: 'done' });
+      expect(currentStepId(reportDb, runId)).toBe('discovery-call');
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0].stepId).toBe('discovery-call');
+    });
+
+    it('returns ok:false "unknown_step_id" for an invalid stepId and writes nothing', async () => {
+      const runId = seedReportRun(reportDb, 'sprint');
+
+      const { socket, writes } = makeSocketDouble();
+      await reportHandler.handleMessage(
+        { type: 'mcp-report-step', requestId: 'rs-5', runId, stepId: 'does-not-exist' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('unknown_step_id');
+
+      expect(currentStepId(reportDb, runId)).toBeNull();
+      expect(emitted).toHaveLength(0);
+    });
+
+    it('returns ok:false and does not throw when no workflow_runs row matches runId', async () => {
+      // No seed — the JOIN finds nothing.
+      const { socket, writes } = makeSocketDouble();
+      await expect(
+        reportHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'rs-6', runId: 'run-vanished', stepId: 'implement' },
+          socket,
+        ),
+      ).resolves.toBeUndefined();
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      // JOIN-miss path returns 'run_not_found'.
+      expect(response.error).toBe('run_not_found');
+      expect(emitted).toHaveLength(0);
     });
   });
 
