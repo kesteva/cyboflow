@@ -6,7 +6,6 @@ export interface AppConfig {
   runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
-  autoCheckUpdates?: boolean;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

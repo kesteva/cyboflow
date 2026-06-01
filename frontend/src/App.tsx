@@ -10,7 +10,6 @@ import { PromptHistoryModal } from './components/PromptHistoryModal';
 import Help from './components/Help';
 import Welcome from './components/Welcome';
 import { AboutDialog } from './components/AboutDialog';
-import { UpdateDialog } from './components/UpdateDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
 import { PermissionDialog } from './components/PermissionDialog';
@@ -28,7 +27,7 @@ import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
-import type { VersionUpdateInfo, PermissionInput } from './types/session';
+import type { PermissionInput } from './types/session';
 
 // Type for IPC response
 import type { IPCResponse } from './utils/api';
@@ -45,8 +44,6 @@ function App() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWelcomeOpen, setIsWelcomeOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
-  const [updateVersionInfo, setUpdateVersionInfo] = useState<VersionUpdateInfo | null>(null);
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
@@ -73,7 +70,7 @@ function App() {
   });
   
   useIPCEvents();
-  const { showNotification } = useNotifications();
+  useNotifications();
   useStuckNotifications();
 
   // Start the MCP health polling subscription on mount.
@@ -220,31 +217,6 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    // Set up version update listener
-    if (!window.electronAPI?.events) return;
-    
-    const handleVersionUpdate = (versionInfo: VersionUpdateInfo) => {
-      console.log('[App] Version update available:', versionInfo);
-      setUpdateVersionInfo(versionInfo);
-      setIsUpdateDialogOpen(true);
-      showNotification(
-        `🚀 Update Available - Cyboflow v${versionInfo.latest}`,
-        'A new version of Cyboflow is available!',
-        '/favicon.ico'
-      );
-    };
-    
-    // Set up the listener using the events API
-    const removeListener = window.electronAPI.events.onVersionUpdateAvailable(handleVersionUpdate);
-    
-    return () => {
-      if (removeListener) {
-        removeListener();
-      }
-    };
-  }, [showNotification]);
-
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -324,12 +296,7 @@ function App() {
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
         <Welcome isOpen={isWelcomeOpen} onClose={() => setIsWelcomeOpen(false)} />
         <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
-        <UpdateDialog 
-          isOpen={isUpdateDialogOpen} 
-          onClose={() => setIsUpdateDialogOpen(false)}
-          versionInfo={updateVersionInfo || undefined}
-        />
-        <ErrorDialog 
+        <ErrorDialog
           isOpen={!!currentError}
           onClose={clearError}
           title={currentError?.title}

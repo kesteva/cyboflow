@@ -8,7 +8,6 @@ import type { GitStatusManager } from '../services/gitStatusManager';
 import type { ExecutionTracker } from '../services/executionTracker';
 import type { DatabaseService } from '../database/database';
 import type { RunCommandManager } from '../services/runCommandManager';
-import type { VersionChecker } from '../services/versionChecker';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
@@ -29,7 +28,6 @@ export interface AppServices {
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
   runCommandManager: RunCommandManager;
-  versionChecker: VersionChecker;
   taskQueue: TaskQueue | null;
   getMainWindow: () => BrowserWindow | null;
   logger?: Logger;

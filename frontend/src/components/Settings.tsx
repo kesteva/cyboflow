@@ -11,7 +11,6 @@ import {
   Settings as SettingsIcon,
   Palette,
   Zap,
-  RefreshCw,
   FileText,
   Eye
 } from 'lucide-react';
@@ -34,7 +33,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve'>('approve');
-  const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
@@ -70,7 +68,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       // Only 'approve' is a valid UI selection; coerce any legacy 'ignore' value to 'approve'.
       setDefaultPermissionMode('approve');
-      setAutoCheckUpdates(data.autoCheckUpdates !== false); // Default to true
       setDevMode(data.devMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       
@@ -107,7 +104,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         systemPromptAppend: globalSystemPrompt,
         claudeExecutablePath,
         defaultPermissionMode,
-        autoCheckUpdates,
         devMode,
         enableCyboflowFooter,
         additionalPaths: parsedPaths,
@@ -288,55 +284,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 />
                 <p className="text-xs text-text-tertiary mt-1">
                   When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
-                </p>
-              </SettingsSection>
-            </CollapsibleCard>
-
-            {/* System Updates */}
-            <CollapsibleCard
-              title="Updates & Maintenance"
-              subtitle="Keep Cyboflow up to date with the latest features"
-              icon={<RefreshCw className="w-5 h-5" />}
-              defaultExpanded={false}
-            >
-              <SettingsSection
-                title="Automatic Updates"
-                description="Stay current with new features and bug fixes"
-                icon={<RefreshCw className="w-4 h-4" />}
-              >
-                <div className="flex items-center justify-between p-3 bg-surface-secondary rounded-lg border border-border-secondary">
-                  <div className="flex items-center gap-3">
-                    <Checkbox
-                      label="Check for updates automatically"
-                      checked={autoCheckUpdates}
-                      onChange={(e) => setAutoCheckUpdates(e.target.checked)}
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={async () => {
-                      try {
-                        const response = await API.checkForUpdates();
-                        if (response.success && response.data) {
-                          if (response.data.hasUpdate) {
-                            // Update will be shown via the version update event
-                          } else {
-                            alert('You are running the latest version of Cyboflow!');
-                          }
-                        }
-                      } catch (error) {
-                        console.error('Failed to check for updates:', error);
-                        alert('Failed to check for updates. Please try again later.');
-                      }
-                    }}
-                  >
-                    Check Now
-                  </Button>
-                </div>
-                <p className="text-xs text-text-tertiary mt-2">
-                  We check GitHub for new releases every 24 hours. Updates require manual installation.
                 </p>
               </SettingsSection>
             </CollapsibleCard>

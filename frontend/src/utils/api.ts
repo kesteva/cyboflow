@@ -433,12 +433,7 @@ export class API {
     },
   };
 
-  // Version and updates
-  static async checkForUpdates() {
-    if (!isElectron()) throw new Error('Electron API not available');
-    return window.electronAPI.checkForUpdates();
-  }
-
+  // Version info
   static async getVersionInfo() {
     if (!isElectron()) throw new Error('Electron API not available');
     return window.electronAPI.getVersionInfo();

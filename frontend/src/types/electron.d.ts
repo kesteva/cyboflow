@@ -1,5 +1,5 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus, VersionUpdateInfo, GitCommands } from './session';
+import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
@@ -46,9 +46,8 @@ interface ElectronAPI {
   getAppVersion: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
-  // Version checking — use IPCDataResponse so callers can access .data fields directly
+  // Version info — use IPCDataResponse so callers can access .data fields directly
   // after `if (result.success)` without narrowing for undefined.
-  checkForUpdates: () => Promise<IPCDataResponse<VersionUpdateInfo>>;
   getVersionInfo: () => Promise<IPCDataResponse<{
     current: string;
     workingDirectory?: string;
@@ -58,13 +57,6 @@ interface ElectronAPI {
     buildTimestamp?: number;
     worktreeName?: string;
   }>>;
-
-  // Auto-updater
-  updater: {
-    checkAndDownload: () => Promise<IPCResponse<void>>;
-    downloadUpdate: () => Promise<IPCResponse<void>>;
-    installUpdate: () => Promise<IPCResponse<void>>;
-  };
 
   // System utilities
   openExternal: (url: string) => Promise<void>;
@@ -274,15 +266,6 @@ interface ElectronAPI {
 
     onTerminalOutput: (callback: (output: { sessionId: string; data: string; type: 'stdout' | 'stderr' }) => void) => () => void;
     onMainLog: (callback: (level: string, message: string) => void) => () => void;
-    onVersionUpdateAvailable: (callback: (versionInfo: VersionUpdateInfo) => void) => () => void;
-
-    // Auto-updater events
-    onUpdaterCheckingForUpdate: (callback: () => void) => () => void;
-    onUpdaterUpdateAvailable: (callback: (info: { version: string; releaseDate: string; releaseName?: string; releaseNotes?: string }) => void) => () => void;
-    onUpdaterUpdateNotAvailable: (callback: (info: { version: string }) => void) => () => void;
-    onUpdaterDownloadProgress: (callback: (progressInfo: { bytesPerSecond: number; percent: number; transferred: number; total: number }) => void) => () => void;
-    onUpdaterUpdateDownloaded: (callback: (info: { version: string; files: string[]; path: string; sha512: string; releaseDate: string }) => void) => () => void;
-    onUpdaterError: (callback: (error: Error) => void) => () => void;
 
     // Process management events
     onZombieProcessesDetected: (callback: (data: { sessionId?: string | null; pids?: number[]; message: string }) => void) => () => void;

@@ -11,8 +11,6 @@ export interface AppConfig {
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default model for new sessions
   defaultModel?: string;
-  // Auto-check for updates
-  autoCheckUpdates?: boolean;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -57,7 +55,6 @@ export interface UpdateConfigRequest {
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
-  autoCheckUpdates?: boolean;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

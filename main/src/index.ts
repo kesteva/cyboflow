@@ -9,14 +9,12 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { VersionChecker } from './services/versionChecker';
 import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
-import { setupAutoUpdater } from './autoUpdater';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -105,7 +103,6 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let versionChecker: VersionChecker;
 let archiveProgressManager: ArchiveProgressManager;
 
 // Store original console methods before overriding
@@ -484,9 +481,6 @@ async function initializeServices() {
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
   runCommandManager = new RunCommandManager(databaseService);
 
-  // Initialize version checker
-  versionChecker = new VersionChecker(configManager, logger);
-
   taskQueue = new TaskQueue({
     sessionManager,
     worktreeManager,
@@ -670,7 +664,6 @@ async function initializeServices() {
     gitStatusManager,
     executionTracker,
     runCommandManager,
-    versionChecker,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,
@@ -692,9 +685,6 @@ async function initializeServices() {
       console.log(`[Frontend ${level}] ${message}`); // unchanged
     });
   }
-  
-  // Start periodic version checking (only if enabled in settings)
-  versionChecker.startPeriodicCheck();
   
   // Start git status polling
   gitStatusManager.startPolling();
@@ -843,15 +833,6 @@ app.whenReady().then(async () => {
     console.error('[Main] Failed to record app open:', error);
   }
 
-  // Configure auto-updater
-  setupAutoUpdater(() => mainWindow);
-
-  // Check for updates after window is created
-  setTimeout(async () => {
-    console.log('[Main] Performing startup version check...');
-    await versionChecker.checkOnStartup();
-  }, 1000); // Small delay to ensure window is fully ready
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       console.log('[Main] Activating app, creating new window...');
@@ -947,11 +928,6 @@ app.on('before-quit', async (event) => {
   // Close task queue
   if (taskQueue) {
     await taskQueue.close();
-  }
-
-  // Stop version checker
-  if (versionChecker) {
-    versionChecker.stopPeriodicCheck();
   }
 
   // Close logger to ensure all logs are flushed

@@ -57,22 +57,6 @@ interface Folder {
   updated_at: string;
 }
 
-interface VersionInfo {
-  current: string;
-  latest: string;
-  hasUpdate: boolean;
-  releaseNotes?: string;
-}
-
-interface UpdaterInfo {
-  version: string;
-  releaseDate?: string;
-  releaseNotes?: string;
-  path?: string;
-  sha512?: string;
-  size?: number;
-}
-
 // Increase max listeners for ipcRenderer to prevent warnings when many components listen to events
 ipcRenderer.setMaxListeners(50);
 
@@ -181,16 +165,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   isPackaged: () => ipcRenderer.invoke('is-packaged'),
 
-  // Version checking
-  checkForUpdates: (): Promise<IPCResponse> => ipcRenderer.invoke('version:check-for-updates'),
+  // Version info
   getVersionInfo: (): Promise<IPCResponse> => ipcRenderer.invoke('version:get-info'),
-  
-  // Auto-updater
-  updater: {
-    checkAndDownload: (): Promise<IPCResponse> => ipcRenderer.invoke('updater:check-and-download'),
-    downloadUpdate: (): Promise<IPCResponse> => ipcRenderer.invoke('updater:download-update'),
-    installUpdate: (): Promise<IPCResponse> => ipcRenderer.invoke('updater:install-update'),
-  },
 
   // System utilities
   openExternal: (url: string): Promise<IPCResponse> => ipcRenderer.invoke('openExternal', url),
@@ -489,45 +465,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('main-log', wrappedCallback);
     },
 
-    // Version updates
-    onVersionUpdateAvailable: (callback: (versionInfo: VersionInfo) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, versionInfo: VersionInfo) => callback(versionInfo);
-      ipcRenderer.on('version:update-available', wrappedCallback);
-      return () => ipcRenderer.removeListener('version:update-available', wrappedCallback);
-    },
-    
-    // Auto-updater events
-    onUpdaterCheckingForUpdate: (callback: () => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent) => callback();
-      ipcRenderer.on('updater:checking-for-update', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:checking-for-update', wrappedCallback);
-    },
-    onUpdaterUpdateAvailable: (callback: (info: UpdaterInfo) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: UpdaterInfo) => callback(info);
-      ipcRenderer.on('updater:update-available', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:update-available', wrappedCallback);
-    },
-    onUpdaterUpdateNotAvailable: (callback: (info: UpdaterInfo) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: UpdaterInfo) => callback(info);
-      ipcRenderer.on('updater:update-not-available', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:update-not-available', wrappedCallback);
-    },
-    onUpdaterDownloadProgress: (callback: (progressInfo: { percent: number; bytesPerSecond: number; total: number; transferred: number }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, progressInfo: { percent: number; bytesPerSecond: number; total: number; transferred: number }) => callback(progressInfo);
-      ipcRenderer.on('updater:download-progress', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:download-progress', wrappedCallback);
-    },
-    onUpdaterUpdateDownloaded: (callback: (info: UpdaterInfo) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: UpdaterInfo) => callback(info);
-      ipcRenderer.on('updater:update-downloaded', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:update-downloaded', wrappedCallback);
-    },
-    onUpdaterError: (callback: (error: Error) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, error: Error) => callback(error);
-      ipcRenderer.on('updater:error', wrappedCallback);
-      return () => ipcRenderer.removeListener('updater:error', wrappedCallback);
-    },
-    
     // Process management events
     onZombieProcessesDetected: (callback: (data: { count: number; processes: string[] }) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { count: number; processes: string[] }) => callback(data);
