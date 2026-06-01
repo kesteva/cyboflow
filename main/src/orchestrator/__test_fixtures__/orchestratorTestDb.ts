@@ -104,6 +104,8 @@ export interface SeedRunOverrides {
   workflowName?: string;
   /** Override the worktree_path column (defaults to '/tmp/test'). */
   worktreePath?: string;
+  /** Override the branch_name column (defaults to NULL). */
+  branchName?: string;
   /** Override the policy_json column (defaults to '{}'). */
   policyJson?: string;
 }
@@ -122,6 +124,7 @@ export function seedRun(db: Database.Database, overrides?: SeedRunOverrides): { 
   const projectId = overrides?.projectId ?? 1;
   const workflowName = overrides?.workflowName ?? 'test-workflow';
   const worktreePath = overrides?.worktreePath ?? '/tmp/test';
+  const branchName = overrides?.branchName ?? null;
   const policyJson = overrides?.policyJson ?? '{}';
 
   db.prepare(
@@ -131,9 +134,9 @@ export function seedRun(db: Database.Database, overrides?: SeedRunOverrides): { 
 
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(runId, workflowId, projectId, worktreePath, status, policyJson);
+       (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(runId, workflowId, projectId, worktreePath, branchName, status, policyJson);
 
   return { workflowId, runId };
 }

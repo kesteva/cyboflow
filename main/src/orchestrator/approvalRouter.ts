@@ -277,6 +277,13 @@ export class ApprovalRouter extends EventEmitter {
     // Fast-path guard: surface unknown IDs synchronously before touching the queue.
     const peek = this.pending.get(approvalId);
     if (!peek) {
+      // No in-flight decision. The approval may still be a stale `pending` DB row
+      // whose decisionPromise is gone (app restart) or whose run was closed out.
+      // Settle it directly so the user can clear it from the review queue; only
+      // report not-found when there is genuinely nothing pending to act on.
+      if (this.settleStalePendingApproval(approvalId, decision)) {
+        return;
+      }
       throw new ApprovalNotFoundError(approvalId);
     }
 
@@ -358,6 +365,36 @@ export class ApprovalRouter extends EventEmitter {
   }
 
   /**
+   * Settle an approval that has a `pending` DB row but no in-memory entry — a
+   * row that outlived its decisionPromise (app restart) or its run (close-out).
+   * There is no awaiting caller or socket to satisfy; we move the row to a
+   * terminal status and emit `approvalDecided` so the review queue drops it.
+   *
+   * @returns true if a `pending` row was settled (changes > 0); false when no
+   *   such row exists or it was already terminal (caller treats that as
+   *   not-found and throws ApprovalNotFoundError).
+   */
+  private settleStalePendingApproval(approvalId: string, decision: ApprovalDecision): boolean {
+    const status = decision.behavior === 'allow' ? 'approved' : 'rejected';
+    const now = new Date().toISOString();
+    try {
+      const info = this.db.prepare(
+        `UPDATE approvals SET status = ?, decided_at = ?, decided_by = 'user'
+         WHERE id = ? AND status = 'pending'`,
+      ).run(status, now, approvalId) as { changes: number };
+      if (info.changes > 0) {
+        this.emit('approvalDecided', { approvalId, decision: status });
+        return true;
+      }
+    } catch (err) {
+      console.warn(
+        `[ApprovalRouter] settleStalePendingApproval: DB update failed for ${approvalId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return false;
+  }
+
+  /**
    * Clear all pending approvals for `runId`.
    *
    * Called during run termination (e.g., from claudeCodeManager's runSdkQuery
@@ -410,6 +447,28 @@ export class ApprovalRouter extends EventEmitter {
       // Resolve the awaiting Promise — do NOT invoke socketReply.
       entry.resolve(denyDecision);
       this.emit('approvalDecided', { approvalId, decision: 'rejected' });
+    }
+
+    // Sweep any remaining DB-only `pending` rows for this run — rows whose
+    // in-memory entry was already gone (app restart, or an approval recorded
+    // before this process started). Without this, closing out a run leaves
+    // orphaned `pending` approvals stuck in the review queue forever.
+    try {
+      const now = new Date().toISOString();
+      const staleRows = this.db
+        .prepare(`SELECT id FROM approvals WHERE run_id = ? AND status = 'pending'`)
+        .all(runId) as Array<{ id: string }>;
+      for (const { id } of staleRows) {
+        this.db.prepare(
+          `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
+           WHERE id = ? AND status = 'pending'`,
+        ).run(now, id);
+        this.emit('approvalDecided', { approvalId: id, decision: 'rejected' });
+      }
+    } catch (err) {
+      console.warn(
+        `[ApprovalRouter] clearPendingForRun: DB sweep failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
