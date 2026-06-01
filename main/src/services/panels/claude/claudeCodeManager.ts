@@ -518,9 +518,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
           command: nodeCmd,
           args: [cyboflowMcpScriptPath],
           env: {
-            // Use sessionId as a stand-in run ID for Cyboflow-legacy sessions.
-            // Workflow-run epic will tighten this to a real workflow_runs.id.
-            CYBOFLOW_RUN_ID: options.sessionId,
+            // CYBOFLOW_RUN_ID is the real workflow_runs.id for workflow runs
+            // (options.runId, threaded through the spawn path by RunExecutor).
+            // For legacy quick sessions that have no run, options.runId is
+            // undefined/empty and we fall back to sessionId so the value is
+            // always populated. Empty string is treated as absent.
+            CYBOFLOW_RUN_ID: (options.runId && options.runId.length > 0) ? options.runId : options.sessionId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
           },
         };

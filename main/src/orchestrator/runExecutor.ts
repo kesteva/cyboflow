@@ -50,6 +50,13 @@ export interface ClaudeSpawnerOptions {
   prompt: string;
   preToolUseHook?: HookCallback;
   systemPromptAppend?: string;
+  /**
+   * The real workflow_runs.id. For workflow runs this equals panelId/sessionId
+   * per the orchestrator invariant (panelId === runId === sessionId); the
+   * spawner uses it to set CYBOFLOW_RUN_ID. Optional so quick-session callers
+   * (which never reach this executor) are unaffected.
+   */
+  runId?: string;
 }
 
 /**
@@ -250,6 +257,7 @@ export class RunExecutor {
         await this.spawner.spawnCliProcess({
           panelId,
           sessionId,
+          runId,
           worktreePath: run.worktree_path,
           prompt,
           ...overrides,

@@ -104,11 +104,11 @@ function createLoggerSpy(): { warn: MockInstance; info: MockInstance; error: Moc
  * lifecycle (which would need a running SDK query, etc.).
  */
 class TestableClaudeCodeManager extends ClaudeCodeManager {
-  async publicComposeMcpServers(sessionId: string): Promise<Record<string, McpServerConfig>> {
+  async publicComposeMcpServers(sessionId: string, runId?: string): Promise<Record<string, McpServerConfig>> {
     // composeMcpServers is private on the parent; cast via index signature
     return (this as unknown as {
-      composeMcpServers(opts: { sessionId: string }): Promise<Record<string, McpServerConfig>>;
-    }).composeMcpServers({ sessionId } as Parameters<ClaudeCodeManager['composeMcpServers' & keyof ClaudeCodeManager]>[0]);
+      composeMcpServers(opts: { sessionId: string; runId?: string }): Promise<Record<string, McpServerConfig>>;
+    }).composeMcpServers({ sessionId, runId } as Parameters<ClaudeCodeManager['composeMcpServers' & keyof ClaudeCodeManager]>[0]);
   }
 }
 
@@ -212,5 +212,35 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
 
     // findNodeExecutable must never have been touched.
     expect(findNodeExecutableMock).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 5: CYBOFLOW_RUN_ID prefers the real runId over sessionId (workflow run)
+  // ---------------------------------------------------------------------------
+  it('sets CYBOFLOW_RUN_ID to the real runId when runId is a non-empty string distinct from sessionId', async () => {
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-uuid', 'run-real-id');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { env: Record<string, string> };
+    // The real workflow_runs.id wins over the Claude session UUID.
+    expect(cyboflow.env.CYBOFLOW_RUN_ID).toBe('run-real-id');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 6: CYBOFLOW_RUN_ID falls back to sessionId when runId is absent
+  // ---------------------------------------------------------------------------
+  it('falls back to sessionId for CYBOFLOW_RUN_ID when runId is undefined (quick-session path)', async () => {
+    mgr.setOrchSocketPath('/tmp/test.sock');
+    await Promise.resolve();
+
+    const result = await mgr.publicComposeMcpServers('sess-uuid');
+
+    expect(result).toHaveProperty('cyboflow');
+    const cyboflow = result['cyboflow'] as { env: Record<string, string> };
+    // No runId supplied → legacy fallback to the session id.
+    expect(cyboflow.env.CYBOFLOW_RUN_ID).toBe('sess-uuid');
   });
 });
