@@ -16,7 +16,7 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { AnalyticsManager } from './services/analyticsManager';
 import { initializeCommitManager } from './services/commitManager';
-import { setCyboflowDirectory } from './utils/cyboflowDirectory';
+import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { setupAutoUpdater } from './autoUpdater';
@@ -24,6 +24,7 @@ import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
+import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
@@ -36,6 +37,9 @@ import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
+import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
+import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
+import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import { approvalEvents, questionEvents, runStatusEvents } from './orchestrator/trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
@@ -540,23 +544,34 @@ async function initializeServices() {
     },
   };
 
-  // OrchSocketProvider — TODO(epic 7): permissionIpcServer is not yet on
-  // AppServices.  The sentinel throws at call time so any code path that
-  // reaches getSocketPath() surfaces a loud, traceable error instead of
-  // silently producing a broken socket path.
+  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
+  // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
+  // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
+  // tools are routable.  Started here (before the RunLauncher block) so its
+  // socket path is available to the providers, the McpServerLifecycle, and the
+  // CLI manager below.  `cyboflowDb`/`cyboflowLogger` are already in scope above.
+  const orchSocketServer = new OrchSocketServer(
+    getCyboflowSubdirectory('sockets', 'orch.sock'),
+    cyboflowDb,
+    cyboflowLogger,
+  );
+  void orchSocketServer.start().catch((err) => {
+    cyboflowLogger.error(
+      `[Cyboflow Orch IPC] socket server start failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+
+  // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
+  // injects the live socket path into spawned sessions.
   const orchSocketProvider: OrchSocketProvider = {
-    getSocketPath: () => {
-      throw new Error('cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)');
-    },
+    getSocketPath: () => orchSocketServer.getSocketPath(),
   };
 
-  // BridgeScriptResolver — TODO(epic 7): ASAR extraction of the bridge
-  // script is not yet implemented.  The sentinel throws at call time so
-  // missing wiring fails loudly rather than resolving to a phantom path.
+  // BridgeScriptResolver — delegates to resolveMcpServerScriptPath(), which
+  // returns the asar-unpacked path in packaged builds and the __dirname-relative
+  // compiled .js in dev (no extraction step needed).
   const bridgeScriptResolver: BridgeScriptResolver = {
-    getScriptPath: () => {
-      throw new Error('cyboflow: bridgeScriptResolver not yet wired (epic 7 owns ASAR extraction)');
-    },
+    getScriptPath: () => resolveMcpServerScriptPath(),
   };
 
   // NodeResolver — returns the process's own node executable path as a
@@ -671,14 +686,42 @@ async function initializeServices() {
     runQueues,
   );
 
-  // OrchestratorHealth — constructed with a sentinel lifecycle so both the
+  // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
+  const socketPath = orchSocketServer.getSocketPath();
+
+  // McpServerLifecycle — manages the singleton cyboflowMcpServer subprocess that
+  // connects back to the OrchSocketServer above.  The run-id provider returns the
+  // documented 'orchestrator' sentinel; per-session run-id is supplied per-tool-call
+  // (TASK-800), not here.  cyboflowLogger is a LoggerLike already in scope above.
+  const mcpServerLifecycle = new McpServerLifecycle(
+    socketPath,
+    cyboflowLogger,
+    () => 'orchestrator',
+  );
+
+  // Wire the orch socket path into the CLI manager so composeMcpServers() stops
+  // taking the orchSocketPath===null branch and injects the 'cyboflow' MCP entry
+  // into every spawned session.  This is the first production caller of
+  // setOrchSocketPath; it does not need to wait on the lifecycle start() below.
+  // defaultCliManager is typed as AbstractCliManager (setOrchSocketPath lives on
+  // the concrete ClaudeCodeManager), so narrow via instanceof — the factory
+  // creates a ClaudeCodeManager for the 'claude' tool at runtime.
+  if (defaultCliManager instanceof ClaudeCodeManager) {
+    defaultCliManager.setOrchSocketPath(socketPath);
+  }
+
+  // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
-  // procedure read from the same source of truth.  The sentinel reports
-  // 'starting' (yellow dot) until the real McpServerLifecycle is wired in
-  // epic 7 (permissionIpcServer + socket path).
-  orchestratorHealth = new OrchestratorHealth({
-    getStatus: () => 'starting' as const,
-    getRestartAttempts: () => 0,
+  // procedure read live status (off the old hard-coded 'starting' fallback).
+  // McpServerLifecycle structurally satisfies McpLifecycleReadable, so no adapter
+  // is needed.
+  orchestratorHealth = new OrchestratorHealth(mcpServerLifecycle);
+
+  // Start the MCP server subprocess fire-and-forget; on failure record the error
+  // on the health surface (callable now that orchestratorHealth exists) and log it.
+  void mcpServerLifecycle.start().catch((err) => {
+    orchestratorHealth.setMcpError(err instanceof Error ? err.message : String(err));
+    cyboflowLogger.error(`[Cyboflow MCP] lifecycle start failed: ${String(err)}`);
   });
 
   const services: AppServices = {
