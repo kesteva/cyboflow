@@ -5,7 +5,6 @@ import { API } from '../utils/api';
 import type { AppConfig } from '../types/config';
 import { useConfigStore } from '../stores/configStore';
 import {
-  Shield,
   Sun,
   Moon,
   Settings as SettingsIcon,
@@ -31,7 +30,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [verbose, setVerbose] = useState(false);
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
-  const [defaultPermissionMode, setDefaultPermissionMode] = useState<'approve'>('approve');
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
@@ -64,8 +62,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setVerbose(data.verbose || false);
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
-      // Only 'approve' is a valid UI selection; coerce any legacy 'ignore' value to 'approve'.
-      setDefaultPermissionMode('approve');
       setDevMode(data.devMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       
@@ -100,7 +96,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         verbose,
         systemPromptAppend: globalSystemPrompt,
         claudeExecutablePath,
-        defaultPermissionMode,
         devMode,
         enableCyboflowFooter,
         additionalPaths: parsedPaths,
@@ -208,35 +203,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               icon={<Zap className="w-5 h-5" />}
               defaultExpanded={true}
             >
-              <SettingsSection
-                title="Default Security Mode"
-                description="How Claude should handle potentially risky operations"
-                icon={<Shield className="w-4 h-4" />}
-              >
-                <div className="space-y-3">
-                  <label className="flex items-start gap-3 cursor-pointer p-3 rounded-lg hover:bg-surface-hover transition-colors border border-border-secondary">
-                    <input
-                      type="radio"
-                      name="defaultPermissionMode"
-                      value="approve"
-                      checked={defaultPermissionMode === 'approve'}
-                      onChange={(e) => setDefaultPermissionMode(e.target.value as 'approve')}
-                      className="text-interactive mt-1"
-                    />
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Shield className="w-4 h-4 text-status-success" />
-                        <span className="text-sm font-medium text-text-primary">Secure & Controlled</span>
-                        <span className="ml-auto px-2 py-0.5 text-xs bg-status-warning/20 text-status-warning rounded-full">Default</span>
-                      </div>
-                      <p className="text-xs text-text-tertiary leading-relaxed">
-                        Claude asks for your approval before running potentially risky commands. Safer for production code.
-                      </p>
-                    </div>
-                  </label>
-                </div>
-              </SettingsSection>
-
               <SettingsSection
                 title="Global Instructions"
                 description="Add custom instructions that apply to all your projects"
