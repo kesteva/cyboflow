@@ -25,6 +25,8 @@ import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
+import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
+import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
@@ -54,7 +56,7 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -506,6 +508,22 @@ async function initializeServices() {
     },
     skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
+
+  // Create the interactive (PTY) CLI manager (IDEA-013 S4 / TASK-809). Registered
+  // as the 'claude-interactive' built-in tool by TASK-806. Constructed with the
+  // same db-in-additionalOptions + skipValidation contract as the SDK manager so a
+  // missing `claude` binary never blocks startup; availability is probed lazily on
+  // first interactive spawn. The SubstrateDispatchFacade routes per-run between this
+  // and defaultCliManager based on workflow_runs.substrate.
+  const interactiveCliManager = await cliManagerFactory.createManager('claude-interactive', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
+    skipValidation: true,
+  });
   gitDiffManager = new GitDiffManager(logger, analyticsManager);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -612,15 +630,22 @@ async function initializeServices() {
     },
   };
 
-  // ClaudeSpawnerLike adapter — wraps defaultCliManager so RunExecutor can call
-  // spawnCliProcess() and abort() via the narrow interface without importing the
-  // concrete class directly.  ClaudeCodeManager.spawnCliProcess() accepts a
-  // ClaudeSpawnOptions superset of ClaudeSpawnerOptions; abort delegates to
-  // killProcess() which performs the SDK abort + cleanup.
-  const spawnerAdapter: ClaudeSpawnerLike = {
-    spawnCliProcess: defaultCliManager.spawnCliProcess.bind(defaultCliManager),
-    abort: defaultCliManager.killProcess.bind(defaultCliManager),
-  };
+  // SubstrateDispatchFacade — the substrate-aware ClaudeSpawnerLike that replaces
+  // the single-manager spawnerAdapter (IDEA-013 S4 / TASK-809). It resolves
+  // workflow_runs.substrate per run (via workflowRegistry.getRunById) and dispatches
+  // spawnCliProcess to defaultCliManager ('sdk' / legacy / default) or
+  // interactiveCliManager ('interactive'); abort hits the manager that spawned the
+  // run's panel. It ALSO extends EventEmitter and fans-in BOTH managers'
+  // 'output'/'exit' events, re-emitting them on itself — so the SAME facade serves
+  // as RunExecutor's single `source` EventEmitter (which is bound once at
+  // construction and cannot be swapped per run). One object satisfies both seams.
+  // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
+  const substrateFacade = new SubstrateDispatchFacade(
+    defaultCliManager,
+    interactiveCliManager,
+    workflowRegistry,
+    cyboflowLogger,
+  );
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
   // delegating to the transitionTo* helpers at the index.ts boundary.
@@ -672,10 +697,12 @@ async function initializeServices() {
     },
   };
 
-  // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
-  // LifecycleTransitions adapter, streaming publisher + db for event bridging,
-  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output'),
-  // and the stepTransitionEmitter for lifecycle step-transition events (TASK-765).
+  // RunExecutor wired with the SubstrateDispatchFacade as BOTH the spawner (substrate-
+  // aware dispatch, in place of the single-manager spawnerAdapter) AND the EventEmitter
+  // source (so bridgeEvents() can call .on('output') against the fan-in of both
+  // managers, regardless of which substrate ran). Plus WorkflowPromptReader,
+  // LifecycleTransitions adapter, streaming publisher + db for event bridging, and the
+  // stepTransitionEmitter for lifecycle step-transition events (TASK-765).
   //
   // The executor NEVER auto-completes a run: on SDK iterator drain it rests the
   // run in awaiting_review (running -> awaiting_review via restAwaitingReview).
@@ -683,14 +710,14 @@ async function initializeServices() {
   // runs router. This supersedes the old GAP-A pending-work probe (never
   // auto-completing subsumes "don't complete while a gate is pending").
   const runExecutor = new RunExecutor(
-    spawnerAdapter,
+    substrateFacade,
     workflowRegistry,
     cyboflowLogger,
     promptReader,
     lifecycleTransitions,
     cyboflowPublisher,
     rawDb,
-    defaultCliManager,
+    substrateFacade,
     stepTransitionEmitter,
   );
 
@@ -727,15 +754,19 @@ async function initializeServices() {
     () => 'orchestrator',
   );
 
-  // Wire the orch socket path into the CLI manager so composeMcpServers() stops
-  // taking the orchSocketPath===null branch and injects the 'cyboflow' MCP entry
-  // into every spawned session.  This is the first production caller of
+  // Wire the orch socket path into BOTH CLI managers so each one's spawn path
+  // injects the 'cyboflow' MCP entry / CYBOFLOW_ORCH_SOCKET into every spawned
+  // session, on whichever substrate runs.  This is the first production caller of
   // setOrchSocketPath; it does not need to wait on the lifecycle start() below.
-  // defaultCliManager is typed as AbstractCliManager (setOrchSocketPath lives on
-  // the concrete ClaudeCodeManager), so narrow via instanceof — the factory
-  // creates a ClaudeCodeManager for the 'claude' tool at runtime.
+  // The managers are typed as AbstractCliManager (setOrchSocketPath lives on each
+  // concrete subclass), so narrow via instanceof — the factory creates a
+  // ClaudeCodeManager for 'claude' and an InteractiveClaudeManager for
+  // 'claude-interactive' at runtime.
   if (defaultCliManager instanceof ClaudeCodeManager) {
     defaultCliManager.setOrchSocketPath(socketPath);
+  }
+  if (interactiveCliManager instanceof InteractiveClaudeManager) {
+    interactiveCliManager.setOrchSocketPath(socketPath);
   }
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
