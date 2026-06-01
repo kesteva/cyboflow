@@ -53,6 +53,7 @@ function makeWorkflowRow(overrides?: Partial<WorkflowRow>): WorkflowRow {
     name: 'sprint',
     workflow_path: '/fake/sprint.md',
     permission_mode: 'default',
+    spec_json: '{}',
     created_at: new Date().toISOString(),
     ...overrides,
   };

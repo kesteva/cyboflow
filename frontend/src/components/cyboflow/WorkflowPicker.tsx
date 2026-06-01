@@ -10,10 +10,11 @@
  * `sessions:create-quick` IPC, bootstraps both Claude and Terminal panels via
  * `panelApi.createPanel`, and navigates via `setActiveQuickSession`.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuickSession } from '../../hooks/useQuickSession';
+import { WorkflowEditorModal } from './WorkflowEditorModal';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 
 interface WorkflowPickerProps {
@@ -28,6 +29,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
+  const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
+
+  /**
+   * Synchronous in-flight latch for "Start Run". The `isStarting` STATE guard is
+   * insufficient against a double-submit: two clicks fired in the same tick both
+   * read isStarting=false and both fire runs.start (each spinning up a worktree),
+   * and the `disabled` attribute only applies after the next render. A ref flips
+   * synchronously so the second click is rejected. (Prevents the duplicate-run bug.)
+   */
+  const startInFlightRef = useRef(false);
+
   const {
     start: startQuickSession,
     isStarting: isQuickStarting,
@@ -39,38 +52,53 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     },
   });
 
-  // Load workflows on mount (or when projectId changes)
+  /**
+   * Fetch the project's workflow list. Refactored out of the mount effect into a
+   * callable so it can be re-invoked after the editor saves a new/edited flow.
+   * `preferId`, when set, is selected after the refresh (used to focus a flow the
+   * user just created/edited); otherwise selection is preserved or defaults to
+   * the first row.
+   */
+  const loadWorkflows = useCallback(
+    (preferId?: string): Promise<void> => {
+      setIsLoading(true);
+      setError(null);
+      return trpc.cyboflow.workflows.list
+        .query({ projectId })
+        .then((rows) => {
+          setWorkflows(rows);
+          setSelectedId((prev) => {
+            if (preferId && rows.some((r) => r.id === preferId)) return preferId;
+            if (prev !== null && rows.some((r) => r.id === prev)) return prev;
+            return rows.length > 0 ? rows[0].id : null;
+          });
+        })
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : 'Failed to load workflows');
+        })
+        .finally(() => {
+          setIsLoading(false);
+        });
+    },
+    [projectId],
+  );
+
+  // Load workflows on mount (or when projectId changes).
   useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    setError(null);
+    void loadWorkflows();
+  }, [loadWorkflows]);
 
-    trpc.cyboflow.workflows.list
-      .query({ projectId })
-      .then((rows) => {
-        if (cancelled) return;
-        setWorkflows(rows);
-        if (rows.length > 0 && selectedId === null) {
-          setSelectedId(rows[0].id);
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load workflows');
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // selectedId intentionally excluded — only re-fetch when projectId changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  const handleEditorSaved = useCallback(
+    (savedId: string) => {
+      setEditorMode(null);
+      void loadWorkflows(savedId);
+    },
+    [loadWorkflows],
+  );
 
   const handleStartRun = async () => {
-    if (selectedId === null || isStarting) return;
+    if (selectedId === null || startInFlightRef.current) return;
+    startInFlightRef.current = true;
     setError(null);
     setIsStarting(true);
     try {
@@ -81,6 +109,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       setError(err instanceof Error ? err.message : 'Failed to start run');
     } finally {
       setIsStarting(false);
+      startInFlightRef.current = false;
     }
   };
 
@@ -115,13 +144,42 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         </p>
       )}
 
-      <button
-        onClick={handleStartRun}
-        disabled={selectedId === null || isLoading || isStarting || isQuickStarting}
-        className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Start Run
-      </button>
+      <div className="flex gap-2">
+        <button
+          onClick={handleStartRun}
+          disabled={selectedId === null || isLoading || isStarting || isQuickStarting}
+          className="flex-1 rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Start Run
+        </button>
+        <button
+          onClick={() => setEditorMode('edit')}
+          disabled={selectedId === null || isLoading}
+          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="workflow-picker-edit"
+        >
+          Edit
+        </button>
+        <button
+          onClick={() => setEditorMode('create')}
+          disabled={isLoading}
+          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          data-testid="workflow-picker-new-flow"
+        >
+          New flow
+        </button>
+      </div>
+
+      {editorMode !== null && (
+        <WorkflowEditorModal
+          isOpen
+          mode={editorMode}
+          workflowId={selectedId ?? ''}
+          projectId={projectId}
+          onClose={() => setEditorMode(null)}
+          onSaved={handleEditorSaved}
+        />
+      )}
 
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
