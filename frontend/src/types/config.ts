@@ -7,8 +7,6 @@ export interface AppConfig {
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   autoCheckUpdates?: boolean;
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

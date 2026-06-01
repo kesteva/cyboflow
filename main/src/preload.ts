@@ -344,17 +344,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getPending: (): Promise<IPCResponse> => ipcRenderer.invoke('permission:getPending'),
   },
 
-  // Stravu OAuth integration
-  stravu: {
-    getConnectionStatus: (): Promise<IPCResponse> => ipcRenderer.invoke('stravu:get-connection-status'),
-    initiateAuth: (): Promise<IPCResponse> => ipcRenderer.invoke('stravu:initiate-auth'),
-    checkAuthStatus: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('stravu:check-auth-status', sessionId),
-    disconnect: (): Promise<IPCResponse> => ipcRenderer.invoke('stravu:disconnect'),
-    getNotebooks: (): Promise<IPCResponse> => ipcRenderer.invoke('stravu:get-notebooks'),
-    getNotebook: (notebookId: string): Promise<IPCResponse> => ipcRenderer.invoke('stravu:get-notebook', notebookId),
-    searchNotebooks: (query: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('stravu:search-notebooks', query, limit),
-  },
-
   // Dashboard
   dashboard: {
     getProjectStatus: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('dashboard:get-project-status', projectId),

@@ -227,18 +227,6 @@ interface ElectronAPI {
     getPending: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
-  // Stravu MCP integration with OAuth — IPCDataResponse for methods whose callers access .data directly
-  stravu: {
-    getConnectionStatus: () => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
-    initiateAuth: () => Promise<IPCDataResponse<{ authUrl: string; sessionId: string }>>;
-    checkAuthStatus: (sessionId: string) => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
-    disconnect: () => Promise<IPCResponse<void>>;
-    getNotebooks: () => Promise<IPCResponse<unknown[]>>; // Caller does not consume .data directly
-    getNotebook: (notebookId: string) => Promise<IPCDataResponse<{ content: string }>>;
-    // searchNotebooks returns StravuNotebook[] locally typed in StravuFileSearch.tsx
-    searchNotebooks: (query: string, limit?: number) => Promise<IPCDataResponse<unknown[]>>;
-  };
-
   // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access
   dashboard: {
     getProjectStatus: (projectId: number) => Promise<IPCDataResponse<unknown>>;

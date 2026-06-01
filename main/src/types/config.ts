@@ -13,9 +13,6 @@ export interface AppConfig {
   defaultModel?: string;
   // Auto-check for updates
   autoCheckUpdates?: boolean;
-  // Stravu MCP integration
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -68,8 +65,6 @@ export interface UpdateConfigRequest {
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
   autoCheckUpdates?: boolean;
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

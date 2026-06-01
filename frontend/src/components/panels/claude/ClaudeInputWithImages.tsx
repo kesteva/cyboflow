@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, memo, useEffect } from 'react';
 import { Session, GitCommands } from '../../../types/session';
 // ViewMode removed - no longer needed
-import { X, Cpu, Send, Play, Terminal, ChevronRight, AtSign, Paperclip, Zap, Brain, Target, CheckCircle, Square, FileText, Loader2 } from 'lucide-react';
+import { X, Cpu, Send, Play, Terminal, ChevronRight, Paperclip, Zap, Brain, Target, CheckCircle, Square, FileText, Loader2 } from 'lucide-react';
 import FilePathAutocomplete from '../../FilePathAutocomplete';
 import { API } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
@@ -37,8 +37,6 @@ interface SessionInputWithImagesProps {
     attachedTexts?: AttachedText[],
     modelOverride?: string
   ) => void;
-  isStravuConnected: boolean;
-  setShowStravuSearch: (show: boolean) => void;
   ultrathink: boolean;
   setUltrathink: (ultra: boolean) => void;
   gitCommands: GitCommands | null;
@@ -62,8 +60,6 @@ export const SessionInputWithImages: React.FC<SessionInputWithImagesProps> = mem
   handleTerminalCommand,
   handleSendInput,
   handleContinueConversation,
-  isStravuConnected,
-  setShowStravuSearch,
   ultrathink,
   setUltrathink,
   gitCommands,
@@ -547,17 +543,6 @@ export const SessionInputWithImages: React.FC<SessionInputWithImagesProps> = mem
                 Attach Image
               </Pill>
               
-              {/* Reference Button */}
-              {isStravuConnected && (
-                <Pill
-                  onClick={() => setShowStravuSearch(true)}
-                  icon={<AtSign className="w-3.5 h-3.5" />}
-                  title="Reference files (@)"
-                >
-                  Reference
-                </Pill>
-              )}
-
               {/* Divider */}
               <div className="h-6 w-px bg-border-primary mx-1" />
 

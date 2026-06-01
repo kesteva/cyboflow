@@ -10,8 +10,6 @@ import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { VersionChecker } from './services/versionChecker';
-import { StravuAuthManager } from './services/stravuAuthManager';
-import { StravuNotebookService } from './services/stravuNotebookService';
 import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { AnalyticsManager } from './services/analyticsManager';
@@ -109,8 +107,6 @@ let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
 let versionChecker: VersionChecker;
-let stravuAuthManager: StravuAuthManager;
-let stravuNotebookService: StravuNotebookService;
 let archiveProgressManager: ArchiveProgressManager;
 let analyticsManager: AnalyticsManager;
 
@@ -206,11 +202,7 @@ async function createWindow() {
     const originalHandle = ipcMain.handle;
     ipcMain.handle = function(channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown> | unknown) {
       const wrappedListener = async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-        if (channel.startsWith('stravu:')) {
-        }
         const result = await listener(event, ...args);
-        if (channel.startsWith('stravu:')) {
-        }
         return result;
       };
       return originalHandle.call(this, channel, wrappedListener);
@@ -507,8 +499,6 @@ async function initializeServices() {
 
   // Initialize version checker
   versionChecker = new VersionChecker(configManager, logger);
-  stravuAuthManager = new StravuAuthManager(logger);
-  stravuNotebookService = new StravuNotebookService(stravuAuthManager, logger);
 
   taskQueue = new TaskQueue({
     sessionManager,
@@ -694,8 +684,6 @@ async function initializeServices() {
     executionTracker,
     runCommandManager,
     versionChecker,
-    stravuAuthManager,
-    stravuNotebookService,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,

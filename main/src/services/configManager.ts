@@ -23,8 +23,6 @@ export class ConfigManager extends EventEmitter {
       runScript: undefined,
       defaultPermissionMode: 'approve',
       defaultModel: 'sonnet',
-      stravuApiKey: undefined,
-      stravuServerUrl: 'https://api.stravu.com',
       notifications: {
         enabled: true,
         playSound: true,
@@ -160,14 +158,6 @@ export class ConfigManager extends EventEmitter {
 
   getRunScript(): string[] | undefined {
     return this.config.runScript;
-  }
-
-  getStravuApiKey(): string | undefined {
-    return this.config.stravuApiKey;
-  }
-
-  getStravuServerUrl(): string {
-    return this.config.stravuServerUrl || 'https://api.stravu.com';
   }
 
   getDefaultModel(): string {

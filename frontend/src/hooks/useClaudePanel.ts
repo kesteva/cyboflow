@@ -3,7 +3,6 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useTheme } from '../contexts/ThemeContext';
 import { API } from '../utils/api';
 import { GitCommands } from '../types/session';
-import { createVisibilityAwareInterval } from '../utils/performanceUtils';
 import type { AttachedImage, AttachedText } from '../types/session';
 
 export const useClaudePanel = (
@@ -32,8 +31,6 @@ export const useClaudePanel = (
   const [loadError, setLoadError] = useState<string | null>(null);
   const [outputLoadState, setOutputLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [gitCommands, setGitCommands] = useState<GitCommands | null>(null);
-  const [showStravuSearch, setShowStravuSearch] = useState(false);
-  const [isStravuConnected, setIsStravuConnected] = useState(false);
   const [contextCompacted, setContextCompacted] = useState(false);
   const [compactedContext, setCompactedContext] = useState<string | null>(null);
   const [hasConversationHistory, setHasConversationHistory] = useState(false);
@@ -175,26 +172,6 @@ export const useClaudePanel = (
 
   // Auto-resize textarea is now handled in ClaudeInputWithImages component
   // Removed duplicate effect to prevent performance issues
-
-  // Check Stravu connection status
-  useEffect(() => {
-    const checkStravuConnection = async () => {
-      try {
-        const response = await API.stravu.getConnectionStatus();
-        setIsStravuConnected(response.success && response.data.status === 'connected');
-      } catch (err) {
-        setIsStravuConnected(false);
-      }
-    };
-    checkStravuConnection();
-    // Use visibility-aware interval for Stravu connection checking
-    const cleanup = createVisibilityAwareInterval(
-      checkStravuConnection,
-      30000, // 30 seconds when visible
-      120000 // 2 minutes when not visible
-    );
-    return cleanup;
-  }, [activeSessionId]);
 
   // Load git commands when session changes
   useEffect(() => {
@@ -398,11 +375,6 @@ export const useClaudePanel = (
     if (activeSession) await API.sessions.stop(activeSession.id);
   };
 
-  const handleStravuFileSelect = (file: { name: string; type: string }, content: string) => {
-    const formattedContent = `\n\n## File: ${file.name}\n\`\`\`${file.type}\n${content}\n\`\`\`\n\n`;
-    setInput(prev => prev + formattedContent);
-  };
-
   const handleCompactContext = async () => {
     if (!activeSession) return;
     
@@ -451,9 +423,6 @@ export const useClaudePanel = (
     isLoadingOutput,
     outputLoadState,
     loadError,
-    showStravuSearch,
-    setShowStravuSearch,
-    isStravuConnected,
     textareaRef,
     contextCompacted,
     compactedContext,
@@ -465,7 +434,6 @@ export const useClaudePanel = (
     handleContinueConversation,
     handleTerminalCommand,
     handleStopSession,
-    handleStravuFileSelect,
     handleCompactContext,
     
     // Utilities

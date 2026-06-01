@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { NotificationSettings } from './NotificationSettings';
-import { StravuConnection } from './StravuConnection';
 import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import type { AppConfig } from '../types/config';
@@ -49,7 +48,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'analytics' | 'stravu'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'analytics'>('general');
   const [analyticsEnabled, setAnalyticsEnabled] = useState(true);
   const [previousAnalyticsEnabled, setPreviousAnalyticsEnabled] = useState(true);
   const { updateSettings } = useNotifications();
@@ -206,16 +205,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             }`}
           >
             Analytics
-          </button>
-          <button
-            onClick={() => setActiveTab('stravu')}
-            className={`px-4 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'stravu'
-                ? 'text-interactive border-b-2 border-interactive bg-interactive/5'
-                : 'text-text-tertiary hover:text-text-primary hover:bg-surface-hover'
-            }`}
-          >
-            Stravu Integration
           </button>
         </div>
 
@@ -581,77 +570,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               </div>
             )}
           </form>
-        )}
-
-        {activeTab === 'stravu' && (
-          <div className="space-y-6">
-            {/* Stravu Introduction */}
-            <CollapsibleCard
-              title="About Stravu Integration"
-              subtitle="Connect your team's knowledge to your AI workflow"
-              icon={
-                <img 
-                  src="./stravu-logo.png" 
-                  alt="Stravu Logo" 
-                  className="w-5 h-5 object-contain"
-                />
-              }
-              defaultExpanded={true}
-              variant="subtle"
-            >
-              <div className="space-y-4">
-                <p className="text-sm text-text-secondary leading-relaxed">
-                  Stravu is the knowledge platform for AI-first teams. Connect Cyboflow to your Stravu workspace to give Claude access to your team's documentation, best practices, and institutional knowledge.
-                </p>
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                  <div className="p-3 bg-surface-tertiary rounded-lg">
-                    <h4 className="font-medium text-text-primary mb-1">🚀 Smart Context</h4>
-                    <p className="text-text-tertiary">Claude automatically pulls relevant docs and standards</p>
-                  </div>
-                  <div className="p-3 bg-surface-tertiary rounded-lg">
-                    <h4 className="font-medium text-text-primary mb-1">👥 Team Alignment</h4>
-                    <p className="text-text-tertiary">Ensure AI follows your team's patterns and conventions</p>
-                  </div>
-                  <div className="p-3 bg-surface-tertiary rounded-lg">
-                    <h4 className="font-medium text-text-primary mb-1">📚 Knowledge Base</h4>
-                    <p className="text-text-tertiary">Surface relevant documentation during development</p>
-                  </div>
-                  <div className="p-3 bg-surface-tertiary rounded-lg">
-                    <h4 className="font-medium text-text-primary mb-1">🔄 Always Current</h4>
-                    <p className="text-text-tertiary">Real-time sync with your latest team knowledge</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between pt-2 border-t border-border-secondary">
-                  <a 
-                    href="https://stravu.com/?utm_source=Crystal&utm_medium=OS&utm_campaign=Crystal&utm_id=1" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="text-interactive hover:text-interactive-hover text-sm inline-flex items-center gap-2 font-medium transition-colors"
-                  >
-                    Learn more about Stravu
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </a>
-                  <span className="text-xs text-text-tertiary">
-                    Made by the Cyboflow team
-                  </span>
-                </div>
-              </div>
-            </CollapsibleCard>
-
-            {/* Connection Management */}
-            <CollapsibleCard
-              title="Connection Management"
-              subtitle="Connect and manage your Stravu workspace integration"
-              icon={<Zap className="w-5 h-5" />}
-              defaultExpanded={true}
-            >
-              <StravuConnection />
-            </CollapsibleCard>
-          </div>
         )}
       </ModalBody>
 
