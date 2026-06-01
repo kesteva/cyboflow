@@ -1,14 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, ExternalLink, Download, Check, AlertCircle, Loader2 } from 'lucide-react';
-import { UpdateDialog } from './UpdateDialog';
+import { X, ExternalLink } from 'lucide-react';
 
 interface VersionInfo {
   current: string;
-  latest: string;
-  hasUpdate: boolean;
-  releaseUrl?: string;
-  releaseNotes?: string;
-  publishedAt?: string;
   workingDirectory?: string;
   cyboflowDirectory?: string;
   buildDate?: string;
@@ -24,9 +18,6 @@ interface AboutDialogProps {
 
 export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
-  const [isChecking, setIsChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [showUpdateDialog, setShowUpdateDialog] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -41,8 +32,6 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
       if (result.success) {
         setVersionInfo({
           current: result.data.current,
-          latest: result.data.current,
-          hasUpdate: false,
           workingDirectory: result.data.workingDirectory,
           cyboflowDirectory: result.data.cyboflowDirectory,
           buildDate: result.data.buildDate,
@@ -53,41 +42,6 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
       }
     } catch (error) {
       console.error('Failed to get version info:', error);
-    }
-  };
-
-  const checkForUpdates = async () => {
-    setIsChecking(true);
-    setError(null);
-    
-    try {
-      const result = await window.electronAPI.checkForUpdates();
-      if (result.success) {
-        setVersionInfo(result.data);
-        // If update is available, automatically show the update dialog
-        if (result.data.hasUpdate) {
-          setShowUpdateDialog(true);
-        }
-      } else {
-        setError(result.error || 'Failed to check for updates');
-      }
-    } catch (error) {
-      setError('Failed to check for updates');
-      console.error('Update check failed:', error);
-    } finally {
-      setIsChecking(false);
-    }
-  };
-
-  const formatDate = (dateString: string) => {
-    try {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-    } catch {
-      return dateString;
     }
   };
 
@@ -217,78 +171,6 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               </div>
             )}
 
-            {versionInfo?.hasUpdate && (
-              <div className="bg-interactive/10 border border-interactive/30 rounded-lg p-4">
-                <div className="flex items-start space-x-3">
-                  <Download className="w-5 h-5 text-interactive mt-0.5 flex-shrink-0" />
-                  <div className="flex-1 space-y-3">
-                    <div className="space-y-2">
-                      <p className="text-sm font-medium text-interactive">
-                        Update Available: v{versionInfo.latest}
-                      </p>
-                      {versionInfo.publishedAt && (
-                        <p className="text-xs text-interactive/80">
-                          Released {formatDate(versionInfo.publishedAt)}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <button
-                        onClick={() => setShowUpdateDialog(true)}
-                        className="inline-flex items-center justify-center space-x-2 px-3 py-1.5 bg-interactive hover:bg-interactive-hover text-on-interactive text-sm font-medium rounded-md transition-colors"
-                      >
-                        <Download className="w-4 h-4" />
-                        <span>Download Update</span>
-                      </button>
-                      {versionInfo.releaseUrl && (
-                        <a
-                          href={versionInfo.releaseUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center justify-center space-x-1 px-3 py-1.5 text-sm text-interactive hover:underline"
-                        >
-                          <span>View Release Notes</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {!versionInfo?.hasUpdate && versionInfo?.current && !isChecking && (
-              <div className="flex items-center space-x-2 text-sm text-status-success">
-                <Check className="w-4 h-4" />
-                <span>You're running the latest version</span>
-              </div>
-            )}
-
-            {error && (
-              <div className="flex items-center space-x-2 text-sm text-status-error">
-                <AlertCircle className="w-4 h-4" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            {/* Check for Updates Button */}
-            <button
-              onClick={checkForUpdates}
-              disabled={isChecking}
-              className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-interactive hover:bg-interactive-hover disabled:bg-interactive/50 text-on-interactive text-sm font-medium rounded-lg transition-colors"
-            >
-              {isChecking ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Checking for Updates...</span>
-                </>
-              ) : (
-                <>
-                  <Download className="w-4 h-4" />
-                  <span>Check for Updates</span>
-                </>
-              )}
-            </button>
           </div>
 
           {/* Discord Community Button */}
@@ -335,15 +217,6 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           </div>
         </div>
       </div>
-      
-      {/* Update Dialog */}
-      {showUpdateDialog && versionInfo && (
-        <UpdateDialog
-          isOpen={showUpdateDialog}
-          onClose={() => setShowUpdateDialog(false)}
-          versionInfo={versionInfo}
-        />
-      )}
     </div>
   );
 }

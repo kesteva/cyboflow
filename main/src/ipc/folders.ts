@@ -16,7 +16,7 @@ export function convertDbFolderToFolder(dbFolder: Folder) {
 }
 
 export function registerFolderHandlers(ipcMain: IpcMain, services: AppServices) {
-  const { databaseService, getMainWindow, analyticsManager } = services;
+  const { databaseService, getMainWindow } = services;
 
   // Get all folders for a project
   ipcMain.handle('folders:get-by-project', async (_, projectId: number) => {
@@ -36,14 +36,6 @@ export function registerFolderHandlers(ipcMain: IpcMain, services: AppServices) 
       const folder = databaseService.createFolder(name, projectId, parentFolderId);
       const convertedFolder = convertDbFolderToFolder(folder);
 
-      // Track folder creation
-      if (analyticsManager) {
-        const nestingLevel = parentFolderId ? databaseService.getFolderDepth(folder.id) : 0;
-        analyticsManager.track('folder_created', {
-          nesting_level: nestingLevel
-        });
-      }
-
       return { success: true, data: convertedFolder };
     } catch (error: unknown) {
       console.error('[IPC] Failed to create folder:', error);
@@ -54,11 +46,6 @@ export function registerFolderHandlers(ipcMain: IpcMain, services: AppServices) 
   // Update a folder
   ipcMain.handle('folders:update', async (_, folderId: string, updates: { name?: string; display_order?: number; parent_folder_id?: string | null }) => {
     try {
-      // Track folder rename if name is being updated
-      if (analyticsManager && updates.name !== undefined) {
-        analyticsManager.track('folder_renamed', {});
-      }
-
       databaseService.updateFolder(folderId, updates);
 
       // Get the updated folder to emit the event
@@ -84,20 +71,6 @@ export function registerFolderHandlers(ipcMain: IpcMain, services: AppServices) 
   // Delete a folder
   ipcMain.handle('folders:delete', async (_, folderId: string) => {
     try {
-      // Count sessions in the folder before deletion for analytics
-      if (analyticsManager) {
-        const folder = databaseService.getFolder(folderId);
-        if (folder) {
-          // Count sessions in this folder (including all nested folders)
-          const allSessions = databaseService.getAllSessions(folder.project_id);
-          const sessionsInFolder = allSessions.filter(s => s.folder_id === folderId);
-
-          analyticsManager.track('folder_deleted', {
-            contained_session_count: sessionsInFolder.length
-          });
-        }
-      }
-
       databaseService.deleteFolder(folderId);
 
       // Emit the folder:deleted event to notify the frontend

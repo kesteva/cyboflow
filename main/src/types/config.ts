@@ -1,6 +1,5 @@
 export interface AppConfig {
   verbose?: boolean;
-  anthropicApiKey?: string;
   // Legacy fields for backward compatibility
   gitRepoPath?: string;
   systemPromptAppend?: string;
@@ -11,11 +10,6 @@ export interface AppConfig {
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default model for new sessions
   defaultModel?: string;
-  // Auto-check for updates
-  autoCheckUpdates?: boolean;
-  // Stravu MCP integration
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -51,25 +45,14 @@ export interface AppConfig {
   };
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-    distinctId?: string; // Random UUID for anonymous user identification
-  };
 }
 
 export interface UpdateConfigRequest {
   verbose?: boolean;
-  anthropicApiKey?: string;
   claudeExecutablePath?: string;
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
-  autoCheckUpdates?: boolean;
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
@@ -99,11 +82,4 @@ export interface UpdateConfigRequest {
     };
   };
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-    distinctId?: string; // Random UUID for anonymous user identification
-  };
 }

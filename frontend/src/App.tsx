@@ -9,9 +9,7 @@ import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
 import Help from './components/Help';
 import Welcome from './components/Welcome';
-import AnalyticsConsentDialog from './components/AnalyticsConsentDialog';
 import { AboutDialog } from './components/AboutDialog';
-import { UpdateDialog } from './components/UpdateDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
 import { PermissionDialog } from './components/PermissionDialog';
@@ -29,7 +27,7 @@ import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
-import type { VersionUpdateInfo, PermissionInput } from './types/session';
+import type { PermissionInput } from './types/session';
 
 // Type for IPC response
 import type { IPCResponse } from './utils/api';
@@ -45,11 +43,7 @@ interface PermissionRequest {
 function App() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWelcomeOpen, setIsWelcomeOpen] = useState(false);
-  const [isAnalyticsConsentOpen, setIsAnalyticsConsentOpen] = useState(false);
-  const [hasCheckedAnalyticsConsent, setHasCheckedAnalyticsConsent] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
-  const [updateVersionInfo, setUpdateVersionInfo] = useState<VersionUpdateInfo | null>(null);
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
@@ -76,7 +70,7 @@ function App() {
   });
   
   useIPCEvents();
-  const { showNotification } = useNotifications();
+  useNotifications();
   useStuckNotifications();
 
   // Start the MCP health polling subscription on mount.
@@ -103,35 +97,6 @@ function App() {
   useEffect(() => {
     fetchConfig();
   }, [fetchConfig]);
-
-  // Check if analytics consent dialog should be shown (before other dialogs)
-  useEffect(() => {
-    if (hasCheckedAnalyticsConsent) {
-      return;
-    }
-
-    const checkAnalyticsConsent = async () => {
-      if (!window.electron?.invoke) {
-        return;
-      }
-
-      try {
-        // Check if consent has already been shown
-        const consentResult = await window.electron.invoke('preferences:get', 'analytics_consent_shown') as IPCResponse<string>;
-        const hasShownConsent = consentResult?.data === 'true';
-
-        if (!hasShownConsent) {
-          // Show consent dialog
-          setIsAnalyticsConsentOpen(true);
-        }
-      } catch (error) {
-        console.error('[App] Error checking analytics consent:', error);
-      }
-    };
-
-    setHasCheckedAnalyticsConsent(true);
-    checkAnalyticsConsent();
-  }, [hasCheckedAnalyticsConsent]);
 
   // CRITICAL PERFORMANCE FIX: Very aggressive cleanup to prevent V8 array iteration issues
   useEffect(() => {
@@ -191,8 +156,7 @@ function App() {
   useEffect(() => {
     // Show welcome screen intelligently based on user state
     // This should only run once when the app is loaded, not when sessions change
-    // Don't show welcome while analytics consent dialog is open
-    if (!isLoaded || hasCheckedWelcome || isAnalyticsConsentOpen) {
+    if (!isLoaded || hasCheckedWelcome) {
       return;
     }
 
@@ -237,7 +201,7 @@ function App() {
     // Set the flag first to prevent re-runs
     setHasCheckedWelcome(true);
     checkInitialState();
-  }, [isLoaded, isAnalyticsConsentOpen]); // Also wait for analytics consent dialog to close
+  }, [isLoaded]);
 
   useEffect(() => {
     // Set up permission request listener
@@ -252,33 +216,6 @@ function App() {
       window.electron?.off('permission:request', handlePermissionRequest);
     };
   }, []);
-
-  useEffect(() => {
-    // Set up version update listener
-    if (!window.electronAPI?.events) return;
-    
-    const handleVersionUpdate = (versionInfo: VersionUpdateInfo) => {
-      console.log('[App] Version update available:', versionInfo);
-      setUpdateVersionInfo(versionInfo);
-      setIsUpdateDialogOpen(true);
-      showNotification(
-        `🚀 Update Available - Cyboflow v${versionInfo.latest}`,
-        'A new version of Cyboflow is available!',
-        '/favicon.ico',
-        'version_update',
-        `update:${versionInfo.latest}` // Deduplicate by version - only track once per version
-      );
-    };
-    
-    // Set up the listener using the events API
-    const removeListener = window.electronAPI.events.onVersionUpdateAvailable(handleVersionUpdate);
-    
-    return () => {
-      if (removeListener) {
-        removeListener();
-      }
-    };
-  }, [showNotification]);
 
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
@@ -357,18 +294,9 @@ function App() {
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />
         <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
-        <AnalyticsConsentDialog
-          isOpen={isAnalyticsConsentOpen}
-          onClose={() => setIsAnalyticsConsentOpen(false)}
-        />
         <Welcome isOpen={isWelcomeOpen} onClose={() => setIsWelcomeOpen(false)} />
         <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
-        <UpdateDialog 
-          isOpen={isUpdateDialogOpen} 
-          onClose={() => setIsUpdateDialogOpen(false)}
-          versionInfo={updateVersionInfo || undefined}
-        />
-        <ErrorDialog 
+        <ErrorDialog
           isOpen={!!currentError}
           onClose={clearError}
           title={currentError?.title}

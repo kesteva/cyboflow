@@ -39,15 +39,6 @@ vi.mock('../icons/NimbalystIcon', () => ({
   NimbalystIcon: () => null,
 }));
 
-vi.mock('../../services/analyticsService', () => ({
-  AnalyticsService: {
-    hashSessionId: vi.fn().mockResolvedValue('hashed'),
-    trackNimbalystButtonClicked: vi.fn().mockResolvedValue(undefined),
-    trackNimbalystInstallDialogShown: vi.fn().mockResolvedValue(undefined),
-    trackNimbalystOpened: vi.fn().mockResolvedValue(undefined),
-  },
-}));
-
 // ---------------------------------------------------------------------------
 // Mock API
 // ---------------------------------------------------------------------------

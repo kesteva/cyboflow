@@ -222,11 +222,6 @@ export class API {
       return window.electronAPI.sessions.hasChangesToRebase(sessionId);
     },
 
-    async generateName(prompt: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.generateName(prompt);
-    },
-
     async rename(sessionId: string, newName: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.rename(sessionId, newName);
@@ -433,54 +428,11 @@ export class API {
     },
   };
 
-  // Version and updates
-  static async checkForUpdates() {
-    if (!isElectron()) throw new Error('Electron API not available');
-    return window.electronAPI.checkForUpdates();
-  }
-
+  // Version info
   static async getVersionInfo() {
     if (!isElectron()) throw new Error('Electron API not available');
     return window.electronAPI.getVersionInfo();
   }
-
-  // Stravu MCP integration with OAuth
-  static stravu = {
-    async getConnectionStatus() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.getConnectionStatus();
-    },
-
-    async initiateAuth() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.initiateAuth();
-    },
-
-    async checkAuthStatus(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.checkAuthStatus(sessionId);
-    },
-
-    async disconnect() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.disconnect();
-    },
-
-    async getNotebooks() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.getNotebooks();
-    },
-
-    async getNotebook(notebookId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.getNotebook(notebookId);
-    },
-
-    async searchNotebooks(query: string, limit?: number) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.stravu.searchNotebooks(query, limit);
-    },
-  };
 
   // Dashboard
   static dashboard = {
