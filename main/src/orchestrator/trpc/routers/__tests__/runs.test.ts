@@ -341,6 +341,7 @@ describe('cyboflow.runs.start', () => {
 
 describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
   let db: Database.Database;
+  let clearApprovals: ReturnType<typeof vi.fn>;
 
   function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
     return {
@@ -361,6 +362,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     setRunCloseoutDeps({
       worktreeManager: wm,
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: clearApprovals,
     });
   }
 
@@ -370,6 +372,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
   beforeEach(() => {
     db = createTestDb({ includeStuckDetectedAt: true });
+    clearApprovals = vi.fn();
   });
 
   afterEach(() => {
@@ -378,6 +381,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     setRunCloseoutDeps({
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: () => undefined },
+      clearPendingApprovalsForRun: vi.fn(),
     });
   });
 
@@ -460,6 +464,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-br');
     expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/dismissbr', { force: true });
+    expect(clearApprovals).toHaveBeenCalledWith('run-dismiss-br');
     expect(getStatus('run-dismiss-br')).toBe('canceled');
   });
 
@@ -478,6 +483,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-br');
     expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/mergebr', { force: true });
+    expect(clearApprovals).toHaveBeenCalledWith('run-merge-br');
     expect(getStatus('run-merge-br')).toBe('completed');
   });
 
@@ -496,6 +502,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-pr-br');
     expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(clearApprovals).toHaveBeenCalledWith('run-pr-br');
     expect(getStatus('run-pr-br')).toBe('completed');
   });
 

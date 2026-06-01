@@ -23,7 +23,7 @@
  * end-to-end without spinning up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { ApprovalRouter, RunNotRunningError, type ApprovalDecision } from '../approvalRouter';
+import { ApprovalRouter, RunNotRunningError, ApprovalNotFoundError, type ApprovalDecision } from '../approvalRouter';
 import type { DatabaseLike } from '../types';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -877,5 +877,81 @@ describe("ApprovalRouter — PreToolUse end-to-end (real ApprovalRouter + real S
     // Clean up: respond to avoid dangling promises.
     await router.respond(req.id, { behavior: 'deny' });
     await helperPromise;
+  });
+
+  // -------------------------------------------------------------------------
+  // Stale-approval handling (review-queue cleanup):
+  //   - respond() settles a `pending` DB row that has no in-memory entry
+  //     (its decisionPromise died with the process / the run was closed out)
+  //   - respond() still throws ApprovalNotFoundError when nothing is pending
+  //   - clearPendingForRun sweeps DB-only `pending` rows, scoped to the run
+  // -------------------------------------------------------------------------
+  it('respond settles a stale (DB-only) pending approval and emits approvalDecided', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-stale';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-stale', runId, status: 'pending' });
+
+    const decided: Array<{ approvalId: string; decision: string }> = [];
+    router.on('approvalDecided', (e: { approvalId: string; decision: string }) => decided.push(e));
+
+    // No requestApproval → no in-memory entry. respond must settle the DB row
+    // directly so the review queue can drop it.
+    await router.respond('appr-stale', { behavior: 'deny', message: 'Rejected by user' });
+
+    const row = db
+      .prepare('SELECT status, decided_by FROM approvals WHERE id = ?')
+      .get('appr-stale') as { status: string; decided_by: string };
+    expect(row.status).toBe('rejected');
+    expect(row.decided_by).toBe('user');
+    expect(decided).toEqual([{ approvalId: 'appr-stale', decision: 'rejected' }]);
+  });
+
+  it('respond (stale allow) settles the DB row to approved', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-stale-allow';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-allow', runId, status: 'pending' });
+
+    await router.respond('appr-allow', { behavior: 'allow' });
+
+    const row = db.prepare('SELECT status FROM approvals WHERE id = ?').get('appr-allow') as { status: string };
+    expect(row.status).toBe('approved');
+  });
+
+  it('respond throws ApprovalNotFoundError when nothing pending exists (unknown or already-terminal)', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-none';
+    seedRun(db, { id: runId, status: 'canceled' });
+    seedApproval(db, { id: 'appr-done', runId, status: 'rejected' });
+
+    await expect(router.respond('does-not-exist', { behavior: 'deny' })).rejects.toBeInstanceOf(ApprovalNotFoundError);
+    await expect(router.respond('appr-done', { behavior: 'deny' })).rejects.toBeInstanceOf(ApprovalNotFoundError);
+  });
+
+  it('clearPendingForRun sweeps DB-only pending approvals (scoped to the run) and emits approvalDecided', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-sweep';
+    seedRun(db, { id: runId, status: 'awaiting_review' });
+    seedApproval(db, { id: 'sweep-a', runId, status: 'pending' });
+    seedApproval(db, { id: 'sweep-b', runId, status: 'pending' });
+    // A different run's pending approval must be left untouched.
+    seedRun(db, { id: 'run-other', status: 'awaiting_review' });
+    seedApproval(db, { id: 'other-a', runId: 'run-other', status: 'pending' });
+
+    const decided: string[] = [];
+    router.on('approvalDecided', (e: { approvalId: string; decision: string }) => decided.push(e.approvalId));
+
+    router.clearPendingForRun(runId);
+
+    const swept = db.prepare('SELECT status FROM approvals WHERE run_id = ?').all(runId) as Array<{ status: string }>;
+    expect(swept.every((r) => r.status === 'rejected')).toBe(true);
+    const other = db.prepare("SELECT status FROM approvals WHERE id = 'other-a'").get() as { status: string };
+    expect(other.status).toBe('pending');
+    expect(decided.sort()).toEqual(['sweep-a', 'sweep-b']);
   });
 });
