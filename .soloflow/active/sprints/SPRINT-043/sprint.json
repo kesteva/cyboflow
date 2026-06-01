@@ -1,17 +1,21 @@
 {
-  "id": "SPRINT-043",
-  "status": "complete",
-  "created": "2026-05-28T00:00:00Z",
-  "tasks": [
-    "TASK-787",
-    "TASK-785",
-    "TASK-792",
-    "TASK-793",
-    "TASK-794",
-    "TASK-795"
-  ],
-  "execution_mode": "serial",
-  "branch": "run/sprint-043",
-  "model": "opus",
-  "task_limit": 10
+  "sprint": {
+    "id": "SPRINT-043",
+    "status": "complete",
+    "started": "2026-05-28T00:00:00.000Z",
+    "execution_mode": "serial"
+  },
+  "tasks": {},
+  "run": {
+    "branch": "run/sprint-043",
+    "base_branch": "main",
+    "base_sha": "256240f3472a85b1f17fb59579651fa55bd3dea5",
+    "created_at": "2026-05-28T00:00:00.000Z"
+  },
+  "playwright_target": {
+    "kind": "electron",
+    "evidence": "electron in package.json",
+    "dev_url_hint": null,
+    "divergence_risk": false
+  }
 }
