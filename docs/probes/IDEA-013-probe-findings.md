@@ -1,122 +1,93 @@
 # IDEA-013 probe findings — decision record (TASK-805)
 
-**Status:** PARTIAL — Probe **D** (Shannon) is RESOLVED, Probe **B** (encodeCwd) is confirmed, and an
-INDICATIVE Probe **E**/**C** run was done 2026-05-29 against a real on-disk transcript. Probes **A/A2**
-(live interactive session), **C**-authoritative (bare no-`-p` REPL + Stop hook), **B**-`DISCOVERY_TIMEOUT_MS`
-(spawn timing), **H** (real subscription + user sign-off), and **F/G** (IDEA-029 socket) remain `TBD`.
-Verdicts marked `TBD` are filled by running the probe kit in `scratch/` (see `scratch/README.md`).
-Values marked `(indicative)` were measured on a Claude-Code **agent-session** transcript and MUST be
-re-confirmed on the exact `--settings`-isolated, bare no-`-p` spawn config the InteractiveClaudeManager uses.
-
-This record resolves **Q1–Q4** and names, for each downstream slice **S1–S7**, the explicit
-fallback its gating probe selects. The SDK substrate keeps shipping while these run, so blocking
-the epic here is zero-cost.
-
----
+**Status:** Probes **A, A2, B(encode), C, D, E** RESOLVED via a live interactive `claude` battery on
+**2026-06-01** (sessions under `~/.claude/projects/-private-tmp-idea013-probe/`, driven through the
+`docs/probes/scratch/` kit). **Q1–Q4 are all resolved.** Remaining: **B-timing** (`DISCOVERY_TIMEOUT_MS`),
+**F/G** (gated on IDEA-029 socket runtime), and **H** (real-subscription parallel + user go/no-go).
 
 ## Q1–Q4 resolutions
 
 | Q | Question | Resolution | Evidence |
 |---|----------|------------|----------|
-| **Q1** | Roll-our-own vs adopt Shannon? | **ROLL-OUR-OWN** behind a swappable `TranscriptSource` seam (a future `ShannonTranscriptSource` is a one-factory-branch swap). | **CONFIRMED 2026-05-29 (Probe D):** GOAL_PROGRESS.md — bridge "Planned", *"no shannon-mcp-bridge binary yet, no oRPC Unix-socket host server yet"*; requires **Bun**+**tmux**; no Node/Electron build of `@dexh/shannon-agent-sdk`. |
-| **Q2** | Do interactive PreToolUse hooks fire + block synchronously? | `TBD` — **gates whether a GATED interactive substrate ships at all.** | Probe A (5 sub-claims) + Probe A2. **Needs a live interactive session.** |
-| **Q3** | Is the structured panel lost? | **NO** — preserved by tailing the transcript through a **normalizer**; coarser turn-level (not token-level) granularity. | Probe E (schema divergence) — normalizer-mandatory CORROBORATED (indicative 55.2% unknown, 2026-05-29). |
-| **Q4** | How is completion detected? | Deterministic **turn-end signal** (`Stop hook` PRIMARY; `stop_hook_summary`+`turn_duration` markers SECONDARY) → EOF/`/exit` to PTY stdin → PTY exit as teardown CONSEQUENCE. | Probe C — no `result` line + turn-end markers PRESENT (corroborated); Stop-hook firing still `TBD`. |
-
----
+| **Q1** | Roll-our-own vs adopt Shannon? | **ROLL-OUR-OWN** behind a swappable `TranscriptSource` seam. | **Probe D (2026-06-01):** GOAL_PROGRESS.md — bridge "Planned", *"no shannon-mcp-bridge binary yet, no oRPC Unix-socket host server yet"*; requires **Bun**+**tmux**; no Node/Electron build of `@dexh/shannon-agent-sdk`. |
+| **Q2** | Do interactive PreToolUse hooks fire + block synchronously? | **YES — RESOLVED.** Interactive hooks fire AND synchronously gate (deny blocks; holds for minutes; exit-2 precedence). **S5 ships its PRIMARY shell-hook gating; native-TUI fallback OFF the table.** | **Probe A (a–e) all PASS** (below). |
+| **Q3** | Is the structured panel lost? | **NO** — preserved by tailing the transcript through a **mandatory normalizer**; coarser turn-level granularity. | **Probe E (canonical) 78.4% `__unknown__`** — `assistant` lines parse as modeled; noise types dropped by the normalizer + **noise-filter**. |
+| **Q4** | How is completion detected? | **`Stop` hook PRIMARY** (fires deterministically at turn end) → EOF/`/exit` to PTY stdin → PTY exit as teardown CONSEQUENCE; `stop_hook_summary`+`turn_duration` markers SECONDARY. | **Probe C** — `Stop` fired in every session; **no `result` line**; turn-end markers present. |
 
 ## Probe results
 
-### Probe A — interactive PreToolUse hook fires + blocks (gates S5 PRIMARY) — `TBD`
-| Sub-claim | Verdict | Evidence |
+### Probe A — interactive PreToolUse hook fires + blocks (gates S5 PRIMARY) — **PASS (all 5)**
+| Sub-claim | Verdict | Evidence (2026-06-01) |
 |---|---|---|
-| (a) fires for the MAIN session's own Bash call | `TBD` | hook log line for `Bash` |
-| (b) `exit 2` / `permissionDecision:'deny'` BLOCKS synchronously | `TBD` | echo blocked |
-| (c) hook subprocess can block for **minutes** (not 5–10s) | `TBD` | `PROBE_BLOCK_SECONDS=180`; note any hard cap |
-| (d) inherits `CYBOFLOW_ORCH_SOCKET` from the PTY env | `TBD` | log `env_orch_socket` ≠ null |
-| (e) `exit 2` vs JSON `permissionDecision` precedence | `TBD` | `PROBE_MODE=precedence` (docs: exit 2 wins) |
+| (a) fires for the MAIN session's own Bash call | **PASS** | `event:PreToolUse, tool_name:Bash, parent_tool_use_id:null` (session `bd0aea1e`) |
+| (b) deny BLOCKS synchronously | **PASS** | Claude: *"The command was blocked… `echo hello` never executed"*, reason `IDEA-013 probe deny` |
+| (c) hook subprocess can block for **minutes** (not 5–10s) | **PASS** | Run with `PROBE_BLOCK_SECONDS=180` → Claude *"Cooked for 3m 7s"* then denied; no short kill-cap (`timeout:600` governs) |
+| (d) inherits `CYBOFLOW_ORCH_SOCKET` from the PTY env | **PASS** | hook log: `env_orch_socket:"/tmp/idea013.sock"` (+ `CLAUDE_PROJECT_DIR`, `claudecode:1`) |
+| (e) `exit 2` vs JSON `permissionDecision` precedence | **PASS** | `precedence` mode (allow-JSON **+** exit 2) → Claude blocked: *"returned an error … allow-JSON + exit 2"*; **exit 2 wins**, stderr fed to model |
 
-**KILL (any FAIL):** S5 takes the **native-TUI fallback** — no roll-our-own gating shipped; S7
-substrate picker surfaces "approval routing unavailable" on the interactive (subscription) substrate.
+**KILL not triggered.** S5 ships the shell-hook → `CYBOFLOW_ORCH_SOCKET` → ApprovalRouter PRIMARY path.
 
-### Probe A2 — subagent hook scope + AskUserQuestion (ship-gating) — `TBD`
-- Hook fires for a **Task-subagent's** tool call? `TBD`.
-  **KILL (if NOT):** ungated subagent tool calls are a **ship blocker** for subagent-spawning
-  workflows (planner/sprint/compound) — S5/S7 must **restrict interactive selection** for those
-  workflows OR **force-deny the Task tool**, not merely document it.
-- **AskUserQuestion**: confirmed it has **no answer-injection channel** via a command hook
-  (`updatedInput` is SDK-`HookJSONOutput`-only) → **native-TUI-only** v1 limit; no QuestionRouter
-  wiring on the interactive substrate. `TBD (confirm)`.
+### Probe A2 — subagent hook scope + AskUserQuestion — **PASS (best case)**
+- **Subagent: the PreToolUse hook FIRES for a subagent's tool call → gateable → NOT a ship-blocker.** `PreToolUse/Agent` launch (`18:06:21`) → nested `PreToolUse/Bash` for `echo from-subagent` (`18:06:23`); subagent ran (output `from-subagent`). **S5/S7 do NOT need to restrict planner/sprint/compound or force-deny the Task tool.**
+  - **Attribution caveat (design note for S5/S6):** the subagent's Bash reported the **same `session_id`** as the parent with **`parent_tool_use_id:null`** — hooks fire for subagent tools but the payload does **not** tag them as a sub-session. The Task tool surfaces as `tool_name:"Agent"` (input keys `description/prompt/subagent_type`).
+  - Minor: the subagent UI summary showed *"1 PostToolUse hook ran"* (only PreToolUse+Stop were configured) — our log confirms a **PreToolUse** fired, so gating holds; worth a glance but not blocking.
+- **AskUserQuestion: native-TUI-only — CONFIRMED.** `PreToolUse/AskUserQuestion` fires (`tool_input_keys:["questions"]`, so it is gateable allow/deny), but with `allow` it rendered Claude's **native multiple-choice menu** in the REPL (*"Enter to select · ↑/↓ to navigate"*). A command hook has **no `updatedInput` channel** to inject the chosen answer → cyboflow's QuestionRouter does NOT wire on this substrate; documented v1 limit.
 
 ### Probe B — session-id discovery + encodeCwd (gates S1/S2) — PASS (encode) / `TBD` (timing)
-- `encodeCwd` live-verified example: **PASS (2026-05-29)** — `encodeCwd('/Users/raimundoesteva/.warp/worktrees/cyboflow/dusk-switchback')` = `-Users-raimundoesteva--warp-worktrees-cyboflow-dusk-switchback`, **EXACT match** to the live `~/.claude/projects/` dir (note `/.warp`→`--warp` double-dash; algorithm = `[^a-zA-Z0-9]→-`). Non-ASCII case: `TBD`; **#19972** collision note recorded.
-- `DISCOVERY_TIMEOUT_MS` from measured spawn→first-`.jsonl` delay: `TBD ms` (run `probe-transcript.ts watch` while launching claude; with margin).
-- Session UUID is **filename-only** (`--session-id` ignored interactively, **#44607**): **CONFIRMED** — UUID `356a22e0-…` was only the filename; `--session-id` interactive behavior still `TBD`.
-- First physical line is **`file-history-snapshot`** with NO `cwd`; disambiguation binds on the
-  first **cwd-bearing** line (NOT `system/init.cwd`, which never appears interactively): the agent-session sample's first line was `last-prompt` (also no `cwd`) and the first **cwd-bearing** line was **idx 4** → disambiguation-on-first-cwd-line CONFIRMED; the literal `file-history-snapshot`-first ordering is `TBD` on the bare REPL.
+- `encodeCwd` EXACT match: `[^a-zA-Z0-9]→-` (e.g. `/Users/.../.warp/...` → `-Users-...--warp-...`, double-dash for `/.`). **#19972** collision note recorded.
+- Session UUID is **filename-only**; `--session-id` interactive behavior still `TBD` (#44607).
+- First physical line is `last-prompt` (no `cwd`); the literal `file-history-snapshot`-first ordering varies by launch path. Disambiguation binds on the **first cwd-bearing line** (idx **4** observed), NOT `system/init.cwd` (never appears).
+- **BONUS:** the PreToolUse hook stdin payload itself carries **`transcript_path` + `session_id` + `cwd`** — so when gating is ON, the session file is known directly from the hook (no tail-discovery race). Tail-discovery is only the fallback when gating is off.
+- `DISCOVERY_TIMEOUT_MS` from measured spawn→first-`.jsonl` delay: `TBD ms` (run `probe-transcript.ts watch`).
 
-### Probe C — how a no-`-p` turn ends (gates S3 completion) — PARTIAL (corroborated)
-- The **REPL** does NOT self-exit after a turn (returns to the prompt): `TBD` (needs a bare interactive run).
-- NO `{type:'result'}` **result line** in the interactive transcript: **CONFIRMED** — `has result line: false` on the 2026-05-29 sample.
-- Turn-end mechanism: **`Stop hook`** fires (PRIMARY) `TBD` (needs the live Probe-A hook config); `system/stop_hook_summary` +
-  `system/turn_duration` markers appear at turn end (SECONDARY): **CONFIRMED PRESENT** — 8 such markers in the sample.
-- **hung-input** case distinguishes a finished turn from one waiting on input: `TBD`.
+### Probe C — how a no-`-p` turn ends (gates S3 completion) — **PASS**
+- The **`Stop` hook fires** at turn end in interactive mode — confirmed across sessions (`bd0aea1e` +7s; `2f4c9bac` +184s after a 180s block; `efde13c6`). **PRIMARY turn-end signal for S3.**
+- **No `{type:'result'}` result line** in any bare-REPL transcript (confirmed). `system/stop_hook_summary` + `system/turn_duration` markers present (SECONDARY signal).
+- REPL self-exit / hung-input distinction: `TBD` (the `Stop` hook already gives a deterministic primary signal, so this is lower-priority).
 
-### Probe D — Shannon bridge status (gates Q1) — PASS (RESOLVED 2026-05-29)
-- Bidirectional permission-gating bridge: **Planned** (NOT implemented). GOAL_PROGRESS.md: *"the generated `--settings` bridge is specified but not implemented: no `shannon-mcp-bridge` binary yet, no oRPC Unix-socket host server yet."*
-- Runtime deps still **Bun** + **tmux**: **YES** (`#!/usr/bin/env bun`; tested with `tmux 3.6a`, Claude Code 2.1.140). `@dexh/shannon-agent-sdk` Node/Electron build: **not documented** (published npm, no platform-build variants discussed).
-- → **Q1 = roll-our-own** behind the swappable `TranscriptSource` seam. ✓
+### Probe D — Shannon bridge status (gates Q1) — **PASS (RESOLVED)**
+- Bidirectional permission-gating bridge: **Planned**, not implemented (*"no `shannon-mcp-bridge` binary yet, no oRPC Unix-socket host server yet"*). Requires **Bun** + **tmux** (`#!/usr/bin/env bun`, `tmux 3.6a`). No Node/Electron `@dexh/shannon-agent-sdk` build documented. → **Q1 = roll-our-own** behind the swappable `TranscriptSource` seam. ✓
 
-### Probe E — transcript-vs-wire `__unknown__` rate (HARD GATE, gates S2 normalizer) — INDICATIVE PASS
-> Measured 2026-05-29 on a real 549-line Claude-Code **agent-session** transcript (NOT a bare no-`-p`
-> REPL run). Authoritative re-measure on the canonical `--settings`-isolated bare spawn config is `TBD`,
-> but the conclusion is already decisive.
-- `__unknown__` rate: **55.2%** (303/549 lines) `(indicative; planning estimate was 45%+)`.
-- Unmodeled top-level types (observed): `last-prompt`, `mode`, `permission-mode`, `bridge-session`,
-  `attachment`, `ai-title`, `file-history-snapshot`, `queue-operation` — matches the planning inventory.
-- Unmodeled `system` subtypes (observed): `stop_hook_summary`, `turn_duration`, `local_command`,
-  `bridge_status` (`api_error` not present in this sample).
-- STRING-content `user` lines fail `userEventSchema`'s array requirement: **CONFIRMED — 8 lines**.
-  camelCase top-level `sessionId` present: **YES**; `system/init` present: **NO** (as expected interactively).
+### Probe E — transcript-vs-wire `__unknown__` rate (HARD GATE, gates S2 normalizer) — **PASS**
+- **Canonical (bare-REPL `efde13c6`, 2026-06-01): 78.4% `__unknown__`** (29/37). (Indicative agent-session sample was 55.2%.)
+- Unmodeled top-level: `last-prompt`, `mode`, `permission-mode`, `bridge-session`, `attachment`, `file-history-snapshot`, `ai-title`. (`queue-operation`/`local_command`/`api_error` did not appear in this sample.)
+- Unmodeled `system` subtypes: `stop_hook_summary`, `turn_duration`, `bridge_status`. **Every `system` line was an unmodeled subtype** (none of init/compact_boundary/hook_started/hook_response/status).
+- `assistant` lines **parse as modeled** (panel-critical content survives). 2 STRING-content `user` lines fail `userEventSchema`'s array requirement. camelCase top-level `sessionId` present; `system/init` absent.
+- `bridge-session`/`bridge_status` originate from the `/remote-control` launch path — a local-only launch may differ; the normalizer must drop **any** unmodeled type by default.
 - **CONCLUSION:** a **normalizer** + **noise-filter** is **MANDATORY** for S2 (not optional drift patching). ✓
 
 ### Probe F — interactive MCP load + report_step fires (S6) — `TBD (gated on IDEA-029 socket up)`
-- `cyboflow_report_step` listed/callable from the MAIN interactive session: `TBD`.
-- A **prompt-body-prepended** instruction actually CAUSES a `report_step` call (watch
-  `cyboflow-backend-debug.log` for `handleReportStep`): `TBD`.
-- **Fallback:** if the prepend is unreliable, S6 delivers instructions via a per-worktree instruction file.
+- Run with `--mcp-config` injecting the cyboflow stdio entry once IDEA-029's socket runtime exists. **Fallback:** per-worktree instruction file if prompt-prepend is unreliable.
 
 ### Probe G — socket round-trip incl. human-decision window (de-risks S5) — `TBD (gated on IDEA-029 socket up)`
-- ApprovalRequest→verdict round-trip through the shell hook over a **multi-minute** human window
-  via heartbeat; `claude` does not kill the hook; the held-open socket is not evicted: `TBD`.
-- **Fallback:** if `claude` kills the hook or the socket is evicted mid-wait → Probe-A-fail native-TUI path.
+- Probe A(c) already proved the hook can block for minutes; G validates the full ApprovalRouter round-trip over the held-open socket once it exists. **Fallback:** native-TUI path (now unlikely, given Probe A passed).
 
 ### Probe H — parallel sessions on a real subscription (WHOLE-EPIC go/no-go) — `TBD`
-- N≥4 **parallel** interactive sessions on a real Pro/Max plan: `TBD/N` completed; `TBD/N` saw
-  **rate-limit**/usage-limit/throttle; any concurrency caps: `TBD`.
-- Support article cited: **support.claude.com/articles/15036540** (blesses interactive terminal/IDE
-  use; SILENT on automated/parallel/headless driving).
-- **USER DECISION (dated, required):** `__________` — go / no-go / ship-as-**UNCONFIRMED**-assumption.
-  (Human gate — cannot be satisfied by an automated assertion.)
+- N≥4 **parallel** interactive sessions on a real Pro/Max plan: `TBD/N` completed; `TBD/N` saw **rate-limit**/usage-limit/throttle.
+- Support article: **support.claude.com/articles/15036540** (blesses interactive terminal/IDE use; SILENT on automated/parallel/headless driving).
+- **USER DECISION (dated, required):** `__________` — go / no-go / ship-as-**UNCONFIRMED**-assumption. (Human gate.)
 
----
+## Bonus findings (resolve previously-"NOT documented" unknowns)
+
+- **Hook env inheritance:** the hook subprocess inherits exported parent env (`CYBOFLOW_ORCH_SOCKET` came through), and `CLAUDE_PROJECT_DIR` + `CLAUDECODE=1` are set. (Was "implied, not explicit" — now confirmed.)
+- **Hook payload carries `transcript_path`/`session_id`/`cwd`:** simplifies S2 discovery when gating is on.
+- **Task tool name = `Agent`** (`subagent_type` input) — the exact name S5 would force-deny (not needed).
+- **`permission_mode` observed: `auto`** in these sessions.
 
 ## Per-slice fallback selection (S1–S7)
 
-| Slice | Depends on probe | If PASS | If FAIL → fallback |
-|-------|------------------|---------|--------------------|
-| **S1** selection seam | B | proceed | n/a (pure plumbing) |
-| **S2** normalizer | E (+ B for collision key) | ship normalizer per measured inventory | extend `schemas.ts` with a transcript-event union; if even that fails, escalate Q3 (xterm view primary) |
-| **S3** completion | C | EOF/`/exit` on the turn-end signal | conservative quiescence-timeout + explicit user "turn done" affordance (documented reduced determinism) |
-| **S5** gating | A (+ A2 subagent + G window) | shell-hook → socket → ApprovalRouter (PRIMARY) | **native-TUI fallback**; picker surfaces "approval routing unavailable"; AskUserQuestion native-TUI-only |
-| **S6** step tracking | F | prompt-body prepend → `cyboflow_report_step` | per-worktree instruction file |
-| **S7** picker/docs | A/A2/E/H | surface caveats + parity test | surface the degraded caveats prominently in the picker |
+| Slice | Gating probe | Outcome |
+|-------|--------------|---------|
+| **S1** selection seam | B | proceed (encodeCwd confirmed) |
+| **S2** normalizer | E (+ B collision key) | **ship the mandatory normalizer + noise-filter** (78.4% unknown); drop unmodeled types; bind collision on first cwd-bearing line |
+| **S3** completion | C | **`Stop` hook PRIMARY** (deterministic) → EOF→PTY teardown; `stop_hook_summary`/`turn_duration` SECONDARY; no `result` line |
+| **S5** gating | A, A2 | **PRIMARY shell-hook → socket → ApprovalRouter SHIPS** (no native-TUI fallback). Subagents gateable (no workflow restriction). **AskUserQuestion native-TUI-only** (documented limit). |
+| **S6** step tracking | F | `TBD` (IDEA-029 socket); prompt-body prepend, per-worktree-file fallback |
+| **S7** picker/docs | A/A2/E/H | surface caveats: AskUserQuestion native-TUI-only, coarser turn-level streaming; **drop** "approval routing unavailable" (Probe A passed) unless H fails |
 
-> **Note:** S4 (dispatch + facade) is not probe-gated; it is depends-on-MERGE of IDEA-029 TASK-799.
-
----
+> S4 (dispatch + facade) is not probe-gated; depends-on-MERGE of IDEA-029 TASK-799.
 
 ## How this was produced
-Run the kit in `scratch/` (order A→A2→B→C→D→E→F→G→H per `scratch/README.md`), paste verdicts/
-measurements above, then delete `/tmp/idea013-probe-hook.log` and any transient settings. The
-`scratch/` artifacts are throwaway evidence-gatherers, excluded from the app build.
+Live battery run 2026-06-01 via `docs/probes/scratch/` against a bare interactive `claude` in
+`/private/tmp/idea013-probe` (hook log streamed to the orchestrating agent). Probes B-timing, F, G, H remain.
+Cleanup: `rm -rf /tmp/idea013-probe /tmp/idea013-probe-hook.log /tmp/idea013.sock` when done.
