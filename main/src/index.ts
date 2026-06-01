@@ -29,6 +29,7 @@ import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
+import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -528,6 +529,14 @@ async function initializeServices() {
   workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
   const mcpConfigWriter = new McpConfigWriter();
 
+  // Native task-tracking write chokepoint (migration 013). The single serialized
+  // writer for `tasks`/`task_events`; injected (structurally) into RunExecutor,
+  // RunLauncher, and the run close-out deps below so run lifecycle transitions
+  // derive each linked task's stage. The tasks tRPC router reaches it via
+  // getInstance(); its taskChangeEvents emitter is consumed directly by the
+  // cyboflow.tasks.onTaskChanged subscription (no bridge needed here).
+  const taskChangeRouter = TaskChangeRouter.initialize(cyboflowDb);
+
   // Concrete publisher: adapts BrowserWindow.webContents.send to the
   // StreamEventPublisher interface.  This is the only place in the codebase
   // that calls win.webContents.send for cyboflow stream events, keeping
@@ -649,6 +658,7 @@ async function initializeServices() {
     rawDb,
     defaultCliManager,
     stepTransitionEmitter,
+    taskChangeRouter,
   );
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
@@ -669,6 +679,7 @@ async function initializeServices() {
     cyboflowPublisher,
     runExecutor,
     runQueues,
+    taskChangeRouter,
   );
 
   // OrchestratorHealth — constructed with a sentinel lifecycle so both the
@@ -864,6 +875,10 @@ app.whenReady().then(async () => {
       // items in the review queue.
       clearPendingApprovalsForRun: (runId) =>
         ApprovalRouter.getInstance().clearPendingForRun(runId),
+      // Native task-tracking (migration 013): merge/createPr/dismiss stamp the
+      // run's outcome and recompute the linked task's derived execution stage.
+      // getInstance() resolves the singleton initialized during service construction.
+      taskStageDeriver: TaskChangeRouter.getInstance(),
     });
     console.log('[Main] runs.merge/dismiss deps wired');
 
