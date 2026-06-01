@@ -140,6 +140,13 @@ export interface RunCloseoutSessionManagerLike {
 export interface RunCloseoutDeps {
   worktreeManager: RunWorktreeManagerLike;
   sessionManager: RunCloseoutSessionManagerLike;
+  /**
+   * Settle + drop any pending approvals for the run so close-out doesn't leave
+   * orphaned items stuck in the review queue. Backed by
+   * ApprovalRouter.clearPendingForRun (settles in-memory entries + sweeps any
+   * DB-only `pending` rows, emitting approvalDecided for each).
+   */
+  clearPendingApprovalsForRun: (runId: string) => void;
 }
 
 let runCloseoutDeps: RunCloseoutDeps | null = null;
@@ -325,6 +332,9 @@ export const runsRouter = router({
       if (branchName) {
         await wm.deleteBranch(projectPath, branchName, { force: true });
       }
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -370,6 +380,9 @@ export const runsRouter = router({
       // The local branch is intentionally NOT deleted here: it tracks the
       // pushed origin branch the user is about to open a PR from.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -402,6 +415,9 @@ export const runsRouter = router({
       if (branchName) {
         await deps!.worktreeManager.deleteBranch(projectPath, branchName, { force: true });
       }
+      // Drop any pending approvals for the run so close-out doesn't leave
+      // orphaned items in the review queue.
+      deps!.clearPendingApprovalsForRun(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs

@@ -839,6 +839,11 @@ app.whenReady().then(async () => {
           return p ? { path: p.path } : undefined;
         },
       },
+      // Close-out clears the run's pending approvals (settles in-memory entries
+      // + sweeps DB-only `pending` rows) so dismiss/merge/PR don't leave orphaned
+      // items in the review queue.
+      clearPendingApprovalsForRun: (runId) =>
+        ApprovalRouter.getInstance().clearPendingForRun(runId),
     });
     console.log('[Main] runs.merge/dismiss deps wired');
 
