@@ -2,8 +2,10 @@
 
 **Status:** Probes **A, A2, B(encode), C, D, E** RESOLVED via a live interactive `claude` battery on
 **2026-06-01** (sessions under `~/.claude/projects/-private-tmp-idea013-probe/`, driven through the
-`docs/probes/scratch/` kit). **Q1–Q4 are all resolved.** Remaining: **B-timing** (`DISCOVERY_TIMEOUT_MS`),
-**F/G** (gated on IDEA-029 socket runtime), and **H** (real-subscription parallel + user go/no-go).
+`docs/probes/scratch/` kit), and **Probe H = GO** (user sign-off 2026-06-01, on operator experience).
+**Q1–Q4 are resolved and the whole-epic go/no-go is GO — the epic is greenlit.** The only remaining items
+are non-gating sub-probes: **B-timing** (`DISCOVERY_TIMEOUT_MS`, a constant to calibrate during S2) and
+**F/G** (validate the IDEA-029-dependent slices once that socket runtime exists).
 
 ## Q1–Q4 resolutions
 
@@ -62,10 +64,16 @@
 ### Probe G — socket round-trip incl. human-decision window (de-risks S5) — `TBD (gated on IDEA-029 socket up)`
 - Probe A(c) already proved the hook can block for minutes; G validates the full ApprovalRouter round-trip over the held-open socket once it exists. **Fallback:** native-TUI path (now unlikely, given Probe A passed).
 
-### Probe H — parallel sessions on a real subscription (WHOLE-EPIC go/no-go) — `TBD`
-- N≥4 **parallel** interactive sessions on a real Pro/Max plan: `TBD/N` completed; `TBD/N` saw **rate-limit**/usage-limit/throttle.
-- Support article: **support.claude.com/articles/15036540** (blesses interactive terminal/IDE use; SILENT on automated/parallel/headless driving).
-- **USER DECISION (dated, required):** `__________` — go / no-go / ship-as-**UNCONFIRMED**-assumption. (Human gate.)
+### Probe H — parallel sessions on a real subscription (WHOLE-EPIC go/no-go) — **GO (user sign-off 2026-06-01)**
+- Not run as a controlled harness measurement. **USER DECISION (2026-06-01): GO** — the user has, in practice,
+  run **substantially more than 4 parallel** interactive `claude` sessions on their plan without hitting
+  concurrency/rate-limit walls, so the "8 parallel agents on your subscription" value prop is accepted on
+  **operator experience**.
+- Caveat: support article **support.claude.com/articles/15036540** blesses interactive terminal/IDE use but is
+  SILENT on automated/parallel driving, so this is a **knowingly-accepted product/business assumption**
+  (experiential, not a measured rate-limit guarantee). The `probe-parallel.mjs` harness remains available to
+  quantify if ever needed; the SDK substrate stays the fallback for heavy/automated load. Revisit only if
+  parallel interactive runs hit usage-limit responses in real use.
 
 ## Bonus findings (resolve previously-"NOT documented" unknowns)
 
