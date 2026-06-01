@@ -162,3 +162,59 @@ describe('WorktreeManager.createDeterministicWorktree', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// deleteBranch (run close-out) — real temp git repo.
+// ---------------------------------------------------------------------------
+
+/** Init a temp git repo with one empty initial commit so branches can be made. */
+function initRepo(dir: string): void {
+  execSync('git init', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email "test@example.com"', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' });
+  execSync('git commit --allow-empty -m "init"', { cwd: dir, stdio: 'pipe' });
+}
+
+describe('WorktreeManager.deleteBranch (integration)', () => {
+  it('no-ops on a blank branch name without invoking git', async () => {
+    const manager = new WorktreeManager();
+    // Blank name returns before any git call, so a bogus path is fine.
+    await expect(manager.deleteBranch('/nonexistent', '   ')).resolves.toBeUndefined();
+  });
+
+  it('is idempotent when the branch is already gone', async () => {
+    await withTempDir('worktree-delbranch-missing-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const manager = new WorktreeManager();
+      await expect(manager.deleteBranch(tmpDir, 'never-existed')).resolves.toBeUndefined();
+    });
+  });
+
+  it('safe-deletes a merged (at-HEAD) branch', async () => {
+    await withTempDir('worktree-delbranch-safe-', async (tmpDir) => {
+      initRepo(tmpDir);
+      execSync('git branch merged-feat', { cwd: tmpDir, stdio: 'pipe' });
+
+      const manager = new WorktreeManager();
+      await manager.deleteBranch(tmpDir, 'merged-feat');
+
+      expect(execSync('git branch --list merged-feat', { cwd: tmpDir }).toString().trim()).toBe('');
+    });
+  });
+
+  it('force-deletes an unmerged branch that a safe delete would refuse', async () => {
+    await withTempDir('worktree-delbranch-force-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const base = execSync('git rev-parse --abbrev-ref HEAD', { cwd: tmpDir }).toString().trim();
+      // Branch with a commit absent from base → unmerged.
+      execSync('git checkout -b unmerged-feat', { cwd: tmpDir, stdio: 'pipe' });
+      execSync('git commit --allow-empty -m "feat-only"', { cwd: tmpDir, stdio: 'pipe' });
+      execSync(`git checkout ${base}`, { cwd: tmpDir, stdio: 'pipe' });
+
+      const manager = new WorktreeManager();
+      await manager.deleteBranch(tmpDir, 'unmerged-feat', { force: true });
+
+      expect(execSync('git branch --list unmerged-feat', { cwd: tmpDir }).toString().trim()).toBe('');
+    });
+  });
+});

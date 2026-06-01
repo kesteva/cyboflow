@@ -348,6 +348,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
       removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
       gitPush: vi.fn().mockResolvedValue({ output: 'pushed' }),
       getRemoteUrlAndBranch: vi.fn().mockResolvedValue({
         remoteUrl: 'https://github.com/acme/repo.git',
@@ -439,7 +440,63 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
     expect(result).toEqual({ success: true });
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-1');
+    // This run has no branch_name → branch deletion must be skipped (no throw).
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
     expect(getStatus('run-dismiss-1')).toBe('canceled');
+  });
+
+  it('dismiss force-deletes the run branch after removing the worktree', async () => {
+    seedRun(db, {
+      id: 'run-dismiss-br',
+      status: 'stuck',
+      worktreePath: '/tmp/wt/run-dismiss-br',
+      branchName: 'cyboflow/sprint/dismissbr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-dismiss-br' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-dismiss-br');
+    expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/dismissbr', { force: true });
+    expect(getStatus('run-dismiss-br')).toBe('canceled');
+  });
+
+  it('merge force-deletes the run branch (squash-safe) after removing the worktree', async () => {
+    seedRun(db, {
+      id: 'run-merge-br',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-merge-br',
+      branchName: 'cyboflow/sprint/mergebr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-merge-br', strategy: 'preserve' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-br');
+    expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/sprint/mergebr', { force: true });
+    expect(getStatus('run-merge-br')).toBe('completed');
+  });
+
+  it('createPr preserves the local branch (no deleteBranch — it lives on origin)', async () => {
+    seedRun(db, {
+      id: 'run-pr-br',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-pr-br',
+      branchName: 'cyboflow/sprint/prbr',
+    });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.createPr({ runId: 'run-pr-br' });
+
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-pr-br');
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(getStatus('run-pr-br')).toBe('completed');
   });
 
   it('merge on a missing run → NOT_FOUND', async () => {

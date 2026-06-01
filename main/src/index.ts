@@ -828,6 +828,8 @@ app.whenReady().then(async () => {
           worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
         removeWorktreeByPath: (projectPath, worktreePath) =>
           worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
+        deleteBranch: (projectPath, branchName, opts) =>
+          worktreeManager.deleteBranch(projectPath, branchName, opts),
         gitPush: (worktreePath) => worktreeManager.gitPush(worktreePath),
         getRemoteUrlAndBranch: (worktreePath) => worktreeManager.getRemoteUrlAndBranch(worktreePath),
       },

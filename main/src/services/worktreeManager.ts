@@ -266,6 +266,44 @@ export class WorktreeManager {
     });
   }
 
+  /**
+   * Delete a local branch (run close-out). Must be called AFTER the worktree is
+   * removed, so the branch is no longer checked out in any worktree.
+   *
+   * `force` selects `git branch -D` (discard even if unmerged) over the safe
+   * `git branch -d`. Run close-out always force-deletes:
+   *   - dismiss discards the run, so its commits go with the branch;
+   *   - merge has already replayed the content into main, and a SQUASH merge
+   *     leaves the branch a non-ancestor of main (so a safe `-d` would wrongly
+   *     report "not fully merged") — force is required for the squash case.
+   *
+   * Idempotent: a blank name or an already-gone branch resolves as success,
+   * mirroring removeWorktreeByPath so close-out never fails on already-clean
+   * state. (Create-PR intentionally does NOT call this — that branch lives on
+   * origin.)
+   */
+  async deleteBranch(projectPath: string, branchName: string, opts?: { force?: boolean }): Promise<void> {
+    const branch = branchName.trim();
+    if (branch === '') return;
+    return await withLock(`branch-delete-${projectPath}-${branch}`, async () => {
+      const flag = opts?.force ? '-D' : '-d';
+      try {
+        await execWithShellPath(`git branch ${flag} "${branch}"`, { cwd: projectPath });
+      } catch (error: unknown) {
+        const err = error as Error & { stderr?: string; stdout?: string };
+        const errorMessage = err.stderr || err.stdout || err.message || String(err);
+        // Already gone — treat as success (matches removeWorktreeByPath idempotency).
+        if (errorMessage.includes('not found') ||
+            errorMessage.includes("Can't find") ||
+            errorMessage.includes('does not exist')) {
+          console.log(`Branch ${branch} already deleted or doesn't exist, skipping...`);
+          return;
+        }
+        throw new Error(`Failed to delete branch ${branch}: ${errorMessage}`);
+      }
+    });
+  }
+
   async listWorktrees(projectPath: string): Promise<Array<{ path: string; branch: string }>> {
     try {
       const { stdout } = await execWithShellPath(`git worktree list --porcelain`, { cwd: projectPath });

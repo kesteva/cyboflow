@@ -122,6 +122,11 @@ export interface RunWorktreeManagerLike {
   mergeWorktreeToMain(projectPath: string, worktreePath: string, mainBranch: string): Promise<void>;
   /** `git worktree remove "<worktreePath>" --force` — idempotent on already-gone trees. */
   removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
+  /**
+   * `git branch -d/-D "<branch>"` — idempotent on already-gone branches. Called
+   * AFTER the worktree is removed so the branch is no longer checked out.
+   */
+  deleteBranch(projectPath: string, branchName: string, opts?: { force?: boolean }): Promise<void>;
   /** `git push` from the worktree — pushes the run's branch to origin (Create-PR). */
   gitPush(worktreePath: string): Promise<{ output: string }>;
   /** Resolve the origin remote URL + current branch of the worktree (Create-PR). */
@@ -291,7 +296,7 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -313,6 +318,13 @@ export const runsRouter = router({
       // idempotent; mark-completed is guarded so it no-ops on an already-terminal
       // run rather than throwing.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
+      // The content is now in main; delete the run's branch so close-out doesn't
+      // leave an orphaned ref. Force-delete because a squash merge leaves the
+      // branch a non-ancestor of main (safe `-d` would refuse it). Skip when the
+      // run never recorded a branch name.
+      if (branchName) {
+        await wm.deleteBranch(projectPath, branchName, { force: true });
+      }
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -355,6 +367,8 @@ export const runsRouter = router({
 
       // Artifact delivered to origin — close the run out. Remove the local
       // worktree (the branch now lives on origin) and mark the run completed.
+      // The local branch is intentionally NOT deleted here: it tracks the
+      // pushed origin branch the user is about to open a PR from.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
       ctx.db
         .prepare(
@@ -380,8 +394,14 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
+      // Dismiss discards the run — force-delete its branch too (its commits go
+      // with it), so close-out doesn't leave an orphaned ref. No-op when the run
+      // never recorded a branch name.
+      if (branchName) {
+        await deps!.worktreeManager.deleteBranch(projectPath, branchName, { force: true });
+      }
       ctx.db
         .prepare(
           `UPDATE workflow_runs
