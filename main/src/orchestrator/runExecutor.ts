@@ -95,6 +95,20 @@ export interface LifecycleTransitionsLike {
 }
 
 /**
+ * Narrow slice of TaskChangeRouter needed to derive a task's execution stage as
+ * the linked run transitions through its lifecycle (migration 013).
+ *
+ * Injected (not reached for via `TaskChangeRouter.getInstance()`) to preserve
+ * the standalone-typecheck invariant + constructor-injection test ergonomics.
+ * The concrete TaskChangeRouter singleton satisfies this shape structurally.
+ * When absent, all task derivation is silently skipped (backward-compat with
+ * callers that predate native tasks).
+ */
+export interface TaskStageRecomputeLike {
+  recomputeTaskExecutionStage(taskId: string): Promise<void>;
+}
+
+/**
  * Narrow interface for emitting step-transition events.
  * The concrete adapter in main/src/index.ts delegates to buildStepTransitionEvent()
  * from stepTransitionBridge.ts. Keeping this interface here preserves the
@@ -172,6 +186,14 @@ export class RunExecutor {
      * silently skipped (backward-compat with callers that predate TASK-765).
      */
     private readonly stepEmitter?: StepTransitionEmitterLike,
+    /**
+     * Optional native-task stage deriver (migration 013). When injected, terminal
+     * and running lifecycle transitions set workflow_runs.outcome (for failed /
+     * canceled) and recompute the linked task's derived execution stage via the
+     * chokepoint. Requires `db` to also be injected (to read the run's task_id and
+     * write its outcome). When absent, task derivation is silently skipped.
+     */
+    private readonly taskStageDeriver?: TaskStageRecomputeLike,
   ) {}
 
   /**
@@ -456,62 +478,123 @@ export class RunExecutor {
    * @param phase  The lifecycle phase label.
    */
   protected async onLifecycleTransition(runId: string, phase: ExecutionPhase): Promise<void> {
-    if (!this.lifecycleTransitions) return;
-    try {
-      switch (phase) {
-        // FIND-SPRINT-026-10 regression fix: 'pre_spawn' was previously a no-op
-        // (fell through to 'post_spawn' return). Tests were failing because the
-        // production contract changed: running() must fire BEFORE spawnCliProcess so
-        // ApprovalRouter sees 'running' status when the SDK's PreToolUse hook fires.
-        // The SDK can invoke PreToolUse before its first stream event is dispatched to
-        // the bridge's onFirstMessage callback, so the prior 'sdk_initialized'-only
-        // path would race: tool calls would arrive at the router while status='starting'
-        // and be rejected with RunNotRunningError.
-        case 'pre_spawn':
-          await this.lifecycleTransitions.running(runId);
-          break;
-        case 'sdk_initialized':
-          // Defensive idempotency: if pre_spawn somehow didn't fire (legacy code
-          // paths or test subclasses overriding bridgeEvents), still attempt the
-          // transition. transitionToRunning rejects when status≠'starting', so a
-          // double-call just emits a (logged) TransitionRejectedError that's
-          // safely swallowed below.
-          await this.lifecycleTransitions.running(runId);
-          break;
-        case 'drained': {
-          // The SDK iterator drained without error — the agent finished its turn.
-          // The executor NEVER auto-completes a run: `completed` is reserved for an
-          // explicit user accept (Merge / Create-PR). Instead the run RESTS in
-          // awaiting_review, awaiting the user's decision.
-          //
-          // restAwaitingReview is guarded on status='running', so it is a safe
-          // no-op (rejected → swallowed below) when the run is already parked in a
-          // non-terminal state:
-          //   - awaiting_review with a PENDING approval row: a tool approval gate is
-          //     still open; the existing approval cycle (transitionFromAwaitingReview)
-          //     drives it back to running. The rejected rest transition leaves the
-          //     gate untouched.
-          //   - awaiting_input: a question gate is open (QuestionRouter owns it).
-          //   - stuck: the StuckDetector flagged it; leave it for triage.
-          // Any of these means there is nothing for the rest transition to do.
-          await this.lifecycleTransitions.restAwaitingReview(runId);
-          break;
+    if (this.lifecycleTransitions) {
+      try {
+        switch (phase) {
+          // FIND-SPRINT-026-10 regression fix: 'pre_spawn' was previously a no-op
+          // (fell through to 'post_spawn' return). Tests were failing because the
+          // production contract changed: running() must fire BEFORE spawnCliProcess so
+          // ApprovalRouter sees 'running' status when the SDK's PreToolUse hook fires.
+          // The SDK can invoke PreToolUse before its first stream event is dispatched to
+          // the bridge's onFirstMessage callback, so the prior 'sdk_initialized'-only
+          // path would race: tool calls would arrive at the router while status='starting'
+          // and be rejected with RunNotRunningError.
+          case 'pre_spawn':
+            await this.lifecycleTransitions.running(runId);
+            break;
+          case 'sdk_initialized':
+            // Defensive idempotency: if pre_spawn somehow didn't fire (legacy code
+            // paths or test subclasses overriding bridgeEvents), still attempt the
+            // transition. transitionToRunning rejects when status≠'starting', so a
+            // double-call just emits a (logged) TransitionRejectedError that's
+            // safely swallowed below.
+            await this.lifecycleTransitions.running(runId);
+            break;
+          case 'drained': {
+            // The SDK iterator drained without error — the agent finished its turn.
+            // The executor NEVER auto-completes a run: `completed` is reserved for an
+            // explicit user accept (Merge / Create-PR). Instead the run RESTS in
+            // awaiting_review, awaiting the user's decision.
+            //
+            // restAwaitingReview is guarded on status='running', so it is a safe
+            // no-op (rejected → swallowed below) when the run is already parked in a
+            // non-terminal state:
+            //   - awaiting_review with a PENDING approval row: a tool approval gate is
+            //     still open; the existing approval cycle (transitionFromAwaitingReview)
+            //     drives it back to running. The rejected rest transition leaves the
+            //     gate untouched.
+            //   - awaiting_input: a question gate is open (QuestionRouter owns it).
+            //   - stuck: the StuckDetector flagged it; leave it for triage.
+            // Any of these means there is nothing for the rest transition to do.
+            await this.lifecycleTransitions.restAwaitingReview(runId);
+            break;
+          }
+          case 'failed': {
+            const fromStatus = this.pendingFailedFromStatus.get(runId) ?? 'running';
+            const errorMessage = this.pendingFailedMessage.get(runId) ?? 'unknown error';
+            await this.lifecycleTransitions.failed(runId, fromStatus, errorMessage);
+            break;
+          }
+          case 'canceled':
+            await this.lifecycleTransitions.canceled(runId);
+            break;
+          case 'post_spawn':
+            // no-op
+            break;
         }
-        case 'failed': {
-          const fromStatus = this.pendingFailedFromStatus.get(runId) ?? 'running';
-          const errorMessage = this.pendingFailedMessage.get(runId) ?? 'unknown error';
-          await this.lifecycleTransitions.failed(runId, fromStatus, errorMessage);
-          break;
-        }
-        case 'canceled':
-          await this.lifecycleTransitions.canceled(runId);
-          break;
-        case 'post_spawn':
-          // no-op
-          return;
+      } catch (err) {
+        this.logger.warn('[RunExecutor] lifecycle transition rejected (expected race)', {
+          runId,
+          phase,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
+    }
+
+    // Native-task derivation (migration 013) — runs AFTER the status transition
+    // (and independently of whether it was rejected as a race) so the chokepoint
+    // aggregate reads the just-written run status. Sets workflow_runs.outcome for
+    // terminal phases, then recomputes the linked task's derived execution stage
+    // through TaskChangeRouter. Fail-soft: a task-side error is logged, never
+    // escalated — task overlays must never crash the run lifecycle.
+    await this.deriveTaskStageForPhase(runId, phase);
+  }
+
+  /**
+   * Phase → task-stage derivation seam (migration 013).
+   *
+   * Resolves the run's linked task_id (skipping entirely when there is none, no
+   * deriver is wired, or no db is injected). For the terminal phases it stamps
+   * the DB-canonical close-out signal on workflow_runs.outcome BEFORE recomputing
+   * so the chokepoint aggregate sees it:
+   *   'failed'   → outcome='failed'
+   *   'canceled' → outcome='canceled'
+   * Then recomputeTaskExecutionStage drives the task to its derived stage:
+   *   running phases (pre_spawn / sdk_initialized) → In development
+   *   'drained' (rests awaiting_review)            → Ready to merge
+   *   'failed' / 'canceled' (all runs terminal)    → revert to entry stage
+   * 'post_spawn' is a no-op for tasks (status is unchanged).
+   *
+   * NOTE: merged / pr_open / dismissed outcomes are owned by the run close-out
+   * mutations in trpc/routers/runs.ts, NOT here.
+   */
+  private async deriveTaskStageForPhase(runId: string, phase: ExecutionPhase): Promise<void> {
+    if (!this.taskStageDeriver || !this.db || phase === 'post_spawn') return;
+
+    try {
+      const run = this.registry.getRunById(runId);
+      const taskId = run?.task_id ?? null;
+      if (!taskId) return;
+
+      if (phase === 'failed') {
+        this.db
+          .prepare(
+            `UPDATE workflow_runs SET outcome = 'failed', updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND outcome IS NULL`,
+          )
+          .run(runId);
+      } else if (phase === 'canceled') {
+        this.db
+          .prepare(
+            `UPDATE workflow_runs SET outcome = 'canceled', updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND outcome IS NULL`,
+          )
+          .run(runId);
+      }
+
+      await this.taskStageDeriver.recomputeTaskExecutionStage(taskId);
     } catch (err) {
-      this.logger.warn('[RunExecutor] lifecycle transition rejected (expected race)', {
+      this.logger.warn('[RunExecutor] task stage derivation failed (fail-soft)', {
         runId,
         phase,
         error: err instanceof Error ? err.message : String(err),

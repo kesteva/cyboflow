@@ -279,9 +279,11 @@ describe('cyboflow.runs.start', () => {
         branchName: 'cyboflow/my-workflow/abc12345',
       });
 
-      // launch must be called with workflowId and the project path resolved by the session manager.
+      // launch must be called with workflowId, the project path resolved by the
+      // session manager, and the optional taskId (undefined here — no native-task
+      // link supplied, migration 013).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project');
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({

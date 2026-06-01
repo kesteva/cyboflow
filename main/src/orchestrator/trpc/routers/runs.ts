@@ -63,7 +63,7 @@ export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
 // ---------------------------------------------------------------------------
 
 export interface RunLauncherLike {
-  launch(workflowId: string, projectPath: string): Promise<{
+  launch(workflowId: string, projectPath: string, taskId?: string): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -137,6 +137,17 @@ export interface RunCloseoutSessionManagerLike {
   getProjectById(projectId: number): { path: string } | undefined;
 }
 
+/**
+ * Narrow slice of TaskChangeRouter needed for run close-out stage derivation
+ * (migration 013). Optional — when absent, close-out skips native-task
+ * derivation (backward-compat with the pre-tasks close-out path). The concrete
+ * TaskChangeRouter singleton satisfies this shape structurally; the boot wiring
+ * in main/src/index.ts passes it in.
+ */
+export interface RunCloseoutTaskDeriverLike {
+  recomputeTaskExecutionStage(taskId: string): Promise<void>;
+}
+
 export interface RunCloseoutDeps {
   worktreeManager: RunWorktreeManagerLike;
   sessionManager: RunCloseoutSessionManagerLike;
@@ -147,6 +158,14 @@ export interface RunCloseoutDeps {
    * DB-only `pending` rows, emitting approvalDecided for each).
    */
   clearPendingApprovalsForRun: (runId: string) => void;
+  /**
+   * Optional native-task stage deriver (migration 013). When wired, the merge /
+   * createPr / dismiss mutations stamp workflow_runs.outcome and recompute the
+   * linked task's derived execution stage through the chokepoint. The run's
+   * task_id is resolved BEFORE worktree teardown (the run row survives teardown,
+   * but the lookup is kept adjacent to the outcome write for clarity).
+   */
+  taskStageDeriver?: RunCloseoutTaskDeriverLike;
 }
 
 let runCloseoutDeps: RunCloseoutDeps | null = null;
@@ -194,6 +213,57 @@ function resolveRunForCloseout(
   return { worktreePath: row.worktree_path, branchName: row.branch_name, projectPath: project.path };
 }
 
+/**
+ * Stamp the DB-canonical close-out signal on workflow_runs.outcome and recompute
+ * the linked task's derived execution stage through the chokepoint (migration 013).
+ *
+ * GATED on a wired `taskStageDeriver`: the entire migration-013 close-out path —
+ * including ANY reference to the `task_id` / `outcome` columns — is opt-in via the
+ * injected deriver. When no deriver is wired (the pre-tasks close-out path, and the
+ * legacy close-out tests whose fixture DB omits the migration-013 columns), this is
+ * a complete no-op that touches none of the new columns.
+ *
+ * The run's `task_id` is read here, AFTER the git/worktree close-out but using the
+ * run row that survives teardown (worktree teardown does not delete the run row).
+ * The read is kept adjacent to the outcome write so both touch the new columns only
+ * under the same gate.
+ *
+ * Fail-soft: a task-side error is logged-then-swallowed so it never fails an
+ * otherwise-successful merge / PR / dismiss.
+ *
+ *   'merged'    → task -> Done
+ *   'pr_open'   → task stays at Ready to merge
+ *   'dismissed' → task reverts to its entry (planning) stage
+ */
+async function stampOutcomeAndDeriveTask(
+  db: DatabaseLike,
+  runId: string,
+  outcome: 'merged' | 'pr_open' | 'dismissed',
+): Promise<void> {
+  const deriver = runCloseoutDeps?.taskStageDeriver;
+  if (!deriver) return; // migration-013 close-out is opt-in; touch no new columns otherwise
+
+  try {
+    // task_id read + outcome write both gated behind the deriver so the legacy
+    // (no-deriver) path never references columns a pre-migration-013 DB lacks.
+    const linkRow = db
+      .prepare('SELECT task_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { task_id: string | null } | undefined;
+    db.prepare(
+      `UPDATE workflow_runs SET outcome = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run(outcome, runId);
+
+    const taskId = linkRow?.task_id ?? null;
+    if (!taskId) return;
+    await deriver.recomputeTaskExecutionStage(taskId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] task stage derivation failed (run ${runId}, outcome ${outcome}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 export const runsRouter = router({
   /** List workflow runs for a project, ordered newest-first. */
   list: protectedProcedure
@@ -213,6 +283,9 @@ export const runsRouter = router({
     .input(z.object({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
+      // Optional native-task link (migration 013). When supplied, the launcher
+      // records workflow_runs.task_id and derives the task's execution stage.
+      taskId: z.string().min(1).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -231,6 +304,7 @@ export const runsRouter = router({
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
         project.path,
+        input.taskId,
       );
       return { runId, worktreePath, branchName };
     }),
@@ -342,6 +416,11 @@ export const runsRouter = router({
             WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
         )
         .run(input.runId);
+      // DB-canonical merge signal + task derivation (-> Done). NO git probe: the
+      // squash/merge above already succeeded, so 'merged' is authoritative. The
+      // chokepoint aggregate keys 'done' on outcome='merged', so this MUST be
+      // stamped before the recompute (handled inside the helper).
+      await stampOutcomeAndDeriveTask(ctx.db, input.runId, 'merged');
       return { success: true };
     }),
 
@@ -390,6 +469,10 @@ export const runsRouter = router({
             WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
         )
         .run(input.runId);
+      // outcome='pr_open' keeps the task at Ready to merge (the chokepoint
+      // aggregate maps pr_open -> merge). The PR is open but not yet merged, so
+      // the task is NOT marked Done here — that happens on a later merge.
+      await stampOutcomeAndDeriveTask(ctx.db, input.runId, 'pr_open');
 
       return { remoteUrl, branchName };
     }),
@@ -425,6 +508,10 @@ export const runsRouter = router({
             WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
         )
         .run(input.runId);
+      // outcome='dismissed' + recompute reverts the task to its entry (planning)
+      // stage: the chokepoint aggregate sees all runs terminal-without-merge and
+      // restores entry_stage_id (fallback Ready for development).
+      await stampOutcomeAndDeriveTask(ctx.db, input.runId, 'dismissed');
       return { success: true };
     }),
 
