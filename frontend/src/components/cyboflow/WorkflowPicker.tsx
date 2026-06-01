@@ -10,7 +10,7 @@
  * `sessions:create-quick` IPC, bootstraps both Claude and Terminal panels via
  * `panelApi.createPanel`, and navigates via `setActiveQuickSession`.
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuickSession } from '../../hooks/useQuickSession';
@@ -31,6 +31,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
+
+  /**
+   * Synchronous in-flight latch for "Start Run". The `isStarting` STATE guard is
+   * insufficient against a double-submit: two clicks fired in the same tick both
+   * read isStarting=false and both fire runs.start (each spinning up a worktree),
+   * and the `disabled` attribute only applies after the next render. A ref flips
+   * synchronously so the second click is rejected. (Prevents the duplicate-run bug.)
+   */
+  const startInFlightRef = useRef(false);
 
   const {
     start: startQuickSession,
@@ -88,7 +97,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   );
 
   const handleStartRun = async () => {
-    if (selectedId === null || isStarting) return;
+    if (selectedId === null || startInFlightRef.current) return;
+    startInFlightRef.current = true;
     setError(null);
     setIsStarting(true);
     try {
@@ -99,6 +109,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       setError(err instanceof Error ? err.message : 'Failed to start run');
     } finally {
       setIsStarting(false);
+      startInFlightRef.current = false;
     }
   };
 

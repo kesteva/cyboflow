@@ -21,7 +21,7 @@
  *
  * FEATURE: user-editable workflow blueprint editor.
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -90,6 +90,16 @@ export function WorkflowEditorModal({
    * 'default'. Set during seed; defaults to 'default' when no source row exists.
    */
   const [sourcePermissionMode, setSourcePermissionMode] = useState<PermissionMode>('default');
+
+  /**
+   * Synchronous in-flight latch shared by every mutating action (save / save-as-new
+   * / reset / run). The `isBusy` STATE guard alone cannot stop a double-submit: two
+   * clicks fired in the same tick both read the pre-update state and both pass, and
+   * the `disabled` attribute only takes effect after the next render. A ref flips
+   * synchronously, so the second invocation is rejected before it can fire a second
+   * runs.start / createCustom. (Prevents the duplicate-run bug.)
+   */
+  const actionInFlightRef = useRef(false);
 
   const isBuiltIn = isSoloFlowWorkflowName(state.name);
 
@@ -195,7 +205,8 @@ export function WorkflowEditorModal({
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   const handleSave = useCallback(async () => {
-    if (!canSave) return;
+    if (!canSave || actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setError(null);
     setIsBusy(true);
     try {
@@ -207,6 +218,7 @@ export function WorkflowEditorModal({
       setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
       setIsBusy(false);
+      actionInFlightRef.current = false;
     }
   }, [canSave, saveEdit, state.definition, state.name, onSaved]);
 
@@ -218,6 +230,8 @@ export function WorkflowEditorModal({
       setError('A workflow name is required.');
       return;
     }
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setError(null);
     setIsBusy(true);
     try {
@@ -228,11 +242,13 @@ export function WorkflowEditorModal({
       setError(err instanceof Error ? err.message : 'Could not create the workflow');
     } finally {
       setIsBusy(false);
+      actionInFlightRef.current = false;
     }
   }, [state.name, saveCustom, onSaved, onClose]);
 
   const handleReset = useCallback(async () => {
-    if (!isBuiltIn) return;
+    if (!isBuiltIn || actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setError(null);
     setIsBusy(true);
     try {
@@ -243,10 +259,13 @@ export function WorkflowEditorModal({
       setError(err instanceof Error ? err.message : 'Reset failed');
     } finally {
       setIsBusy(false);
+      actionInFlightRef.current = false;
     }
   }, [isBuiltIn, workflowId, onSaved, onClose]);
 
   const handleRunWithModifications = useCallback(async () => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setError(null);
     setIsBusy(true);
     try {
@@ -283,6 +302,7 @@ export function WorkflowEditorModal({
       setError(err instanceof Error ? err.message : 'Could not run with modifications');
     } finally {
       setIsBusy(false);
+      actionInFlightRef.current = false;
     }
   }, [mode, isDirty, workflowId, saveEdit, saveCustom, state.name, projectId, onSaved, onClose]);
 
