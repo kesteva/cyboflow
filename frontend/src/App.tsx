@@ -25,10 +25,12 @@ import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import ReviewQueueView from './components/ReviewQueueView';
+import BacklogPane from './components/BacklogPane';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
+import { useBacklogStore } from './stores/backlogStore';
 import type { VersionUpdateInfo, PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -56,7 +58,11 @@ function App() {
   const [globalSearch, setGlobalSearch] = useState('');
   const showHumanReview = useNavigationStore((s) => s.humanReviewOpen);
   const toggleHumanReview = useNavigationStore((s) => s.toggleHumanReview);
+  const showBacklog = useNavigationStore((s) => s.backlogOpen);
+  const toggleBacklog = useNavigationStore((s) => s.toggleBacklog);
   const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
+  // Non-done task count drives the backlog rail badge (mirrors the review count).
+  const backlogCount = useBacklogStore((s) => s.tasks.filter((t) => !t.isDone).length);
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();
@@ -333,12 +339,28 @@ function App() {
             pendingReviewCount={reviewQueueCount}
             humanReviewActive={showHumanReview}
             onToggleHumanReview={toggleHumanReview}
+            backlogCount={backlogCount}
+            backlogActive={showBacklog}
+            onToggleBacklog={toggleBacklog}
           />
-          {/* Center: full-width human-review queue OR the active-project surface
-              (CyboflowRoot, the only mount point for the run surface — the legacy
-              SessionView branch was retired in TASK-690). */}
+          {/* Center: full-width task-backlog pane OR human-review queue OR the
+              active-project surface (CyboflowRoot, the only mount point for the
+              run surface — the legacy SessionView branch was retired in TASK-690).
+              Backlog takes precedence; both center panes are mutually exclusive
+              (navigationStore opening one closes the other). */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            {showHumanReview ? (
+            {showBacklog ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Task backlog error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <BacklogPane projectId={activeProjectId} />
+              </ErrorBoundary>
+            ) : showHumanReview ? (
               <ErrorBoundary fallback={(error) => (
                 <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
                   <div className="text-center">

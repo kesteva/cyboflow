@@ -12,6 +12,14 @@ interface NavigationState {
    * store-selection watcher would miss.
    */
   humanReviewOpen: boolean;
+  /**
+   * Whether the full-width task-backlog pane is the active center surface
+   * (App swaps it in over CyboflowRoot — mirrors `humanReviewOpen`). Lives here
+   * so the rail navigation handlers can dismiss it when the user picks a
+   * project / session / run. Mutually exclusive with `humanReviewOpen` — opening
+   * one closes the other so the center never tries to render both.
+   */
+  backlogOpen: boolean;
 
   // Actions
   setActiveView: (view: 'sessions' | 'project') => void;
@@ -21,12 +29,16 @@ interface NavigationState {
   openHumanReview: () => void;
   closeHumanReview: () => void;
   toggleHumanReview: () => void;
+  openBacklog: () => void;
+  closeBacklog: () => void;
+  toggleBacklog: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
   activeView: 'sessions',
   activeProjectId: null,
   humanReviewOpen: false,
+  backlogOpen: false,
 
   setActiveView: (view) => set({ activeView: view }),
 
@@ -42,7 +54,15 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     activeProjectId: null
   }),
 
-  openHumanReview: () => set({ humanReviewOpen: true }),
+  // Opening human review closes the backlog (the center hosts one full-width
+  // pane at a time); closing/toggling leave the backlog flag untouched.
+  openHumanReview: () => set({ humanReviewOpen: true, backlogOpen: false }),
   closeHumanReview: () => set({ humanReviewOpen: false }),
-  toggleHumanReview: () => set((s) => ({ humanReviewOpen: !s.humanReviewOpen })),
+  toggleHumanReview: () => set((s) => ({ humanReviewOpen: !s.humanReviewOpen, backlogOpen: false })),
+
+  // Symmetric with the human-review actions — opening/toggling the backlog
+  // closes human review so the center never tries to render both panes.
+  openBacklog: () => set({ backlogOpen: true, humanReviewOpen: false }),
+  closeBacklog: () => set({ backlogOpen: false }),
+  toggleBacklog: () => set((s) => ({ backlogOpen: !s.backlogOpen, humanReviewOpen: false })),
 }));
