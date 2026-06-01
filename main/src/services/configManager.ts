@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import type { AppConfig } from '../types/config';
+import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -172,6 +173,18 @@ export class ConfigManager extends EventEmitter {
 
   getDefaultModel(): string {
     return this.config.defaultModel || 'sonnet';
+  }
+
+  /**
+   * The global default CLI substrate for new workflow runs (IDEA-013 / TASK-806).
+   *
+   * Floors to DEFAULT_SUBSTRATE ('sdk') when unset. `defaultSubstrate` is
+   * intentionally NOT seeded into the constructor defaults, so existing
+   * config.json files are not rewritten on launch — preserving byte-identical
+   * behavior for users who never opt into the interactive substrate.
+   */
+  getDefaultSubstrate(): CliSubstrate {
+    return this.config.defaultSubstrate ?? DEFAULT_SUBSTRATE;
   }
 
   getSessionCreationPreferences() {

@@ -1,3 +1,5 @@
+import type { CliSubstrate } from '../../../shared/types/substrate';
+
 export interface AppConfig {
   verbose?: boolean;
   anthropicApiKey?: string;
@@ -11,6 +13,8 @@ export interface AppConfig {
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default model for new sessions
   defaultModel?: string;
+  // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
+  defaultSubstrate?: CliSubstrate;
   // Auto-check for updates
   autoCheckUpdates?: boolean;
   // Stravu MCP integration
@@ -67,6 +71,8 @@ export interface UpdateConfigRequest {
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
+  // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
+  defaultSubstrate?: CliSubstrate;
   autoCheckUpdates?: boolean;
   stravuApiKey?: string;
   stravuServerUrl?: string;
