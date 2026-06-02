@@ -20,6 +20,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { makeRawEventsDb, countRawEvents } from '../../../../orchestrator/__test_fixtures__/rawEvents';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
@@ -27,6 +30,7 @@ import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { InteractiveClaudeManager } from '../interactiveClaudeManager';
+import { InteractiveSettingsWriter } from '../interactiveSettingsWriter';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConfigManager } from '../../../configManager';
 import type {
@@ -262,6 +266,52 @@ async function waitFor(predicate: () => boolean, maxTicks = 200): Promise<void> 
 }
 
 // ---------------------------------------------------------------------------
+// .claude/settings.json helpers (real-fs round-trip for the writer integration).
+// ---------------------------------------------------------------------------
+
+interface HookCommandEntry {
+  type?: string;
+  command?: string;
+  timeout?: number;
+}
+interface HookMatcherGroup {
+  matcher?: string;
+  hooks?: HookCommandEntry[];
+}
+interface ClaudeSettingsShape {
+  hooks?: { PreToolUse?: HookMatcherGroup[]; [k: string]: HookMatcherGroup[] | undefined };
+  [k: string]: unknown;
+}
+
+/** Make a fresh, unique, real temp worktree dir. */
+function makeTempWorktree(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'icm-task819-'));
+}
+
+/** Read the worktree's `.claude/settings.json`, or undefined when absent/unreadable. */
+function readSettings(worktreePath: string): ClaudeSettingsShape | undefined {
+  const p = path.join(worktreePath, '.claude', 'settings.json');
+  if (!fs.existsSync(p)) return undefined;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8')) as ClaudeSettingsShape;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True iff the settings carry the cyboflow PreToolUse `'*'` shell-hook group. */
+function hasCyboflowHook(settings: ClaudeSettingsShape | undefined): boolean {
+  const groups = settings?.hooks?.PreToolUse;
+  if (!Array.isArray(groups)) return false;
+  return groups.some(
+    (g) =>
+      g.matcher === '*' &&
+      Array.isArray(g.hooks) &&
+      g.hooks.some((h) => h.type === 'command' && typeof h.command === 'string' && h.command.includes('preToolUseShellHook')),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -346,7 +396,7 @@ describe('InteractiveClaudeManager', () => {
       expect(withoutFlag).not.toContain('--strict-mcp-config');
     });
 
-    it('includes --mcp-config and --settings isolation flags', () => {
+    it('includes --mcp-config and does NOT emit the dangling --settings flag (TASK-819)', () => {
       const args = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
@@ -354,17 +404,28 @@ describe('InteractiveClaudeManager', () => {
         prompt: 'hi',
       });
       expect(args).toContain('--mcp-config');
-      expect(args).toContain('--settings');
+      // The dangling `--settings <.cyboflow/interactive-settings.json>` flag is
+      // dropped (TASK-819): the PreToolUse hook is installed by the writer into
+      // the worktree's default `.claude/settings.json` that `claude` reads, so
+      // no `--settings` flag is emitted.
+      expect(args).not.toContain('--settings');
     });
   });
 
   // -------------------------------------------------------------------------
-  // (a continued) permissionMode 'ignore' produces no hook-write call.
+  // (TASK-819) PreToolUse shell-approval hook: write on spawn + ignore skip.
+  // Real-fs round-trip on a temp worktree exercises the writer's merge.
   // -------------------------------------------------------------------------
-  describe('permissionMode ignore — no hook write', () => {
+  describe('shell-approval hook write on spawn (TASK-819)', () => {
     let db: Database.Database;
     let mgr: TestableInteractiveClaudeManager;
-    let removeSettingsSpy: MockInstance;
+    const worktrees: string[] = [];
+
+    function freshWorktree(): string {
+      const wt = makeTempWorktree();
+      worktrees.push(wt);
+      return wt;
+    }
 
     beforeEach(() => {
       db = createTestDb();
@@ -376,13 +437,125 @@ describe('InteractiveClaudeManager', () => {
         createMockConfigManager(),
         db,
       );
-      // Spy on the hook-write seam (removeGeneratedSettings is the teardown twin;
-      // for the write seam the manager does not invoke any writer when
-      // permissionMode is 'ignore'). We assert via the spawn path that no
-      // settings-write seam fires for the 'ignore' branch.
-      removeSettingsSpy = vi.spyOn(
-        mgr as unknown as { removeGeneratedSettings(p: string): void },
-        'removeGeneratedSettings',
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      for (const wt of worktrees.splice(0)) {
+        fs.rmSync(wt, { recursive: true, force: true });
+      }
+      vi.restoreAllMocks();
+      vi.clearAllMocks();
+    });
+
+    it('installs the PreToolUse \'*\' hook into <worktree>/.claude/settings.json once on spawn, passing the worktree path', async () => {
+      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+      const worktreePath = freshWorktree();
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-hook',
+        sessionId: 'sess-hook',
+        worktreePath,
+        prompt: 'go',
+      });
+      await waitFor(() => mgr.ptys.length > 0);
+
+      // write() invoked exactly once with the worktree path + permissionMode opts.
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(writeSpy.mock.calls[0][0]).toBe(worktreePath);
+      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: undefined });
+
+      // The real writer wrote the cyboflow '*' PreToolUse entry to disk.
+      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(true);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('constructs the writer with a logger PASSED (write/skip diagnostics enabled)', async () => {
+      // A logger whose debug() fires when the writer logs the install. The
+      // manager adapts its Logger (debug -> verbose) to LoggerLike, so a verbose
+      // call on the manager logger proves the shim is wired.
+      const logger = createLoggerSpy();
+      const m = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        logger as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+      const worktreePath = freshWorktree();
+      const spawn = m.spawnCliProcess({
+        panelId: 'panel-log',
+        sessionId: 'sess-log',
+        worktreePath,
+        prompt: 'go',
+      });
+      await waitFor(() => m.ptys.length > 0);
+
+      // The writer's install-diagnostic routed through the adapted logger
+      // (debug -> verbose). A no-arg writer would have silently no-op'd this.
+      expect(
+        logger.verbose.mock.calls.some(
+          (c) => typeof c[0] === 'string' && c[0].includes('installed PreToolUse shell hook'),
+        ),
+      ).toBe(true);
+
+      m.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('writes NO gating hook when permissionMode === \'ignore\' (writer opt-out consumed, not a manager gate)', async () => {
+      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+      const worktreePath = freshWorktree();
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-ign',
+        sessionId: 'sess-ign',
+        worktreePath,
+        prompt: 'go',
+        permissionMode: 'ignore',
+      });
+      await waitFor(() => mgr.ptys.length > 0);
+
+      // write() is still CALLED (no manager gate) but with permissionMode 'ignore'
+      // — the writer returns null and writes nothing (its own opt-out branch).
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'ignore' });
+      expect(writeSpy.mock.results[0].value).toBeNull();
+      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(false);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (TASK-819) teardown: deny in-flight shell approvals (ordered before
+  // clearPendingForRun) + remove the generated hook entry.
+  // -------------------------------------------------------------------------
+  describe('shell-approval teardown (TASK-819)', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+    const worktrees: string[] = [];
+
+    function freshWorktree(): string {
+      const wt = makeTempWorktree();
+      worktrees.push(wt);
+      return wt;
+    }
+
+    beforeEach(() => {
+      db = createTestDb();
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
       );
     });
 
@@ -390,27 +563,83 @@ describe('InteractiveClaudeManager', () => {
       ApprovalRouter._resetForTesting();
       QuestionRouter._resetForTesting();
       db.close();
+      for (const wt of worktrees.splice(0)) {
+        fs.rmSync(wt, { recursive: true, force: true });
+      }
+      vi.restoreAllMocks();
       vi.clearAllMocks();
     });
 
-    it('spawns with permissionMode ignore without writing a gating hook', async () => {
-      const panelId = 'panel-ign';
-      const spawn = mgr.spawnCliProcess({
-        panelId,
-        sessionId: 'sess-ign',
-        worktreePath: '/tmp/wt-ign',
-        prompt: 'go',
-        permissionMode: 'ignore',
+    it('calls the injected canceller with the run\'s runId on teardown, BEFORE clearPendingForRun', async () => {
+      const callOrder: string[] = [];
+      const cancellerSpy = vi.fn((_runId: string): number => {
+        callOrder.push('cancel');
+        return 1;
       });
-      // Let the spawn reach the PTY/source wiring (it returns a pending
-      // completion promise).
-      await waitFor(() => mgr.ptys.length > 0);
-      // No hook-write seam fired during spawn for the auto-allow branch.
-      expect(removeSettingsSpy).not.toHaveBeenCalled();
-      // Tear down so the pending spawn promise resolves.
-      mgr.ptys[0].fireExit(0);
-      await new Promise((r) => setTimeout(r, 600));
-      await spawn;
+      const clearSpy = vi
+        .spyOn(ApprovalRouter.getInstance(), 'clearPendingForRun')
+        .mockImplementation((_runId: string) => {
+          callOrder.push('clear');
+        });
+      mgr.setShellApprovalCanceller(cancellerSpy);
+
+      const worktreePath = freshWorktree();
+      const panelId = 'panel-deny';
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-deny', worktreePath, prompt: 'go' });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      await mgr.killProcess(panelId);
+
+      // runId falls back to panelId (no run_id on the session row).
+      expect(cancellerSpy).toHaveBeenCalledTimes(1);
+      expect(cancellerSpy).toHaveBeenCalledWith(panelId);
+      // deny precedes the router DB settle.
+      expect(callOrder.indexOf('cancel')).toBeLessThan(callOrder.indexOf('clear'));
+      expect(callOrder.indexOf('cancel')).toBeGreaterThanOrEqual(0);
+
+      void spawn;
+    });
+
+    it('teardown does NOT throw when no canceller is wired (null-safe seam)', async () => {
+      const worktreePath = freshWorktree();
+      const panelId = 'panel-nocancel';
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-nocancel', worktreePath, prompt: 'go' });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      await expect(mgr.killProcess(panelId)).resolves.toBeUndefined();
+      expect(mgr.publicInteractiveRuns().has(panelId)).toBe(false);
+
+      void spawn;
+    });
+
+    it('removes the generated \'*\' hook on teardown while preserving a pre-seeded user key', async () => {
+      const worktreePath = freshWorktree();
+      // Pre-seed a user settings.json with an unrelated key the writer must keep.
+      const dotClaude = path.join(worktreePath, '.claude');
+      fs.mkdirSync(dotClaude, { recursive: true });
+      fs.writeFileSync(
+        path.join(dotClaude, 'settings.json'),
+        JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }, null, 2),
+        'utf8',
+      );
+
+      const panelId = 'panel-remove';
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-remove', worktreePath, prompt: 'go' });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      // Spawn installed our '*' hook alongside the user key.
+      const afterSpawn = readSettings(worktreePath);
+      expect(hasCyboflowHook(afterSpawn)).toBe(true);
+      expect((afterSpawn as { permissions?: { allow?: string[] } }).permissions?.allow).toEqual(['Bash(ls)']);
+
+      await mgr.killProcess(panelId);
+
+      // Teardown stripped ONLY the cyboflow entry; the user key survives.
+      const afterTeardown = readSettings(worktreePath);
+      expect(hasCyboflowHook(afterTeardown)).toBe(false);
+      expect((afterTeardown as { permissions?: { allow?: string[] } }).permissions?.allow).toEqual(['Bash(ls)']);
+
+      void spawn;
     });
   });
 

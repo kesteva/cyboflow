@@ -781,6 +781,15 @@ async function initializeServices() {
   }
   if (interactiveCliManager instanceof InteractiveClaudeManager) {
     interactiveCliManager.setOrchSocketPath(socketPath);
+    // Wire the deny-on-teardown shell-approval canceller (IDEA-030 / TASK-819):
+    // the interactive teardown seam denies/closes any in-flight PreToolUse shell-
+    // approval sockets for the run BEFORE the PTY is killed, delegating to the
+    // OrchSocketServer's public twin (which forwards to the handler's shipped
+    // cancelInFlightShellApprovals). Without this the manager-side canceller is
+    // null and the deny ships as a production no-op.
+    interactiveCliManager.setShellApprovalCanceller((runId) =>
+      orchSocketServer.cancelInFlightShellApprovals(runId),
+    );
   }
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the

@@ -12,6 +12,8 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
+import { InteractiveSettingsWriter } from './interactiveSettingsWriter';
+import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 
@@ -54,20 +56,29 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
  *   permissionMode   : 'ignore' (dontAsk / auto-allow) SKIPS writing the gating
  *                      shell hook — matching the SDK's permissionMode==='ignore'
  *                      branch that omits the PreToolUse hook
- *                      (claudeCodeManager.ts:446). The hook WRITE body itself is
- *                      owned by S5/TASK-810 (interactiveSettingsWriter); here we
- *                      only gate the seam call so 'ignore' produces no hook-write.
+ *                      (claudeCodeManager.ts:446). The hook WRITE body is owned by
+ *                      S5/TASK-810 (interactiveSettingsWriter); TASK-819 calls
+ *                      `settingsWriter.write(worktreePath, { permissionMode })` on
+ *                      spawn and the gating is the WRITER's own opt-out branch —
+ *                      'ignore'/'dontAsk' makes write() return null (no hook). The
+ *                      manager adds NO second gate (single source of truth).
  *   strictMcpConfig  : threads `--strict-mcp-config` iff strictMcpConfig===true,
  *                      so only the per-run `.mcp.json` servers load and user
  *                      globals cannot interfere with the permission bridge.
  *                      Mirrors claudeCodeManager.ts:188.
- *   settingSources   : EXPLICIT decision — interactive ISOLATES from user/global
- *                      settings via the generated `--settings <path>` file (NOT
- *                      a silent flip of the SDK's settingSources:['user','project']).
- *                      The SDK reads ['user','project']; the interactive REPL has
- *                      no settingSources option, so isolation is achieved with
- *                      `--settings` pointing at the per-run file S5 owns. This is
- *                      a deliberate read-vs-isolate divergence, documented here.
+ *   settings/hooks   : EXPLICIT decision (TASK-819) — the PreToolUse `'*'` shell-
+ *                      approval hook is installed by InteractiveSettingsWriter into
+ *                      the worktree's DEFAULT `<worktree>/.claude/settings.json`
+ *                      that `claude` reads at launch; NO `--settings` flag is
+ *                      emitted. The old `--settings <.cyboflow/interactive-
+ *                      settings.json>` flag was dangling (nothing wrote that file →
+ *                      NO hook → NO gating) and is dropped. The SDK reads
+ *                      settingSources ['user','project'] via its own option; the
+ *                      interactive REPL has no settingSources option, so the gate is
+ *                      delivered through the on-disk settings file `claude` already
+ *                      reads. A future explicit `--settings` MUST target the
+ *                      writer's `.claude/settings.json` path, not the empty
+ *                      `.cyboflow` file.
  *   resume/isResume  : v1 is FRESH-SESSION-ONLY. Interactive `--resume` /
  *                      `--session-id` continuity is NOT implemented (#44607 is
  *                      ignored interactively). isResume is accepted but no
@@ -206,6 +217,25 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    */
   private readonly narrowing: TypedEventNarrowing;
 
+  /**
+   * Merge-safe `.claude/settings.json` writer/remover (TASK-810). Installs the
+   * PreToolUse `'*'` shell-approval hook on spawn (gated by the writer's own
+   * permissionMode opt-out) and strips it on teardown. Constructed in the
+   * constructor after super() so this.logger is available — the logger is
+   * PASSED (adapted to LoggerLike) per the CLAUDE.md optional-logger rule
+   * (omitting it silently no-ops the writer's write/skip/remove diagnostics).
+   */
+  private readonly settingsWriter: InteractiveSettingsWriter;
+
+  /**
+   * Injected deny-on-teardown shell-approval canceller (TASK-819). Wired at boot
+   * via setShellApprovalCanceller to OrchSocketServer.cancelInFlightShellApprovals
+   * (which delegates to the handler's shipped twin). Null until wired — quick
+   * sessions and a boot before wiring no-op cleanly. Typed `(runId) => number`
+   * to match the handler's return (count of sockets denied/closed).
+   */
+  private shellApprovalCanceller: ((runId: string) => number) | null = null;
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
@@ -217,6 +247,28 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       throw new TypeError('[InteractiveClaudeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
     this.narrowing = new TypedEventNarrowing(this.logger);
+    // PASS the logger to the writer (CLAUDE.md optional-logger rule). The
+    // manager's Logger surface exposes verbose/info/warn/error but NOT `debug`,
+    // so adapt it to LoggerLike at the call site (debug -> verbose) rather than
+    // omitting it, which would silently no-op the writer's diagnostics. The shim
+    // is undefined when no logger was supplied so the writer's own opt-out holds.
+    this.settingsWriter = new InteractiveSettingsWriter(this.toLoggerLike(this.logger));
+  }
+
+  /**
+   * Adapt the manager's `Logger` (verbose/info/warn/error) to the writer's
+   * `LoggerLike` (info/warn/error/debug). Routes `debug` -> `verbose`. Returns
+   * `undefined` when no logger is present so the writer falls back to its own
+   * no-op branch — never fabricates a logger that swallows diagnostics.
+   */
+  private toLoggerLike(logger: Logger | undefined): LoggerLike | undefined {
+    if (logger === undefined) return undefined;
+    return {
+      info: (message: string) => logger.info(message),
+      warn: (message: string) => logger.warn(message),
+      error: (message: string) => logger.error(message),
+      debug: (message: string) => logger.verbose(message),
+    };
   }
 
   /**
@@ -226,6 +278,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    */
   setOrchSocketPath(socketPath: string): void {
     this.orchSocketPath = socketPath;
+  }
+
+  /**
+   * Inject the deny-on-teardown shell-approval canceller (TASK-819). Wired at
+   * boot to OrchSocketServer.cancelInFlightShellApprovals so teardownRun can
+   * deny/close any in-flight PreToolUse shell-approval socket for a run BEFORE
+   * the PTY is killed. Mirrors the setOrchSocketPath injection seam. Null-safe:
+   * unset until wired (quick sessions / pre-boot) and the deny no-ops cleanly.
+   */
+  setShellApprovalCanceller(fn: (runId: string) => number): void {
+    this.shellApprovalCanceller = fn;
   }
 
   // ---------------------------------------------------------------------------
@@ -313,15 +376,22 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--strict-mcp-config');
     }
 
-    // Inject the cyboflow MCP stdio entry and isolate from user settings. The
-    // actual `.mcp.json` / settings+hook file is GENERATED by S5/TASK-810; here
-    // we only emit the flags pointed at the path that writer will own.
-    const settingsPath = path.join(options.worktreePath, '.cyboflow', 'interactive-settings.json');
+    // Inject the cyboflow MCP stdio entry. The actual `.mcp.json` is GENERATED
+    // by S5/TASK-810; here we only emit the flag pointed at the path that writer
+    // owns.
     const mcpConfigPath = path.join(options.worktreePath, '.cyboflow', 'interactive-mcp.json');
     args.push('--mcp-config', mcpConfigPath);
-    // settingSources read-vs-isolate decision: ISOLATE via `--settings` (see
-    // parity table). NOT a silent flip of the SDK's ['user','project'].
-    args.push('--settings', settingsPath);
+
+    // No `--settings` flag is emitted (TASK-819 reconciliation): the PreToolUse
+    // shell-approval hook is installed by InteractiveSettingsWriter into the
+    // worktree's DEFAULT `<worktree>/.claude/settings.json` that `claude` reads
+    // at launch — a DIFFERENT path from the dangling `.cyboflow/interactive-
+    // settings.json` this manager used to point `--settings` at (nothing ever
+    // wrote that file, so the hook never loaded → NO gating). Dropping the
+    // dangling flag and letting `claude` pick up the writer-installed hook from
+    // its default settings path is what makes the interactive gate actually
+    // fire. A future explicit `--settings` MUST target the writer's path; do NOT
+    // re-point it at the empty `.cyboflow` file.
 
     return args;
   }
@@ -416,6 +486,16 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const sink = new RawEventsSink(this.db, this.logger);
     sink.attachToRouter(router, runId);
     this.pipelines.set(panelId, { router, sink, runId });
+
+    // Install the PreToolUse `'*'` shell-approval hook into the worktree's
+    // default `.claude/settings.json` BEFORE `claude` launches (TASK-819), so the
+    // live interactive REPL gates tool calls for human review. The writer is
+    // idempotent (drops any stale cyboflow entry before re-adding) so a respawn
+    // is safe, and SKIPS internally when permissionMode is 'ignore'/'dontAsk'
+    // (interactiveSettingsWriter.ts) — returning null — so NO second gate is
+    // added here (the writer's opt-out branch is the single source of truth).
+    // Synchronous fs; no await needed.
+    this.settingsWriter.write(worktreePath, { permissionMode: options.permissionMode });
 
     // Build args + env via the abstract hooks.
     const args = this.buildCommandArgs({ ...options, runId });
@@ -821,18 +901,28 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       this.tailSources.delete(panelId);
     }
 
+    const runId = run?.runId ?? panelId;
+
+    // Proactively deny + close any in-flight shell-approval sockets for the run
+    // FIRST (TASK-819), so the held-open socket gets a real DENY verdict and the
+    // blocked PreToolUse hook subprocess (and thus the blocked PTY) unblocks. This
+    // MUST precede clearPendingForRun: ApprovalRouter.clearPendingForRun
+    // deliberately does NOT touch the socket (correct for the in-process SDK
+    // transport, WRONG for the shell transport), so the deny ships the verdict and
+    // clearPendingForRun then settles the router's DB rows
+    // (mcpQueryHandler.ts:505-511). Reordering deny -> clear (vs clear -> deny) is
+    // the only structural change to this method.
+    this.denyInFlightShellApprovals(runId);
+
     // Clear router pending under the runId (same id passed to requestApproval /
     // requestQuestion). Falls back to panelId when no run record exists.
-    const runId = run?.runId ?? panelId;
     ApprovalRouter.getInstance().clearPendingForRun(runId);
     QuestionRouter.getInstance().clearPendingForRun(runId);
 
-    // Proactively deny + close any in-flight shell-approval sockets for the run.
-    // Extensible seam — the socket-deny body lands in S5/TASK-810. No-op here.
-    this.denyInFlightShellApprovals(runId);
-
-    // Remove the generated settings.json hook entry. Removal call is a seam; the
-    // writer body lands in S5/TASK-810.
+    // Remove the generated `.claude/settings.json` PreToolUse hook entry, leaving
+    // user keys intact (the writer's merge-safe remove). Resolved from the run's
+    // worktree (the run record is still present here — interactiveRuns.delete runs
+    // last below).
     this.removeGeneratedSettings(panelId);
 
     // Dispose the pipeline (router + sink) for the run.
@@ -847,20 +937,42 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Deny + close any in-flight shell-approval sockets for the run. Extensible
-   * teardown seam consumed by S5/TASK-810 — the socket-deny body lands there.
-   * No-op in v1.
+   * Deny + close any in-flight shell-approval sockets for the run (TASK-819).
+   * Delegates to the injected canceller (wired at boot to
+   * OrchSocketServer.cancelInFlightShellApprovals, which forwards to the handler's
+   * shipped twin at mcpQueryHandler.ts:519). The deny-and-close logic is NOT
+   * re-implemented here — only invoked. No-op safe when no canceller is wired
+   * (quick sessions / boot order) and when nothing is in flight.
    */
-  private denyInFlightShellApprovals(_runId: string): void {
-    // S5/TASK-810 wires the shell-hook socket handler; this is the cancel seam.
+  private denyInFlightShellApprovals(runId: string): void {
+    try {
+      this.shellApprovalCanceller?.(runId);
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] cancel in-flight shell approvals failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
-   * Remove the generated interactive settings.json hook entry. The writer body
-   * is owned by S5/TASK-810; this is the removal seam. No-op in v1.
+   * Remove the generated `.claude/settings.json` PreToolUse hook entry on teardown
+   * (TASK-819) by delegating to the writer's merge-safe remove for the run's
+   * worktree. The writer strips ONLY the cyboflow `'*'` entry and preserves all
+   * user keys; it is a no-op when the file is absent or carries no cyboflow entry.
+   * Resolves the worktree from the still-present interactiveRuns record (the run
+   * is deleted last in teardownRun). No-op when no worktree is resolvable.
    */
-  private removeGeneratedSettings(_panelId: string): void {
-    // S5/TASK-810 owns interactiveSettingsWriter; this is the teardown seam.
+  private removeGeneratedSettings(panelId: string): void {
+    const run = this.interactiveRuns.get(panelId);
+    const worktreePath = run?.worktreePath;
+    if (!worktreePath) return;
+    try {
+      this.settingsWriter.remove(worktreePath);
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] remove generated settings failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Map a sessionId back to its active panelId via the run/process records. */

@@ -157,6 +157,21 @@ export class OrchSocketServer implements PermissionServerLike {
     return (this.clientsByRun.get(runId)?.size ?? 0) > 0;
   }
 
+  /**
+   * Deny-and-close every in-flight shell-approval socket for `runId`. Public
+   * boot-wired affordance (IDEA-030 / TASK-819): the interactive manager's
+   * teardown seam (setShellApprovalCanceller) invokes this BEFORE killing the
+   * PTY so a blocked PreToolUse hook subprocess unblocks with a deny rather than
+   * leaking a held-open socket. Delegates to the handler's shipped twin
+   * (mcpQueryHandler.cancelInFlightShellApprovals, TASK-810) — the deny logic is
+   * NOT re-implemented here.
+   *
+   * @returns the number of sockets denied/closed.
+   */
+  cancelInFlightShellApprovals(runId: string): number {
+    return this.handler.cancelInFlightShellApprovals(runId);
+  }
+
   // -------------------------------------------------------------------------
   // Connection handling
   // -------------------------------------------------------------------------
