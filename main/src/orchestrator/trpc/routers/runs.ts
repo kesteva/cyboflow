@@ -119,6 +119,17 @@ export interface RelayDeps {
   relayInput(runId: string, text: string): void;
   /** Relay a PTY geometry change into the live interactive node-pty. */
   relayResize(runId: string, cols: number, rows: number): void;
+  /**
+   * Explicitly END a LIVE interactive run's persistent REPL (IDEA-030 /
+   * TASK-818). Writes the EOF/`/exit` control sequence so the interactive
+   * manager's inherited onExit settles the run's spawn promise and tears the run
+   * down — the ONLY non-kill spawn-promise resolver for a persistent interactive
+   * run. Strict NO-OP for the SDK substrate (no PTY). Called by the close-out
+   * mutations (merge / createPr / dismiss) BEFORE worktree removal so the live
+   * REPL is terminated as part of close-out. RelayDeps is the SINGLE bag for
+   * live-session collaborators (relay + end-session).
+   */
+  endSession(runId: string): Promise<void>;
 }
 
 let relayDeps: RelayDeps | null = null;
@@ -299,6 +310,32 @@ async function stampOutcomeAndDeriveTask(
   } catch (err) {
     console.error(
       `[runs.closeout] task stage derivation failed (run ${runId}, outcome ${outcome}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Terminate a LIVE interactive run's persistent REPL as part of close-out
+ * (IDEA-030 / TASK-818). Routes through the RelayDeps `endSession` seam (backed
+ * by SubstrateDispatchFacade.endSession), which writes EOF/`/exit` into the live
+ * PTY so the run's spawn promise resolves and teardown fires. Strict NO-OP for
+ * the SDK substrate (the facade resolves the substrate per-run). Called BEFORE
+ * worktree removal in merge / createPr / dismiss.
+ *
+ * Fail-soft + opt-in: when `relayDeps` is not wired (legacy close-out / tests
+ * that don't inject the relay bag) this is a complete no-op — close-out still
+ * proceeds. A throwing endSession is logged-then-swallowed so a flaky live-PTY
+ * write never fails an otherwise-successful merge / PR / dismiss; the guarded
+ * UPDATE below marks the run terminal regardless.
+ */
+async function endLiveInteractiveSession(runId: string): Promise<void> {
+  if (!relayDeps) return;
+  try {
+    await relayDeps.endSession(runId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] endSession failed (run ${runId}):`,
       err instanceof Error ? err.message : String(err),
     );
   }
@@ -488,6 +525,11 @@ export const runsRouter = router({
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
+      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE the
+      // worktree mutation so its spawn promise resolves as part of close-out.
+      // NO-OP for the SDK substrate and when the relay bag is unwired.
+      await endLiveInteractiveSession(input.runId);
+
       const mainBranch = await wm.getProjectMainBranch(projectPath);
       if (input.strategy === 'squash') {
         const message = input.commitMessage?.trim();
@@ -558,6 +600,11 @@ export const runsRouter = router({
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
+      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE pushing
+      // so its spawn promise resolves as part of close-out. NO-OP for SDK /
+      // unwired relay bag.
+      await endLiveInteractiveSession(input.runId);
+
       await wm.gitPush(worktreePath);
       const { remoteUrl, branchName } = await wm.getRemoteUrlAndBranch(worktreePath);
 
@@ -598,6 +645,10 @@ export const runsRouter = router({
       }
       const deps = runCloseoutDeps;
       const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE removing
+      // the worktree so its spawn promise resolves as part of close-out. NO-OP
+      // for the SDK substrate and when the relay bag is unwired.
+      await endLiveInteractiveSession(input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
       // Dismiss discards the run — force-delete its branch too (its commits go
       // with it), so close-out doesn't leave an orphaned ref. No-op when the run

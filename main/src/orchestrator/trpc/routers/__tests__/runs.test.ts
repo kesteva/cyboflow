@@ -58,6 +58,7 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { setStartRunDeps, setRunCloseoutDeps, setRelayDeps } from '../runs';
 import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
+import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
@@ -103,6 +104,27 @@ function seedRawEvents(
     ids.push(Number(result.lastInsertRowid));
   }
   return ids;
+}
+
+/**
+ * A RelayDeps bag whose every method throws "not wired" — used to RESET the
+ * module-level relayDeps after a test wires real spies, so a wired stub does
+ * not leak into another describe block. `endSession` is async (IDEA-030 /
+ * TASK-818) so its reject is a rejected promise, mirroring the unwired-guard
+ * contract of the sync relay methods.
+ */
+function makeUnwiredRelayDeps(): RelayDeps {
+  return {
+    relayInput: vi.fn(() => {
+      throw new Error('not wired');
+    }),
+    relayResize: vi.fn(() => {
+      throw new Error('not wired');
+    }),
+    endSession: vi.fn(async () => {
+      throw new Error('not wired');
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +395,8 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
   it('(b) relayInput routes to deps.relayInput(runId, text) once wired', async () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
-    setRelayDeps({ relayInput, relayResize });
+    const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
+    setRelayDeps({ relayInput, relayResize, endSession });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -384,21 +407,15 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
       expect(relayInput).toHaveBeenCalledWith('run-relay', 'go\n');
       expect(relayResize).not.toHaveBeenCalled();
     } finally {
-      setRelayDeps({
-        relayInput: vi.fn(() => {
-          throw new Error('not wired');
-        }),
-        relayResize: vi.fn(() => {
-          throw new Error('not wired');
-        }),
-      });
+      setRelayDeps(makeUnwiredRelayDeps());
     }
   });
 
   it('(b) relayResize routes to deps.relayResize(runId, cols, rows) once wired', async () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
-    setRelayDeps({ relayInput, relayResize });
+    const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
+    setRelayDeps({ relayInput, relayResize, endSession });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -409,14 +426,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
       expect(relayResize).toHaveBeenCalledWith('run-relay', 120, 40);
       expect(relayInput).not.toHaveBeenCalled();
     } finally {
-      setRelayDeps({
-        relayInput: vi.fn(() => {
-          throw new Error('not wired');
-        }),
-        relayResize: vi.fn(() => {
-          throw new Error('not wired');
-        }),
-      });
+      setRelayDeps(makeUnwiredRelayDeps());
     }
   });
 });
@@ -644,6 +654,186 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       caller.cyboflow.runs.createPr({ runId: 'run-pr-nowt' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
     expect(wm.gitPush).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.merge / dismiss — explicit interactive end-session (IDEA-030 /
+// TASK-818).
+//
+// For a LIVE interactive run, close-out (Merge / Dismiss / Create-PR) must call
+// the RelayDeps `endSession` seam BEFORE worktree removal so the live REPL's
+// spawn promise resolves as part of close-out. This is the ONLY non-kill
+// spawn-promise resolver for a persistent interactive run. We inject a spy
+// endSession via setRelayDeps() and assert it is called with the runId before
+// the run is marked terminal.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (IDEA-030 / TASK-818)', () => {
+  let db: Database.Database;
+
+  function makeWmStub(): { [K in keyof RunWorktreeManagerLike]: ReturnType<typeof vi.fn> } {
+    return {
+      getProjectMainBranch: vi.fn().mockResolvedValue('main'),
+      squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
+      gitPush: vi.fn().mockResolvedValue({ output: 'pushed' }),
+      getRemoteUrlAndBranch: vi.fn().mockResolvedValue({
+        remoteUrl: 'https://github.com/acme/repo.git',
+        branchName: 'cyboflow/sprint/abcd1234',
+      }),
+    };
+  }
+
+  function getStatus(runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  beforeEach(() => {
+    db = createTestDb({ includeStuckDetectedAt: true });
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: () => undefined },
+      clearPendingApprovalsForRun: vi.fn(),
+    });
+    // Reset the relay bag so the wired spy does not leak into other describe blocks.
+    setRelayDeps(makeUnwiredRelayDeps());
+  });
+
+  it('merge calls endSession(runId) before close-out and the spawn promise resolves only via this path', async () => {
+    seedRun(db, { id: 'run-iz-merge', status: 'awaiting_review', worktreePath: '/tmp/wt/run-iz-merge' });
+
+    // endSession resolves only when invoked — it stands in for the live PTY
+    // teardown that settles the spawn promise. The relay spies are the ONLY
+    // path that triggers it.
+    const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
+    setRelayDeps({
+      relayInput: vi.fn<RelayDeps['relayInput']>(),
+      relayResize: vi.fn<RelayDeps['relayResize']>(),
+      endSession,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({
+      runId: 'run-iz-merge',
+      strategy: 'preserve',
+    });
+
+    expect(result).toEqual({ success: true });
+    // The live interactive REPL was terminated as part of close-out.
+    expect(endSession).toHaveBeenCalledOnce();
+    expect(endSession).toHaveBeenCalledWith('run-iz-merge');
+    expect(getStatus('run-iz-merge')).toBe('completed');
+  });
+
+  it('dismiss calls endSession(runId) before removing the worktree', async () => {
+    seedRun(db, { id: 'run-iz-dismiss', status: 'awaiting_review', worktreePath: '/tmp/wt/run-iz-dismiss' });
+
+    const removeWorktreeByPath = vi.fn().mockResolvedValue(undefined);
+    const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
+    setRunCloseoutDeps({
+      worktreeManager: { ...makeWmStub(), removeWorktreeByPath },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+    });
+    setRelayDeps({
+      relayInput: vi.fn<RelayDeps['relayInput']>(),
+      relayResize: vi.fn<RelayDeps['relayResize']>(),
+      endSession,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-iz-dismiss' });
+
+    // endSession fired, and it ran BEFORE the worktree removal.
+    expect(endSession).toHaveBeenCalledWith('run-iz-dismiss');
+    expect(removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-iz-dismiss');
+    const endOrder = endSession.mock.invocationCallOrder[0];
+    const removeOrder = removeWorktreeByPath.mock.invocationCallOrder[0];
+    expect(endOrder).toBeLessThan(removeOrder);
+    expect(getStatus('run-iz-dismiss')).toBe('canceled');
+  });
+
+  it('close-out without a wired relay bag is a no-op — the run still completes (spawn-promise resolution is the relay path only)', async () => {
+    seedRun(db, { id: 'run-iz-norelay', status: 'awaiting_review', worktreePath: '/tmp/wt/run-iz-norelay' });
+    // Relay bag explicitly unwired (every method throws) — endLiveInteractiveSession
+    // must short-circuit BEFORE invoking it (no relayDeps when null; here we
+    // assert it doesn't even call a throwing endSession by leaving it unwired).
+    setRelayDeps(makeUnwiredRelayDeps());
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    // The unwired endSession throws; the close-out swallows it (fail-soft) and the
+    // guarded UPDATE still marks the run terminal.
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-iz-norelay', strategy: 'preserve' });
+    expect(result).toEqual({ success: true });
+    expect(getStatus('run-iz-norelay')).toBe('completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Boot-recovery live-state skip (IDEA-030 / TASK-818).
+//
+// recoverStaleAwaitingReview (approvalRouter.ts, READONLY) fails ONLY
+// awaiting_review runs that still hold a PENDING approval row. A persistent
+// interactive run resting in awaiting_review BETWEEN turns (turn-end rest)
+// creates NO approval row, so the existing recovery already skips it — the
+// live-state guard lives in the run's state (no pending approval), not in a
+// rewrite of the readonly sweep. This test asserts that scoping holds for a
+// persistent live/awaiting-input interactive run within a session.
+// ---------------------------------------------------------------------------
+
+describe('boot-recovery live-state skip for persistent interactive runs (IDEA-030 / TASK-818)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ includeSubstrate: true });
+    ApprovalRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    db.close();
+  });
+
+  function getStatus(runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  it('does NOT fail a persistent interactive run resting in awaiting_review with NO pending approval (turn-end rest)', () => {
+    // A persistent interactive run that rests between turns: awaiting_review, no
+    // pending approval row.
+    seedRun(db, { id: 'run-live-rest', status: 'awaiting_review' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'interactive' WHERE id = ?").run('run-live-rest');
+
+    const count = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
+
+    // No pending approval → not recovered. The live-state skip holds: the run
+    // stays awaiting_review (a finished/between-turns run awaiting close-out),
+    // it is NOT failed.
+    expect(count).toBe(0);
+    expect(getStatus('run-live-rest')).toBe('awaiting_review');
+  });
+
+  it('still fails an awaiting_review run that DOES hold a pending approval (contrast — true mid-approval stale run)', () => {
+    seedRun(db, { id: 'run-gate-stale', status: 'awaiting_review' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'interactive' WHERE id = ?").run('run-gate-stale');
+    seedApproval(db, { runId: 'run-gate-stale', status: 'pending' });
+
+    const count = ApprovalRouter.getInstance().recoverStaleAwaitingReview();
+
+    expect(count).toBe(1);
+    expect(getStatus('run-gate-stale')).toBe('failed');
   });
 });
 

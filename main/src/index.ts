@@ -947,11 +947,17 @@ app.whenReady().then(async () => {
     // SubstrateDispatchFacade, which dispatches to the interactive manager's live
     // PTY and NO-OPs for the SDK substrate (Q3 byte-identical). runId === panelId
     // per the orchestrator invariant, so the facade maps directly.
+    // IDEA-030 / TASK-818: endSession is the explicit-termination seam for a
+    // persistent interactive REPL — the close-out mutations (merge / createPr /
+    // dismiss) call it BEFORE worktree removal so the live PTY's spawn promise
+    // resolves. It rides the SAME RelayDeps bag (the single bag for live-session
+    // collaborators) and routes through the facade, which NO-OPs for SDK.
     setRelayDeps({
       relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
       relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),
+      endSession: (runId) => substrateFacade.endSession(runId),
     });
-    console.log('[Main] runs.relayInput/relayResize deps wired');
+    console.log('[Main] runs.relayInput/relayResize/endSession deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested

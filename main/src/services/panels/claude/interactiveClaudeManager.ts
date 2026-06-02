@@ -124,7 +124,22 @@ interface InteractiveRun {
   sessionId: string;
   runId: string;
   worktreePath: string;
-  /** True once an EOF/`/exit` has been written in response to a turn-end. */
+  /**
+   * True for a TRUE persistent multi-turn REPL session (IDEA-030 / TASK-818).
+   * Every run this manager spawns IS interactive, so this is set `true` at spawn.
+   * When persistent, a turn-end emits a 'turn-end' EVENT and leaves the REPL
+   * ALIVE (no EOF/`/exit`) — the REPL is torn down ONLY on explicit termination
+   * (endSession / killProcess). When false (defensive / future non-interactive
+   * use) the legacy TASK-808 single-turn behavior is preserved: the first
+   * turn-end writes EOF/`/exit`.
+   */
+  persistent: boolean;
+  /**
+   * Per-turn re-armable guard. In the LEGACY non-persistent path it gates the
+   * one-shot EOF write (true once an EOF/`/exit` has been written). In the
+   * persistent path it is NOT used as a one-shot latch — each turn-end re-emits
+   * the 'turn-end' event and re-arms (the REPL stays alive across turns).
+   */
   turnEnded: boolean;
   /** Resolves the spawn promise on clean exit. */
   resolve: () => void;
@@ -144,6 +159,19 @@ const SETTLE_MS = 500;
 
 /** EOF control byte (Ctrl-D) written to PTY stdin to end the REPL turn. */
 const EOF_BYTE = '\x04';
+
+/**
+ * Payload of the 'turn-end' event emitted on each assistant turn boundary of a
+ * persistent interactive REPL (IDEA-030 / TASK-818). The SubstrateDispatchFacade
+ * fans this in and re-emits it by reference; RunExecutor's event-driven rest
+ * handler reads `runId` to drive running -> awaiting_review WITHOUT resolving the
+ * spawn promise. The SDK manager NEVER emits this event.
+ */
+export interface InteractiveTurnEndPayload {
+  panelId: string;
+  sessionId: string;
+  runId: string;
+}
 
 export class InteractiveClaudeManager extends AbstractCliManager {
   /** Per-run pipeline (router -> sink), keyed by panelId. */
@@ -431,6 +459,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       panelId,
       sessionId,
       runId,
+      // Every run this manager spawns IS a persistent interactive REPL session
+      // (IDEA-030 / TASK-818). The persistent flag gates the turn-end-kill: a
+      // persistent run emits a 'turn-end' event instead of writing EOF/`/exit`,
+      // so the REPL survives every in-session checkpoint and only terminates on
+      // explicit end-session / killProcess. Resolved via an overridable seam so a
+      // test can exercise the legacy single-turn (non-persistent) path.
+      persistent: this.isPersistentRun(),
       worktreePath,
       turnEnded: false,
       resolve: resolveSpawn,
@@ -601,17 +636,76 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Handle a turn-end signal (Probe C). On the FIRST turn-end, write EOF/`/exit`
-   * to PTY stdin to end the REPL turn. Does NOT resolve the spawn promise — that
-   * happens only from the inherited onExit path after the settle window.
+   * Whether a freshly-spawned run runs as a TRUE persistent multi-turn REPL
+   * (IDEA-030 / TASK-818). Production is ALWAYS persistent — every run the
+   * interactive manager spawns is a live interactive session. Overridable so a
+   * test can exercise the legacy single-turn (non-persistent) EOF-on-turn-end
+   * path that remains for defensive / future non-interactive use.
+   */
+  protected isPersistentRun(): boolean {
+    return true;
+  }
+
+  /**
+   * Handle a turn-end signal (Probe C).
+   *
+   * PERSISTENT path (IDEA-030 / TASK-818 — the live interactive REPL): do NOT
+   * write EOF/`/exit`. The turn-end marker fires at the end of EVERY assistant
+   * turn (transcriptNormalizer `stop_hook_summary` / `turn_duration`), including
+   * every in-session human checkpoint — writing EOF here is exactly what TASK-808
+   * did and what broke persistence (the REPL died at the first checkpoint).
+   * Instead emit a 'turn-end' EVENT (consumed by SubstrateDispatchFacade ->
+   * RunExecutor's event-driven rest, which transitions running -> awaiting_review
+   * WITHOUT resolving the spawn promise) and leave the REPL ALIVE. The guard is
+   * per-turn RE-ARMABLE: it is reset after each emit so the NEXT turn-end re-emits.
+   *
+   * LEGACY non-persistent path (defensive / future non-interactive use): preserve
+   * the TASK-808 one-shot behavior — the first turn-end writes EOF/`/exit` so the
+   * inherited onExit fires and (after the settle window) resolves the spawn promise.
+   * Does NOT resolve the spawn promise directly — that happens only from the
+   * inherited onExit path after the settle window.
    */
   private handleTurnEnd(panelId: string): void {
     const run = this.interactiveRuns.get(panelId);
-    if (!run || run.turnEnded) return;
+    if (!run) return;
+
+    if (run.persistent) {
+      // Re-armable: emit the turn-end event and keep the REPL alive. `turnEnded`
+      // is flipped per-turn purely for observability — it is NOT a one-shot latch
+      // here (the next turn-end re-emits).
+      run.turnEnded = true;
+      this.logger?.verbose(
+        `[InteractiveClaudeManager] turn-end for panel ${panelId} (persistent) — emitting 'turn-end', REPL stays alive`,
+      );
+      const payload: InteractiveTurnEndPayload = {
+        panelId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+      };
+      this.emit('turn-end', payload);
+      // Re-arm for the NEXT turn so each subsequent stop_hook_summary re-emits.
+      run.turnEnded = false;
+      return;
+    }
+
+    // Legacy single-turn (non-persistent) path: one-shot EOF write.
+    if (run.turnEnded) return;
     run.turnEnded = true;
+    this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
+    this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Write the EOF (Ctrl-D) + `/exit` control sequence into the live PTY stdin to
+   * end the REPL turn / session. Shared by the legacy single-turn turn-end path
+   * and the explicit-termination seam (endSession) so BOTH route through the same
+   * conditional write. No-op when no live process exists for the panel. Does NOT
+   * resolve the spawn promise — the inherited onExit path (wireCompletionExit)
+   * does that after the settle window.
+   */
+  private writeExitToRepl(panelId: string): void {
     const cliProcess = this.processes.get(panelId);
     if (!cliProcess) return;
-    this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
     try {
       // EOF (Ctrl-D) then `/exit` — either ends the REPL turn so the inherited
       // onExit fires and (after the settle window) resolves the spawn promise.
@@ -620,6 +714,37 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     } catch (err) {
       this.logger?.warn(`[InteractiveClaudeManager] failed to write EOF/exit for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Explicit end-session seam (IDEA-030 / TASK-818). The ONLY non-kill path that
+   * terminates a persistent interactive REPL: writes the EOF/`/exit` control
+   * sequence so the inherited onExit (wireCompletionExit) settles the spawn
+   * promise (resolve on clean exit / reject on non-zero) and teardownRun fires.
+   * Wired from the run close-out mutations (Merge / Dismiss / Create-PR) via the
+   * RelayDeps bag. No-op when no live process exists for the run/panel.
+   *
+   * panelId === runId per the orchestrator invariant, so the run close-out passes
+   * the runId straight through. Returns a resolved promise once the exit write is
+   * issued — the spawn-promise settle happens asynchronously on the PTY onExit.
+   */
+  public async endSession(panelId: string): Promise<void> {
+    this.logger?.verbose(`[InteractiveClaudeManager] endSession for panel ${panelId} — writing EOF/exit to terminate REPL`);
+    this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Resize the live node-pty for a panel (IDEA-030 / TASK-818 — delivers
+   * TASK-817's deferred manager-side resize seam that SubstrateDispatchFacade.
+   * relayResize feature-detects via its narrow ResizeCapable interface). Looks up
+   * the live process via the SAME per-panel `processes` map `sendInput` /
+   * `writeExitToRepl` use; no-op when no live PTY exists for the panel. The SDK
+   * manager gets no such method (no PTY) — Q3 / SDK byte-identity holds.
+   */
+  public resizePanel(panelId: string, cols: number, rows: number): void {
+    const cliProcess = this.processes.get(panelId);
+    if (!cliProcess?.process) return;
+    cliProcess.process.resize(cols, rows);
   }
 
   /**
