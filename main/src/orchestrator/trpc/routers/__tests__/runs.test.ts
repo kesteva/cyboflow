@@ -193,8 +193,10 @@ describe('cyboflow.runs.list', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    // createTestDb applies GATE_SCHEMA (migration 006 equivalent) + migration 007 (stuck_detected_at).
-    db = createTestDb({ includeStuckDetectedAt: true });
+    // createTestDb applies GATE_SCHEMA (migration 006 equivalent) + migration 007
+    // (stuck_detected_at). listRunsHandler's SELECT also projects `substrate`
+    // (migration 013), which GATE_SCHEMA omits — so opt in via includeSubstrate.
+    db = createTestDb({ includeStuckDetectedAt: true, includeSubstrate: true });
   });
 
   // -------------------------------------------------------------------------
