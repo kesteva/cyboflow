@@ -311,7 +311,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Ensure the enhanced shell PATH is loaded before probing.
     getShellPath();
 
-    const configuredPath = customPath ?? this.configManager?.getConfig()?.claudeExecutablePath;
+    // Treat an empty/whitespace customPath or config claudeExecutablePath as
+    // "not configured". config.json seeds `claudeExecutablePath` as "" by
+    // default, and `"" ?? x` keeps the empty string (?? only falls through on
+    // null/undefined), which made `resolvedPath` an empty (falsy) string and
+    // short-circuited straight to "not found" WITHOUT ever probing the PATH via
+    // findExecutableInPath. Use `||` so an empty configured value falls through
+    // to the PATH probe.
+    const configuredPath =
+      customPath?.trim() ||
+      this.configManager?.getConfig()?.claudeExecutablePath?.trim() ||
+      undefined;
     const resolvedPath = configuredPath ?? findExecutableInPath('claude');
 
     if (!resolvedPath) {
