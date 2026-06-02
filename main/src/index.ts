@@ -9,17 +9,12 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { VersionChecker } from './services/versionChecker';
-import { StravuAuthManager } from './services/stravuAuthManager';
-import { StravuNotebookService } from './services/stravuNotebookService';
 import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { AnalyticsManager } from './services/analyticsManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
-import { setupAutoUpdater } from './autoUpdater';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -116,14 +111,7 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let versionChecker: VersionChecker;
-let stravuAuthManager: StravuAuthManager;
-let stravuNotebookService: StravuNotebookService;
 let archiveProgressManager: ArchiveProgressManager;
-let analyticsManager: AnalyticsManager;
-
-// Store app start time for session duration tracking
-let appStartTime: number;
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -214,11 +202,7 @@ async function createWindow() {
     const originalHandle = ipcMain.handle;
     ipcMain.handle = function(channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown> | unknown) {
       const wrappedListener = async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-        if (channel.startsWith('stravu:')) {
-        }
         const result = await listener(event, ...args);
-        if (channel.startsWith('stravu:')) {
-        }
         return result;
       };
       return originalHandle.call(this, channel, wrappedListener);
@@ -471,21 +455,13 @@ async function initializeServices() {
   databaseService = new DatabaseService(dbPath);
   databaseService.initialize();
 
-  // Initialize analytics manager early so it can be used by SessionManager
-  analyticsManager = new AnalyticsManager(configManager);
-  await analyticsManager.initialize();
-
-  // Set analytics manager on logsManager for script execution tracking
-  const { logsManager } = await import('./services/panels/logPanel/logsManager');
-  logsManager.setAnalyticsManager(analyticsManager);
-
-  sessionManager = new SessionManager(databaseService, analyticsManager);
+  sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  // Create worktree manager with configManager and analyticsManager
-  worktreeManager = new WorktreeManager(configManager, analyticsManager);
+  // Create worktree manager
+  worktreeManager = new WorktreeManager(configManager);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();
@@ -524,15 +500,10 @@ async function initializeServices() {
     },
     skipValidation: true,
   });
-  gitDiffManager = new GitDiffManager(logger, analyticsManager);
+  gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
   runCommandManager = new RunCommandManager(databaseService);
-
-  // Initialize version checker
-  versionChecker = new VersionChecker(configManager, logger);
-  stravuAuthManager = new StravuAuthManager(logger);
-  stravuNotebookService = new StravuNotebookService(stravuAuthManager, logger);
 
   taskQueue = new TaskQueue({
     sessionManager,
@@ -795,14 +766,10 @@ async function initializeServices() {
     gitStatusManager,
     executionTracker,
     runCommandManager,
-    versionChecker,
-    stravuAuthManager,
-    stravuNotebookService,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,
     archiveProgressManager,
-    analyticsManager,
     cyboflow: { workflowRegistry, runLauncher },
   };
 
@@ -821,17 +788,11 @@ async function initializeServices() {
     });
   }
   
-  // Start periodic version checking (only if enabled in settings)
-  versionChecker.startPeriodicCheck();
-  
   // Start git status polling
   gitStatusManager.startPolling();
 }
 
 app.whenReady().then(async () => {
-  // Record app start time
-  appStartTime = Date.now();
-
   console.log('[Main] App is ready, initializing services...');
   await initializeServices();
   console.log('[Main] Services initialized, creating window...');
@@ -973,48 +934,13 @@ app.whenReady().then(async () => {
     console.log('[Main] health.mcpServer deps wired');
   }
 
-  // Track app lifecycle events
+  // Record app open in the local database (used for app-update detection)
   try {
     const currentVersion = app.getVersion();
-    const lastVersion = databaseService.getLastAppVersion();
-    const isFirstLaunch = lastVersion === null;
-
-    // Check if version changed (app update)
-    if (lastVersion && lastVersion !== currentVersion) {
-      console.log(`[Analytics] App updated from ${lastVersion} to ${currentVersion}`);
-      analyticsManager.track('app_updated', {
-        previous_version: lastVersion,
-        new_version: currentVersion
-      });
-    }
-
-    // Track app opened - use minimal tracking if analytics is disabled
-    console.log(`[Analytics] App opened (version: ${currentVersion}, first_launch: ${isFirstLaunch}, analytics_enabled: ${configManager.isAnalyticsEnabled()})`);
-    if (configManager.isAnalyticsEnabled()) {
-      analyticsManager.track('app_opened', {
-        is_first_launch: isFirstLaunch
-      });
-    } else {
-      // Track minimal app_opened event even when opted out
-      analyticsManager.trackMinimalEvent('app_opened', {
-        is_first_launch: isFirstLaunch
-      });
-    }
-
-    // Record app open in database with version
     databaseService.recordAppOpen(false, currentVersion);
   } catch (error) {
-    console.error('[Analytics] Failed to track app lifecycle events:', error);
+    console.error('[Main] Failed to record app open:', error);
   }
-
-  // Configure auto-updater
-  setupAutoUpdater(() => mainWindow);
-
-  // Check for updates after window is created
-  setTimeout(async () => {
-    console.log('[Main] Performing startup version check...');
-    await versionChecker.checkOnStartup();
-  }, 1000); // Small delay to ensure window is fully ready
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1111,28 +1037,6 @@ app.on('before-quit', async (event) => {
   // Close task queue
   if (taskQueue) {
     await taskQueue.close();
-  }
-
-  // Stop version checker
-  if (versionChecker) {
-    versionChecker.stopPeriodicCheck();
-  }
-
-  // Track app closed event with session duration
-  if (analyticsManager && appStartTime) {
-    try {
-      const sessionDurationSeconds = Math.floor((Date.now() - appStartTime) / 1000);
-      console.log(`[Analytics] App closed after ${sessionDurationSeconds} seconds`);
-      analyticsManager.track('app_closed', {
-        session_duration_seconds: sessionDurationSeconds
-      });
-
-      // Flush analytics events before shutdown
-      await analyticsManager.flush();
-      await analyticsManager.shutdown();
-    } catch (error) {
-      console.error('[Analytics] Failed to track app_closed event:', error);
-    }
   }
 
   // Close logger to ensure all logs are flushed

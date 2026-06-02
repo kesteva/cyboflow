@@ -1,14 +1,10 @@
 export interface AppConfig {
   gitRepoPath: string;
   verbose?: boolean;
-  anthropicApiKey?: string;
   systemPromptAppend?: string;
   runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
-  autoCheckUpdates?: boolean;
-  stravuApiKey?: string;
-  stravuServerUrl?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
@@ -40,10 +36,4 @@ export interface AppConfig {
   additionalPaths?: string[];
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
-  // PostHog analytics settings
-  analytics?: {
-    enabled: boolean;
-    posthogApiKey?: string;
-    posthogHost?: string;
-  };
 }

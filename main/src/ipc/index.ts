@@ -9,7 +9,6 @@ import { registerDialogHandlers } from './dialog';
 import { registerGitHandlers } from './git';
 import { registerScriptHandlers } from './script';
 import { registerPromptHandlers } from './prompt';
-import { registerStravuHandlers } from './stravu';
 import { registerFileHandlers } from './file';
 import { registerFolderHandlers } from './folders';
 import { registerUIStateHandlers } from './uiState';
@@ -20,7 +19,6 @@ import { registerPanelHandlers } from './panels';
 import { registerClaudePanelHandlers } from './claudePanel';
 import { registerEditorPanelHandlers } from './editorPanel';
 import { registerNimbalystHandlers } from './nimbalyst';
-import { registerAnalyticsHandlers } from './analytics';
 import { registerCyboflowHandlers } from './cyboflow';
 
 
@@ -34,7 +32,6 @@ export function registerIpcHandlers(services: AppServices): void {
   registerGitHandlers(ipcMain, services);
   registerScriptHandlers(ipcMain, services);
   registerPromptHandlers(ipcMain, services);
-  registerStravuHandlers(ipcMain, services);
   registerFileHandlers(ipcMain, services);
   registerFolderHandlers(ipcMain, services);
   registerUIStateHandlers(services);
@@ -45,6 +42,5 @@ export function registerIpcHandlers(services: AppServices): void {
   registerClaudePanelHandlers(ipcMain, services);
   registerEditorPanelHandlers(ipcMain, services);
   registerNimbalystHandlers(ipcMain, services);
-  registerAnalyticsHandlers(ipcMain, services);
   registerCyboflowHandlers(ipcMain, services);
 }

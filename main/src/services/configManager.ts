@@ -19,13 +19,10 @@ export class ConfigManager extends EventEmitter {
     this.config = {
       gitRepoPath: defaultGitPath || os.homedir(),
       verbose: false,
-      anthropicApiKey: undefined,
       systemPromptAppend: undefined,
       runScript: undefined,
       defaultPermissionMode: 'approve',
       defaultModel: 'sonnet',
-      stravuApiKey: undefined,
-      stravuServerUrl: 'https://api.stravu.com',
       notifications: {
         enabled: true,
         playSound: true,
@@ -49,11 +46,6 @@ export class ConfigManager extends EventEmitter {
           mode: 'checkpoint',
           checkpointPrefix: 'checkpoint: '
         }
-      },
-      analytics: {
-        enabled: false, // Opt-in: disabled by default until user consents
-        posthogApiKey: 'phc_uwOqT2KUa4C9Qx5WbEPwQSN9mUCoSGFg1aY0b670ft5',
-        posthogHost: 'https://us.i.posthog.com'
       }
     };
   }
@@ -89,10 +81,6 @@ export class ConfigManager extends EventEmitter {
             ...this.config.sessionCreationPreferences?.commitModeSettings,
             ...loadedConfig.sessionCreationPreferences?.commitModeSettings
           }
-        },
-        analytics: {
-          ...this.config.analytics,
-          ...loadedConfig.analytics
         }
       };
 
@@ -151,24 +139,12 @@ export class ConfigManager extends EventEmitter {
     return path.join(this.configDir, 'sessions.db');
   }
 
-  getAnthropicApiKey(): string | undefined {
-    return this.config.anthropicApiKey;
-  }
-
   getSystemPromptAppend(): string | undefined {
     return this.config.systemPromptAppend;
   }
 
   getRunScript(): string[] | undefined {
     return this.config.runScript;
-  }
-
-  getStravuApiKey(): string | undefined {
-    return this.config.stravuApiKey;
-  }
-
-  getStravuServerUrl(): string {
-    return this.config.stravuServerUrl || 'https://api.stravu.com';
   }
 
   getDefaultModel(): string {
@@ -207,31 +183,4 @@ export class ConfigManager extends EventEmitter {
     };
   }
 
-  getAnalyticsSettings() {
-    return this.config.analytics || {
-      enabled: false, // Opt-in: disabled by default until user consents
-      posthogApiKey: 'phc_uwOqT2KUa4C9Qx5WbEPwQSN9mUCoSGFg1aY0b670ft5',
-      posthogHost: 'https://us.i.posthog.com'
-    };
-  }
-
-  isAnalyticsEnabled(): boolean {
-    return this.config.analytics?.enabled ?? false; // Opt-in: default to false
-  }
-
-  getAnalyticsDistinctId(): string | undefined {
-    return this.config.analytics?.distinctId;
-  }
-
-  async setAnalyticsDistinctId(distinctId: string): Promise<void> {
-    if (!this.config.analytics) {
-      this.config.analytics = {
-        enabled: true,
-        posthogApiKey: 'phc_uwOqT2KUa4C9Qx5WbEPwQSN9mUCoSGFg1aY0b670ft5',
-        posthogHost: 'https://us.i.posthog.com'
-      };
-    }
-    this.config.analytics.distinctId = distinctId;
-    await this.saveConfig();
-  }
 }

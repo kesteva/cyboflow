@@ -1,7 +1,6 @@
 import * as fs from 'node:fs';
 import { execSync } from '../utils/commandExecutor';
 import type { Logger } from '../utils/logger';
-import type { AnalyticsManager } from './analyticsManager';
 
 export interface GitDiffStats {
   additions: number;
@@ -27,8 +26,7 @@ export interface GitCommit {
 
 export class GitDiffManager {
   constructor(
-    private logger?: Logger,
-    private analyticsManager?: AnalyticsManager
+    private logger?: Logger
   ) {}
 
   /**
@@ -328,17 +326,6 @@ export class GitDiffManager {
 
   async getGitDiff(worktreePath: string): Promise<GitDiffResult> {
     const result = await this.captureWorkingDirectoryDiff(worktreePath);
-
-    // Track git diff viewed
-    if (this.analyticsManager) {
-      const fileCountCategory = this.analyticsManager.categorizeNumber(result.stats.filesChanged, [1, 5, 10, 25, 50]);
-      const hasUncommitted = this.hasChanges(worktreePath);
-
-      this.analyticsManager.track('git_diff_viewed', {
-        file_count_category: fileCountCategory,
-        has_uncommitted: hasUncommitted
-      });
-    }
 
     return result;
   }

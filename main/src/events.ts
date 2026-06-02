@@ -1,10 +1,8 @@
 import type { BrowserWindow } from 'electron';
 import { execSync } from './utils/commandExecutor';
 import type { AppServices } from './ipc/types';
-import type { VersionInfo } from './services/versionChecker';
 import { addSessionLog } from './ipc/logs';
 import { panelManager } from './services/panelManager';
-import { terminalPanelManager } from './services/terminalPanelManager';
 import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
 import type { ClaudePanelManager } from './services/panels/claude/claudePanelManager';
 import type { SessionOutput } from './types/session';
@@ -45,15 +43,8 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     worktreeManager,
     archiveProgressManager,
     databaseService,
-    logger,
-    analyticsManager
+    logger
   } = services;
-
-  // Wire up analytics manager to panel managers
-  if (analyticsManager) {
-    panelManager.setAnalyticsManager(analyticsManager);
-    terminalPanelManager.setAnalyticsManager(analyticsManager);
-  }
 
   let cachedClaudePanelManager: ClaudePanelManager | undefined;
   let attemptedClaudeManagerResolve = false;
@@ -1274,15 +1265,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     const mw = getMainWindow();
     if (mw && !mw.isDestroyed()) {
       mw.webContents.send('zombie-processes-detected', data);
-    }
-  });
-
-  // Listen for version update events
-  process.on('version-update-available', (versionInfo: VersionInfo) => {
-    const mw = getMainWindow();
-    if (mw && !mw.isDestroyed()) {
-      // Only send to renderer for custom dialog - no native dialogs
-      mw.webContents.send('version:update-available', versionInfo);
     }
   });
 
