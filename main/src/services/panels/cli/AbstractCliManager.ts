@@ -493,12 +493,23 @@ export abstract class AbstractCliManager extends EventEmitter {
       timestamp: new Date()
     } as CliOutputEvent);
 
-    // Add dedicated error output
-    this.sessionManager.addSessionError(
-      sessionId,
-      `${this.getCliToolName()} not available`,
-      `${availability.error}\nPlease install ${this.getCliToolName()} or verify it is in your PATH.`
-    );
+    // Add dedicated error output. Best-effort: workflow-run panels (the
+    // orchestrator / interactive-substrate path) have no Crystal `sessions` row,
+    // so this session-scoped INSERT would throw a FOREIGN KEY constraint error
+    // and BECOME the run's failure — masking the real "not available" reason.
+    // The 'output' emit above already surfaces the error to the orchestrator and
+    // renderer, so a failed session write must never crash the run.
+    try {
+      this.sessionManager.addSessionError(
+        sessionId,
+        `${this.getCliToolName()} not available`,
+        `${availability.error}\nPlease install ${this.getCliToolName()} or verify it is in your PATH.`
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `${this.getCliToolName()} not-available session write skipped for ${sessionId} (no sessions row?): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   /**
