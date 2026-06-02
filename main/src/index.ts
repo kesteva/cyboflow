@@ -544,6 +544,19 @@ async function initializeServices() {
     },
   };
 
+  // ptyPublisher — the raw-PTY byte path (TASK-814 / IDEA-030). Mirrors
+  // cyboflowPublisher but sends VERBATIM interactive-substrate PTY chunks on a
+  // DEDICATED cyboflow:pty:<runId> channel for a future live xterm terminal
+  // (TASK-815). These ephemeral bytes BYPASS runEventBridge entirely — there is
+  // no raw_events persistence and no cyboflow:stream coupling (Q3
+  // panel-preservation). The facade subscription that drives this is wired below
+  // where substrateFacade + mainWindow are both in scope (near the RunExecutor ctor).
+  const ptyPublisher = (runId: string, data: string, timestamp: Date | string): void => {
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return;
+    win.webContents.send(`cyboflow:pty:${runId}`, { runId, data, timestamp });
+  };
+
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
   // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
   // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
@@ -701,6 +714,17 @@ async function initializeServices() {
     stepTransitionEmitter,
     taskChangeRouter,
   );
+
+  // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
+  // fan-in (interactive substrate only) to the ptyPublisher, forwarding VERBATIM
+  // chunks to the renderer on cyboflow:pty:<runId>. The payload is opaque
+  // `unknown` on the facade EventEmitter, so narrow it through a typed local
+  // shape (NO `any`). This deliberately bypasses runEventBridge — the bytes are
+  // ephemeral live-view only and are never persisted to raw_events.
+  substrateFacade.on('pty-output', (payload) => {
+    const evt = payload as { runId: string; data: string; timestamp: Date | string };
+    ptyPublisher(evt.runId, evt.data, evt.timestamp);
+  });
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
   // and ApprovalRouter (for permission-decision dispatch). RunLauncher needs it

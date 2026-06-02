@@ -59,6 +59,10 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   private readonly sdkExitHandler: ForwardHandler;
   private readonly interactiveOutputHandler: ForwardHandler;
   private readonly interactiveExitHandler: ForwardHandler;
+  // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
+  // manager has no PTY and never emits 'pty-output', so it is deliberately NOT
+  // subscribed here (the path is interactive-only by construction).
+  private readonly interactivePtyHandler: ForwardHandler;
 
   constructor(
     private readonly sdkManager: AbstractCliManager,
@@ -75,11 +79,15 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkExitHandler = (payload) => this.emit('exit', payload);
     this.interactiveOutputHandler = (payload) => this.emit('output', payload);
     this.interactiveExitHandler = (payload) => this.emit('exit', payload);
+    // Raw-PTY fan-in — re-emit 'pty-output' by reference, mirroring the 'output'
+    // fan-in. Interactive manager ONLY (the SDK manager is never subscribed).
+    this.interactivePtyHandler = (payload) => this.emit('pty-output', payload);
 
     this.sdkManager.on('output', this.sdkOutputHandler);
     this.sdkManager.on('exit', this.sdkExitHandler);
     this.interactiveManager.on('output', this.interactiveOutputHandler);
     this.interactiveManager.on('exit', this.interactiveExitHandler);
+    this.interactiveManager.on('pty-output', this.interactivePtyHandler);
 
     this.logger.debug('[SubstrateDispatchFacade] subscribed to both substrate managers', {
       defaultSubstrate: DEFAULT_SUBSTRATE,
@@ -148,6 +156,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkManager.off('exit', this.sdkExitHandler);
     this.interactiveManager.off('output', this.interactiveOutputHandler);
     this.interactiveManager.off('exit', this.interactiveExitHandler);
+    this.interactiveManager.off('pty-output', this.interactivePtyHandler);
     this.removeAllListeners();
     this.panelOwners.clear();
     this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');

@@ -454,6 +454,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     this.setupProcessHandlers(ptyProcess, panelId, sessionId);
     this.wireCompletionExit(ptyProcess, interactiveRun);
 
+    // Raw-PTY byte path (TASK-814 / IDEA-030): register a SECOND, additive
+    // ptyProcess.onData listener (the same multi-listener precedent as
+    // wireCompletionExit's extra onExit) that emits the VERBATIM chunk on a NEW
+    // 'pty-output' event for the live xterm terminal (TASK-815). The chunk is
+    // forwarded UNMODIFIED — NO line-split, NO `\n` re-join — because the base
+    // setupProcessHandlers.onData line-splits/re-joins for the structured
+    // parseCliOutput per-line path, which would mangle xterm ANSI cursor/control
+    // sequences. node-pty's onData is multi-listener, so this does NOT disturb
+    // the inherited handler. The raw bytes ride 'pty-output' ONLY — they never
+    // touch the 'output'/type:'json' channel and never reach runEventBridge
+    // (Q3 panel-preservation; additive-isolation by construction).
+    ptyProcess.onData((data: string) =>
+      this.emit('pty-output', { panelId, sessionId, runId, type: 'pty', data, timestamp: new Date() }),
+    );
+
     this.emit('spawned', { panelId, sessionId });
 
     // Start the TranscriptTailSource (TASK-807). Each normalized line flows

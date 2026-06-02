@@ -100,6 +100,11 @@ class FakePty {
   fireExit(exitCode: number): void {
     for (const cb of this.exitListeners) cb({ exitCode });
   }
+
+  /** Test driver: push a raw chunk through every captured onData listener. */
+  fireData(chunk: string): void {
+    for (const cb of this.dataListeners) cb(chunk);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +506,124 @@ describe('InteractiveClaudeManager', () => {
       }
 
       expect(emitSpy).toHaveBeenCalledTimes(fixtureLines.length);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (TASK-814) raw-PTY byte path: the second additive ptyProcess.onData listener
+  // emits exactly ONE 'pty-output' per onData call carrying the VERBATIM chunk
+  // (no line-split, no \n re-join) plus the per-run identity fields. The base
+  // 'output'/type:'json' path stays byte-identical (Q3 panel-preservation) and
+  // parseCliOutput still returns [].
+  // -------------------------------------------------------------------------
+  describe('raw-PTY pty-output path', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    it('emits exactly one pty-output per onData call with the VERBATIM chunk and full identity', async () => {
+      const panelId = 'panel-pty';
+      const sessionId = 'sess-pty';
+      const runId = panelId; // no run_id on the session row -> falls back to panelId
+
+      const ptyOutputs: Array<{ panelId: string; sessionId: string; runId: string; type: string; data: string; timestamp: unknown }> = [];
+      mgr.on('pty-output', (evt) => {
+        ptyOutputs.push(evt);
+      });
+
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId, worktreePath: '/tmp/wt-pty', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      // A multi-line ANSI chunk with cursor/control sequences and an embedded
+      // newline — the listener MUST forward it byte-for-byte (no split, no \n
+      // mutation), or xterm rendering downstream (TASK-815) corrupts.
+      const chunk = '\x1b[2J\x1b[Hline1\nline2\x1b[K';
+      mgr.ptys[0].fireData(chunk);
+
+      // Exactly ONE pty-output per onData call (the second additive listener only).
+      expect(ptyOutputs).toHaveLength(1);
+      const evt = ptyOutputs[0];
+      // VERBATIM: byte-equal to the chunk, no split, no \n re-join.
+      expect(evt.data).toBe(chunk);
+      // Full per-run identity fields present.
+      expect(Object.keys(evt).sort()).toEqual(['data', 'panelId', 'runId', 'sessionId', 'timestamp', 'type']);
+      expect(evt.panelId).toBe(panelId);
+      expect(evt.sessionId).toBe(sessionId);
+      expect(evt.runId).toBe(runId);
+      expect(evt.type).toBe('pty');
+      expect(evt.timestamp).toBeInstanceOf(Date);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a second onData chunk yields a second VERBATIM pty-output (one per call)', async () => {
+      const ptyOutputs: Array<{ data: string }> = [];
+      mgr.on('pty-output', (evt) => ptyOutputs.push(evt as { data: string }));
+
+      const spawn = mgr.spawnCliProcess({ panelId: 'p2', sessionId: 's2', worktreePath: '/tmp/wt2', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      const a = 'first\nchunk';
+      const b = '\x1b[31msecond\x1b[0m';
+      mgr.ptys[0].fireData(a);
+      mgr.ptys[0].fireData(b);
+
+      expect(ptyOutputs.map((e) => e.data)).toEqual([a, b]);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('raw PTY bytes never ride the output channel and parseCliOutput stays []', async () => {
+      const panelId = 'panel-iso';
+      const sessionId = 'sess-iso';
+
+      const outputs: Array<{ type: string }> = [];
+      mgr.on('output', (evt) => outputs.push(evt as { type: string }));
+
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId, worktreePath: '/tmp/wt-iso', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      // session_info emitted once at spawn on the output channel.
+      const outputCountBeforeChunk = outputs.length;
+      expect(outputCountBeforeChunk).toBeGreaterThanOrEqual(1);
+
+      // A raw PTY chunk produces a pty-output, never an output. The base
+      // setupProcessHandlers.onData line-splits 'line1\n' and feeds it to
+      // parseCliOutput, which returns [] — so NO new output emit fires.
+      mgr.ptys[0].fireData('\x1b[2Jline1\nline2');
+      expect(outputs.length).toBe(outputCountBeforeChunk);
+
+      // parseCliOutput returns [] for any raw line (no structured panel events).
+      const parsed = (mgr as unknown as {
+        parseCliOutput(d: string, p: string, s: string): unknown[];
+      }).parseCliOutput('line1\n', panelId, sessionId);
+      expect(parsed).toEqual([]);
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

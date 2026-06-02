@@ -371,6 +371,66 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
 });
 
 // ---------------------------------------------------------------------------
+// raw-PTY pty-output fan-in (TASK-814 / IDEA-030) — interactive manager ONLY
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — pty-output fan-in (interactive only)', () => {
+  it("re-emits a 'pty-output' from the interactive manager with the identical payload object", () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const received: unknown[] = [];
+    facade.on('pty-output', (p) => received.push(p));
+
+    const payload = { panelId: run.id, sessionId: run.id, runId: run.id, type: 'pty', data: '\x1b[2Jhello', timestamp: new Date() };
+    interactive.emit('pty-output', payload);
+
+    expect(received).toHaveLength(1);
+    // Re-emitted by reference (never reshaped), so the raw bytes survive verbatim.
+    expect(received[0]).toBe(payload);
+  });
+
+  it("does NOT forward a 'pty-output' emitted by the sdk manager (the SDK manager is never subscribed)", () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const received: unknown[] = [];
+    facade.on('pty-output', (p) => received.push(p));
+
+    sdk.emit('pty-output', { panelId: run.id, sessionId: run.id, runId: run.id, type: 'pty', data: 'should-not-forward', timestamp: new Date() });
+
+    expect(received).toHaveLength(0);
+    // The SDK manager has no facade 'pty-output' listener attached.
+    expect(sdk.listenerCount('pty-output')).toBe(0);
+  });
+
+  it('dispose() removes the interactive pty-output listener so no further bytes are re-emitted', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const received: unknown[] = [];
+    facade.on('pty-output', (p) => received.push(p));
+
+    facade.dispose();
+
+    interactive.emit('pty-output', { panelId: run.id, sessionId: run.id, runId: run.id, type: 'pty', data: 'after-dispose', timestamp: new Date() });
+
+    expect(received).toHaveLength(0);
+    // Underlying interactive manager no longer has a facade pty-output listener.
+    expect(interactive.listenerCount('pty-output')).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cross-substrate envelope parity through bridgeEvents()
 // ---------------------------------------------------------------------------
 
