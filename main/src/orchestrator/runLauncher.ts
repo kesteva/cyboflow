@@ -20,6 +20,7 @@ import type { WorkflowRegistry } from './workflowRegistry';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { StreamEnvelope } from '../../../shared/types/claudeStream';
 import type { McpConfigWriter } from './mcpConfigWriter';
@@ -103,7 +104,7 @@ export class RunLauncher {
     private readonly runExecutor?: RunExecutor,
     private readonly runQueueRegistry?: RunQueueRegistry,
     /**
-     * Optional native-task stage deriver (migration 013). When injected AND a
+     * Optional native-task stage deriver (migration 014). When injected AND a
      * launch is given a `taskId`, the launcher records the run->task link,
      * captures the task's planning entry stage on first execution, and recomputes
      * the task's derived execution stage (-> In development). When absent (legacy
@@ -134,7 +135,7 @@ export class RunLauncher {
    *      capture the task's planning entry stage if not yet recorded, then recompute
    *      the task's derived execution stage (-> In development).
    *
-   * `taskId` (migration 013) is OPTIONAL: runs may be launched with no task
+   * `taskId` (migration 014) is OPTIONAL: runs may be launched with no task
    * (ad-hoc workflow runs predate native tasks). The task-derivation block is a
    * complete no-op when `taskId` is omitted or no deriver is wired.
    *
@@ -143,6 +144,11 @@ export class RunLauncher {
   async launch(
     workflowId: string,
     projectPath: string,
+    // Forward-compat (IDEA-013): the per-run substrate is currently resolved from
+    // env inside WorkflowRegistry.createRun (S4/S7 will thread it through). Accepted
+    // (unused) here only to stay positionally aligned with RunLauncherLike's
+    // (substrate?, taskId?) shape so taskId lands in the 4th argument slot.
+    _substrate?: CliSubstrate,
     taskId?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
@@ -181,7 +187,7 @@ export class RunLauncher {
         )
         .run(worktreePath, branchName, 'starting', runId);
 
-      // Native-task linkage + in-process stage derivation (migration 013).
+      // Native-task linkage + in-process stage derivation (migration 014).
       // No-op when no taskId was supplied or no deriver is wired. Wrapped in its
       // own try/catch so a task-side failure never aborts the run launch: the run
       // is already created + worktree built; the task overlay is best-effort.

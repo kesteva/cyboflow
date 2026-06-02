@@ -48,7 +48,7 @@ function buildDb(): Database.Database {
   //   006 (workflow_runs base) -> 011 (current_step_id) -> 013 (native tasks).
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '013_native_tasks.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   return db;
 }
 

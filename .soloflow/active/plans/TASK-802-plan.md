@@ -26,8 +26,8 @@ acceptance_criteria:
     verification: "grep -n \"mcp-report-step\" main/src/orchestrator/mcpServer/mcpQueryHandler.ts shows the union member and the dispatch case; pnpm typecheck passes."
   - criterion: "handleReportStep() returns ok:false 'report_step_requires_real_run' when runId === 'orchestrator' (mirroring the checkpoint guard) and performs no DB write."
     verification: "Unit test asserts a 'mcp-report-step' message with runId='orchestrator' yields ok:false with error 'report_step_requires_real_run' and current_step_id stays NULL."
-  - criterion: "handleReportStep() JOINs workflows for the run's name, validates stepId against the flat step ids of WORKFLOW_DEFINITIONS[name], and returns ok:false 'unknown_step_id' (with NO current_step_id write) when stepId is not a known step."
-    verification: "Unit test asserts that an invalid stepId for a run whose workflow name is 'sprint' yields ok:false error 'unknown_step_id' and current_step_id is unchanged."
+  - criterion: "handleReportStep() JOINs workflows for the run's name AND spec_json, resolves the effective definition via resolveWorkflowDefinition(name, spec_json), validates stepId against ITS flat step ids (not the static WORKFLOW_DEFINITIONS[name]), and returns ok:false 'unknown_step_id' (with NO current_step_id write) when stepId is absent or the def resolves null."
+    verification: "Unit tests assert: (a) an invalid stepId for a 'sprint' run yields ok:false 'unknown_step_id', current_step_id unchanged; (b) an EDITED-built-in/custom stepId present only in the run's spec_json is ACCEPTED (ok:true + write). grep -q 'resolveWorkflowDefinition' main/src/orchestrator/mcpServer/mcpQueryHandler.ts"
   - criterion: "On a valid stepId, handleReportStep() calls buildStepTransitionEvent(runId, stepId, status, db, undefined) and returns ok:true; the DB current_step_id is updated and exactly one transition event is emitted."
     verification: "Unit test asserts a valid stepId='write-tests' status='running' for a 'sprint' run yields ok:true, current_step_id === 'write-tests', and stepTransitionEvents emits exactly once."
   - criterion: "handleReportStep() returns ok:false when no workflow_runs row matches runId (run vanished) without throwing."
@@ -55,6 +55,15 @@ test_strategy:
 ---
 
 # Add cyboflow_report_step MCP tool and validated McpQueryHandler handler
+
+## ⚠️ POST-MERGE REVISION (2026-06-01) — resolve from spec_json, not the static constant
+
+`main` merged in user-editable workflows (`spec_json` + `resolveWorkflowDefinition(name, spec_json)` as the runtime source of truth; `WORKFLOW_DEFINITIONS` is now only the seed/fallback). `handleReportStep` MUST validate `stepId` against the run's RESOLVED definition, not the static constant:
+
+- The name JOIN also selects `w.spec_json` (`SELECT w.name AS name, w.spec_json AS specJson FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?`).
+- `const def = resolveWorkflowDefinition(name, specJson)`; if `def === null` OR `stepId ∉ def.phases.flatMap(p=>p.steps).map(s=>s.id)` → `writeResponse` ok:false `'unknown_step_id'`, no write. Import `resolveWorkflowDefinition` from `../../../../shared/types/workflows`.
+- Add a test proving an EDITED-built-in or custom stepId (present only in `spec_json`, absent from the static constant) is ACCEPTED and written.
+- This is the read-side half of the write/read co-requisite shared with TASK-801 (`buildStepTransitionEvent`) and TASK-803 (the generator). TASK-801's bridge hardening also resolves from spec_json, so the bridge call here is reached only for already-valid steps.
 
 ## Objective
 

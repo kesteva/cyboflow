@@ -9,21 +9,19 @@ import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
-import { VersionChecker } from './services/versionChecker';
-import { StravuAuthManager } from './services/stravuAuthManager';
-import { StravuNotebookService } from './services/stravuNotebookService';
 import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { AnalyticsManager } from './services/analyticsManager';
 import { initializeCommitManager } from './services/commitManager';
-import { setCyboflowDirectory } from './utils/cyboflowDirectory';
+import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
-import { setupAutoUpdater } from './autoUpdater';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
+import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
+import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
+import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
 import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
@@ -37,6 +35,9 @@ import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
+import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
+import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
+import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import { approvalEvents, questionEvents, runStatusEvents } from './orchestrator/trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
@@ -51,7 +52,7 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { ClaudeSpawnerLike, LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -60,6 +61,8 @@ import {
   transitionToCanceled,
 } from './services/cyboflow/transitions';
 import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
+import { buildStepReportingAppend } from './orchestrator/prompts/step-reporting-instructions';
+import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans } from './orchestrator/runRecovery';
 import * as fs from 'fs';
@@ -109,14 +112,7 @@ let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
-let versionChecker: VersionChecker;
-let stravuAuthManager: StravuAuthManager;
-let stravuNotebookService: StravuNotebookService;
 let archiveProgressManager: ArchiveProgressManager;
-let analyticsManager: AnalyticsManager;
-
-// Store app start time for session duration tracking
-let appStartTime: number;
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -207,11 +203,7 @@ async function createWindow() {
     const originalHandle = ipcMain.handle;
     ipcMain.handle = function(channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown> | unknown) {
       const wrappedListener = async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-        if (channel.startsWith('stravu:')) {
-        }
         const result = await listener(event, ...args);
-        if (channel.startsWith('stravu:')) {
-        }
         return result;
       };
       return originalHandle.call(this, channel, wrappedListener);
@@ -464,21 +456,13 @@ async function initializeServices() {
   databaseService = new DatabaseService(dbPath);
   databaseService.initialize();
 
-  // Initialize analytics manager early so it can be used by SessionManager
-  analyticsManager = new AnalyticsManager(configManager);
-  await analyticsManager.initialize();
-
-  // Set analytics manager on logsManager for script execution tracking
-  const { logsManager } = await import('./services/panels/logPanel/logsManager');
-  logsManager.setAnalyticsManager(analyticsManager);
-
-  sessionManager = new SessionManager(databaseService, analyticsManager);
+  sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
 
   archiveProgressManager = new ArchiveProgressManager();
 
-  // Create worktree manager with configManager and analyticsManager
-  worktreeManager = new WorktreeManager(configManager, analyticsManager);
+  // Create worktree manager
+  worktreeManager = new WorktreeManager(configManager);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();
@@ -501,15 +485,26 @@ async function initializeServices() {
     },
     skipValidation: true  // Allow Cyboflow to start even if Claude Code is not installed
   });
-  gitDiffManager = new GitDiffManager(logger, analyticsManager);
+
+  // Create the interactive (PTY) CLI manager (IDEA-013 S4 / TASK-809). Registered
+  // as the 'claude-interactive' built-in tool by TASK-806. Constructed with the
+  // same db-in-additionalOptions + skipValidation contract as the SDK manager so a
+  // missing `claude` binary never blocks startup; availability is probed lazily on
+  // first interactive spawn. The SubstrateDispatchFacade routes per-run between this
+  // and defaultCliManager based on workflow_runs.substrate.
+  const interactiveCliManager = await cliManagerFactory.createManager('claude-interactive', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
+    skipValidation: true,
+  });
+  gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
   runCommandManager = new RunCommandManager(databaseService);
-
-  // Initialize version checker
-  versionChecker = new VersionChecker(configManager, logger);
-  stravuAuthManager = new StravuAuthManager(logger);
-  stravuNotebookService = new StravuNotebookService(stravuAuthManager, logger);
 
   taskQueue = new TaskQueue({
     sessionManager,
@@ -529,7 +524,7 @@ async function initializeServices() {
   workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
   const mcpConfigWriter = new McpConfigWriter();
 
-  // Native task-tracking write chokepoint (migration 013). The single serialized
+  // Native task-tracking write chokepoint (migration 014). The single serialized
   // writer for `tasks`/`task_events`; injected (structurally) into RunExecutor,
   // RunLauncher, and the run close-out deps below so run lifecycle transitions
   // derive each linked task's stage. The tasks tRPC router reaches it via
@@ -549,23 +544,34 @@ async function initializeServices() {
     },
   };
 
-  // OrchSocketProvider — TODO(epic 7): permissionIpcServer is not yet on
-  // AppServices.  The sentinel throws at call time so any code path that
-  // reaches getSocketPath() surfaces a loud, traceable error instead of
-  // silently producing a broken socket path.
+  // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
+  // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
+  // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
+  // tools are routable.  Started here (before the RunLauncher block) so its
+  // socket path is available to the providers, the McpServerLifecycle, and the
+  // CLI manager below.  `cyboflowDb`/`cyboflowLogger` are already in scope above.
+  const orchSocketServer = new OrchSocketServer(
+    getCyboflowSubdirectory('sockets', 'orch.sock'),
+    cyboflowDb,
+    cyboflowLogger,
+  );
+  void orchSocketServer.start().catch((err) => {
+    cyboflowLogger.error(
+      `[Cyboflow Orch IPC] socket server start failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+
+  // OrchSocketProvider — delegates to the running OrchSocketServer so RunLauncher
+  // injects the live socket path into spawned sessions.
   const orchSocketProvider: OrchSocketProvider = {
-    getSocketPath: () => {
-      throw new Error('cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)');
-    },
+    getSocketPath: () => orchSocketServer.getSocketPath(),
   };
 
-  // BridgeScriptResolver — TODO(epic 7): ASAR extraction of the bridge
-  // script is not yet implemented.  The sentinel throws at call time so
-  // missing wiring fails loudly rather than resolving to a phantom path.
+  // BridgeScriptResolver — delegates to resolveMcpServerScriptPath(), which
+  // returns the asar-unpacked path in packaged builds and the __dirname-relative
+  // compiled .js in dev (no extraction step needed).
   const bridgeScriptResolver: BridgeScriptResolver = {
-    getScriptPath: () => {
-      throw new Error('cyboflow: bridgeScriptResolver not yet wired (epic 7 owns ASAR extraction)');
-    },
+    getScriptPath: () => resolveMcpServerScriptPath(),
   };
 
   // NodeResolver — returns the process's own node executable path as a
@@ -576,17 +582,50 @@ async function initializeServices() {
 
   // Concrete WorkflowPromptReaderLike adapter — delegates to readWorkflowPrompt()
   // while keeping RunExecutor free of direct fs/concrete-module imports.
-  const promptReader = { read: (workflowPath: string) => readWorkflowPrompt(workflowPath) };
-
-  // ClaudeSpawnerLike adapter — wraps defaultCliManager so RunExecutor can call
-  // spawnCliProcess() and abort() via the narrow interface without importing the
-  // concrete class directly.  ClaudeCodeManager.spawnCliProcess() accepts a
-  // ClaudeSpawnOptions superset of ClaudeSpawnerOptions; abort delegates to
-  // killProcess() which performs the SDK abort + cleanup.
-  const spawnerAdapter: ClaudeSpawnerLike = {
-    spawnCliProcess: defaultCliManager.spawnCliProcess.bind(defaultCliManager),
-    abort: defaultCliManager.killProcess.bind(defaultCliManager),
+  //
+  // TASK-803: on top of the `.md` body + its `system_prompt_append` frontmatter,
+  // concatenate the per-run cyboflow step-reporting instructions. The adapter
+  // resolves the workflow row by `workflow_path` (the only key RunExecutor.getPrompt
+  // passes through the read-only WorkflowPromptReaderLike seam), then resolves the
+  // EFFECTIVE definition via resolveWorkflowDefinition(name, spec_json) — honoring
+  // user edits in spec_json, never WORKFLOW_DEFINITIONS[name] directly — and passes
+  // the resolved def to buildStepReportingAppend. Fail-soft: an unresolved row or a
+  // non-SoloFlow/broken-spec workflow yields '' so nothing extra is injected.
+  const promptReader = {
+    read: (workflowPath: string) => {
+      const base = readWorkflowPrompt(workflowPath);
+      const row = databaseService
+        .getDb()
+        .prepare('SELECT name, spec_json FROM workflows WHERE workflow_path = ? LIMIT 1')
+        .get(workflowPath) as { name: string; spec_json: string } | undefined;
+      if (!row) return base;
+      const resolvedDef = resolveWorkflowDefinition(row.name, row.spec_json);
+      const stepReportingAppend = buildStepReportingAppend(resolvedDef);
+      if (stepReportingAppend === '') return base;
+      const systemPromptAppend =
+        base.systemPromptAppend.length > 0
+          ? `${base.systemPromptAppend}\n\n${stepReportingAppend}`
+          : stepReportingAppend;
+      return { prompt: base.prompt, systemPromptAppend };
+    },
   };
+
+  // SubstrateDispatchFacade — the substrate-aware ClaudeSpawnerLike that replaces
+  // the single-manager spawnerAdapter (IDEA-013 S4 / TASK-809). It resolves
+  // workflow_runs.substrate per run (via workflowRegistry.getRunById) and dispatches
+  // spawnCliProcess to defaultCliManager ('sdk' / legacy / default) or
+  // interactiveCliManager ('interactive'); abort hits the manager that spawned the
+  // run's panel. It ALSO extends EventEmitter and fans-in BOTH managers'
+  // 'output'/'exit' events, re-emitting them on itself — so the SAME facade serves
+  // as RunExecutor's single `source` EventEmitter (which is bound once at
+  // construction and cannot be swapped per run). One object satisfies both seams.
+  // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
+  const substrateFacade = new SubstrateDispatchFacade(
+    defaultCliManager,
+    interactiveCliManager,
+    workflowRegistry,
+    cyboflowLogger,
+  );
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
   // delegating to the transitionTo* helpers at the index.ts boundary.
@@ -638,10 +677,12 @@ async function initializeServices() {
     },
   };
 
-  // RunExecutor wired with the real ClaudeCodeManager spawner, WorkflowPromptReader,
-  // LifecycleTransitions adapter, streaming publisher + db for event bridging,
-  // defaultCliManager as the EventEmitter source so bridgeEvents() can call .on('output'),
-  // and the stepTransitionEmitter for lifecycle step-transition events (TASK-765).
+  // RunExecutor wired with the SubstrateDispatchFacade as BOTH the spawner (substrate-
+  // aware dispatch, in place of the single-manager spawnerAdapter) AND the EventEmitter
+  // source (so bridgeEvents() can call .on('output') against the fan-in of both
+  // managers, regardless of which substrate ran). Plus WorkflowPromptReader,
+  // LifecycleTransitions adapter, streaming publisher + db for event bridging, and the
+  // stepTransitionEmitter for lifecycle step-transition events (TASK-765).
   //
   // The executor NEVER auto-completes a run: on SDK iterator drain it rests the
   // run in awaiting_review (running -> awaiting_review via restAwaitingReview).
@@ -649,14 +690,14 @@ async function initializeServices() {
   // runs router. This supersedes the old GAP-A pending-work probe (never
   // auto-completing subsumes "don't complete while a gate is pending").
   const runExecutor = new RunExecutor(
-    spawnerAdapter,
+    substrateFacade,
     workflowRegistry,
     cyboflowLogger,
     promptReader,
     lifecycleTransitions,
     cyboflowPublisher,
     rawDb,
-    defaultCliManager,
+    substrateFacade,
     stepTransitionEmitter,
     taskChangeRouter,
   );
@@ -682,14 +723,46 @@ async function initializeServices() {
     taskChangeRouter,
   );
 
-  // OrchestratorHealth — constructed with a sentinel lifecycle so both the
+  // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
+  const socketPath = orchSocketServer.getSocketPath();
+
+  // McpServerLifecycle — manages the singleton cyboflowMcpServer subprocess that
+  // connects back to the OrchSocketServer above.  The run-id provider returns the
+  // documented 'orchestrator' sentinel; per-session run-id is supplied per-tool-call
+  // (TASK-800), not here.  cyboflowLogger is a LoggerLike already in scope above.
+  const mcpServerLifecycle = new McpServerLifecycle(
+    socketPath,
+    cyboflowLogger,
+    () => 'orchestrator',
+  );
+
+  // Wire the orch socket path into BOTH CLI managers so each one's spawn path
+  // injects the 'cyboflow' MCP entry / CYBOFLOW_ORCH_SOCKET into every spawned
+  // session, on whichever substrate runs.  This is the first production caller of
+  // setOrchSocketPath; it does not need to wait on the lifecycle start() below.
+  // The managers are typed as AbstractCliManager (setOrchSocketPath lives on each
+  // concrete subclass), so narrow via instanceof — the factory creates a
+  // ClaudeCodeManager for 'claude' and an InteractiveClaudeManager for
+  // 'claude-interactive' at runtime.
+  if (defaultCliManager instanceof ClaudeCodeManager) {
+    defaultCliManager.setOrchSocketPath(socketPath);
+  }
+  if (interactiveCliManager instanceof InteractiveClaudeManager) {
+    interactiveCliManager.setOrchSocketPath(socketPath);
+  }
+
+  // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
-  // procedure read from the same source of truth.  The sentinel reports
-  // 'starting' (yellow dot) until the real McpServerLifecycle is wired in
-  // epic 7 (permissionIpcServer + socket path).
-  orchestratorHealth = new OrchestratorHealth({
-    getStatus: () => 'starting' as const,
-    getRestartAttempts: () => 0,
+  // procedure read live status (off the old hard-coded 'starting' fallback).
+  // McpServerLifecycle structurally satisfies McpLifecycleReadable, so no adapter
+  // is needed.
+  orchestratorHealth = new OrchestratorHealth(mcpServerLifecycle);
+
+  // Start the MCP server subprocess fire-and-forget; on failure record the error
+  // on the health surface (callable now that orchestratorHealth exists) and log it.
+  void mcpServerLifecycle.start().catch((err) => {
+    orchestratorHealth.setMcpError(err instanceof Error ? err.message : String(err));
+    cyboflowLogger.error(`[Cyboflow MCP] lifecycle start failed: ${String(err)}`);
   });
 
   const services: AppServices = {
@@ -704,14 +777,10 @@ async function initializeServices() {
     gitStatusManager,
     executionTracker,
     runCommandManager,
-    versionChecker,
-    stravuAuthManager,
-    stravuNotebookService,
     taskQueue,
     getMainWindow: () => mainWindow,
     logger,
     archiveProgressManager,
-    analyticsManager,
     cyboflow: { workflowRegistry, runLauncher },
   };
 
@@ -730,17 +799,11 @@ async function initializeServices() {
     });
   }
   
-  // Start periodic version checking (only if enabled in settings)
-  versionChecker.startPeriodicCheck();
-  
   // Start git status polling
   gitStatusManager.startPolling();
 }
 
 app.whenReady().then(async () => {
-  // Record app start time
-  appStartTime = Date.now();
-
   console.log('[Main] App is ready, initializing services...');
   await initializeServices();
   console.log('[Main] Services initialized, creating window...');
@@ -875,7 +938,7 @@ app.whenReady().then(async () => {
       // items in the review queue.
       clearPendingApprovalsForRun: (runId) =>
         ApprovalRouter.getInstance().clearPendingForRun(runId),
-      // Native task-tracking (migration 013): merge/createPr/dismiss stamp the
+      // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
       // run's outcome and recompute the linked task's derived execution stage.
       // getInstance() resolves the singleton initialized during service construction.
       taskStageDeriver: TaskChangeRouter.getInstance(),
@@ -886,48 +949,13 @@ app.whenReady().then(async () => {
     console.log('[Main] health.mcpServer deps wired');
   }
 
-  // Track app lifecycle events
+  // Record app open in the local database (used for app-update detection)
   try {
     const currentVersion = app.getVersion();
-    const lastVersion = databaseService.getLastAppVersion();
-    const isFirstLaunch = lastVersion === null;
-
-    // Check if version changed (app update)
-    if (lastVersion && lastVersion !== currentVersion) {
-      console.log(`[Analytics] App updated from ${lastVersion} to ${currentVersion}`);
-      analyticsManager.track('app_updated', {
-        previous_version: lastVersion,
-        new_version: currentVersion
-      });
-    }
-
-    // Track app opened - use minimal tracking if analytics is disabled
-    console.log(`[Analytics] App opened (version: ${currentVersion}, first_launch: ${isFirstLaunch}, analytics_enabled: ${configManager.isAnalyticsEnabled()})`);
-    if (configManager.isAnalyticsEnabled()) {
-      analyticsManager.track('app_opened', {
-        is_first_launch: isFirstLaunch
-      });
-    } else {
-      // Track minimal app_opened event even when opted out
-      analyticsManager.trackMinimalEvent('app_opened', {
-        is_first_launch: isFirstLaunch
-      });
-    }
-
-    // Record app open in database with version
     databaseService.recordAppOpen(false, currentVersion);
   } catch (error) {
-    console.error('[Analytics] Failed to track app lifecycle events:', error);
+    console.error('[Main] Failed to record app open:', error);
   }
-
-  // Configure auto-updater
-  setupAutoUpdater(() => mainWindow);
-
-  // Check for updates after window is created
-  setTimeout(async () => {
-    console.log('[Main] Performing startup version check...');
-    await versionChecker.checkOnStartup();
-  }, 1000); // Small delay to ensure window is fully ready
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1024,28 +1052,6 @@ app.on('before-quit', async (event) => {
   // Close task queue
   if (taskQueue) {
     await taskQueue.close();
-  }
-
-  // Stop version checker
-  if (versionChecker) {
-    versionChecker.stopPeriodicCheck();
-  }
-
-  // Track app closed event with session duration
-  if (analyticsManager && appStartTime) {
-    try {
-      const sessionDurationSeconds = Math.floor((Date.now() - appStartTime) / 1000);
-      console.log(`[Analytics] App closed after ${sessionDurationSeconds} seconds`);
-      analyticsManager.track('app_closed', {
-        session_duration_seconds: sessionDurationSeconds
-      });
-
-      // Flush analytics events before shutdown
-      await analyticsManager.flush();
-      await analyticsManager.shutdown();
-    } catch (error) {
-      console.error('[Analytics] Failed to track app_closed event:', error);
-    }
   }
 
   // Close logger to ensure all logs are flushed

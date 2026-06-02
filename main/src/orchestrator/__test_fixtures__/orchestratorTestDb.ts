@@ -51,7 +51,7 @@ export interface CreateTestDbOptions {
   includeQuestionsTable?: boolean;
   /**
    * If true, additionally layer migration 011's `current_step_id` column and
-   * migration 013's run->task link columns (task_id, outcome, base_branch,
+   * migration 014's run->task link columns (task_id, outcome, base_branch,
    * base_sha, steps_snapshot_json) onto workflow_runs. Additive SQL on top of
    * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test in
    * __tests__/orchestratorTestDb.test.ts will drift.
@@ -97,7 +97,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec(sql);
   }
   if (options?.includeWorkflowRunTaskColumns) {
-    // Mirror migration 011 (current_step_id) + migration 013's workflow_runs
+    // Mirror migration 011 (current_step_id) + migration 014's workflow_runs
     // ALTERs. Inlined here (rather than reading the files) so this layering is
     // resilient to migration 010's table-recreation recipe ordering.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');

@@ -1645,7 +1645,7 @@ export class DatabaseService {
     if (!project) {
       throw new Error('Failed to create project');
     }
-    // Seed the default board + 11 stages for the new project (migration 013).
+    // Seed the default board + 11 stages for the new project (migration 014).
     this.seedDefaultBoard(project.id);
     return project;
   }
@@ -1653,13 +1653,13 @@ export class DatabaseService {
   /**
    * Seed the default board and its 11 canonical stages for a project.
    *
-   * Mirrors the seed block in migration 013_native_tasks.sql (the migration
+   * Mirrors the seed block in migration 014_native_tasks.sql (the migration
    * seeds all EXISTING projects; this seeds each NEW project on creation).
    * Uses deterministic ids + INSERT OR IGNORE so it is idempotent and safe to
    * call more than once. Wrapped in a single transaction.
    *
    * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
-   * MUST stay field-for-field in sync with migration 013's seed block.
+   * MUST stay field-for-field in sync with migration 014's seed block.
    */
   seedDefaultBoard(projectId: number): void {
     const boardId = `board-${projectId}-default`;

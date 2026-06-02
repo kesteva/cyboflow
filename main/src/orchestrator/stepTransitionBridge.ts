@@ -7,10 +7,13 @@
  *    subscriber reading workflow_runs sees a consistent current_step_id.
  *  - Missing workflow_runs row fallback: logs warn via the provided LoggerLike
  *    (or console.warn when no logger is available), does NOT throw.
- *  - Uses a single-step-per-workflow model (v1): each named SoloFlow workflow
- *    maps to ONE representative step id. The executor emits 'running' at run
- *    start and 'done' at run end. The seam is designed to support MCP-tool-
- *    driven transitions in a future task.
+ *  - stepId validation: buildStepTransitionEvent resolves the run's EFFECTIVE
+ *    workflow definition (resolveWorkflowDefinition(name, spec_json) — the
+ *    runtime source of truth that overrides the static WORKFLOW_DEFINITIONS
+ *    seed) and rejects any stepId not present in its flat steps (warn, return
+ *    null, no write, no emit). Any validated step id is accepted, not only the
+ *    INITIAL_STEP_IDS entry; resolveInitialStepId remains the lifecycle
+ *    fallback used by the index.ts StepTransitionEmitterLike adapter.
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*.
@@ -18,7 +21,7 @@
 import { stepTransitionEvents } from './trpc/routers/events';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { SoloFlowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
-import { SOLOFLOW_WORKFLOW_NAMES } from '../../../shared/types/workflows';
+import { SOLOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 
 export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 
@@ -57,6 +60,39 @@ export function resolveInitialStepId(workflowName: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// stepId validation (dynamic step-id model)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true iff `stepId` is present in the run's EFFECTIVE workflow
+ * definition (post user-editable-workflows merge). The effective def is
+ * resolved via `resolveWorkflowDefinition(workflowName, specJson)` — the
+ * runtime source of truth that fully overrides the static
+ * `WORKFLOW_DEFINITIONS` seed. Validating against the resolved def means an
+ * edited/custom step id present only in `spec_json` is accepted, and a step id
+ * removed by an edit is rejected.
+ *
+ * A `null` resolution (a custom flow whose `spec_json` is missing/broken) →
+ * `false` (reject). Pure: no DB, no logger.
+ *
+ * @param workflowName - The `workflows.name` value from the database row.
+ * @param specJson     - The `workflows.spec_json` value from the database row.
+ * @param stepId       - The step id to validate.
+ */
+function isValidStepId(
+  workflowName: string,
+  specJson: string | null | undefined,
+  stepId: string,
+): boolean {
+  const def = resolveWorkflowDefinition(workflowName, specJson);
+  if (def === null) return false;
+  return def.phases
+    .flatMap((p) => p.steps)
+    .map((s) => s.id)
+    .includes(stepId);
+}
+
+// ---------------------------------------------------------------------------
 // buildStepTransitionEvent
 // ---------------------------------------------------------------------------
 
@@ -88,6 +124,41 @@ export function buildStepTransitionEvent(
   logger?: LoggerLike,
 ): WorkflowStepTransitionEvent | null {
   const timestamp = new Date().toISOString();
+
+  // Resolve the run's workflow name + spec_json by JOIN on runId, then validate
+  // the stepId against the run's EFFECTIVE definition (dynamic step-id model:
+  // resolveWorkflowDefinition is the runtime source of truth, NOT the static
+  // WORKFLOW_DEFINITIONS seed). This makes a typo / unknown / removed-by-edit
+  // step id impossible to write — no UPDATE, no emit (FIND-SPRINT-024-4
+  // silent-corruption class). Mirrors the JOIN in index.ts:599-604.
+  const runRow = db
+    .prepare(
+      `SELECT w.name AS workflowName, w.spec_json AS specJson
+       FROM workflow_runs r
+       JOIN workflows w ON w.id = r.workflow_id
+       WHERE r.id = ?`,
+    )
+    .get(runId) as { workflowName: string; specJson: string | null } | undefined;
+
+  if (runRow === undefined) {
+    const msg = `[stepTransitionBridge] No workflow_runs row found for runId=${runId} — skipping step transition emit`;
+    if (logger) {
+      logger.warn(msg, { runId, stepId, status });
+    } else {
+      console.warn(msg);
+    }
+    return null;
+  }
+
+  if (!isValidStepId(runRow.workflowName, runRow.specJson, stepId)) {
+    const msg = `[stepTransitionBridge] Rejecting unknown stepId=${stepId} for runId=${runId} (workflow=${runRow.workflowName}) — no write/emit`;
+    if (logger) {
+      logger.warn(msg, { runId, stepId, status });
+    } else {
+      console.warn(msg);
+    }
+    return null;
+  }
 
   // Write current_step_id to DB BEFORE emitting (write-then-emit ordering).
   let changes = 0;

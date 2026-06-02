@@ -17,9 +17,9 @@ import {
   buildStepTransitionEvent,
   resolveInitialStepId,
 } from '../stepTransitionBridge';
-import type { WorkflowStepTransitionEvent } from '../../../../shared/types/workflows';
+import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
-import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
+import { SOLOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,15 +41,15 @@ function createTestDbWithCurrentStep() {
  *
  * Returns { db, runId } ready for use.
  */
-function seedForBridge(workflowName: string) {
+function seedForBridge(workflowName: string, specJson = '{}') {
   const db = createTestDbWithCurrentStep();
   const workflowId = `wf-${workflowName}`;
   const runId = `run-${workflowName}-01`;
 
   db.prepare(
     `INSERT INTO workflows (id, project_id, name, spec_json)
-     VALUES (?, 1, ?, '{}')`,
-  ).run(workflowId, workflowName);
+     VALUES (?, 1, ?, ?)`,
+  ).run(workflowId, workflowName, specJson);
 
   db.prepare(
     `INSERT INTO workflow_runs
@@ -258,5 +258,157 @@ describe('buildStepTransitionEvent — unknown workflow name (no DB write/emit)'
       .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
       .get(runId) as { current_step_id: string | null } | undefined;
     expect(row?.current_step_id).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildStepTransitionEvent — stepId validation (dynamic step-id model)
+// ---------------------------------------------------------------------------
+
+describe('buildStepTransitionEvent — stepId validation', () => {
+  let emittedEvents: WorkflowStepTransitionEvent[] = [];
+
+  beforeEach(() => {
+    emittedEvents = [];
+    stepTransitionEvents.on('transition', (ev: WorkflowStepTransitionEvent) => {
+      emittedEvents.push(ev);
+    });
+  });
+
+  afterEach(() => {
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  it('rejects a stepId not present in the run\'s resolved definition: no write, no emit, warn, returns null', () => {
+    const { db, runId } = seedForBridge('sprint');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const result = buildStepTransitionEvent(runId, 'not-a-real-step', 'running', adapter, logger);
+
+    expect(result).toBeNull();
+    expect(emittedEvents).toHaveLength(0);
+
+    const row = db
+      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { current_step_id: string | null } | undefined;
+    expect(row?.current_step_id).toBeNull();
+
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('not-a-real-step');
+  });
+
+  it('accepts ANY valid (non-initial) stepId of the resolved workflow: writes, emits once, returns the event', () => {
+    // 'epics' is a real planner flat step id and is NOT the initial step ('context').
+    const validNonInitialStepId = 'epics';
+    const plannerFlatStepIds = WORKFLOW_DEFINITIONS.planner.phases
+      .flatMap((p) => p.steps)
+      .map((s) => s.id);
+    expect(plannerFlatStepIds).toContain(validNonInitialStepId);
+    expect(resolveInitialStepId('planner')).not.toBe(validNonInitialStepId);
+
+    const { db, runId } = seedForBridge('planner');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const event = buildStepTransitionEvent(runId, validNonInitialStepId, 'running', adapter, logger);
+
+    expect(event).not.toBeNull();
+    expect(event!.stepId).toBe(validNonInitialStepId);
+    expect(emittedEvents).toHaveLength(1);
+    expect(emittedEvents[0].stepId).toBe(validNonInitialStepId);
+
+    const row = db
+      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { current_step_id: string | null } | undefined;
+    expect(row?.current_step_id).toBe(validNonInitialStepId);
+  });
+
+  it('accepts an EDITED/custom stepId present only in spec_json (absent from the static built-in)', () => {
+    // Custom flow def whose step id 'discovery-call' exists nowhere in
+    // WORKFLOW_DEFINITIONS.sprint — proving validation resolves from spec_json.
+    const customDef: WorkflowDefinition = {
+      id: 'sprint',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'discovery-call',
+              name: 'Discovery call',
+              agent: 'executor',
+              mcps: [],
+              retries: 0,
+            },
+          ],
+        },
+      ],
+    };
+    const sprintFlatStepIds = WORKFLOW_DEFINITIONS.sprint.phases
+      .flatMap((p) => p.steps)
+      .map((s) => s.id);
+    expect(sprintFlatStepIds).not.toContain('discovery-call');
+
+    const { db, runId } = seedForBridge('sprint', JSON.stringify(customDef));
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const event = buildStepTransitionEvent(runId, 'discovery-call', 'running', adapter, logger);
+
+    expect(event).not.toBeNull();
+    expect(event!.stepId).toBe('discovery-call');
+    expect(emittedEvents).toHaveLength(1);
+
+    const row = db
+      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { current_step_id: string | null } | undefined;
+    expect(row?.current_step_id).toBe('discovery-call');
+  });
+
+  it('rejects a built-in stepId that the edit REMOVED from spec_json', () => {
+    // Custom sprint def that keeps only 'implement' — the built-in 'write-tests'
+    // step has been removed by the edit and must now be rejected.
+    const editedDef: WorkflowDefinition = {
+      id: 'sprint',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'implement',
+              name: 'Implement task',
+              agent: 'executor',
+              mcps: [],
+              retries: 0,
+            },
+          ],
+        },
+      ],
+    };
+    const sprintFlatStepIds = WORKFLOW_DEFINITIONS.sprint.phases
+      .flatMap((p) => p.steps)
+      .map((s) => s.id);
+    expect(sprintFlatStepIds).toContain('write-tests');
+
+    const { db, runId } = seedForBridge('sprint', JSON.stringify(editedDef));
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const result = buildStepTransitionEvent(runId, 'write-tests', 'running', adapter, logger);
+
+    expect(result).toBeNull();
+    expect(emittedEvents).toHaveLength(0);
+
+    const row = db
+      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { current_step_id: string | null } | undefined;
+    expect(row?.current_step_id).toBeNull();
+
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('write-tests');
   });
 });

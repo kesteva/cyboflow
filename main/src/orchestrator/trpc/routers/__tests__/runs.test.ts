@@ -279,11 +279,12 @@ describe('cyboflow.runs.start', () => {
         branchName: 'cyboflow/my-workflow/abc12345',
       });
 
-      // launch must be called with workflowId, the project path resolved by the
-      // session manager, and the optional taskId (undefined here — no native-task
-      // link supplied, migration 013).
+      // With neither a substrate (IDEA-013) nor a native-task link (migration 014)
+      // supplied, start calls launch with the 2-arg SDK-default shape (workflowId +
+      // the project path resolved by the session manager) — no trailing undefineds,
+      // so the resolver's override ladder owns the substrate decision.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project');
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({

@@ -50,6 +50,13 @@ export interface ClaudeSpawnerOptions {
   prompt: string;
   preToolUseHook?: HookCallback;
   systemPromptAppend?: string;
+  /**
+   * The real workflow_runs.id. For workflow runs this equals panelId/sessionId
+   * per the orchestrator invariant (panelId === runId === sessionId); the
+   * spawner uses it to set CYBOFLOW_RUN_ID. Optional so quick-session callers
+   * (which never reach this executor) are unaffected.
+   */
+  runId?: string;
 }
 
 /**
@@ -96,7 +103,7 @@ export interface LifecycleTransitionsLike {
 
 /**
  * Narrow slice of TaskChangeRouter needed to derive a task's execution stage as
- * the linked run transitions through its lifecycle (migration 013).
+ * the linked run transitions through its lifecycle (migration 014).
  *
  * Injected (not reached for via `TaskChangeRouter.getInstance()`) to preserve
  * the standalone-typecheck invariant + constructor-injection test ergonomics.
@@ -187,7 +194,7 @@ export class RunExecutor {
      */
     private readonly stepEmitter?: StepTransitionEmitterLike,
     /**
-     * Optional native-task stage deriver (migration 013). When injected, terminal
+     * Optional native-task stage deriver (migration 014). When injected, terminal
      * and running lifecycle transitions set workflow_runs.outcome (for failed /
      * canceled) and recompute the linked task's derived execution stage via the
      * chokepoint. Requires `db` to also be injected (to read the run's task_id and
@@ -272,6 +279,7 @@ export class RunExecutor {
         await this.spawner.spawnCliProcess({
           panelId,
           sessionId,
+          runId,
           worktreePath: run.worktree_path,
           prompt,
           ...overrides,
@@ -541,7 +549,7 @@ export class RunExecutor {
       }
     }
 
-    // Native-task derivation (migration 013) — runs AFTER the status transition
+    // Native-task derivation (migration 014) — runs AFTER the status transition
     // (and independently of whether it was rejected as a race) so the chokepoint
     // aggregate reads the just-written run status. Sets workflow_runs.outcome for
     // terminal phases, then recomputes the linked task's derived execution stage
@@ -551,7 +559,7 @@ export class RunExecutor {
   }
 
   /**
-   * Phase → task-stage derivation seam (migration 013).
+   * Phase → task-stage derivation seam (migration 014).
    *
    * Resolves the run's linked task_id (skipping entirely when there is none, no
    * deriver is wired, or no db is injected). For the terminal phases it stamps

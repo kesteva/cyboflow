@@ -4,6 +4,7 @@ import type { ConfigManager } from './configManager';
 import type { SessionManager } from './sessionManager';
 import { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './panels/claude/claudeCodeManager';
+import { InteractiveClaudeManager } from './panels/claude/interactiveClaudeManager';
 import { 
   CliToolRegistry, 
   CliToolDefinition, 
@@ -153,14 +154,19 @@ export class CliManagerFactory {
    * Register built-in CLI tools
    */
   private registerBuiltInTools(): void {
-    // Register Claude Code
+    // Register Claude Code (SDK substrate — the default).
     this.registerClaudeTool();
-    
+
+    // Register Claude Code (Interactive PTY substrate — IDEA-013 / TASK-806).
+    // Registered with a LOWER priority than 'claude' (100) so getDefaultTool()
+    // still prefers the SDK path; the manager body is a stub until TASK-808/S3.
+    this.registerInteractiveClaudeTool();
+
     // Future tools can be registered here:
     // this.registerAiderTool();
     // this.registerContinueTool();
     // this.registerCursorTool();
-    
+
     this.logger?.info('[CliManagerFactory] Registered built-in CLI tools');
   }
 
@@ -239,6 +245,90 @@ export class CliManagerFactory {
     this.registry.registerTool(claudeDefinition, {
       priority: 100, // Highest priority as it's the primary tool
       validateOnRegister: false // Skip validation on startup for performance
+    });
+  }
+
+  /**
+   * Register the interactive Claude Code CLI tool (IDEA-013 / TASK-806).
+   *
+   * Mirrors registerClaudeTool's db-guard exactly (same TypeError when
+   * additionalOptions.db is missing or lacks .prepare). The managerFactory
+   * returns an InteractiveClaudeManager — a throw-on-call STUB this slice; the
+   * real PTY body lands in TASK-808/S3. Registered with priority < 100 so
+   * getDefaultTool() continues to prefer the SDK 'claude' tool.
+   */
+  private registerInteractiveClaudeTool(): void {
+    const interactiveManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+      additionalOptions?: unknown,
+    ) => {
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const dbCandidate = options?.db;
+      if (!dbCandidate) {
+        throw new TypeError('[CliManagerFactory] claude-interactive tool requires `db` in additionalOptions');
+      }
+      if (
+        typeof dbCandidate !== 'object' ||
+        typeof (dbCandidate as { prepare?: unknown }).prepare !== 'function'
+      ) {
+        throw new TypeError(
+          '[CliManagerFactory] claude-interactive tool: additionalOptions.db must be a better-sqlite3 Database instance (received a value lacking a .prepare() method)',
+        );
+      }
+      const db = dbCandidate as Database.Database;
+      return new InteractiveClaudeManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+        db,
+      );
+    };
+
+    const interactiveDefinition: CliToolDefinition = {
+      id: 'claude-interactive',
+      name: 'Claude Code (Interactive)',
+      description: 'Claude Code running under the interactive PTY substrate (IDEA-013)',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: true,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: true,
+        supportsStructuredOutput: true,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.TEXT,
+          CLI_OUTPUT_FORMATS.JSON,
+          CLI_OUTPUT_FORMATS.STREAM_JSON
+        ],
+        supportedPanelTypes: ['claude']
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [
+          'ANTHROPIC_API_KEY',
+          'MCP_DEBUG'
+        ],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [
+          'claudeExecutablePath',
+          'defaultPermissionMode',
+          'systemPromptAppend',
+          'verbose'
+        ],
+        defaultExecutable: 'claude',
+        alternativeExecutables: ['claude-code', 'claude.exe'],
+        minimumVersion: undefined
+      },
+      managerFactory: interactiveManagerFactory
+    };
+
+    this.registry.registerTool(interactiveDefinition, {
+      priority: 50, // Below 'claude' (100) so getDefaultTool() prefers the SDK path
+      validateOnRegister: false // Stub body — never probe availability this slice
     });
   }
 

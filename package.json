@@ -65,10 +65,8 @@
     "@trpc/client": "^11.17.0",
     "@trpc/server": "^11.17.0",
     "better-sqlite3": "^11.7.0",
-    "electron-updater": "^6.6.8",
     "glob": "^11.0.0",
     "p-queue": "^7.4.1",
-    "posthog-node": "^5.11.2",
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
     "zod": "^3.23.8"
@@ -106,7 +104,8 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/**/*.node",
-      "main/dist/main/src/orchestrator/mcpServer/**/*.js"
+      "main/dist/main/src/orchestrator/mcpServer/**/*.js",
+      "main/dist/main/src/orchestrator/shellHooks/**/*.js"
     ],
     "afterSign": "build/afterSign.js",
     "mac": {

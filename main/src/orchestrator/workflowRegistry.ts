@@ -19,6 +19,8 @@ import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, SoloFlowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isSoloFlowWorkflowName } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
+import { resolveSubstrate } from './substrateResolver';
 
 // ---------------------------------------------------------------------------
 // Descriptor types
@@ -422,10 +424,15 @@ export class WorkflowRegistry {
    * file.  The caller (epic-8 deterministic naming task) will later UPDATE
    * `worktree_path` and `branch_name`.
    *
-   * Returns the generated runId and the snapshotted permissionMode.
+   * Stamps the resolved CLI substrate ('sdk' | 'interactive') onto the run row.
+   * The substrate is resolved ONCE here and is immutable for the run lifetime —
+   * there is intentionally no UPDATE path. IDEA-013 / TASK-806.
+   *
+   * Returns the generated runId, the snapshotted permissionMode, and the
+   * stamped substrate.
    * Throws if the workflow does not exist.
    */
-  createRun(workflowId: string): { runId: string; permissionMode: PermissionMode } {
+  createRun(workflowId: string): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
@@ -434,18 +441,27 @@ export class WorkflowRegistry {
     const runId = randomUUID().replace(/-/g, '');
     const permissionMode = workflow.permission_mode;
 
+    // Resolve the substrate via the override ladder. The registry does not yet
+    // receive the project/global config or workflow frontmatter collaborators,
+    // so v1 resolves from env (CYBOFLOW_SUBSTRATE) + the 'sdk' floor only.
+    // TODO(S4/S7): thread frontmatterSubstrate / projectConfigSubstrate /
+    // globalDefaultSubstrate through once those collaborators are injected here.
+    // The floor and stamp are correct regardless — with no override every run
+    // resolves 'sdk' (zero-behavior-change invariant).
+    const substrate = resolveSubstrate({ env: process.env });
+
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-      VALUES (?, ?, ?, 'queued', ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate)
+      VALUES (?, ?, ?, 'queued', ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, workflow.project_id, permissionMode);
+      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate);
     });
 
     createTx();
 
-    return { runId, permissionMode };
+    return { runId, permissionMode, substrate };
   }
 
   /**
@@ -454,7 +470,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, outcome, base_branch, base_sha, steps_snapshot_json, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, outcome, base_branch, base_sha, steps_snapshot_json, substrate, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

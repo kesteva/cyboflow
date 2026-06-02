@@ -109,6 +109,7 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { panelApi } from '../../../services/panelApi';
 import { API } from '../../../utils/api';
 import { trpc } from '../../../trpc/client';
+import type { ToolPanel } from '../../../../../shared/types/panels';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
@@ -131,8 +132,8 @@ beforeEach(() => {
     type: 'claude',
     title: 'Claude',
     state: { isActive: true },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ToolPanel has more fields; this is a test stub
-  } as any);
+    // ToolPanel has more fields; this is a test stub narrowed via unknown
+  } as unknown as ToolPanel);
   mockCreateQuick.mockResolvedValue({
     success: true,
     data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt', runId: 'run-quick-001' },
@@ -290,5 +291,78 @@ describe('WorkflowPicker — Start Run double-submit guard', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+  });
+
+  it("renders a substrate selector that defaults to 'sdk'", async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const substrateSelect = (await screen.findByLabelText('Select CLI substrate')) as HTMLSelectElement;
+    expect(substrateSelect).toBeInTheDocument();
+    // Default reflects ConfigManager.defaultSubstrate floor ('sdk').
+    expect(substrateSelect.value).toBe('sdk');
+  });
+
+  it("forwards the default substrate ('sdk') in the runs.start.mutate payload", async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-1', projectId: 1, substrate: 'sdk' });
+  });
+
+  it("includes substrate: 'interactive' in the mutate payload when 'interactive' is picked", async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    await act(async () => {
+      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+    });
+
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-1', projectId: 1, substrate: 'interactive' });
+  });
+
+  it("does NOT render the interactive caveats while 'sdk' is selected", async () => {
+    render(<WorkflowPicker projectId={1} />);
+    await screen.findByLabelText('Select CLI substrate');
+
+    expect(screen.queryByTestId('workflow-picker-substrate-caveats')).toBeNull();
+  });
+
+  it("renders the unconditional interactive v1 caveats when 'interactive' is selected, and NOT the approval-routing caveat (Probe A passed)", async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    await act(async () => {
+      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+    });
+
+    const caveats = screen.getByTestId('workflow-picker-substrate-caveats');
+    expect(caveats).toBeInTheDocument();
+
+    // The three unconditional v1 caveats.
+    expect(caveats).toHaveTextContent(/AskUserQuestion/i);
+    expect(caveats).toHaveTextContent(/native-TUI/i);
+    expect(caveats).toHaveTextContent(/subagent/i);
+    expect(caveats).toHaveTextContent(/turn-level/i);
+
+    // Approval gating DID ship for the interactive substrate (TASK-810), so the
+    // "approval routing unavailable" caveat must NOT appear.
+    expect(caveats).not.toHaveTextContent(/approval routing/i);
   });
 });

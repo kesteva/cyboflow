@@ -84,6 +84,114 @@ Core business logic services. Key components:
   `cyboflow_system_design.md:64`). Still owns the PTY spawn path (`spawnPtyProcess`); kept
   in place even though `ClaudeCodeManager` no longer routes through it, so future CLI tools
   can be added as additional subclasses.
+- **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
+  Claude substrate (IDEA-013), a sibling of the SDK `ClaudeCodeManager`. It drives a REAL
+  interactive `claude` REPL over the inherited `AbstractCliManager` PTY machinery (no headless
+  `-p` flag, no stream-json output flag) and recovers structured panel fidelity out of band via
+  a `TranscriptTailSource`. `workflow_runs.substrate` ('sdk' | 'interactive') is stamped at
+  launch and dispatched by the `SubstrateDispatchFacade`.
+
+#### Interactive-substrate workflow step tracking
+
+The Workflow Progress panel advances on interactive-substrate runs through the **exact same
+MCP-driven chain** the SDK substrate uses (scope decision #3: step tracking comes from
+`cyboflow_report_step`, NOT from parsing the transcript stream). The MAIN orchestrating
+interactive `claude` session calls the `cyboflow_report_step` MCP tool → `OrchSocketServer` →
+`handleReportStep` → `buildStepTransitionEvent` (`stepTransitionBridge.ts`) →
+`stepTransitionEvents.emit('transition', …)` → the `onStepTransition` subscription →
+`mergeTransition` (`useWorkflowPhaseState.ts`), advancing the panel with zero renderer changes.
+Two substrate-specific seams make this work and are the only interactive-side additions:
+- **`CYBOFLOW_RUN_ID = workflow_runs.id`** is injected into the interactive PTY env (the real
+  run id, NOT the discovered Claude session UUID) so the handler binds a real `workflow_runs`
+  row.
+- **Prompt-body prepend**: interactive `claude` has no SDK `systemPrompt.append` channel, so the
+  per-run step-reporting instruction (`buildStepReportingAppend`, built from the run's EFFECTIVE
+  `resolveWorkflowDefinition(name, spec_json)` — the dynamic, user-editable step-id model) is
+  concatenated to the HEAD of the prompt written to PTY stdin. This is the interactive analogue
+  of the SDK manager's `composeSystemPromptAppend` (`claudeCodeManager.ts:478`). Fail-soft: a
+  non-SoloFlow / broken-spec run resolves to a `null` definition and prepends nothing.
+
+**v1 limit — main-session-only step reporting.** Only the MAIN orchestrating session can call
+`cyboflow_report_step`. Agent-tool **subagents** run in isolated sub-sessions that inherit
+**neither** the `mcpServers` config **nor** the parent's hook scope (the same inherited IDEA-029
+limit), so they cannot report steps — even though the PreToolUse shell hook itself does fire for
+subagents (Probe A2). This ties directly to the **S5/TASK-810** subagent gating decision:
+interactive selection is restricted for subagent-spawning workflows OR the `Task` tool is
+force-denied, so a delegated step is always reported from the main session. Per-subagent step
+reporting is explicitly out of scope for v1.
+
+#### Dual-substrate seam, components, and rollback (IDEA-013)
+
+A workflow run executes under **exactly one CLI substrate**, resolved **ONCE** and stamped
+immutably onto `workflow_runs.substrate` at launch. The seam has three load-bearing layers:
+
+- **Resolution** — `substrateResolver.ts` (`resolveSubstrate`) walks an override ladder
+  (workflow frontmatter → per-project config → `ConfigManager.defaultSubstrate` global →
+  `CYBOFLOW_SUBSTRATE` env) and floors to `DEFAULT_SUBSTRATE` (`'sdk'`). With no override
+  anywhere, EVERY run resolves `'sdk'` and the SDK path stays byte-identical (zero-behavior-change
+  invariant). `WorkflowRegistry.createRun` calls it once and stamps the result; there is
+  intentionally **no UPDATE path** — substrate is per-run-immutable.
+- **Selection surfacing** — the renderer carries the user's per-run choice via the
+  `cyboflow.runs.start` tRPC input (`substrate?: 'sdk' | 'interactive'`, AppRouter-inferred,
+  no local mirror) → `RunLauncher.launch` → the resolver. A global default lives in
+  `ConfigManager.defaultSubstrate` (accessor floors to `'sdk'`; the field is deliberately NOT
+  seeded into the constructor defaults so existing `config.json` files stay byte-identical).
+  The `WorkflowPicker` selector defaults to `'sdk'` and surfaces the interactive v1 caveats.
+- **Dispatch — `SubstrateDispatchFacade` (S4 / the boot-seam facade source).** It is the SINGLE
+  `RunExecutor` `source` EventEmitter AND its `ClaudeSpawnerLike`. Per run it resolves
+  `run.substrate` via `WorkflowRegistry.getRunById` and dispatches `spawnCliProcess` / `abort` to
+  the matching `AbstractCliManager` (`ClaudeCodeManager` for `'sdk'`, `interactiveClaudeManager`
+  for `'interactive'`), then **fans-in** both managers' `'output'`/`'exit'` events and re-emits
+  each payload **unchanged by reference**. Because the payload is preserved object-identically,
+  `runEventBridge.ts` needs **zero edits** and the `cyboflow:stream:<runId>` envelope is
+  shape-identical across substrates. The `AbstractCliManager` base methods
+  `spawnPtyProcess` / `setupProcessHandlers` / `killProcessTree` are LIVE and load-bearing for
+  the interactive sibling — do NOT prune them or mark them `@cyboflow-hidden`.
+
+**Structured-panel preservation (Q3).** The structured Claude panel renders interactive runs
+with **zero frontend change**. The interactive substrate produces a `claude` transcript JSONL
+whose per-line schema diverges from the SDK wire shape; `TranscriptSource` /
+`TranscriptTailSource` tail it and `transcriptNormalizer.ts` reshapes each line into the SAME
+`{panelId,sessionId,type:'json',data,timestamp}` envelope the SDK manager emits — so by the time
+events reach `narrow()` and the bridge, the two substrates are indistinguishable. The
+**transcript-vs-wire schema divergence is absorbed entirely by the normalizer**; `MessageProjection`
+coalescing (the `emittedAssistantMessages` map) then folds the interactive **full-content**
+lines that share a `message.id` into one rendered message, exactly as it folds SDK **partial
+deltas**. `WorkflowProgressTimeline.tsx` and `useWorkflowPhaseState.ts` are byte-identical across
+substrates (the `RunRightRail` parity test proves no change is needed).
+
+**IDEA-029 dependency.** Interactive step tracking and PreToolUse gating reuse the IDEA-029
+orchestrator MCP runtime (`OrchSocketServer` + `McpQueryHandler` + `cyboflow_report_step` + the
+async-deferred `shell-approval-request` branch). The interactive seam consumes that runtime —
+it does not duplicate it; `index.ts` / `mcpQueryHandler.ts` / `claudeCodeManager.ts` /
+`runExecutor.ts` are owned by IDEA-029 / earlier slices.
+
+**v1 limits (interactive substrate):**
+- **Resume is fresh-session-only** — interactive `claude` does not expose a stable
+  resume-by-id handle (upstream `claude-code#44607`); a re-opened run starts a NEW session
+  rather than rehydrating the prior one.
+- **Main-session-only step reporting** — only the MAIN orchestrating session reports steps
+  (subagents inherit neither the `mcpServers` config nor hook scope; see above).
+- **AskUserQuestion is native-TUI-only** — multiple-choice questions surface in the terminal,
+  not the structured panel (no `QuestionRouter` bridge on this path).
+- **Subagent gating per S5** — interactive selection is restricted for subagent-spawning
+  workflows OR `Task` is force-denied (per-subagent surfacing is out of scope).
+- **Coarser streaming granularity** — output arrives at **turn-level**, not token-level deltas
+  (no `--include-partial-messages` on the interactive path).
+- **`encodeCwd` collision caveat** — the transcript directory is keyed by an encoded cwd
+  (upstream `claude-code#19972`); two worktrees that encode to the same key could collide. The
+  deterministic per-run worktree path makes this practically unreachable in v1, but it is an
+  UNRESOLVED upstream edge.
+- **ToS / concurrency assumption is UNCONFIRMED (Probe H)** — running multiple concurrent
+  subscription-billed interactive sessions is assumed acceptable but has NOT been confirmed
+  against Anthropic's terms; this is a known open risk, not a guarantee.
+
+**Rollback.** Substrate is per-run-immutable, so rollback is "pick `'sdk'` for a NEW run", never
+a mutation of an existing run. Because the schema is substrate-agnostic (the column is one stamp
+at launch; `raw_events` / `workflow_runs` / step transitions carry no substrate-specific shape),
+flipping back to `'sdk'` preserves all prior interactive-run history unchanged — no migration, no
+data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
+
 - **`terminalSessionManager.ts` / `terminalPanelManager.ts` / `runCommandManager.ts`** —
   These three services are the remaining live users of `@homebridge/node-pty-prebuilt-multiarch`
   (terminal panel and script execution surfaces — unrelated to Claude).

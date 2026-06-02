@@ -6,6 +6,8 @@
  * Node.js built-ins so it can be imported in any environment.
  */
 
+import type { CliSubstrate } from './substrate';
+
 export type PermissionMode = 'default' | 'acceptEdits' | 'dontAsk';
 
 export interface WorkflowRow {
@@ -45,16 +47,18 @@ export interface WorkflowRunRow {
   error_message?: string | null;
   /** Id of the workflow step currently executing, e.g. 'context'. Bare WorkflowStep.id from WORKFLOW_DEFINITIONS. NULL when no step is active. IDEA-026 / TASK-764. */
   current_step_id?: string | null;
-  /** Native-task link: the task this run executes. One run -> one task; a task has 0..N runs. NULL for runs launched without a task (migration 013). */
+  /** Native-task link: the task this run executes. One run -> one task; a task has 0..N runs. NULL for runs launched without a task (migration 014). */
   task_id?: string | null;
-  /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 013). */
+  /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 014). */
   outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
-  /** Base branch captured at launch — future git triage only, NOT a hot path (migration 013). */
+  /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
   base_branch?: string | null;
-  /** Base SHA captured at launch — future git triage only (migration 013). */
+  /** Base SHA captured at launch — future git triage only (migration 014). */
   base_sha?: string | null;
-  /** step->agent map frozen at launch; stable overlay across mid-run workflow edits (migration 013). */
+  /** step->agent map frozen at launch; stable overlay across mid-run workflow edits (migration 014). */
   steps_snapshot_json?: string | null;
+  /** CLI substrate stamped at launch ('sdk' | 'interactive'). Resolved once and immutable for the run. Reads back 'sdk' for every legacy row. IDEA-013 / TASK-806. */
+  substrate?: CliSubstrate;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;
@@ -74,6 +78,14 @@ export interface WorkflowRunListRow {
   status: WorkflowRunRow['status'];
   worktree_path: string | null;
   branch_name: string | null;
+  /**
+   * CLI substrate stamped at launch ('sdk' | 'interactive'). Surfaced to the
+   * renderer so the picker can show it (S7). Optional in this seam slice so the
+   * field is additive only — the renderer store (ActiveRunRow) and its fixtures
+   * are owned by S7 and not widened here (Out of Scope: no frontend type widening).
+   * IDEA-013 / TASK-806.
+   */
+  substrate?: CliSubstrate;
   created_at: string;
   updated_at: string;
   started_at: string | null;

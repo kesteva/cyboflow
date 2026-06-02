@@ -1,5 +1,5 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus, VersionUpdateInfo, GitCommands } from './session';
+import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
@@ -46,9 +46,8 @@ interface ElectronAPI {
   getAppVersion: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
-  // Version checking — use IPCDataResponse so callers can access .data fields directly
+  // Version info — use IPCDataResponse so callers can access .data fields directly
   // after `if (result.success)` without narrowing for undefined.
-  checkForUpdates: () => Promise<IPCDataResponse<VersionUpdateInfo>>;
   getVersionInfo: () => Promise<IPCDataResponse<{
     current: string;
     workingDirectory?: string;
@@ -58,13 +57,6 @@ interface ElectronAPI {
     buildTimestamp?: number;
     worktreeName?: string;
   }>>;
-
-  // Auto-updater
-  updater: {
-    checkAndDownload: () => Promise<IPCResponse<void>>;
-    downloadUpdate: () => Promise<IPCResponse<void>>;
-    installUpdate: () => Promise<IPCResponse<void>>;
-  };
 
   // System utilities
   openExternal: (url: string) => Promise<void>;
@@ -127,7 +119,6 @@ interface ElectronAPI {
     hasChangesToRebase: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
     getGitCommands: (sessionId: string) => Promise<IPCDataResponse<GitCommands>>;
     getRemoteUrl: (sessionId: string) => Promise<IPCDataResponse<{ remoteUrl: string; branchName: string }>>;
-    generateName: (prompt: string) => Promise<IPCResponse<string>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
     toggleAutoCommit: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -227,18 +218,6 @@ interface ElectronAPI {
     getPending: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
-  // Stravu MCP integration with OAuth — IPCDataResponse for methods whose callers access .data directly
-  stravu: {
-    getConnectionStatus: () => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
-    initiateAuth: () => Promise<IPCDataResponse<{ authUrl: string; sessionId: string }>>;
-    checkAuthStatus: (sessionId: string) => Promise<IPCDataResponse<{ status: string; memberInfo?: { memberId: string; orgSlug: string; scopes: string[] }; error?: string }>>;
-    disconnect: () => Promise<IPCResponse<void>>;
-    getNotebooks: () => Promise<IPCResponse<unknown[]>>; // Caller does not consume .data directly
-    getNotebook: (notebookId: string) => Promise<IPCDataResponse<{ content: string }>>;
-    // searchNotebooks returns StravuNotebook[] locally typed in StravuFileSearch.tsx
-    searchNotebooks: (query: string, limit?: number) => Promise<IPCDataResponse<unknown[]>>;
-  };
-
   // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access
   dashboard: {
     getProjectStatus: (projectId: number) => Promise<IPCDataResponse<unknown>>;
@@ -286,15 +265,6 @@ interface ElectronAPI {
 
     onTerminalOutput: (callback: (output: { sessionId: string; data: string; type: 'stdout' | 'stderr' }) => void) => () => void;
     onMainLog: (callback: (level: string, message: string) => void) => () => void;
-    onVersionUpdateAvailable: (callback: (versionInfo: VersionUpdateInfo) => void) => () => void;
-
-    // Auto-updater events
-    onUpdaterCheckingForUpdate: (callback: () => void) => () => void;
-    onUpdaterUpdateAvailable: (callback: (info: { version: string; releaseDate: string; releaseName?: string; releaseNotes?: string }) => void) => () => void;
-    onUpdaterUpdateNotAvailable: (callback: (info: { version: string }) => void) => () => void;
-    onUpdaterDownloadProgress: (callback: (progressInfo: { bytesPerSecond: number; percent: number; transferred: number; total: number }) => void) => () => void;
-    onUpdaterUpdateDownloaded: (callback: (info: { version: string; files: string[]; path: string; sha512: string; releaseDate: string }) => void) => () => void;
-    onUpdaterError: (callback: (error: Error) => void) => () => void;
 
     // Process management events
     onZombieProcessesDetected: (callback: (data: { sessionId?: string | null; pids?: number[]; message: string }) => void) => () => void;
@@ -368,16 +338,6 @@ interface ElectronAPI {
   nimbalyst: {
     checkInstalled: () => Promise<IPCResponse<boolean>>;
     openWorktree: (worktreePath: string) => Promise<IPCResponse<void>>;
-  };
-
-  // Analytics tracking
-  analytics: {
-    trackUIEvent: (eventData: {
-      event: string;
-      properties: Record<string, string | number | boolean | string[] | undefined>;
-    }) => Promise<IPCResponse<void>>;
-    categorizeResultCount: (count: number) => Promise<IPCResponse<string>>;
-    hashSessionId: (sessionId: string) => Promise<IPCResponse<string>>;
   };
 }
 

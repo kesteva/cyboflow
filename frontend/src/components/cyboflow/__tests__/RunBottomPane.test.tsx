@@ -40,6 +40,26 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Mock tRPC client — the Data Stream tab mounts RunView, whose effect calls
+// trpc.cyboflow.runs.listRawEvents.query(...) on mount. Without this mock the
+// procedure is undefined and the awaited .query() rejects as an unhandled
+// rejection (Vitest then exits 1 even though all assertions pass). Mirror the
+// canonical mock in RunView.test.tsx; return [] so the backfill is a no-op.
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        listRawEvents: {
+          query: vi.fn(async () => []),
+        },
+      },
+    },
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // Mock RunChatView so the Chat tab test does not require tRPC / stores
 // ---------------------------------------------------------------------------
 

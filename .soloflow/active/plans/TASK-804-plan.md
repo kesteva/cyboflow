@@ -15,10 +15,10 @@ files_readonly:
   - shared/types/workflows.ts
   - frontend/src/hooks/useWorkflowPhaseState.ts
 acceptance_criteria:
-  - criterion: "A new parity test file main/src/orchestrator/__tests__/stepIdParity.test.ts asserts every stepId referenced by the cyboflow-owned step-reporting prompt assets (from TASK-803) exists as a valid WorkflowStep.id in WORKFLOW_DEFINITIONS, and fails when a referenced id has no match."
-    verification: "test -f main/src/orchestrator/__tests__/stepIdParity.test.ts && grep -q 'WORKFLOW_DEFINITIONS' main/src/orchestrator/__tests__/stepIdParity.test.ts"
-  - criterion: "The parity test derives its referenced-stepId set from the actual TASK-803 prompt assets (not a hardcoded duplicate list), so prompt drift fails CI."
-    verification: "grep -Eq \"planner-step-reporting|sprint-step-reporting|step-reporting-instructions\" main/src/orchestrator/__tests__/stepIdParity.test.ts"
+  - criterion: "A new derivation/round-trip test file main/src/orchestrator/__tests__/stepIdParity.test.ts asserts that for a resolved WorkflowDefinition, buildStepReportingAppend(def)'s emitted step-id set EQUALS def.phases.flatMap(p=>p.steps).map(s=>s.id) in order — proven for (a) a resolved built-in, (b) an edited-built-in spec_json fixture, (c) a custom-flow def — and that a null/broken resolution yields '' without throwing."
+    verification: "test -f main/src/orchestrator/__tests__/stepIdParity.test.ts && grep -Eq 'resolveWorkflowDefinition|buildStepReportingAppend' main/src/orchestrator/__tests__/stepIdParity.test.ts"
+  - criterion: "The test derives ids from resolveWorkflowDefinition output and the TASK-803 generator (not a hardcoded duplicate list or a scan of the .md bodies, which no longer contain ids), so generator-vs-definition drift fails CI; a bogus id is absent (negative control)."
+    verification: "grep -Eq \"step-reporting-instructions|resolveWorkflowDefinition\" main/src/orchestrator/__tests__/stepIdParity.test.ts && grep -Eq \"edited|custom|forward\" main/src/orchestrator/__tests__/stepIdParity.test.ts frontend/src/hooks/__tests__/useWorkflowPhaseState.test.tsx"
   - criterion: "frontend/src/hooks/__tests__/useWorkflowPhaseState.test.tsx gains a forward-jump test: with a >=6-step flat definition and currentStep at index 2, a transition to the index-5 step with status 'running' yields steps 0-4 'done', step 5 'running', and any steps after 5 'pending'."
     verification: "grep -q 'forward' frontend/src/hooks/__tests__/useWorkflowPhaseState.test.tsx"
   - criterion: "Both files are NEW-test-only / additive — no production source under main/src or frontend/src outside the two test files is modified."
@@ -42,6 +42,15 @@ test_strategy:
 ---
 
 # Lock the step_id contract + UI mergeTransition forward-jump test
+
+## ⚠️ POST-MERGE REVISION (2026-06-01) — dynamic step-id model (OVERRIDES the static-parity text below)
+
+`main` merged in user-editable workflows (`spec_json` + `resolveWorkflowDefinition` as the runtime source of truth; `WORKFLOW_DEFINITIONS` is now only the seed/fallback). Step ids are dynamic/per-row/user-authored, so a STATIC parity test ("every prompt-referenced id ∈ `WORKFLOW_DEFINITIONS[name]`") is INVALID and the prompt `.md` assets no longer contain ids (TASK-803 revision). Replace the static gate with a DERIVATION / ROUND-TRIP invariant against `buildStepReportingAppend` (TASK-803's now-def-driven generator):
+
+- **Primary invariant:** for a given resolved `WorkflowDefinition`, the id set emitted by `buildStepReportingAppend(def)` EQUALS `def.phases.flatMap(p=>p.steps).map(s=>s.id)`, in order. Test with THREE fixtures: (a) a resolved built-in (`resolveWorkflowDefinition('planner','{}')` fallback path), (b) an EDITED-built-in `spec_json` (a renamed/added/removed step) — assert the prompt references the edited ids and NONE of the removed originals, (c) a CUSTOM-flow def (arbitrary kebab ids, no built-in backstop). Plus fail-soft: a null/broken-spec resolution yields `''` (no throw).
+- The test drives `buildStepReportingAppend` with fixtures and compares against `resolveWorkflowDefinition` output — it does NOT scan the `.md` bodies for ids (they no longer contain ids). Optionally keep a narrow check that the `.md` role prose mentions `cyboflow_report_step` + the subagent note (the AC#5 substance), but NOT an id-parity check against the static constant.
+- Negative control unchanged: a bogus id is absent from the emitted set.
+- **Co-requisite (NOT owned here):** the read-side validators in TASK-801 (`buildStepTransitionEvent`) and TASK-802 (`handleReportStep`) must ALSO resolve via `resolveWorkflowDefinition(name, spec_json)`, or an edited/custom run's valid id is injected then rejected → panel stalls. This parity contract is only sound if write side (generator) and read side (validators) resolve from the same live source.
 
 ## Objective
 

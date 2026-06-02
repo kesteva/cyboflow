@@ -190,18 +190,6 @@ export type FolderWithProjectId = Folder;
 
 export type ContextMenuPayload = Session | Folder;
 
-// Version update info interface
-export interface VersionUpdateInfo {
-  version: string;
-  current: string;
-  latest: string;
-  hasUpdate: boolean;
-  releaseUrl?: string;
-  releaseNotes?: string;
-  downloadUrl?: string;
-  mandatory?: boolean;
-}
-
 // Permission request input types  
 export interface PermissionInput {
   tool_name?: string;

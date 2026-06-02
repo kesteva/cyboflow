@@ -487,9 +487,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 archiveProgressManager.updateTaskStatus(sessionId, 'removing-worktree');
               }
 
-              // Pass session creation date for analytics tracking
-              const sessionCreatedAt = dbSession.created_at ? new Date(dbSession.created_at) : undefined;
-              await worktreeManager.removeWorktree(project.path, dbSession.worktree_name, project.worktree_folder || undefined, sessionCreatedAt);
+              await worktreeManager.removeWorktree(project.path, dbSession.worktree_name, project.worktree_folder || undefined);
 
               cleanupMessage += `\x1b[32m✓ Worktree removed successfully\x1b[0m\r\n`;
             } catch (worktreeError) {
@@ -1488,23 +1486,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to stop session:', error);
       return { success: false, error: 'Failed to stop session' };
-    }
-  });
-
-  ipcMain.handle('sessions:generate-name', async (_event, prompt: string) => {
-    try {
-      // Generate a deterministic slug from the prompt (no API call)
-      const words = prompt
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter((word: string) => word.length > 2)
-        .slice(0, 3);
-      const name = words.join('-').replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 30) || 'new-task';
-      return { success: true, data: name };
-    } catch (error) {
-      console.error('Failed to generate session name:', error);
-      return { success: false, error: 'Failed to generate session name' };
     }
   });
 

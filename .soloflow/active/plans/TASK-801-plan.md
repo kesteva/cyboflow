@@ -16,7 +16,7 @@ files_readonly:
   - main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts
   - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
 acceptance_criteria:
-  - criterion: "buildStepTransitionEvent rejects a stepId not present in the run's WORKFLOW_DEFINITIONS flat steps: no DB UPDATE, no emit, warn-log, returns null."
+  - criterion: "buildStepTransitionEvent rejects a stepId not present in the run's RESOLVED definition (resolveWorkflowDefinition(name, spec_json)) flat steps — and rejects when the def resolves null: no DB UPDATE, no emit, warn-log, returns null."
     verification: "New unit test seeds a 'sprint' run, calls buildStepTransitionEvent(runId, 'not-a-real-step', 'running', adapter, logger), asserts return null, emitSpy not called, current_step_id unchanged (null), logger.warn called once with a message containing 'not-a-real-step'. Run: pnpm --filter main test stepTransitionBridge"
   - criterion: "buildStepTransitionEvent accepts ANY stepId that exists in the resolved workflow's flat steps (not just the INITIAL_STEP_IDS entry): DB UPDATE runs, emit fires once, returns the event."
     verification: "New unit test seeds a 'planner' run and calls buildStepTransitionEvent with a non-initial valid step id (confirm the exact id exists in WORKFLOW_DEFINITIONS.planner flat steps at author time); asserts event not null, emittedEvents length 1, DB current_step_id equals that step id. Run: pnpm --filter main test stepTransitionBridge"
@@ -46,6 +46,15 @@ test_strategy:
 ---
 
 # Validate stepId in buildStepTransitionEvent + relax INITIAL_STEP_IDS hardcoding
+
+## ⚠️ POST-MERGE REVISION (2026-06-01) — resolve from spec_json, not the static constant
+
+`main` merged in user-editable workflows (`spec_json` + `resolveWorkflowDefinition(name, spec_json)` as the runtime source of truth; `WORKFLOW_DEFINITIONS` is now only the seed/fallback). The validator MUST resolve the run's EFFECTIVE definition and validate the stepId against ITS flat steps — NOT against `WORKFLOW_DEFINITIONS[name]`. Concretely:
+
+- The in-function JOIN selects `spec_json` too: `SELECT w.name AS workflowName, w.spec_json AS specJson FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?`.
+- `isValidStepId` resolves the def: `resolveWorkflowDefinition(workflowName, specJson)` then checks `stepId ∈ def.phases.flatMap(p=>p.steps).map(s=>s.id)`. A `null` resolution (custom flow with broken/missing spec) → reject (warn, return null). Keep the standalone-typecheck invariant (resolveWorkflowDefinition lives in `shared/types/workflows.ts`, already an allowed import).
+- Add a test case proving an EDITED-built-in or custom stepId (present only in `spec_json`, absent from the static constant) is ACCEPTED, and that an id removed by an edit is REJECTED.
+- This is the read-side half of the write/read co-requisite shared with TASK-802 (`handleReportStep`) and TASK-803 (the generator) — all three resolve from the same live source.
 
 ## Objective
 

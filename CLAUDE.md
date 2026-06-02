@@ -21,6 +21,10 @@ Code that is intentionally unreachable in cyboflow v1 is marked with `@cyboflow-
 
 `AbstractCliManager` (`main/src/services/panels/cli/AbstractCliManager.ts`) is an intentional extension surface per `docs/cyboflow_system_design.md:64` — do NOT collapse it into its single concrete subclass (`ClaudeCodeManager`). It is designed to host additional CLI tool integrations in future sprints. Contrast with `AbstractAIPanelManager` / `BaseAIPanelHandler`, which ARE collapse candidates (Crystal-era Claude+Codex scaffolding).
 
+### Dual-substrate (IDEA-013) — resolves once, base PTY methods are LIVE
+
+The CLI substrate (`'sdk'` | `'interactive'`) resolves **ONCE** at the `CliManagerFactory` / `SubstrateDispatchFacade` seam (`substrateResolver.ts` → stamped immutably onto `workflow_runs.substrate` by `WorkflowRegistry.createRun`, no UPDATE path) and is threaded per-run via `run.substrate` read by the boot-seam **facade source** (`SubstrateDispatchFacade`, the single `RunExecutor` source + spawner). `AbstractCliManager.spawnPtyProcess` / `setupProcessHandlers` / `killProcessTree` are **LIVE and load-bearing** for the interactive sibling (`interactiveClaudeManager.ts`) — do NOT prune them and do NOT mark them `@cyboflow-hidden` even though the SDK `ClaudeCodeManager` no longer routes through the PTY path. See `docs/ARCHITECTURE.md` "Dual-substrate seam, components, and rollback" for the full seam, the Q3 panel-preservation invariant, and the v1 limits.
+
 ## Common Commands
 
 ```bash

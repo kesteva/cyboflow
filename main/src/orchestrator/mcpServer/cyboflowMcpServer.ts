@@ -174,6 +174,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['label'],
         },
       },
+      {
+        name: 'cyboflow_report_step',
+        description:
+          'Report the current workflow phase/step for the current run by its step id. This is an OBSERVATIONAL signal that drives the Workflow Progress panel only — it does NOT pause the run, change run status, approve anything, or notify the user (contrast with the PreToolUse approval gate). The run is bound from CYBOFLOW_RUN_ID, so there is no run_id argument.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            step_id: { type: 'string', description: "The workflow step id to mark as current (must exist in this run's workflow definition)" },
+            status: { type: 'string', enum: ['running', 'done'], description: "Optional step status; defaults to 'running'" },
+          },
+          required: ['step_id'],
+        },
+      },
     ],
   };
 });
@@ -256,6 +269,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { label };
       if (note !== undefined) queryParams['note'] = note;
       return executeMcpQuery('mcp-submit-checkpoint', queryParams);
+    }
+
+    case 'cyboflow_report_step': {
+      const args = (request.params.arguments ?? {}) as { step_id?: unknown; status?: unknown };
+      const { step_id, status } = args;
+      if (typeof step_id !== 'string' || step_id.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'step_id: string' }),
+            },
+          ],
+        };
+      }
+      if (status !== undefined && status !== 'running' && status !== 'done') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "status: 'running' | 'done' (optional)" }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { stepId: step_id };
+      if (status !== undefined) queryParams['status'] = status;
+      return executeMcpQuery('mcp-report-step', queryParams);
     }
 
     default:

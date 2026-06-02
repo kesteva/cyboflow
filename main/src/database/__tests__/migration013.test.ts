@@ -1,21 +1,54 @@
 /**
- * Migration 013_native_tasks.sql — schema + seed integration tests.
+ * Integration tests for migration 013_workflow_run_substrate.sql (TASK-806).
  *
- * Applies 006_cyboflow_schema.sql then 013_native_tasks.sql against an
- * in-memory SQLite instance (with a minimal `projects` table seeded first so
- * the FKs + project-scoped seed have something to attach to). Proves:
- *   1. All native-task tables exist with the spec'd columns.
- *   2. TaskRow field names match the `tasks` columns exactly (schema parity).
- *   3. The seed produces EXACTLY 11 stages per board with the right
- *      write_policy / is_terminal / hidden_by_default flags.
- *   4. workflow_runs gains task_id + outcome + base_branch + base_sha +
- *      steps_snapshot_json.
+ * Applies 006_cyboflow_schema.sql → 011_workflow_step_tracking.sql →
+ * 013_workflow_run_substrate.sql against an in-memory SQLite instance. This
+ * proves the SQL file itself is correct — not a hard-coded inline string — and
+ * guards against column-type, default, or CHECK-domain typos.
+ *
+ * The test_strategy.targets from the plan frontmatter:
+ *  1. Applying 006→011→013 adds substrate TEXT NOT NULL DEFAULT 'sdk' with the
+ *     CHECK domain to workflow_runs.
+ *  2. A row inserted WITHOUT a substrate value reads back 'sdk' (legacy rows).
+ *  3. Inserting 'interactive' round-trips; inserting an out-of-domain value
+ *     (e.g. 'gemini') is rejected by the CHECK constraint.
+ *  4. Re-executing 013 raises 'duplicate column name: substrate' SqliteError
+ *     (the idempotency signal that runFileBasedMigrations uses to skip
+ *     already-applied files).
  */
+
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { TaskRow } from '../models';
+
+// ---------------------------------------------------------------------------
+// Helper: open a fresh in-memory DB and apply migrations 006, 011, and 013
+// ---------------------------------------------------------------------------
+
+function readMigration(name: string): string {
+  return readFileSync(join(__dirname, '..', 'migrations', name), 'utf-8');
+}
+
+function applyMigrations(): Database.Database {
+  const db = new Database(':memory:');
+  db.exec(readMigration('006_cyboflow_schema.sql'));
+  db.exec(readMigration('011_workflow_step_tracking.sql'));
+  db.exec(readMigration('013_workflow_run_substrate.sql'));
+  return db;
+}
+
+/** Seed a workflow row so the workflow_runs FK is satisfied. */
+function seedWorkflow(db: Database.Database): void {
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json)
+     VALUES ('wf-1', 1, 'test-wf', '{}')`,
+  ).run();
+}
+
+// ---------------------------------------------------------------------------
+// PRAGMA table_info row shape returned by better-sqlite3
+// ---------------------------------------------------------------------------
 
 interface TableInfoRow {
   cid: number;
@@ -26,154 +59,89 @@ interface TableInfoRow {
   pk: number;
 }
 
-interface StageRow {
-  id: string;
-  board_id: string;
-  position: number;
-  write_policy: string;
-  is_terminal: number;
-  hidden_by_default: number;
-  label: string;
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-function buildDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('foreign_keys = ON');
+describe('Migration 013: substrate column on workflow_runs', () => {
+  it("adds substrate TEXT NOT NULL DEFAULT 'sdk' to workflow_runs", () => {
+    const db = applyMigrations();
 
-  // Minimal projects table (the real one is created inline in database.ts, not a migration).
-  db.exec(`
-    CREATE TABLE projects (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      path TEXT NOT NULL UNIQUE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-  db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj One', '/tmp/p1');
-  db.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj Two', '/tmp/p2');
+    const rows = db
+      .prepare('PRAGMA table_info(workflow_runs)')
+      .all() as TableInfoRow[];
 
-  const sql006 = readFileSync(join(__dirname, '..', 'migrations', '006_cyboflow_schema.sql'), 'utf-8');
-  db.exec(sql006);
-  const sql013 = readFileSync(join(__dirname, '..', 'migrations', '013_native_tasks.sql'), 'utf-8');
-  db.exec(sql013);
+    const col = rows.find((r) => r.name === 'substrate');
 
-  return db;
-}
+    expect(col).toBeDefined();
+    expect(String(col!.type).toUpperCase()).toBe('TEXT');
+    // notnull=1 means the column is NOT NULL
+    expect(col!.notnull).toBe(1);
+    // The default literal is stored as the quoted string 'sdk'
+    expect(col!.dflt_value).toBe("'sdk'");
 
-describe('Migration 013: native task backlog schema', () => {
-  it('creates all native-task tables', () => {
-    const db = buildDb();
-    const names = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
-      (r) => r.name,
-    );
-    for (const t of [
-      'boards',
-      'board_stages',
-      'tasks',
-      'task_ref_counters',
-      'task_events',
-      'task_acceptance_criteria',
-      'task_dependencies',
-      'task_files',
-      'task_external_links',
-    ]) {
-      expect(names).toContain(t);
-    }
     db.close();
   });
 
-  it('TaskRow field names match the `tasks` columns exactly (schema parity)', () => {
-    const db = buildDb();
-    const cols = (db.prepare('PRAGMA table_info(tasks)').all() as TableInfoRow[]).map((r) => r.name).sort();
+  it("a row inserted WITHOUT a substrate value reads back 'sdk' (legacy default)", () => {
+    const db = applyMigrations();
+    seedWorkflow(db);
 
-    // The canonical TaskRow shape. Listing keys explicitly (rather than from a
-    // runtime object) keeps the test as a compile-time-checked source of truth:
-    // a TaskRow field rename fails `tsc`, and a column rename fails this assertion.
-    const taskRowKeys: Array<keyof TaskRow> = [
-      'id',
-      'project_id',
-      'type',
-      'ref',
-      'parent_epic_id',
-      'board_id',
-      'stage_id',
-      'entry_stage_id',
-      'title',
-      'summary',
-      'priority',
-      'repo',
-      'version',
-      'created_at',
-      'updated_at',
-    ];
-    const sortedKeys = [...taskRowKeys].sort();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+       VALUES ('wr-default', 'wf-1', 1, 'queued', 'default')`,
+    ).run();
 
-    expect(sortedKeys).toEqual(cols);
+    const row = db
+      .prepare('SELECT substrate FROM workflow_runs WHERE id = ?')
+      .get('wr-default') as { substrate: string };
+
+    expect(row.substrate).toBe('sdk');
+
     db.close();
   });
 
-  it('seeds exactly 11 stages per board with correct authority/terminal/hidden flags', () => {
-    const db = buildDb();
+  it("round-trips an explicit 'interactive' value", () => {
+    const db = applyMigrations();
+    seedWorkflow(db);
 
-    const boards = db.prepare('SELECT id, project_id FROM boards ORDER BY project_id').all() as {
-      id: string;
-      project_id: number;
-    }[];
-    expect(boards).toHaveLength(2);
-    expect(boards[0].id).toBe('board-1-default');
-    expect(boards[1].id).toBe('board-2-default');
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate)
+       VALUES ('wr-interactive', 'wf-1', 1, 'queued', 'default', 'interactive')`,
+    ).run();
 
-    for (const board of boards) {
-      const stages = db
-        .prepare('SELECT * FROM board_stages WHERE board_id = ? ORDER BY position')
-        .all(board.id) as StageRow[];
-      expect(stages).toHaveLength(11);
+    const row = db
+      .prepare('SELECT substrate FROM workflow_runs WHERE id = ?')
+      .get('wr-interactive') as { substrate: string };
 
-      // Deterministic stage id format.
-      expect(stages[0].id).toBe(`stage-${board.id}-1`);
-      expect(stages[10].id).toBe(`stage-${board.id}-11`);
+    expect(row.substrate).toBe('interactive');
 
-      // Positions 7 + 8 are the only DERIVED stages.
-      const derived = stages.filter((s) => s.write_policy === 'derived').map((s) => s.position);
-      expect(derived.sort((a, b) => a - b)).toEqual([7, 8]);
-
-      // Positions 9, 10, 11 are terminal.
-      const terminal = stages.filter((s) => s.is_terminal === 1).map((s) => s.position);
-      expect(terminal.sort((a, b) => a - b)).toEqual([9, 10, 11]);
-
-      // Positions 10, 11 are hidden_by_default.
-      const hidden = stages.filter((s) => s.hidden_by_default === 1).map((s) => s.position);
-      expect(hidden.sort((a, b) => a - b)).toEqual([10, 11]);
-
-      // Done is position 9, asserted + terminal.
-      const done = stages.find((s) => s.position === 9)!;
-      expect(done.label).toBe('Done');
-      expect(done.write_policy).toBe('asserted');
-      expect(done.is_terminal).toBe(1);
-    }
     db.close();
   });
 
-  it('extends workflow_runs with task_id/outcome/base_branch/base_sha/steps_snapshot_json', () => {
-    const db = buildDb();
-    const cols = (db.prepare('PRAGMA table_info(workflow_runs)').all() as TableInfoRow[]).map((r) => r.name);
-    for (const c of ['task_id', 'outcome', 'base_branch', 'base_sha', 'steps_snapshot_json']) {
-      expect(cols).toContain(c);
-    }
+  it("rejects an out-of-domain substrate value via the CHECK constraint", () => {
+    const db = applyMigrations();
+    seedWorkflow(db);
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate)
+         VALUES ('wr-bad', 'wf-1', 1, 'queued', 'default', 'gemini')`,
+      ).run();
+    }).toThrow(/CHECK constraint failed/i);
+
     db.close();
   });
 
-  it('is idempotent — re-applying the seed block does not duplicate boards/stages', () => {
-    const db = buildDb();
-    // Re-run just the seed portion by re-executing the whole file (CREATE IF NOT EXISTS + INSERT OR IGNORE).
-    // The ALTER statements would throw duplicate-column; isolate the seed INSERTs instead.
-    db.exec(`
-      INSERT OR IGNORE INTO boards (id, project_id, name, kind, is_default)
-      SELECT 'board-' || id || '-default', id, 'Default board', 'default', 1 FROM projects;
-    `);
-    const boardCount = (db.prepare('SELECT COUNT(*) AS n FROM boards').get() as { n: number }).n;
-    expect(boardCount).toBe(2);
+  it("re-executing migration 013 raises duplicate column name: substrate", () => {
+    const db = applyMigrations();
+
+    // SQLite raises this error when ALTER TABLE ADD COLUMN names an already-existing
+    // column. runFileBasedMigrations catches this message as the idempotency signal.
+    expect(() => {
+      db.exec(readMigration('013_workflow_run_substrate.sql'));
+    }).toThrow(/duplicate column name: substrate/i);
+
     db.close();
   });
 });

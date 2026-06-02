@@ -18,18 +18,18 @@ files_readonly:
   - main/src/orchestrator/stepTransitionBridge.ts
   - main/src/services/panels/claude/claudeCodeManager.ts
 acceptance_criteria:
-  - criterion: "step-reporting-instructions.ts exports a pure generator that derives the step-reporting append text for a workflow name from WORKFLOW_DEFINITIONS step ids — no hardcoded step-id string literals duplicated from the definitions."
-    verification: "grep -n 'WORKFLOW_DEFINITIONS' main/src/orchestrator/prompts/step-reporting-instructions.ts returns >=1 match; grep -nE \"'context'.*'research'.*'approve-idea'\" main/src/orchestrator/prompts/step-reporting-instructions.ts returns 0 matches (no inline id-list literal)."
+  - criterion: "step-reporting-instructions.ts exports a pure generator that derives the step-reporting append text from a RESOLVED WorkflowDefinition's step ids (via resolveWorkflowDefinition / a passed-in def) — NOT keyed off the static WORKFLOW_DEFINITIONS constant — and has no hardcoded step-id string literals."
+    verification: "grep -nE 'resolveWorkflowDefinition|WorkflowDefinition' main/src/orchestrator/prompts/step-reporting-instructions.ts returns >=1 match; grep -nE \"'context'.*'research'.*'approve-idea'\" main/src/orchestrator/prompts/step-reporting-instructions.ts returns 0 matches (no inline id-list literal)."
   - criterion: "The generator returns text that names cyboflow_report_step and instructs the MAIN session to call it at each phase boundary with the flat step ids for the given workflow, in WORKFLOW_DEFINITIONS order."
     verification: "Unit test: buildStepReportingAppend('planner') contains 'cyboflow_report_step' and the substrings 'context','research','approve-idea','epics','tasks','approve-plan' in order; buildStepReportingAppend('sprint') contains 'implement' … 'human-review' in order."
-  - criterion: "Every step id emitted by the generator for a workflow exists in WORKFLOW_DEFINITIONS[name] flat steps (no drift)."
-    verification: "Unit test iterates SOLOFLOW_WORKFLOW_NAMES; for each, every step id the generator references is asserted ∈ the flat step ids of WORKFLOW_DEFINITIONS[name]."
+  - criterion: "Every step id emitted by the generator for a resolved definition exists in THAT definition's flat steps (no drift); for an edited/custom def the emitted ids track the resolved spec, not the static constant."
+    verification: "Unit test: for resolved built-in defs plus an edited-built-in fixture and a custom-flow fixture, every step id the generator emits is asserted ∈ resolveWorkflowDefinition(...).phases.flatMap(p=>p.steps).map(s=>s.id)."
   - criterion: "Unknown / non-SoloFlow workflow names produce empty append text (fail-soft, no throw)."
     verification: "Unit test: buildStepReportingAppend('not-a-workflow') returns '' and does not throw."
   - criterion: "planner-step-reporting.md and sprint-step-reporting.md exist as cyboflow-owned role/instruction assets that are ADAPTED (minimal, in-repo), not verbatim plugin copies, and each documents the v1 subagent limitation."
     verification: "test -f on both paths; grep -in 'cyboflow_report_step' on both returns >=1 match; grep -in 'subagent' on both returns >=1 match."
-  - criterion: "The injected append text reaches a live run: the index.ts promptReader adapter concatenates buildStepReportingAppend(workflow.name) onto the systemPromptAppend it returns."
-    verification: "grep -n 'buildStepReportingAppend' main/src/index.ts shows it called in the promptReader adapter and concatenated into the returned systemPromptAppend; pnpm typecheck passes."
+  - criterion: "The injected append text reaches a live run: the index.ts promptReader adapter resolves the def via resolveWorkflowDefinition(workflow.name, workflow.spec_json) and concatenates buildStepReportingAppend(resolvedDef) onto the systemPromptAppend it returns."
+    verification: "grep -nE 'buildStepReportingAppend|resolveWorkflowDefinition' main/src/index.ts shows both called in the promptReader adapter and the append concatenated into the returned systemPromptAppend; pnpm typecheck passes."
   - criterion: "runExecutor.ts is unchanged by this task."
     verification: "git diff --stat main/src/orchestrator/runExecutor.ts shows 0 changed lines after the task."
   - criterion: "pnpm test:unit passes."
@@ -49,6 +49,15 @@ test_strategy:
 ---
 
 # Own planner/sprint agent prompt assets natively + inject step-reporting instructions
+
+## ⚠️ POST-MERGE REVISION (2026-06-01) — dynamic step-id model (OVERRIDES the static-model text below)
+
+`main` merged in a user-editable workflow feature: every `workflows` row now carries a `spec_json`, and `resolveWorkflowDefinition(name, spec_json)` (in `shared/types/workflows.ts`) is the RUNTIME source of truth — a full override of `WORKFLOW_DEFINITIONS`, which is now only the seed/fallback. Step ids are arbitrary, user-editable, per-row, and fully user-authored for custom flows. So "derive from `WORKFLOW_DEFINITIONS[name]`" is correct ONLY for an unedited built-in. The following supersedes the Implementation Steps / ACs wherever they key off the static constant:
+
+- **Generator signature:** `export function buildStepReportingAppend(def: WorkflowDefinition | null): string` — it takes the RESOLVED definition, NOT a workflow name keyed into `WORKFLOW_DEFINITIONS`. Flatten `def.phases.flatMap(p => p.steps).map(s => s.id)` from the live resolved def, in declaration order. Fail-soft: `def === null` (custom flow with broken/missing spec) → return `''`. A name-keyed convenience overload that internally calls `resolveWorkflowDefinition(name, '{}')` for the built-in fallback path is fine, but the resolved def — never `WORKFLOW_DEFINITIONS[name]` — is the authoritative id source.
+- **index.ts wiring:** the promptReader adapter calls `resolveWorkflowDefinition(workflow.name, workflow.spec_json)` (the `WorkflowRow` carries both `name` and `spec_json` on `main`) and passes the resolved def to `buildStepReportingAppend`. `runExecutor.ts` stays unchanged (it already has the full `WorkflowRow` in `getPrompt`).
+- **`.md` role assets:** they must NOT enumerate step ids (ids are dynamic). Keep ONLY durable role prose, the `cyboflow_report_step` semantics, and the v1 subagent-limit note. The dynamic id list comes only from the generator.
+- **Parity is by construction** (derive from the same resolved object `getPhaseState` uses at `runs.ts`), so the no-drift guarantee becomes "every emitted id ∈ the RESOLVED def's flat steps", not "∈ `WORKFLOW_DEFINITIONS[name]`". The reframed parity test is TASK-804.
 
 ## Objective
 

@@ -184,7 +184,7 @@ export interface CreatePanelExecutionDiffData {
 }
 
 // ---------------------------------------------------------------------------
-// Native task backlog row interfaces (migration 013_native_tasks.sql).
+// Native task backlog row interfaces (migration 014_native_tasks.sql).
 //
 // These mirror the SQL columns 1:1. SQLite stores BOOLEAN as 0/1, so boolean
 // columns surface as `number` (0|1) on read — consumers normalize to boolean.

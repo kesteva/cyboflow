@@ -81,9 +81,14 @@ describe('WorkflowRegistry', () => {
   let logger: ReturnType<typeof makeSpyLogger>;
 
   beforeEach(() => {
-    // getRunById now SELECTs current_step_id + the migration-013 run->task
+    // getRunById now SELECTs current_step_id + the migration-014 run->task
     // columns; opt the fixture into those columns so the projection resolves.
     db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    // createRun also stamps workflow_runs.substrate (IDEA-013 / TASK-806); layer
+    // that additive ALTER on top so the in-memory fixture carries the column.
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
+    );
     logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });
@@ -412,6 +417,54 @@ describe('WorkflowRegistry', () => {
     it('throws when the workflow does not exist', () => {
       expect(() => registry.createRun('nonexistent-id')).toThrow('not found');
     });
+
+    // ───── substrate stamping (IDEA-013 / TASK-806) ─────
+
+    it("stamps the default substrate 'sdk' when no override is set (zero-behavior-change)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'substrate-default.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId);
+
+        // Returned value floors to 'sdk'.
+        expect(result.substrate).toBe('sdk');
+
+        // And it is persisted on the row.
+        interface SubstrateRow { substrate: string }
+        const row = db.prepare('SELECT substrate FROM workflow_runs WHERE id = ?').get(result.runId) as SubstrateRow;
+        expect(row.substrate).toBe('sdk');
+      });
+    });
+
+    it("stamps 'interactive' when CYBOFLOW_SUBSTRATE resolves it via the env override level", async () => {
+      const prev = process.env.CYBOFLOW_SUBSTRATE;
+      process.env.CYBOFLOW_SUBSTRATE = 'interactive';
+      try {
+        await withTempDir('workflow-registry-test-', async (tmpDir) => {
+          const path = writeTempMd(tmpDir, 'substrate-interactive.md', '---\n---\n');
+          registry.seed(1, [{ name: 'planner', path }]);
+
+          interface IdRow { id: string }
+          const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+          const result = registry.createRun(workflowId);
+
+          expect(result.substrate).toBe('interactive');
+
+          interface SubstrateRow { substrate: string }
+          const row = db.prepare('SELECT substrate FROM workflow_runs WHERE id = ?').get(result.runId) as SubstrateRow;
+          expect(row.substrate).toBe('interactive');
+        });
+      } finally {
+        if (prev === undefined) {
+          delete process.env.CYBOFLOW_SUBSTRATE;
+        } else {
+          process.env.CYBOFLOW_SUBSTRATE = prev;
+        }
+      }
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -507,6 +560,46 @@ describe('WorkflowRegistry', () => {
         expect(run).not.toBeNull();
         expect(run!.started_at).toBe('2026-05-18T10:00:00Z');
         expect(run!.ended_at).toBe('2026-05-18T11:30:00Z');
+      });
+    });
+
+    // ───── substrate read-back + immutability (IDEA-013 / TASK-806) ─────
+
+    it("getRunById round-trips the stamped substrate ('sdk' default)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'substrate-readback.md', '---\n---\n');
+        registry.seed(1, [{ name: 'soloflow', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        const { runId, substrate } = registry.createRun(workflowId);
+
+        const run = registry.getRunById(runId);
+        expect(run).not.toBeNull();
+        expect(run!.substrate).toBe(substrate);
+        expect(run!.substrate).toBe('sdk');
+      });
+    });
+
+    it('substrate is immutable for the run — a second read returns the same value (no in-flight mutation path)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'substrate-immutable.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId } = registry.createRun(workflowId);
+
+        // Progress the run through a couple of status transitions; substrate must
+        // not move (createRun is the only writer; there is no UPDATE path).
+        db.prepare('UPDATE workflow_runs SET status = ? WHERE id = ?').run('running', runId);
+        const first = registry.getRunById(runId);
+        db.prepare('UPDATE workflow_runs SET status = ? WHERE id = ?').run('completed', runId);
+        const second = registry.getRunById(runId);
+
+        expect(first!.substrate).toBe('sdk');
+        expect(second!.substrate).toBe('sdk');
+        expect(first!.substrate).toBe(second!.substrate);
       });
     });
   });

@@ -302,4 +302,102 @@ describe('useWorkflowPhaseState', () => {
     expect(result.current.definition).toEqual(FIXTURE_DEFINITION);
   });
 
+  // -------------------------------------------------------------------------
+  // forward-jump: mergeTransition skipping steps forward (index 2 → index 5)
+  //
+  // Locks the i<idx / i===idx / i>idx branch of mergeTransition (not the
+  // already-covered all-done branch). With a 6-step flat definition and
+  // currentStepId at index 2, a transition to the index-5 step with status
+  // 'running' must back-fill steps 0-4 as 'done', mark step 5 'running', and
+  // (had there been any) leave steps after 5 'pending'. We use a 7-step flow so
+  // there IS an index-6 step to assert lands 'pending', exercising i>idx too.
+  // -------------------------------------------------------------------------
+  it('forward jump (index 2 → index 5): steps 0-4 done, 5 running, rest pending', async () => {
+    // 7 flat steps across 2 phases so a step exists both before and after idx 5.
+    const FORWARD_DEFINITION: WorkflowDefinition = {
+      id: 'sprint',
+      phases: [
+        {
+          id: 'phase-a',
+          label: 'Phase A',
+          color: '#3b6dd6',
+          steps: [
+            { id: 'f0', name: 'Step 0', agent: 'executor', mcps: [], retries: 0 },
+            { id: 'f1', name: 'Step 1', agent: 'executor', mcps: [], retries: 0 },
+            { id: 'f2', name: 'Step 2', agent: 'executor', mcps: [], retries: 0 },
+            { id: 'f3', name: 'Step 3', agent: 'executor', mcps: [], retries: 0 },
+          ],
+        },
+        {
+          id: 'phase-b',
+          label: 'Phase B',
+          color: '#5a4ad6',
+          steps: [
+            { id: 'f4', name: 'Step 4', agent: 'verifier', mcps: [], retries: 0 },
+            { id: 'f5', name: 'Step 5', agent: 'verifier', mcps: [], retries: 0 },
+            { id: 'f6', name: 'Step 6', agent: 'verifier', mcps: [], retries: 0 },
+          ],
+        },
+      ],
+    };
+
+    // Initial query: currentStepId is the index-2 step (f2), everything pending
+    // beyond it. f0/f1 already done.
+    const forwardStepStates: WorkflowStepState[] = [
+      { stepId: 'f0', status: 'done' },
+      { stepId: 'f1', status: 'done' },
+      { stepId: 'f2', status: 'running' },
+      { stepId: 'f3', status: 'pending' },
+      { stepId: 'f4', status: 'pending' },
+      { stepId: 'f5', status: 'pending' },
+      { stepId: 'f6', status: 'pending' },
+    ];
+    querySpy.mockResolvedValueOnce({
+      definition: FORWARD_DEFINITION,
+      currentStepId: 'f2',
+      stepStates: forwardStepStates,
+    });
+
+    const { result } = renderHook(() => useWorkflowPhaseState('r1'));
+
+    // Resolve the initial query so the definition (and currentStep at idx 2) lands.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentStepId).toBe('f2');
+
+    const subscribeCallArgs = subscribeSpy.mock.calls[0] as [
+      { runId: string },
+      {
+        onData: (event: {
+          stepId: string;
+          status: 'pending' | 'running' | 'done';
+          runId: string;
+          timestamp: string;
+        }) => void;
+        onError: (err: unknown) => void;
+      },
+    ];
+    const { onData } = subscribeCallArgs[1];
+
+    // Forward jump from idx 2 to the index-5 step (f5), status 'running'.
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 'f5', status: 'running', timestamp: '2026-01-01T00:00:00Z' });
+    });
+
+    expect(result.current.currentStepId).toBe('f5');
+    // Steps 0-4 back-filled to done, 5 running, 6 (after idx) pending.
+    expect(result.current.stepStates).toEqual([
+      { stepId: 'f0', status: 'done' },
+      { stepId: 'f1', status: 'done' },
+      { stepId: 'f2', status: 'done' },
+      { stepId: 'f3', status: 'done' },
+      { stepId: 'f4', status: 'done' },
+      { stepId: 'f5', status: 'running' },
+      { stepId: 'f6', status: 'pending' },
+    ]);
+    expect(result.current.error).toBeNull();
+  });
+
 });

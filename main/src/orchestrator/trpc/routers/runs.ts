@@ -24,6 +24,7 @@ import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
+import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -63,7 +64,15 @@ export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
 // ---------------------------------------------------------------------------
 
 export interface RunLauncherLike {
-  launch(workflowId: string, projectPath: string, taskId?: string): Promise<{
+  /**
+   * Launch a workflow run. `substrate` carries the user's per-run CLI choice
+   * (IDEA-013) down to the S1 resolver/stamp in WorkflowRegistry.createRun;
+   * `taskId` links the run to a native backlog task (migration 014). Both are
+   * OPTIONAL — when substrate is omitted the run falls through the resolver
+   * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId is omitted no task link is
+   * recorded.
+   */
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -139,7 +148,7 @@ export interface RunCloseoutSessionManagerLike {
 
 /**
  * Narrow slice of TaskChangeRouter needed for run close-out stage derivation
- * (migration 013). Optional — when absent, close-out skips native-task
+ * (migration 014). Optional — when absent, close-out skips native-task
  * derivation (backward-compat with the pre-tasks close-out path). The concrete
  * TaskChangeRouter singleton satisfies this shape structurally; the boot wiring
  * in main/src/index.ts passes it in.
@@ -159,7 +168,7 @@ export interface RunCloseoutDeps {
    */
   clearPendingApprovalsForRun: (runId: string) => void;
   /**
-   * Optional native-task stage deriver (migration 013). When wired, the merge /
+   * Optional native-task stage deriver (migration 014). When wired, the merge /
    * createPr / dismiss mutations stamp workflow_runs.outcome and recompute the
    * linked task's derived execution stage through the chokepoint. The run's
    * task_id is resolved BEFORE worktree teardown (the run row survives teardown,
@@ -215,7 +224,7 @@ function resolveRunForCloseout(
 
 /**
  * Stamp the DB-canonical close-out signal on workflow_runs.outcome and recompute
- * the linked task's derived execution stage through the chokepoint (migration 013).
+ * the linked task's derived execution stage through the chokepoint (migration 014).
  *
  * GATED on a wired `taskStageDeriver`: the entire migration-013 close-out path —
  * including ANY reference to the `task_id` / `outcome` columns — is opt-in via the
@@ -278,12 +287,22 @@ export const runsRouter = router({
       return listRunsHandler(ctx.db, input.projectId);
     }),
 
-  /** Start a new workflow run for the given workflow and project. */
+  /**
+   * Start a new workflow run for the given workflow and project.
+   *
+   * `substrate` is the user's per-run CLI choice (IDEA-013 / TASK-812). It is
+   * OPTIONAL and validated against the CliSubstrate union via z.enum; when the
+   * renderer omits it, resolution falls through the override ladder to
+   * DEFAULT_SUBSTRATE ('sdk'). The value is carried into runLauncher.launch and
+   * stamped (immutably, once) onto workflow_runs.substrate by the S1 resolver
+   * inside WorkflowRegistry.createRun — this router only forwards the choice.
+   */
   start: protectedProcedure
     .input(z.object({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
-      // Optional native-task link (migration 013). When supplied, the launcher
+      substrate: z.enum(['sdk', 'interactive']).optional(),
+      // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
     }))
@@ -301,11 +320,15 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
-        input.workflowId,
-        project.path,
-        input.taskId,
-      );
+      // Forward the per-run substrate choice (IDEA-013) and native-task link
+      // (migration 014). When BOTH are omitted, call the legacy 2-arg shape so
+      // the resolver ladder owns the substrate decision and the SDK-default call
+      // site stays byte-identical (zero-behavior-change floor); otherwise pass
+      // both (substrate may be undefined, which the resolver treats as default).
+      const { runId, worktreePath, branchName } =
+        input.substrate === undefined && input.taskId === undefined
+          ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId);
       return { runId, worktreePath, branchName };
     }),
 
