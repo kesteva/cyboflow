@@ -18,7 +18,7 @@
  *   6. Unmount cleanup off()s the SAME channel + handler and disposes the term.
  */
 import '@testing-library/jest-dom';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,31 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 // Setup
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// matchMedia stub — jsdom has no matchMedia. Drives the reduced-motion guard;
+// default reduced=false (motion on). Tests flip `reduce` to assert the animated
+// classes are dropped under prefers-reduced-motion.
+// ---------------------------------------------------------------------------
+
+function stubMatchMedia(reduce: boolean): void {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: query.includes('prefers-reduced-motion: reduce') ? reduce : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }),
+  });
+}
+
 beforeEach(() => {
+  stubMatchMedia(false);
   termMock.open.mockClear();
   termMock.write.mockClear();
   termMock.loadAddon.mockClear();
@@ -189,5 +213,105 @@ describe('InteractiveTerminalView', () => {
     expect(offSpy).toHaveBeenCalledTimes(1);
     expect(offSpy).toHaveBeenCalledWith('cyboflow:pty:run-cleanup', handler);
     expect(termMock.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-816 additive cases — warn guardrail, interactive chrome, reduced-motion.
+// These do NOT touch TASK-815's xterm/subscribe assertions above.
+// ---------------------------------------------------------------------------
+
+describe('InteractiveTerminalView — TASK-816 warn guardrail + chrome', () => {
+  it('opens the warn dialog on the FIRST terminal-surface mousedown only', () => {
+    render(<InteractiveTerminalView runId="run-warn" />);
+
+    // Closed initially.
+    expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
+
+    const surface = screen.getByTestId('interactive-terminal-surface');
+    fireEvent.mouseDown(surface);
+
+    // First mousedown opens the guardrail.
+    expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
+  });
+
+  it('does NOT re-open the warn dialog after dismissal (per-run has-warned flag)', () => {
+    render(<InteractiveTerminalView runId="run-warn-once" />);
+    const surface = screen.getByTestId('interactive-terminal-surface');
+
+    // First mousedown opens it; "Interact anyway" sets has-warned and closes.
+    fireEvent.mouseDown(surface);
+    expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Interact anyway'));
+    expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
+
+    // A second mousedown after dismissal must NOT re-open it.
+    fireEvent.mouseDown(surface);
+    expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
+  });
+
+  it('"Use chat instead" closes the dialog and leaves the surface usable', () => {
+    render(<InteractiveTerminalView runId="run-warn-usechat" />);
+    const surface = screen.getByTestId('interactive-terminal-surface');
+
+    fireEvent.mouseDown(surface);
+    fireEvent.click(screen.getByText('Use chat instead'));
+    expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
+
+    // "Use chat instead" does NOT set has-warned, so the next mousedown re-opens.
+    fireEvent.mouseDown(surface);
+    expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
+  });
+
+  it('renders the INTERACTIVE pill and LIVE PTY bar (resume/pid/tty) when substrate is interactive', () => {
+    render(
+      <InteractiveTerminalView
+        runId="run-chrome"
+        substrate="interactive"
+        resumeId="abc123"
+        pid={4242}
+        tty="ttys004"
+      />,
+    );
+
+    expect(screen.getByTestId('interactive-pill')).toHaveTextContent('INTERACTIVE');
+    const bar = screen.getByTestId('live-pty-bar');
+    expect(within(bar).getByTestId('live-pty-resume')).toHaveTextContent(
+      'claude --resume abc123',
+    );
+    expect(within(bar).getByTestId('live-pty-pid')).toHaveTextContent('pid 4242');
+    expect(within(bar).getByTestId('live-pty-tty')).toHaveTextContent('ttys004');
+    expect(within(bar).getByTestId('live-pty-elapsed')).toBeInTheDocument();
+    expect(within(bar).getByTestId('live-pty-tokens')).toBeInTheDocument();
+  });
+
+  it('omits the INTERACTIVE pill and LIVE PTY bar when substrate is sdk (Q3 preservation)', () => {
+    render(<InteractiveTerminalView runId="run-sdk" substrate="sdk" />);
+
+    expect(screen.queryByTestId('interactive-pill')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('live-pty-bar')).not.toBeInTheDocument();
+  });
+
+  it('applies animate-pulse to the pill/PTY dots when reduced-motion does NOT match', () => {
+    stubMatchMedia(false);
+    render(<InteractiveTerminalView runId="run-motion-on" substrate="interactive" />);
+
+    expect(screen.getByTestId('interactive-pill-dot').className).toContain(
+      'animate-pulse',
+    );
+    expect(screen.getByTestId('live-pty-dot').className).toContain('animate-pulse');
+  });
+
+  it('drops animate-pulse/animate-spin/blink from the dots when reduced-motion matches', () => {
+    stubMatchMedia(true);
+    render(<InteractiveTerminalView runId="run-motion-off" substrate="interactive" />);
+
+    const pillDot = screen.getByTestId('interactive-pill-dot').className;
+    const ptyDot = screen.getByTestId('live-pty-dot').className;
+    for (const cls of [pillDot, ptyDot]) {
+      expect(cls).not.toContain('animate-pulse');
+      expect(cls).not.toContain('animate-spin');
+      expect(cls).not.toContain('blink');
+    }
   });
 });

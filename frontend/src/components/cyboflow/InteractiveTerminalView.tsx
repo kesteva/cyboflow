@@ -23,12 +23,66 @@
  * `--font-family-mono` CSS variable (not the legacy hard-coded font string), and
  * the terminal ships `disableStdin: true`.
  */
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { subscribeToPtyBytes } from '../../utils/cyboflowApi';
+import { cn } from '../../utils/cn';
+import { InteractiveWarnDialog } from './InteractiveWarnDialog';
 import '@xterm/xterm/css/xterm.css';
+
+/** Run substrate, surfaced to the renderer by TASK-813 (AppRouter-inferred on
+ *  `ActiveRunRow.substrate`). The interactive chrome (INTERACTIVE pill + LIVE
+ *  PTY bar) renders only for `'interactive'`; for `'sdk'` it is absent (Q3
+ *  panel-preservation). Defaults to `'interactive'` because RunChatView only
+ *  mounts this view when the run is interactive. */
+type RunSubstrate = 'sdk' | 'interactive';
+
+/**
+ * Track `prefers-reduced-motion: reduce`. When it matches, the cosmetic motion
+ * loops (pulsing pill/PTY dots, spinners, cursor blink) are dropped — the
+ * accessibility contract from the IDEA-030 handoff. The elapsed counter keeps
+ * ticking because it is information, not decorative motion.
+ */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return false;
+    }
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (e: MediaQueryListEvent): void => setReduced(e.matches);
+    setReduced(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  return reduced;
+}
+
+/**
+ * Live elapsed counter for the LIVE PTY bar, formatted `Xm YYs`. Ticks every
+ * 1000ms via a setInterval cleared on unmount. This is information (a numeric
+ * value), so it keeps updating even under reduced-motion.
+ */
+function useElapsed(active: boolean): string {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${String(s).padStart(2, '0')}s`;
+}
 
 /**
  * Resolve the monospace font stack from the `--font-family-mono` CSS variable,
@@ -55,8 +109,61 @@ function writeWithAutoScroll(term: Terminal, chunk: string): void {
   if (atBottom) term.scrollToBottom();
 }
 
-export function InteractiveTerminalView({ runId }: { runId: string }): ReactElement {
+export function InteractiveTerminalView({
+  runId,
+  substrate = 'interactive',
+  resumeId,
+  pid,
+  tty,
+}: {
+  runId: string;
+  substrate?: RunSubstrate;
+  /** Session-identity fields for the LIVE PTY bar. Where a field is not yet
+   *  plumbed, a stable placeholder is rendered (real wiring is a follow-up). */
+  resumeId?: string;
+  pid?: number;
+  tty?: string;
+}): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const isInteractive = substrate === 'interactive';
+  const reducedMotion = usePrefersReducedMotion();
+
+  // First-interaction warn guardrail (IDEA-030). The dialog opens on the FIRST
+  // mousedown on the terminal surface and is suppressed for every subsequent
+  // mousedown once `hasWarned` is set. "Interact anyway" additionally flips the
+  // per-run keystroke-relay flag that TASK-817 reads to start relaying
+  // `xterm.onData`; this task SETS the flag but does NOT wire the relay.
+  const [hasWarned, setHasWarned] = useState(false);
+  const [warnOpen, setWarnOpen] = useState(false);
+  const [, setRelayEnabled] = useState(false);
+
+  const elapsed = useElapsed(isInteractive);
+
+  const handleSurfaceMouseDown = useCallback((): void => {
+    // FIRST mousedown only — the per-run has-warned flag suppresses every
+    // subsequent open for this run.
+    if (!hasWarned) setWarnOpen(true);
+  }, [hasWarned]);
+
+  const focusComposer = useCallback((): void => {
+    // Focus the chat composer so the operator types there (relayed as a queued
+    // message). The composer focus target is owned by the chat view; this is a
+    // best-effort focus of the run chat input if present.
+    const composer = document.querySelector<HTMLElement>(
+      '[data-testid="run-chat-input"] textarea, [data-testid="run-chat-input"] input',
+    );
+    composer?.focus();
+  }, []);
+
+  const grantTerminalFocus = useCallback((): void => {
+    // Mark the warning acknowledged + enable the per-run keystroke relay flag
+    // that TASK-817 consumes. The actual `xterm.onData` relay is wired by
+    // TASK-817 — do NOT relay keystrokes here.
+    setHasWarned(true);
+    setRelayEnabled(true);
+    containerRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -113,8 +220,96 @@ export function InteractiveTerminalView({ runId }: { runId: string }): ReactElem
   }, [runId]);
 
   return (
-    <div className="h-full w-full" data-testid="interactive-terminal-view">
-      <div ref={containerRef} className="h-full w-full" />
+    <div
+      className="flex h-full w-full flex-col"
+      data-testid="interactive-terminal-view"
+    >
+      {isInteractive && (
+        <>
+          {/* INTERACTIVE pill — pane-head chrome, interactive-only. */}
+          <div
+            className="flex items-center px-3 py-1.5"
+            data-testid="interactive-pane-head"
+          >
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border border-interactive px-2 py-0.5 font-semibold uppercase text-interactive"
+              style={{ fontSize: '9px', letterSpacing: '0.16em' }}
+              data-testid="interactive-pill"
+            >
+              <span
+                className={cn(
+                  'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
+                  !reducedMotion && 'animate-pulse',
+                )}
+                data-testid="interactive-pill-dot"
+                aria-hidden="true"
+              />
+              INTERACTIVE
+            </span>
+          </div>
+
+          {/* LIVE PTY session bar — interactive-only presentational chrome. */}
+          <div
+            className="flex items-center gap-3 border-b border-dashed border-border-primary bg-bg-secondary px-3 py-1"
+            style={{ fontSize: '11px' }}
+            data-testid="live-pty-bar"
+          >
+            <span
+              className="inline-flex items-center gap-1.5 font-bold uppercase text-interactive"
+              style={{ fontSize: '9px', letterSpacing: '0.16em' }}
+            >
+              <span
+                className={cn(
+                  'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
+                  !reducedMotion && 'animate-pulse',
+                )}
+                data-testid="live-pty-dot"
+                aria-hidden="true"
+              />
+              LIVE PTY
+            </span>
+            <span className="text-text-secondary" data-testid="live-pty-resume">
+              <span className="font-semibold text-text-primary">
+                claude --resume {resumeId ?? '—'}
+              </span>
+            </span>
+            <span className="text-text-tertiary" data-testid="live-pty-pid">
+              pid {pid ?? '—'}
+            </span>
+            <span className="text-text-tertiary" data-testid="live-pty-tty">
+              {tty ?? 'ttys000'}
+            </span>
+            <span
+              className="ml-auto tabular-nums text-text-tertiary"
+              data-testid="live-pty-elapsed"
+            >
+              {elapsed}
+            </span>
+            <span
+              className="tabular-nums text-text-tertiary"
+              data-testid="live-pty-tokens"
+            >
+              ↑ 0k tok
+            </span>
+          </div>
+        </>
+      )}
+
+      {/* Terminal surface — first mousedown opens the warn guardrail (once). */}
+      <div
+        className="min-h-0 flex-1"
+        onMouseDown={handleSurfaceMouseDown}
+        data-testid="interactive-terminal-surface"
+      >
+        <div ref={containerRef} className="h-full w-full" />
+      </div>
+
+      <InteractiveWarnDialog
+        isOpen={warnOpen}
+        onClose={() => setWarnOpen(false)}
+        onUseChat={focusComposer}
+        onInteractAnyway={grantTerminalFocus}
+      />
     </div>
   );
 }
