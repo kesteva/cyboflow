@@ -25,6 +25,7 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 
 // Shared stubs for the 4 required MCP collaborators.
 // All tests that construct RunLauncher must pass these (or equivalent stubs)
@@ -219,6 +220,51 @@ describe('RunLauncher.launch', () => {
 
       // Verify worktree manager was called with correct args
       expect(fakeWorktree.createDeterministicWorktree).toHaveBeenCalledWith(tmpDir, 'sprint', cannedRunId);
+    });
+  });
+
+  it('threads the per-run substrate choice into WorkflowRegistry.createRun', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const createRunSpy = vi.fn((_id: string, _substrate?: CliSubstrate) => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'default' as const };
+      });
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: join(tmpDir, 'wt'),
+          branchName: 'cyboflow/sprint/x',
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      await launcher.launch(workflowId, tmpDir, 'interactive');
+
+      // The explicit per-run substrate choice must be forwarded to createRun as
+      // its 2nd argument (the bug: it was previously dropped as `_substrate`).
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive');
     });
   });
 

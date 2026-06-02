@@ -581,6 +581,23 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it("createRun stamps the explicit per-run substrate override ('interactive')", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'substrate-requested.md', '---\n---\n');
+        registry.seed(1, [{ name: 'soloflow', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        // The per-run UI choice (WorkflowPicker → runs.start → launch) is threaded
+        // as the highest-precedence override and must be stamped onto the row.
+        const { runId, substrate } = registry.createRun(workflowId, 'interactive');
+
+        expect(substrate).toBe('interactive');
+        const run = registry.getRunById(runId);
+        expect(run!.substrate).toBe('interactive');
+      });
+    });
+
     it('substrate is immutable for the run — a second read returns the same value (no in-flight mutation path)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'substrate-immutable.md', '---\n---\n');

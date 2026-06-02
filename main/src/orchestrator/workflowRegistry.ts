@@ -432,7 +432,10 @@ export class WorkflowRegistry {
    * stamped substrate.
    * Throws if the workflow does not exist.
    */
-  createRun(workflowId: string): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
+  createRun(
+    workflowId: string,
+    requestedSubstrate?: CliSubstrate,
+  ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
@@ -441,14 +444,16 @@ export class WorkflowRegistry {
     const runId = randomUUID().replace(/-/g, '');
     const permissionMode = workflow.permission_mode;
 
-    // Resolve the substrate via the override ladder. The registry does not yet
-    // receive the project/global config or workflow frontmatter collaborators,
-    // so v1 resolves from env (CYBOFLOW_SUBSTRATE) + the 'sdk' floor only.
+    // Resolve the substrate via the override ladder. The explicit per-run UI
+    // choice (requestedSubstrate, from WorkflowPicker → runs.start →
+    // RunLauncher.launch) is the HIGHEST-precedence level and is threaded here.
+    // The registry does not yet receive the project/global config or workflow
+    // frontmatter collaborators, so the remaining levels still resolve from env
+    // (CYBOFLOW_SUBSTRATE) + the 'sdk' floor.
     // TODO(S4/S7): thread frontmatterSubstrate / projectConfigSubstrate /
     // globalDefaultSubstrate through once those collaborators are injected here.
-    // The floor and stamp are correct regardless — with no override every run
-    // resolves 'sdk' (zero-behavior-change invariant).
-    const substrate = resolveSubstrate({ env: process.env });
+    // With no override at any level every run resolves 'sdk' (zero-behavior-change).
+    const substrate = resolveSubstrate({ requestedSubstrate, env: process.env });
 
     const insert = this.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate)

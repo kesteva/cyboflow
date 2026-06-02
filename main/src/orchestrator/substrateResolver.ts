@@ -32,7 +32,13 @@ export const SUBSTRATE_ENV_VAR = 'CYBOFLOW_SUBSTRATE';
  * resolution fall through to the next level rather than throwing.
  */
 export interface SubstrateResolverInputs {
-  /** Workflow .md frontmatter `substrate:` value. Highest precedence. */
+  /**
+   * Explicit per-run choice from the run-launch UI (WorkflowPicker → runs.start
+   * → RunLauncher.launch → createRun). HIGHEST precedence — a deliberate
+   * per-launch override beats any standing default. IDEA-013 / TASK-812.
+   */
+  requestedSubstrate?: string | null;
+  /** Workflow .md frontmatter `substrate:` value. */
   frontmatterSubstrate?: string | null;
   /** Per-project config override. */
   projectConfigSubstrate?: string | null;
@@ -46,11 +52,12 @@ export interface SubstrateResolverInputs {
  * Resolve the CLI substrate for a run.
  *
  * Precedence (highest wins):
- *   1. workflow frontmatter `substrate:`
- *   2. per-project config override
- *   3. ConfigManager.defaultSubstrate global
- *   4. env.CYBOFLOW_SUBSTRATE
- *   5. DEFAULT_SUBSTRATE ('sdk') — the hard floor.
+ *   1. explicit per-run UI choice (requestedSubstrate)
+ *   2. workflow frontmatter `substrate:`
+ *   3. per-project config override
+ *   4. ConfigManager.defaultSubstrate global
+ *   5. env.CYBOFLOW_SUBSTRATE
+ *   6. DEFAULT_SUBSTRATE ('sdk') — the hard floor.
  *
  * An unrecognized value at any level is ignored (never throws) and resolution
  * falls through to the next level — mirroring extractPermissionMode's
@@ -60,6 +67,7 @@ export function resolveSubstrate(inputs: SubstrateResolverInputs): CliSubstrate 
   const env = inputs.env ?? process.env;
 
   const candidates: Array<string | null | undefined> = [
+    inputs.requestedSubstrate,
     inputs.frontmatterSubstrate,
     inputs.projectConfigSubstrate,
     inputs.globalDefaultSubstrate,
