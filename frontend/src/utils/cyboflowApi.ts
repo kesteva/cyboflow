@@ -108,6 +108,41 @@ export function subscribeToStreamEvents({
 }
 
 /**
+ * Subscribe to the RAW interactive-PTY byte stream for a run.
+ *
+ * Registers a listener on the dedicated `cyboflow:pty:<runId>` channel and
+ * returns a cleanup function that removes it on unmount / runId change.
+ *
+ * This is a RAW byte channel — NOT the structured `cyboflow:stream:<runId>`
+ * envelope. The backend `ptyPublisher` (TASK-814) sends each chunk as the
+ * verbatim PTY ANSI string, so the payload is typed as a plain `string`:
+ *   - it is NOT a tRPC/AppRouter output, so it does NOT reuse the
+ *     AppRouter-coupled `StreamEvent` discriminated union, and
+ *   - it is NOT wrapped in an `IPCResponse`.
+ * The bytes feed `xterm.Terminal.write()` DIRECTLY (see
+ * `InteractiveTerminalView`) and must NEVER enter `cyboflowStore.streamEvents`
+ * (Q3 panel-preservation / store-isolation). The structured `runEventBridge`
+ * drops this channel by construction (its `type !== 'json'` filter), so the two
+ * pipelines never cross-contaminate.
+ */
+export function subscribeToPtyBytes({
+  runId,
+  onData,
+}: {
+  runId: string;
+  onData: (chunk: string) => void;
+}): () => void {
+  const electron = requireElectron();
+  const channel = `cyboflow:pty:${runId}`;
+  // The IPC preload bridges events as (...args) where args[0] is the raw chunk.
+  const handler = (...args: unknown[]) => {
+    onData(args[0] as string);
+  };
+  electron.on(channel, handler);
+  return () => electron.off(channel, handler);
+}
+
+/**
  * Approve or deny a day-3 gate approval request.
  *
  * NOTE: The main-process handler is currently a NOT_IMPLEMENTED stub.
@@ -139,5 +174,6 @@ export async function approveRun({
 
 export const cyboflowApi = {
   subscribeToStreamEvents,
+  subscribeToPtyBytes,
   approveRun,
 };

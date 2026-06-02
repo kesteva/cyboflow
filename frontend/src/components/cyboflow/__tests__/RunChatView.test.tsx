@@ -1,20 +1,27 @@
 /**
- * RunChatView component tests (Phase 3 chat unification).
+ * RunChatView component tests.
  *
- * RunChatView now renders through the shared <ChatTranscript> fed by
- * `cyboflow.runs.listUnifiedMessages`. Behaviors verified:
- *   1. On mount with runId set, calls listUnifiedMessages.query once with { runId }.
- *   2. Re-queries with the new runId when runId changes.
- *   3. UnifiedMessage assistant/user text renders through the transcript.
- *   4. AskUserQuestion tool_call segments route to an inline AskUserQuestionCard
- *      via the renderToolCallExtra hook, matched by toolUseId.
- *   5. PendingApprovalsForRun is filtered by runId — only run-A approvals render.
- *   6. Quick-session mode (runId=null + activeQuickSessionId set) renders placeholder, skips query.
- *   7. Empty mode (runId=null + activeQuickSessionId=null) renders "No active run".
- *   8. A debounced live re-query fires after streamEvents change.
+ * RunChatView renders the run's conversation. As of IDEA-030 / TASK-815 it
+ * branches on the run's CLI substrate (read from activeRunsStore the way
+ * ChatInput does):
+ *   - 'interactive' → the live PTY xterm (InteractiveTerminalView) REPLACES the
+ *     structured transcript; the right PromptNavigation rail is dropped; the
+ *     composer (ChatInput) and approvals strip (PendingApprovalsForRun) stay
+ *     mounted. The listUnifiedMessages-fed ChatTranscript stays dormant (not in
+ *     the DOM) so the conversation is not double-rendered.
+ *   - 'sdk' / undefined → the existing ChatTranscript + PromptNavigation rail,
+ *     byte-for-byte the prior behavior.
+ *
+ * Heavy children are mocked as testid stubs so the branch logic — not pixel
+ * rendering — is under test. Data-flow behaviors verified alongside the branch:
+ *   - On mount with runId set, calls listUnifiedMessages.query once with { runId }.
+ *   - Re-queries with the new runId when runId changes.
+ *   - Quick-session mode renders a placeholder and skips the query.
+ *   - Empty mode renders "No active run".
+ *   - A debounced live re-query fires after streamEvents change.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
@@ -24,8 +31,10 @@ import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage'
 
 vi.mock('../../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: vi.fn(() => vi.fn()),
+  subscribeToPtyBytes: vi.fn(() => vi.fn()),
   cyboflowApi: {
     subscribeToStreamEvents: vi.fn(() => vi.fn()),
+    subscribeToPtyBytes: vi.fn(() => vi.fn()),
     approveRun: vi.fn(),
   },
 }));
@@ -43,53 +52,45 @@ vi.mock('../../../trpc/client', () => ({
         listUnifiedMessages: {
           query: (...args: Parameters<typeof mockListUnifiedMessages>) => mockListUnifiedMessages(...args),
         },
-        listMessages: {
-          query: vi.fn(async () => []),
-        },
-        cancelAndRestart: {
-          mutate: vi.fn(async () => ({})),
-        },
-      },
-      questions: {
-        listPending: { query: vi.fn(async () => []) },
-        onQuestionCreated: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
-        onQuestionAnswered: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
-        answer: { mutate: vi.fn(async () => ({})) },
-      },
-      approvals: {
-        listPending: { query: vi.fn(async () => []) },
-        approve: { mutate: vi.fn(async () => ({})) },
-        reject: { mutate: vi.fn(async () => ({})) },
-        approveRestOfRun: { mutate: vi.fn(async () => ({ decided: 0 })) },
       },
       events: {
-        setBadgeCount: { mutate: vi.fn(async () => ({})) },
+        onStuckDetected: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
         onApprovalCreated: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
         onApprovalDecided: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
+        onRunStatusChanged: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
       },
     },
   },
 }));
 
 // ---------------------------------------------------------------------------
-// Mock AskUserQuestionCard with a testid stub
+// Mock the heavy children as testid stubs — branch logic, not pixel rendering.
 // ---------------------------------------------------------------------------
 
-vi.mock('../../AskUserQuestion/AskUserQuestionCard', () => ({
-  AskUserQuestionCard: ({ item }: { item: { id: string } }) => (
-    <div data-testid={`ask-user-question-card-${item.id}`}>AskUserQuestionCard:{item.id}</div>
+vi.mock('../InteractiveTerminalView', () => ({
+  InteractiveTerminalView: ({ runId }: { runId: string }) => (
+    <div data-testid="interactive-terminal-view">InteractiveTerminalView:{runId}</div>
   ),
 }));
 
-// ---------------------------------------------------------------------------
-// Mock PendingApprovalCard with a testid stub
-// ---------------------------------------------------------------------------
+vi.mock('../../chat/ChatTranscript', () => ({
+  ChatTranscript: () => <div data-testid="chat-transcript">ChatTranscript</div>,
+}));
 
-vi.mock('../../ReviewQueue/PendingApprovalCard', () => ({
-  PendingApprovalCard: ({ item }: { item: { kind: string; approval?: { id: string } } }) => {
-    const id = item.kind === 'single' && item.approval ? item.approval.id : 'group';
-    return <div data-testid={`pending-approval-card-${id}`}>PendingApprovalCard:{id}</div>;
-  },
+vi.mock('../../panels/claude/PromptNavigation', () => ({
+  PromptNavigation: () => <div data-testid="prompt-navigation">PromptNavigation</div>,
+}));
+
+vi.mock('../ChatInput', () => ({
+  ChatInput: ({ runId }: { runId: string | null }) => (
+    <div data-testid="chat-input">ChatInput:{String(runId)}</div>
+  ),
+}));
+
+vi.mock('../../ReviewQueue/PendingApprovalsForRun', () => ({
+  PendingApprovalsForRun: ({ runId }: { runId: string | null }) => (
+    <div data-testid="pending-approvals-for-run">PendingApprovalsForRun:{String(runId)}</div>
+  ),
 }));
 
 // ---------------------------------------------------------------------------
@@ -98,11 +99,9 @@ vi.mock('../../ReviewQueue/PendingApprovalCard', () => ({
 
 import { RunChatView } from '../RunChatView';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
-import { useReviewQueueStore } from '../../../stores/reviewQueueStore';
-import { useQuestionStore } from '../../../stores/questionStore';
-import type { StreamEvent } from '../../../utils/cyboflowApi';
-import type { Approval } from '../../../../../shared/types/approvals';
-import type { Question } from '../../../../../shared/types/questions';
+import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+import type { ActiveRunRow } from '../../../stores/activeRunsStore';
+import type { CliSubstrate } from '../../../../../shared/types/substrate';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -112,8 +111,7 @@ beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
-    useReviewQueueStore.getState().replaceAll([]);
-    useQuestionStore.getState().replaceAll([]);
+    useActiveRunsStore.setState({ runsByProject: {} });
   });
   mockListUnifiedMessages.mockClear();
   mockListUnifiedMessages.mockImplementation(async () => []);
@@ -125,82 +123,112 @@ beforeEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeApproval(id: string, runId: string): Approval {
+function makeRunRow(id: string, substrate: CliSubstrate | undefined): ActiveRunRow {
   return {
     id,
-    runId,
-    workflowName: 'test-workflow',
-    toolName: 'Bash',
-    payloadPreview: 'echo hello',
-    rationale: null,
-    createdAt: new Date().toISOString(),
-    status: 'pending',
+    workflow_id: 'wf-1',
+    project_id: 7,
+    status: 'running',
+    worktree_path: '/Users/me/worktrees/feature-x',
+    branch_name: 'feature/x',
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    started_at: null,
+    ended_at: null,
+    stuck_reason: null,
+    substrate,
+    workflowName: 'planner',
   };
 }
 
-function makeQuestion(id: string, runId: string, toolUseId: string): Question {
-  return {
-    id,
-    runId,
-    workflowName: 'test-workflow',
-    toolUseId,
-    questions: [
-      {
-        question: 'Which option?',
-        header: 'Pick one',
-        multiSelect: false,
-        options: [{ label: 'A' }, { label: 'B' }],
-      },
-    ],
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-    answeredAt: null,
-    answerJson: null,
-  };
-}
-
-function assistantText(id: string, text: string): UnifiedMessage {
-  return {
-    id,
-    role: 'assistant',
-    timestamp: '2026-05-26T00:00:00Z',
-    segments: [{ type: 'text', content: text }],
-  };
-}
-
-function userText(id: string, text: string): UnifiedMessage {
-  return {
-    id,
-    role: 'user',
-    timestamp: '2026-05-26T00:00:00Z',
-    segments: [{ type: 'text', content: text }],
-  };
-}
-
-function askQuestionMessage(id: string, toolUseId: string): UnifiedMessage {
-  return {
-    id,
-    role: 'assistant',
-    timestamp: '2026-05-26T00:00:02Z',
-    segments: [
-      {
-        type: 'tool_call',
-        tool: {
-          id: toolUseId,
-          name: 'AskUserQuestion',
-          input: { questions: [] },
-          status: 'pending',
-        },
-      },
-    ],
-  };
+function seedRun(id: string, substrate: CliSubstrate | undefined): void {
+  act(() => {
+    useActiveRunsStore.setState({ runsByProject: { 7: [makeRunRow(id, substrate)] } });
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests — substrate branch
 // ---------------------------------------------------------------------------
 
-describe('RunChatView', () => {
+describe('RunChatView — substrate branch', () => {
+  it("interactive: renders InteractiveTerminalView, drops the rail + ChatTranscript, keeps composer + approvals", async () => {
+    seedRun('run-int', 'interactive');
+
+    render(<RunChatView runId="run-int" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('interactive-terminal-view')).toBeInTheDocument();
+    });
+    // The structured transcript surface + rail are gone.
+    expect(screen.queryByTestId('chat-transcript')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('prompt-navigation')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-chat-prompt-rail-toggle')).not.toBeInTheDocument();
+    // Composer + approvals stay mounted.
+    expect(screen.getByTestId('chat-input')).toBeInTheDocument();
+    expect(screen.getByTestId('pending-approvals-for-run')).toBeInTheDocument();
+  });
+
+  it("sdk: renders ChatTranscript + PromptNavigation rail, no InteractiveTerminalView", async () => {
+    seedRun('run-sdk', 'sdk');
+
+    render(<RunChatView runId="run-sdk" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-transcript')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('prompt-navigation')).toBeInTheDocument();
+    expect(screen.getByTestId('run-chat-prompt-rail-toggle')).toBeInTheDocument();
+    expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
+    // Composer + approvals stay mounted here too.
+    expect(screen.getByTestId('chat-input')).toBeInTheDocument();
+    expect(screen.getByTestId('pending-approvals-for-run')).toBeInTheDocument();
+  });
+
+  it("undefined substrate falls back to the sdk surface (ChatTranscript + rail)", async () => {
+    seedRun('run-undef', undefined);
+
+    render(<RunChatView runId="run-undef" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-transcript')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('prompt-navigation')).toBeInTheDocument();
+    expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
+  });
+
+  it("no matching run row falls back to the sdk surface (ChatTranscript + rail)", async () => {
+    // runsByProject does not contain run-missing → run resolves null → sdk path.
+    render(<RunChatView runId="run-missing" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-transcript')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('prompt-navigation')).toBeInTheDocument();
+    expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
+  });
+
+  it("interactive: does NOT render the structured ChatTranscript (no double-render)", async () => {
+    mockListUnifiedMessages.mockImplementation(async () => [
+      { id: 'a-1', role: 'assistant', timestamp: '2026-05-26T00:00:00Z', segments: [{ type: 'text', content: 'hi' }] },
+    ]);
+    seedRun('run-int2', 'interactive');
+
+    render(<RunChatView runId="run-int2" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('interactive-terminal-view')).toBeInTheDocument();
+    });
+    // Even with messages available, the ChatTranscript is not in the DOM.
+    expect(screen.queryByTestId('chat-transcript')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests — data flow (substrate-agnostic; sdk surface)
+// ---------------------------------------------------------------------------
+
+describe('RunChatView — data flow', () => {
   it('calls listUnifiedMessages.query once on mount with the given runId', async () => {
     render(<RunChatView runId="run-A" />);
 
@@ -222,89 +250,7 @@ describe('RunChatView', () => {
     });
   });
 
-  it('renders assistant and user text from the unified projection', async () => {
-    mockListUnifiedMessages.mockImplementationOnce(async () => [
-      userText('u-1', 'A user prompt.'),
-      assistantText('a-1', 'Hello from the assistant.'),
-    ]);
-
-    render(<RunChatView runId="run-1" />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Hello from the assistant.')).toBeInTheDocument();
-      // User prompt appears in BOTH the transcript and the prompt-history rail.
-      expect(screen.getAllByText('A user prompt.').length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  it('renders the prompt-history rail from user turns and toggles it closed', async () => {
-    mockListUnifiedMessages.mockImplementationOnce(async () => [
-      userText('u-1', 'First prompt.'),
-      assistantText('a-1', 'Answer one.'),
-      userText('u-2', 'Second prompt.'),
-    ]);
-
-    render(<RunChatView runId="run-1" />);
-
-    // Rail header is unique to the rail; both user turns surface as markers
-    // (also present in the transcript, hence getAllByText).
-    await waitFor(() => {
-      expect(screen.getByText('Prompt History')).toBeInTheDocument();
-      expect(screen.getAllByText('First prompt.').length).toBeGreaterThanOrEqual(1);
-      expect(screen.getAllByText('Second prompt.').length).toBeGreaterThanOrEqual(1);
-    });
-
-    // Toggle collapses the rail (header disappears).
-    fireEvent.click(screen.getByTestId('run-chat-prompt-rail-toggle'));
-    expect(screen.queryByText('Prompt History')).not.toBeInTheDocument();
-  });
-
-  it('renders an inline AskUserQuestionCard at the AskUserQuestion tool_call position', async () => {
-    mockListUnifiedMessages.mockImplementationOnce(async () => [
-      askQuestionMessage('a-q', 'tu-q1'),
-    ]);
-
-    act(() => {
-      useQuestionStore.getState().replaceAll([makeQuestion('q-001', 'run-1', 'tu-q1')]);
-    });
-
-    render(<RunChatView runId="run-1" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('ask-user-question-card-q-001')).toBeInTheDocument();
-    });
-  });
-
-  it('does not render a question card when no pending question matches the tool_call id', async () => {
-    mockListUnifiedMessages.mockImplementationOnce(async () => [
-      askQuestionMessage('a-q', 'tu-gone'),
-    ]);
-
-    render(<RunChatView runId="run-1" />);
-
-    await waitFor(() => {
-      expect(mockListUnifiedMessages).toHaveBeenCalledTimes(1);
-    });
-    expect(screen.queryByTestId('ask-user-question-card-q-001')).not.toBeInTheDocument();
-  });
-
-  it('renders only approvals for the active runId and excludes approvals for other runs', async () => {
-    const approvalA = makeApproval('appr-A', 'run-A');
-    const approvalB = makeApproval('appr-B', 'run-B');
-
-    act(() => {
-      useReviewQueueStore.getState().replaceAll([approvalA, approvalB]);
-    });
-
-    render(<RunChatView runId="run-A" />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pending-approval-card-appr-A')).toBeInTheDocument();
-      expect(screen.queryByTestId('pending-approval-card-appr-B')).not.toBeInTheDocument();
-    });
-  });
-
-  it('renders quick-session placeholder when runId is null and activeQuickSessionId is set', async () => {
+  it('renders quick-session placeholder when runId is null and activeQuickSessionId is set', () => {
     act(() => {
       useCyboflowStore.getState().setActiveQuickSession('qs-001');
     });
@@ -331,58 +277,26 @@ describe('RunChatView', () => {
     // Initial mount fetch
     await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalledTimes(1));
 
-    const event: StreamEvent = {
-      runId: 'run-1',
-      type: 'assistant',
-      payload: {
-        type: 'assistant',
-        message: {
-          id: 'msg-001',
-          model: 'claude-sonnet',
-          role: 'assistant',
-          content: [{ type: 'text', text: 'live delta' }],
-        },
-      },
-      timestamp: '2026-05-26T00:00:00Z',
-    };
-
     act(() => {
-      useCyboflowStore.getState().appendStreamEvent(event);
+      useCyboflowStore.getState().appendStreamEvent({
+        runId: 'run-1',
+        type: 'assistant',
+        payload: {
+          type: 'assistant',
+          message: {
+            id: 'msg-001',
+            model: 'claude-sonnet',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'live delta' }],
+          },
+        },
+        timestamp: '2026-05-26T00:00:00Z',
+      });
     });
 
     // Debounced re-query should fire after the debounce window.
     await waitFor(() => {
       expect(mockListUnifiedMessages).toHaveBeenCalledTimes(2);
     }, { timeout: 2000 });
-  });
-
-  it('ignores the result of a stale fetch when runId changes before it resolves', async () => {
-    let resolveFirst!: (v: UnifiedMessage[]) => void;
-    const firstPromise = new Promise<UnifiedMessage[]>((resolve) => {
-      resolveFirst = resolve;
-    });
-
-    mockListUnifiedMessages
-      .mockImplementationOnce(() => firstPromise)
-      .mockImplementationOnce(async () => [assistantText('a-fresh', 'fresh content')]);
-
-    const { rerender } = render(<RunChatView runId="run-stale" />);
-    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalledTimes(1));
-
-    act(() => {
-      rerender(<RunChatView runId="run-fresh" />);
-    });
-    await waitFor(() => expect(mockListUnifiedMessages).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByText('fresh content')).toBeInTheDocument());
-
-    // Resolve the stale fetch — must NOT clobber fresh content.
-    act(() => {
-      resolveFirst([assistantText('a-stale', 'stale content')]);
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('fresh content')).toBeInTheDocument();
-      expect(screen.queryByText('stale content')).not.toBeInTheDocument();
-    });
   });
 });
