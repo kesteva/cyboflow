@@ -45,6 +45,9 @@ import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
+import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
+import type { TaskChange, TaskActor } from '../taskChangeRouter';
+import type { Priority, TaskType } from '../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -55,6 +58,39 @@ export type McpQueryMessage =
   | { type: 'mcp-get-run'; requestId: string; runId: string; targetRunId: string }
   | { type: 'mcp-submit-checkpoint'; requestId: string; runId: string; label: string; note?: string }
   | { type: 'mcp-report-step'; requestId: string; runId: string; stepId: string; status?: 'running' | 'done' }
+  | {
+      type: 'mcp-create-task';
+      requestId: string;
+      runId: string;
+      title: string;
+      taskType?: TaskType;
+      summary?: string;
+      priority?: Priority;
+      repo?: string;
+      parentEpicId?: string;
+      boardId?: string;
+      initialStageId?: string;
+    }
+  | {
+      type: 'mcp-update-task';
+      requestId: string;
+      runId: string;
+      taskId: string;
+      title?: string;
+      summary?: string;
+      priority?: Priority;
+      repo?: string;
+      parentEpicId?: string;
+      expectedVersion?: number;
+    }
+  | {
+      type: 'mcp-set-task-stage';
+      requestId: string;
+      runId: string;
+      taskId: string;
+      stageId: string;
+      expectedVersion?: number;
+    }
   | {
       type: 'shell-approval-request';
       requestId: string;
@@ -152,6 +188,15 @@ export class McpQueryHandler {
           break;
         case 'mcp-report-step':
           this.handleReportStep(msg, client);
+          break;
+        case 'mcp-create-task':
+          await this.handleCreateTask(msg, client);
+          break;
+        case 'mcp-update-task':
+          await this.handleUpdateTask(msg, client);
+          break;
+        case 'mcp-set-task-stage':
+          await this.handleSetTaskStage(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -387,6 +432,275 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { step_id: msg.stepId, status },
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Native task writes (cyboflow_create_task / _update_task / _set_task_stage)
+  //
+  // All three route through the SINGLE write chokepoint
+  // TaskChangeRouter.getInstance().applyChange — they NEVER UPDATE `tasks`
+  // directly. The actor is derived from the calling run's current step
+  // (agent:LABEL), mirroring TaskChangeRouter.resolveAgentLabel. The
+  // orchestrator-derived stage authority, active-run guard, parent validation,
+  // and optimistic concurrency are all enforced INSIDE applyChange and surface
+  // here as TaskChangeError.code (forbidden_stage | active_runs | invalid_parent
+  // | not_found | concurrency) — they are DESIGNED rejections, not bugs.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Resolve the calling run into the project scope + agent actor needed to apply
+   * a task change. Returns a discriminated result so callers branch without any.
+   *
+   * Guards (parity with handleSubmitCheckpoint / handleReportStep):
+   *   - the 'orchestrator' sentinel runId has no workflow_runs row → reject
+   *     before any DB touch (task_write_requires_real_run);
+   *   - a missing run row → run_not_found;
+   *   - a terminal run (completed | failed | canceled) must not mutate tasks →
+   *     run_not_active.
+   *
+   * Actor derivation mirrors TaskChangeRouter.resolveAgentLabel:
+   *   label = snapshot[current_step_id] (non-empty string) ?? current_step_id ??
+   *           'unknown'; actor = `agent:${label}`.
+   */
+  private resolveTaskRunContext(
+    runId: string,
+  ): { ok: true; projectId: number; actor: TaskActor } | { ok: false; error: string } {
+    if (runId === 'orchestrator') {
+      return { ok: false, error: 'task_write_requires_real_run' };
+    }
+
+    const row = this.db
+      .prepare(
+        `SELECT project_id AS projectId, status, current_step_id AS currentStepId,
+                steps_snapshot_json AS stepsSnapshotJson
+           FROM workflow_runs WHERE id = ?`,
+      )
+      .get(runId) as
+      | {
+          projectId?: unknown;
+          status?: unknown;
+          currentStepId?: unknown;
+          stepsSnapshotJson?: unknown;
+        }
+      | undefined;
+
+    if (!row) {
+      return { ok: false, error: 'run_not_found' };
+    }
+
+    const status = typeof row.status === 'string' ? row.status : '';
+    if (status === 'completed' || status === 'failed' || status === 'canceled') {
+      return { ok: false, error: 'run_not_active' };
+    }
+
+    const projectId = typeof row.projectId === 'number' ? row.projectId : Number(row.projectId);
+    const currentStepId = typeof row.currentStepId === 'string' ? row.currentStepId : null;
+    const stepsSnapshotJson = typeof row.stepsSnapshotJson === 'string' ? row.stepsSnapshotJson : null;
+
+    let label = 'unknown';
+    if (currentStepId && stepsSnapshotJson) {
+      try {
+        const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
+        const agent = snapshot[currentStepId];
+        if (typeof agent === 'string' && agent.length > 0) {
+          label = agent;
+        } else {
+          label = currentStepId;
+        }
+      } catch {
+        // malformed snapshot — fall back to the step id when present.
+        label = currentStepId;
+      }
+    } else if (currentStepId) {
+      label = currentStepId;
+    }
+
+    const actor: TaskActor = `agent:${label}`;
+    return { ok: true, projectId, actor };
+  }
+
+  /**
+   * Re-read a task's identity columns after a chokepoint write so the response
+   * carries the canonical ref / stage / version / type. Returns undefined only
+   * if the row vanished between commit and read (caller surfaces not_found).
+   */
+  private readTaskIdentity(
+    taskId: string,
+  ): { ref: string; stage_id: string; version: number; type: TaskType } | undefined {
+    const row = this.db
+      .prepare(`SELECT ref, stage_id, version, type FROM tasks WHERE id = ?`)
+      .get(taskId) as
+      | { ref?: unknown; stage_id?: unknown; version?: unknown; type?: unknown }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      ref: typeof row.ref === 'string' ? row.ref : '',
+      stage_id: typeof row.stage_id === 'string' ? row.stage_id : '',
+      version: typeof row.version === 'number' ? row.version : Number(row.version),
+      type: row.type as TaskType,
+    };
+  }
+
+  private async handleCreateTask(
+    msg: Extract<McpQueryMessage, { type: 'mcp-create-task' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const change: TaskChange = {
+      actor: ctx.actor,
+      runId: msg.runId,
+      type: msg.taskType,
+      title: msg.title,
+      summary: msg.summary,
+      priority: msg.priority,
+      repo: msg.repo,
+      parentEpicId: msg.parentEpicId ?? null,
+      boardId: msg.boardId,
+      initialStageId: msg.initialStageId,
+    };
+
+    try {
+      const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
+      const identity = this.readTaskIdentity(taskId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          task_id: taskId,
+          ref: identity?.ref,
+          stage_id: identity?.stage_id,
+          type: identity?.type,
+          version: identity?.version,
+        },
+      });
+    } catch (err) {
+      this.writeTaskChangeError(client, msg.requestId, err);
+    }
+  }
+
+  private async handleUpdateTask(
+    msg: Extract<McpQueryMessage, { type: 'mcp-update-task' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const change: TaskChange = {
+      actor: ctx.actor,
+      runId: msg.runId,
+      taskId: msg.taskId,
+      fields: {
+        title: msg.title,
+        summary: msg.summary,
+        priority: msg.priority,
+        repo: msg.repo,
+      },
+      ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
+      expectedVersion: msg.expectedVersion,
+    };
+
+    try {
+      const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
+      const identity = this.readTaskIdentity(taskId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          task_id: taskId,
+          stage_id: identity?.stage_id,
+          version: identity?.version,
+        },
+      });
+    } catch (err) {
+      this.writeTaskChangeError(client, msg.requestId, err);
+    }
+  }
+
+  private async handleSetTaskStage(
+    msg: Extract<McpQueryMessage, { type: 'mcp-set-task-stage' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const change: TaskChange = {
+      actor: ctx.actor,
+      runId: msg.runId,
+      taskId: msg.taskId,
+      stageId: msg.stageId,
+      expectedVersion: msg.expectedVersion,
+    };
+
+    try {
+      const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
+      const identity = this.readTaskIdentity(taskId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          task_id: taskId,
+          stage_id: identity?.stage_id,
+          version: identity?.version,
+        },
+      });
+    } catch (err) {
+      this.writeTaskChangeError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Surface a chokepoint failure as an ok:false response. A TaskChangeError maps
+   * to its discriminated .code (mirrors the tasks tRPC router); anything else is
+   * logged and collapsed to the opaque 'task_change_failed'.
+   */
+  private writeTaskChangeError(client: net.Socket, requestId: string, err: unknown): void {
+    if (err instanceof TaskChangeError) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: err.code,
+      });
+      return;
+    }
+    this.logger?.error('[Cyboflow MCP Query] task change failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId,
+      ok: false,
+      error: 'task_change_failed',
     });
   }
 

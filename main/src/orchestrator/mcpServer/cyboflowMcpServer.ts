@@ -187,6 +187,57 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['step_id'],
         },
       },
+      {
+        name: 'cyboflow_create_task',
+        description:
+          'Create a backlog idea/epic/task for THIS run\'s project. The task is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single write chokepoint, and appears on the board.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Task title (required)' },
+            task_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: "Optional task type; defaults to 'idea'" },
+            summary: { type: 'string', description: 'Optional longer description' },
+            priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: "Optional priority; defaults to 'P2'" },
+            repo: { type: 'string', description: 'Optional repo identifier' },
+            parent_epic_id: { type: 'string', description: 'Optional parent epic id' },
+            board_id: { type: 'string', description: 'Optional board id; defaults to the project default board' },
+            initial_stage_id: { type: 'string', description: "Optional initial stage id; defaults to the board's first idea stage" },
+          },
+          required: ['title'],
+        },
+      },
+      {
+        name: 'cyboflow_update_task',
+        description:
+          'Update editable fields of an existing task. Re-parenting via parent_epic_id is only valid for type=\'task\' (otherwise rejected with error invalid_parent); a stale expected_version is rejected with error concurrency.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: { type: 'string', description: 'The task id to update (required)' },
+            title: { type: 'string', description: 'Optional new title' },
+            summary: { type: 'string', description: 'Optional new summary' },
+            priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: 'Optional new priority' },
+            repo: { type: 'string', description: 'Optional new repo identifier' },
+            parent_epic_id: { type: 'string', description: 'Optional parent epic id (re-parent)' },
+            expected_version: { type: 'number', description: 'Optional expected version for optimistic concurrency' },
+          },
+          required: ['task_id'],
+        },
+      },
+      {
+        name: 'cyboflow_set_task_stage',
+        description:
+          'Move a task to a planning/terminal stage. Execution stages are orchestrator-derived and will be rejected (error forbidden_stage); a task with active runs will be rejected (error active_runs).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: { type: 'string', description: 'The task id to move (required)' },
+            stage_id: { type: 'string', description: 'The target stage id (required)' },
+            expected_version: { type: 'number', description: 'Optional expected version for optimistic concurrency' },
+          },
+          required: ['task_id', 'stage_id'],
+        },
+      },
     ],
   };
 });
@@ -297,6 +348,242 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { stepId: step_id };
       if (status !== undefined) queryParams['status'] = status;
       return executeMcpQuery('mcp-report-step', queryParams);
+    }
+
+    case 'cyboflow_create_task': {
+      const args = (request.params.arguments ?? {}) as {
+        title?: unknown;
+        task_type?: unknown;
+        summary?: unknown;
+        priority?: unknown;
+        repo?: unknown;
+        parent_epic_id?: unknown;
+        board_id?: unknown;
+        initial_stage_id?: unknown;
+      };
+      const { title, task_type, summary, priority, repo, parent_epic_id, board_id, initial_stage_id } = args;
+      if (typeof title !== 'string' || title.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'title: string' }),
+            },
+          ],
+        };
+      }
+      if (task_type !== undefined && task_type !== 'idea' && task_type !== 'epic' && task_type !== 'task') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "task_type: 'idea' | 'epic' | 'task' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (summary !== undefined && typeof summary !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'summary: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0' | 'P1' | 'P2' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (repo !== undefined && typeof repo !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'repo: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (parent_epic_id !== undefined && typeof parent_epic_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'parent_epic_id: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (board_id !== undefined && typeof board_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'board_id: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (initial_stage_id !== undefined && typeof initial_stage_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'initial_stage_id: string (optional)' }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { title };
+      if (task_type !== undefined) queryParams['taskType'] = task_type;
+      if (summary !== undefined) queryParams['summary'] = summary;
+      if (priority !== undefined) queryParams['priority'] = priority;
+      if (repo !== undefined) queryParams['repo'] = repo;
+      if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
+      if (board_id !== undefined) queryParams['boardId'] = board_id;
+      if (initial_stage_id !== undefined) queryParams['initialStageId'] = initial_stage_id;
+      return executeMcpQuery('mcp-create-task', queryParams);
+    }
+
+    case 'cyboflow_update_task': {
+      const args = (request.params.arguments ?? {}) as {
+        task_id?: unknown;
+        title?: unknown;
+        summary?: unknown;
+        priority?: unknown;
+        repo?: unknown;
+        parent_epic_id?: unknown;
+        expected_version?: unknown;
+      };
+      const { task_id, title, summary, priority, repo, parent_epic_id, expected_version } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string' }),
+            },
+          ],
+        };
+      }
+      if (title !== undefined && typeof title !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'title: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (summary !== undefined && typeof summary !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'summary: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (priority !== undefined && priority !== 'P0' && priority !== 'P1' && priority !== 'P2') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "priority: 'P0' | 'P1' | 'P2' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (repo !== undefined && typeof repo !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'repo: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (parent_epic_id !== undefined && typeof parent_epic_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'parent_epic_id: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (expected_version !== undefined && typeof expected_version !== 'number') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'expected_version: number (optional)' }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { taskId: task_id };
+      if (title !== undefined) queryParams['title'] = title;
+      if (summary !== undefined) queryParams['summary'] = summary;
+      if (priority !== undefined) queryParams['priority'] = priority;
+      if (repo !== undefined) queryParams['repo'] = repo;
+      if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
+      if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
+      return executeMcpQuery('mcp-update-task', queryParams);
+    }
+
+    case 'cyboflow_set_task_stage': {
+      const args = (request.params.arguments ?? {}) as {
+        task_id?: unknown;
+        stage_id?: unknown;
+        expected_version?: unknown;
+      };
+      const { task_id, stage_id, expected_version } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string' }),
+            },
+          ],
+        };
+      }
+      if (typeof stage_id !== 'string' || stage_id.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'stage_id: string' }),
+            },
+          ],
+        };
+      }
+      if (expected_version !== undefined && typeof expected_version !== 'number') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'expected_version: number (optional)' }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { taskId: task_id, stageId: stage_id };
+      if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
+      return executeMcpQuery('mcp-set-task-stage', queryParams);
     }
 
     default:

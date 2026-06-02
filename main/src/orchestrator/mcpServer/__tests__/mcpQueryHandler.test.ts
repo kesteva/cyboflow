@@ -20,12 +20,15 @@
  * socket test double is used to assert on the JSON response bodies.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../../trpc/routers/events';
+import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -590,6 +593,499 @@ describe('McpQueryHandler', () => {
       // JOIN-miss path returns 'run_not_found'.
       expect(response.error).toBe('run_not_found');
       expect(emitted).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Native task writes — mcp-create-task / mcp-update-task / mcp-set-task-stage
+  //    (the three handlers routing through the TaskChangeRouter chokepoint).
+  // -------------------------------------------------------------------------
+
+  describe('native task write handlers', () => {
+    // The task handlers reach TaskChangeRouter.getInstance().applyChange, which
+    // needs the full native-task schema (boards/board_stages/tasks/task_events/
+    // task_ref_counters) plus the workflow_runs run->task link columns. The
+    // GATE_SCHEMA used elsewhere in this file does NOT have those tables, so we
+    // build a migration-backed in-memory DB exactly like taskChangeRouter.test.ts.
+
+    function buildTaskDb(): Database.Database {
+      const taskDb = new Database(':memory:');
+      taskDb.pragma('foreign_keys = ON');
+      // The 014 seed is `... FROM projects`, so the projects table MUST exist
+      // (with project 1) BEFORE migrations run or no board/stages seed.
+      taskDb.exec(`
+        CREATE TABLE projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL UNIQUE,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      taskDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+      const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+      // Production order 013 depends on: 006 (workflow_runs base) -> 011
+      // (current_step_id) -> 014 (native tasks + run->task columns + seed).
+      taskDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+      return taskDb;
+    }
+
+    function stage(position: number): string {
+      return `stage-board-1-default-${position}`;
+    }
+
+    /**
+     * Seed a workflows + workflow_runs pair. The run carries current_step_id +
+     * a steps_snapshot_json mapping that step id to an agent label, so
+     * resolveTaskRunContext derives actor = `agent:${label}`.
+     */
+    function seedTaskRun(
+      taskDb: Database.Database,
+      opts: {
+        runId: string;
+        status?: string;
+        currentStepId?: string | null;
+        stepsSnapshot?: Record<string, string> | null;
+        taskId?: string | null;
+      },
+    ): void {
+      taskDb
+        .prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+        )
+        .run();
+      taskDb
+        .prepare(
+          `INSERT INTO workflow_runs
+             (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, task_id)
+           VALUES (?, 'wf-1', 1, ?, ?, ?, ?)`,
+        )
+        .run(
+          opts.runId,
+          opts.status ?? 'running',
+          opts.currentStepId ?? null,
+          opts.stepsSnapshot ? JSON.stringify(opts.stepsSnapshot) : null,
+          opts.taskId ?? null,
+        );
+    }
+
+    let taskDb: Database.Database;
+    let taskHandler: McpQueryHandler;
+
+    beforeEach(() => {
+      taskDb = buildTaskDb();
+      // The handlers reach the singleton via TaskChangeRouter.getInstance().
+      TaskChangeRouter.initialize(dbAdapter(taskDb));
+      // Same dbAdapter the handler reads its run-context SELECTs through.
+      taskHandler = new McpQueryHandler(dbAdapter(taskDb));
+    });
+
+    afterEach(() => {
+      TaskChangeRouter._resetForTesting();
+      taskChangeEvents.removeAllListeners();
+    });
+
+    // -----------------------------------------------------------------------
+    // create
+    // -----------------------------------------------------------------------
+
+    describe('mcp-create-task', () => {
+      it('happy path: mints IDEA-001 at the idea stage, writes the row + an agent task_event', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-1',
+            runId: 'run-1',
+            title: 'First idea',
+          },
+          socket,
+        );
+
+        // Wire-protocol contract: newline-delimited framing.
+        expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
+        const response = parseLastWrite(writes);
+        expect(response.type).toBe('mcp-query-response');
+        expect(response.requestId).toBe('ct-1');
+        expect(response.ok).toBe(true);
+
+        const data = response.data as {
+          task_id: string;
+          ref?: string;
+          stage_id?: string;
+          type?: string;
+          version?: number;
+        };
+        expect(typeof data.task_id).toBe('string');
+        expect(data.ref).toBe('IDEA-001');
+        expect(data.stage_id).toBe(stage(1));
+        expect(data.type).toBe('idea');
+        expect(data.version).toBe(1);
+
+        // The tasks row actually exists with the canonical ref.
+        const task = taskDb
+          .prepare('SELECT ref, stage_id, version FROM tasks WHERE id = ?')
+          .get(data.task_id) as { ref: string; stage_id: string; version: number } | undefined;
+        expect(task).toBeDefined();
+        expect(task!.ref).toBe('IDEA-001');
+
+        // A task_events row was written, attributed to an agent:<label> actor.
+        const ev = taskDb
+          .prepare('SELECT actor, kind FROM task_events WHERE task_id = ? ORDER BY seq ASC LIMIT 1')
+          .get(data.task_id) as { actor: string; kind: string } | undefined;
+        expect(ev).toBeDefined();
+        expect(ev!.actor.startsWith('agent:')).toBe(true);
+        // snapshot[current_step_id] = 'planner' wins over the raw step id.
+        expect(ev!.actor).toBe('agent:planner');
+        expect(ev!.kind).toBe('created');
+      });
+
+      it('task_type "epic" mints EPIC-001', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-2',
+            runId: 'run-1',
+            title: 'An epic',
+            taskType: 'epic',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { ref?: string; type?: string };
+        expect(data.ref).toBe('EPIC-001');
+        expect(data.type).toBe('epic');
+      });
+
+      it('falls back to actor=agent:<step_id> when the snapshot has no mapping for the step', async () => {
+        // current_step_id present but snapshot lacks a non-empty mapping for it →
+        // label = current_step_id (mirrors resolveAgentLabel).
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'implement',
+          stepsSnapshot: { other: 'executor' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-3', runId: 'run-1', title: 'T' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+        const ev = taskDb
+          .prepare('SELECT actor FROM task_events WHERE task_id = ? ORDER BY seq ASC LIMIT 1')
+          .get(data.task_id) as { actor: string };
+        expect(ev.actor).toBe('agent:implement');
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // update
+    // -----------------------------------------------------------------------
+
+    describe('mcp-update-task', () => {
+      it('happy path: updates title + priority, bumps version, reflects in the row', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        // Seed a task to update.
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed', runId: 'run-1', title: 'Before' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-1',
+            runId: 'run-1',
+            taskId,
+            title: 'After',
+            priority: 'P0',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string; version?: number };
+        expect(data.task_id).toBe(taskId);
+        // create -> version 1, one mutating update -> version 2.
+        expect(data.version).toBe(2);
+
+        const task = taskDb
+          .prepare('SELECT title, priority, version FROM tasks WHERE id = ?')
+          .get(taskId) as { title: string; priority: string; version: number };
+        expect(task.title).toBe('After');
+        expect(task.priority).toBe('P0');
+        expect(task.version).toBe(2);
+      });
+
+      it('stale expected_version is rejected with error "concurrency" (no write)', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed2', runId: 'run-1', title: 'Stable' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-2',
+            runId: 'run-1',
+            taskId,
+            title: 'Should not apply',
+            expectedVersion: 99,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('concurrency');
+
+        // The title is unchanged (current version is still 1).
+        const task = taskDb
+          .prepare('SELECT title, version FROM tasks WHERE id = ?')
+          .get(taskId) as { title: string; version: number };
+        expect(task.title).toBe('Stable');
+        expect(task.version).toBe(1);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // set-stage
+    // -----------------------------------------------------------------------
+
+    describe('mcp-set-task-stage', () => {
+      it('moves an idea to an asserted stage (position 3) -> ok:true', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed3', runId: 'run-1', title: 'Movable' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-set-task-stage',
+            requestId: 'ss-1',
+            runId: 'run-1',
+            taskId,
+            stageId: stage(3),
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string; stage_id?: string; version?: number };
+        expect(data.task_id).toBe(taskId);
+        expect(data.stage_id).toBe(stage(3));
+
+        const task = taskDb
+          .prepare('SELECT stage_id FROM tasks WHERE id = ?')
+          .get(taskId) as { stage_id: string };
+        expect(task.stage_id).toBe(stage(3));
+      });
+
+      it('rejects a DERIVED stage (position 7, In development) with error "forbidden_stage"', async () => {
+        // An agent actor cannot assert an orchestrator-owned derived stage.
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed4', runId: 'run-1', title: 'NoDerived' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-set-task-stage',
+            requestId: 'ss-2',
+            runId: 'run-1',
+            taskId,
+            stageId: stage(7),
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('forbidden_stage');
+
+        // Stage is unchanged (still at the idea stage).
+        const task = taskDb
+          .prepare('SELECT stage_id FROM tasks WHERE id = ?')
+          .get(taskId) as { stage_id: string };
+        expect(task.stage_id).toBe(stage(1));
+      });
+
+      it('rejects asserting a stage on a task with a non-terminal run with error "active_runs"', async () => {
+        // The calling run plans the task; a SEPARATE non-terminal run is linked
+        // to the same task, which blocks an agent-asserted stage move.
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed5', runId: 'run-1', title: 'Busy' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        // Link a live (running) run to the task.
+        seedTaskRun(taskDb, {
+          runId: 'run-exec',
+          status: 'running',
+          currentStepId: 'implement',
+          stepsSnapshot: { implement: 'executor' },
+          taskId,
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-set-task-stage',
+            requestId: 'ss-3',
+            runId: 'run-1',
+            taskId,
+            stageId: stage(6),
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('active_runs');
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // run-context guards (shared across all three handlers)
+    // -----------------------------------------------------------------------
+
+    describe('run-context guards', () => {
+      it('rejects the "orchestrator" sentinel with "task_write_requires_real_run" and writes nothing', async () => {
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'g-1',
+            runId: 'orchestrator',
+            title: 'should-be-rejected',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('task_write_requires_real_run');
+
+        // No task and no event were written.
+        const count = (
+          taskDb.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }
+        ).n;
+        expect(count).toBe(0);
+      });
+
+      it('rejects a non-existent runId with "run_not_found"', async () => {
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'g-2',
+            runId: 'run-does-not-exist',
+            title: 'orphan',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('run_not_found');
+      });
+
+      it('rejects a terminal (completed) run with "run_not_active"', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-done',
+          status: 'completed',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'g-3',
+            runId: 'run-done',
+            title: 'after-the-fact',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('run_not_active');
+
+        const count = (
+          taskDb.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }
+        ).n;
+        expect(count).toBe(0);
+      });
     });
   });
 
