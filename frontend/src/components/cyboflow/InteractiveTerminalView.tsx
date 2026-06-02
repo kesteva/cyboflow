@@ -194,7 +194,22 @@ export function InteractiveTerminalView({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
-    fit.fit();
+
+    // Guard fit(): xterm's FitAddon reads the renderer's `dimensions`, which is
+    // undefined until the container has a non-zero layout box. On a tab/flex
+    // mount the container can be 0×0 on the first frame, which throws
+    // "Cannot read properties of undefined (reading 'dimensions')" and tears down
+    // the terminal. Only fit when the container is measured, and never let a
+    // fit() throw escape (a later ResizeObserver tick re-fits once laid out).
+    const safeFit = (): void => {
+      if (container.offsetWidth === 0 || container.offsetHeight === 0) return;
+      try {
+        fit.fit();
+      } catch {
+        // Renderer not ready yet — the ResizeObserver below will re-fit.
+      }
+    };
+    safeFit();
 
     // Subscribe AFTER open so the first bytes land in a live terminal. Raw bytes
     // go DIRECTLY to term.write — NEVER into the structured cyboflow stream store.
@@ -227,7 +242,7 @@ export function InteractiveTerminalView({
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeObserver = new ResizeObserver(() => {
       if (disposed) return;
-      fit.fit();
+      safeFit();
       const cols = term.cols;
       const rows = term.rows;
       if (cols === lastCols && rows === lastRows) return;
