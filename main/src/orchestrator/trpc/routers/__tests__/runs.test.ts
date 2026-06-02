@@ -56,8 +56,8 @@ import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps } from '../runs';
-import type { RunWorktreeManagerLike } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setRelayDeps } from '../runs';
+import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
@@ -333,6 +333,92 @@ describe('cyboflow.runs.start', () => {
   // isolation guarantees that test file starts with startRunDeps === null.
   // Repeating it here would require a __resetForTest escape hatch in source
   // code — not added because it would exist solely to support tests.
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.relayInput / cyboflow.runs.relayResize — live-input relay
+// (IDEA-030 / TASK-817).
+//
+// The relay dep-bag (RelayDeps) is injected via setRelayDeps() with vi.fn()
+// spies so the test stays free of the SubstrateDispatchFacade / services-*. The
+// UNWIRED cases run FIRST (declaration order) so module-level relayDeps is still
+// null at that point — this is the only setRelayDeps() caller in the file, and
+// vitest runs tests in declaration order, so the guard branch is exercised
+// before any wiring. The wired cases then assert runId→panelId fan-out into the
+// dep-bag function refs.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
+  // (a) UNWIRED — both mutations throw METHOD_NOT_SUPPORTED before setRelayDeps().
+  it('(a) relayInput throws METHOD_NOT_SUPPORTED before setRelayDeps() is wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.relayInput({ runId: 'run-unwired', text: 'hi' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'METHOD_NOT_SUPPORTED',
+    );
+  });
+
+  it('(a) relayResize throws METHOD_NOT_SUPPORTED before setRelayDeps() is wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.relayResize({ runId: 'run-unwired', cols: 80, rows: 24 }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'METHOD_NOT_SUPPORTED',
+    );
+  });
+
+  // (b) WIRED — the mutations forward runId/text and runId/cols/rows to the
+  //     injected dep-bag function refs (runId === panelId orchestrator invariant).
+  it('(b) relayInput routes to deps.relayInput(runId, text) once wired', async () => {
+    const relayInput = vi.fn<RelayDeps['relayInput']>();
+    const relayResize = vi.fn<RelayDeps['relayResize']>();
+    setRelayDeps({ relayInput, relayResize });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.relayInput({ runId: 'run-relay', text: 'go\n' });
+
+      expect(result).toEqual({ success: true });
+      expect(relayInput).toHaveBeenCalledOnce();
+      expect(relayInput).toHaveBeenCalledWith('run-relay', 'go\n');
+      expect(relayResize).not.toHaveBeenCalled();
+    } finally {
+      setRelayDeps({
+        relayInput: vi.fn(() => {
+          throw new Error('not wired');
+        }),
+        relayResize: vi.fn(() => {
+          throw new Error('not wired');
+        }),
+      });
+    }
+  });
+
+  it('(b) relayResize routes to deps.relayResize(runId, cols, rows) once wired', async () => {
+    const relayInput = vi.fn<RelayDeps['relayInput']>();
+    const relayResize = vi.fn<RelayDeps['relayResize']>();
+    setRelayDeps({ relayInput, relayResize });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.relayResize({ runId: 'run-relay', cols: 120, rows: 40 });
+
+      expect(result).toEqual({ success: true });
+      expect(relayResize).toHaveBeenCalledOnce();
+      expect(relayResize).toHaveBeenCalledWith('run-relay', 120, 40);
+      expect(relayInput).not.toHaveBeenCalled();
+    } finally {
+      setRelayDeps({
+        relayInput: vi.fn(() => {
+          throw new Error('not wired');
+        }),
+        relayResize: vi.fn(() => {
+          throw new Error('not wired');
+        }),
+      });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

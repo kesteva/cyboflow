@@ -32,6 +32,7 @@ import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../utils/cn';
 import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 
 /** Max composer height (px) before the textarea scrolls instead of growing. */
 const MAX_COMPOSER_HEIGHT = 160;
@@ -96,14 +97,23 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   // Three-state gate
   // -------------------------------------------------------------------------
 
-  const mode: 'quick' | 'workflow-question' | 'workflow-idle' | 'none' =
+  // A run on the interactive substrate that is actively running gets an ENABLED
+  // composer that relays each line as a real REPL turn into the live PTY (IDEA-030
+  // / TASK-817). Every other workflow run keeps the legacy disabled 'workflow-idle'
+  // composer. The substrate is read from the active-run row surfaced by TASK-813.
+  const isInteractiveRunning =
+    runId != null && activeRun?.substrate === 'interactive' && activeRun.status === 'running';
+
+  const mode: 'quick' | 'workflow-question' | 'workflow-interactive' | 'workflow-idle' | 'none' =
     activeQuickSessionId != null
       ? 'quick'
       : runId != null && activeQuestion != null
         ? 'workflow-question'
-        : runId != null
-          ? 'workflow-idle'
-          : 'none';
+        : isInteractiveRunning
+          ? 'workflow-interactive'
+          : runId != null
+            ? 'workflow-idle'
+            : 'none';
 
   if (mode === 'none') return null;
 
@@ -131,6 +141,24 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
         } else {
           setSendError(result.error ?? 'Send failed');
         }
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Send failed');
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
+
+    if (mode === 'workflow-interactive') {
+      // Relay the line as a complete REPL turn into the live interactive PTY.
+      // The trailing '\n' submits the turn — the raw-keystroke path
+      // (InteractiveTerminalView) sends bytes verbatim, so the newline is owned
+      // HERE only. The input type is AppRouter-inferred (no local RelayInput).
+      setIsSending(true);
+      setSendError(null);
+      try {
+        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: text + '\n' });
+        setText('');
       } catch (err: unknown) {
         setSendError(err instanceof Error ? err.message : 'Send failed');
       } finally {
@@ -179,7 +207,13 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder={mode === 'quick' ? 'Send a message…' : 'Type your answer…'}
+        placeholder={
+          mode === 'quick'
+            ? 'Send a message…'
+            : mode === 'workflow-interactive'
+              ? 'Message the running session — relayed safely…'
+              : 'Type your answer…'
+        }
         disabled={isDisabled}
         rows={1}
         style={{ maxHeight: MAX_COMPOSER_HEIGHT }}

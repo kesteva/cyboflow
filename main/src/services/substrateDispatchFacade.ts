@@ -46,6 +46,24 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
  */
 type ForwardHandler = (payload: unknown) => void;
 
+/**
+ * Narrow capability interface for the interactive manager's PTY resize seam.
+ * `AbstractCliManager` does NOT expose a resize method today (PTY geometry is
+ * pinned 80×30 at AbstractCliManager.ts:577-578,614-615); the seam ON the
+ * manager lands in TASK-818. Until then `relayResize` feature-detects this shape
+ * (a `typeof mgr.resizePanel === 'function'` guard, no `any`) and no-ops when it
+ * is absent — so resize is wired end-to-end on the renderer side and becomes
+ * live the moment the manager seam exists.
+ */
+interface ResizeCapable {
+  resizePanel(panelId: string, cols: number, rows: number): void;
+}
+
+/** Type guard: does this manager expose a `resizePanel(panelId, cols, rows)` seam? */
+function isResizeCapable(mgr: AbstractCliManager): mgr is AbstractCliManager & ResizeCapable {
+  return typeof (mgr as Partial<ResizeCapable>).resizePanel === 'function';
+}
+
 export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawnerLike {
   /**
    * Records which manager spawned each panel, keyed by panelId. abort() looks up
@@ -144,6 +162,57 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     const mgr = this.resolveManager(panelId);
     this.logger.warn('[SubstrateDispatchFacade] abort for untracked panel — resolving by substrate', { panelId });
     await mgr.killProcess(panelId);
+  }
+
+  /**
+   * Relay a live-input turn into the SAME running process (IDEA-030 / TASK-817).
+   *
+   * panelId === runId per the orchestrator invariant. Resolves the manager via
+   * the existing resolveManager() seam so substrate dispatch stays in ONE place.
+   * For the interactive manager this writes raw to the live node-pty via
+   * `sendInput` (AbstractCliManager.ts:205-218 — NO kill, NO respawn; this is
+   * NEVER continuePanel/restartPanelWithHistory, which would destroy the
+   * persistent session). For the SDK manager it is a strict NO-OP: the SDK has
+   * no PTY (`process: undefined as never`), so the structured Workflow panel +
+   * SDK iterator path stay byte-identical (Q3 panel-preservation).
+   */
+  relayInput(panelId: string, text: string): void {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      // SDK substrate has no PTY — relaying input is a no-op (Q3 byte-identical).
+      this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { panelId });
+      return;
+    }
+    mgr.sendInput(panelId, text);
+  }
+
+  /**
+   * Relay a PTY geometry change into the live node-pty (IDEA-030 / TASK-817).
+   *
+   * panelId === runId per the orchestrator invariant. Resolves the manager via
+   * resolveManager(). For the interactive manager it feature-detects a
+   * `resizePanel(panelId, cols, rows)` seam (the seam ON the manager lands in
+   * TASK-818) and calls it when present; otherwise NO-OP. The SDK manager is a
+   * strict NO-OP (no PTY). No `any` — the narrow ResizeCapable interface +
+   * `isResizeCapable` guard own the feature detection.
+   */
+  relayResize(panelId: string, cols: number, rows: number): void {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { panelId });
+      return;
+    }
+    if (isResizeCapable(mgr)) {
+      mgr.resizePanel(panelId, cols, rows);
+      return;
+    }
+    // The manager resize seam (TASK-818) is not yet present — no-op so the
+    // renderer ResizeObserver wiring is harmless until it lands.
+    this.logger.debug('[SubstrateDispatchFacade] relayResize no-op — interactive manager has no resize seam yet', {
+      panelId,
+      cols,
+      rows,
+    });
   }
 
   /**

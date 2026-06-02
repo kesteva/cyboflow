@@ -44,6 +44,20 @@ import { makeSpyLogger } from '../../orchestrator/__test_fixtures__/loggerLikeSp
 class SpyManager extends EventEmitter {
   spawnCliProcess = vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockResolvedValue(undefined);
   killProcess = vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined);
+  // Live-PTY input relay (TASK-817) — the facade calls this on the interactive
+  // manager. No `resizePanel` here: this base spy is deliberately NOT
+  // resize-capable so the facade's feature-detection no-op branch is exercised.
+  sendInput = vi.fn<(panelId: string, input: string) => void>();
+}
+
+/**
+ * SpyManager variant that ALSO exposes the `resizePanel(panelId, cols, rows)`
+ * seam (the seam that lands ON the manager in TASK-818). Used to exercise the
+ * facade's "call-when-present" resize branch; the base SpyManager covers the
+ * "no-op-when-absent" branch.
+ */
+class ResizeCapableSpyManager extends SpyManager {
+  resizePanel = vi.fn<(panelId: string, cols: number, rows: number) => void>();
 }
 
 /** Build a SpyManager cast to AbstractCliManager at the construction boundary. */
@@ -285,6 +299,95 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
     expect(sdk.killProcess).toHaveBeenCalledOnce();
     expect(sdk.killProcess).toHaveBeenCalledWith(run.id);
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// live-input relay (TASK-817) — relayInput / relayResize
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — relayInput routes to the interactive manager live PTY', () => {
+  it("relayInput(panelId,text) dispatches to interactiveManager.sendInput with VERBATIM text (interactive substrate)", () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    facade.relayInput(run.id, 'hello world\n');
+
+    expect(interactive.sendInput).toHaveBeenCalledOnce();
+    // Verbatim — the facade never mutates the relayed bytes.
+    expect(interactive.sendInput).toHaveBeenCalledWith(run.id, 'hello world\n');
+    // The SDK manager is never touched.
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('relayInput is a strict NO-OP for the SDK substrate (no PTY — Q3 byte-identical)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    facade.relayInput(run.id, 'should not relay');
+
+    // Neither manager's sendInput is called — the SDK path has no PTY to write to.
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+    expect(interactive.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('relayInput is a NO-OP when substrate is undefined (legacy/default floor -> SDK)', () => {
+    const run = makeWorkflowRunRow({ substrate: undefined });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    facade.relayInput(run.id, 'legacy');
+
+    expect(sdk.sendInput).not.toHaveBeenCalled();
+    expect(interactive.sendInput).not.toHaveBeenCalled();
+  });
+});
+
+describe('SubstrateDispatchFacade — relayResize relays geometry into the live PTY', () => {
+  it('relayResize calls the interactive manager resize seam when present (cols/rows forwarded)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = new ResizeCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    facade.relayResize(run.id, 120, 40);
+
+    expect(interactive.resizePanel).toHaveBeenCalledOnce();
+    expect(interactive.resizePanel).toHaveBeenCalledWith(run.id, 120, 40);
+  });
+
+  it('relayResize is a NO-OP when the interactive manager has no resize seam yet (TASK-818 pending)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    // Base SpyManager has no resizePanel — feature detection must no-op cleanly.
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // Must not throw even though the seam is absent.
+    expect(() => facade.relayResize(run.id, 100, 30)).not.toThrow();
+  });
+
+  it('relayResize is a strict NO-OP for the SDK substrate (no PTY)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = new ResizeCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    facade.relayResize(run.id, 90, 25);
+
+    // The interactive resize seam is never called for an SDK-substrate run.
+    expect(interactive.resizePanel).not.toHaveBeenCalled();
   });
 });
 

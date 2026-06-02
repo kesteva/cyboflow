@@ -32,7 +32,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -99,6 +99,11 @@ let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
 let orchestratorHealth: OrchestratorHealth;
+// Promoted to module scope (IDEA-030 / TASK-817) so the run dep-bag wiring in
+// the app.whenReady() block can reach it for the live-input relay. Assigned in
+// initializeServices(); the in-function usages (RunExecutor source/spawner +
+// pty-output fan-in) read the same instance.
+let substrateFacade: SubstrateDispatchFacade;
 
 // Service instances
 let configManager: ConfigManager;
@@ -633,7 +638,10 @@ async function initializeServices() {
   // as RunExecutor's single `source` EventEmitter (which is bound once at
   // construction and cannot be swapped per run). One object satisfies both seams.
   // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
-  const substrateFacade = new SubstrateDispatchFacade(
+  // Assign the module-level binding (declared near the other shared services) so
+  // the run dep-bag wiring in app.whenReady() can reach the SAME facade instance
+  // for the live-input relay (IDEA-030 / TASK-817).
+  substrateFacade = new SubstrateDispatchFacade(
     defaultCliManager,
     interactiveCliManager,
     workflowRegistry,
@@ -933,6 +941,17 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
+    // path into a running interactive REPL). Both methods route through the
+    // SubstrateDispatchFacade, which dispatches to the interactive manager's live
+    // PTY and NO-OPs for the SDK substrate (Q3 byte-identical). runId === panelId
+    // per the orchestrator invariant, so the facade maps directly.
+    setRelayDeps({
+      relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
+      relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),
+    });
+    console.log('[Main] runs.relayInput/relayResize deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested

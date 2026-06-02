@@ -103,6 +103,37 @@ export function setStartRunDeps(deps: StartRunDeps): void {
 }
 
 // ---------------------------------------------------------------------------
+// live-input relay dependency bag (IDEA-030 / TASK-817)
+//
+// The ONLY post-spawn input path into a LIVE interactive run. Injected at boot
+// by main/src/index.ts via setRelayDeps(), backed by SubstrateDispatchFacade's
+// relayInput/relayResize (which route to the interactive manager's live PTY and
+// NO-OP for the SDK substrate). Function-reference shape (mirrors
+// CancelAndRestartDeps.claudeManagerStop) keeps the router free of any
+// services/* import (standalone-typecheck invariant). Until wired, the relay
+// mutations throw METHOD_NOT_SUPPORTED — same stub pattern as the other dep-bags.
+// ---------------------------------------------------------------------------
+
+export interface RelayDeps {
+  /** Relay a complete REPL turn (text + '\n') into the live interactive PTY. */
+  relayInput(runId: string, text: string): void;
+  /** Relay a PTY geometry change into the live interactive node-pty. */
+  relayResize(runId: string, cols: number, rows: number): void;
+}
+
+let relayDeps: RelayDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the relayInput / relayResize mutations.
+ *
+ * Called once at boot by main/src/index.ts after the SubstrateDispatchFacade is
+ * constructed. Until this is called the mutations throw METHOD_NOT_SUPPORTED.
+ */
+export function setRelayDeps(deps: RelayDeps): void {
+  relayDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
 // run close-out dependency bag (GAP-B)
 //
 // Planner / workflow runs never create a `sessions` row (a sessions row would
@@ -376,6 +407,59 @@ export const runsRouter = router({
       }
 
       return cancelAndRestartHandler(input.runId, cancelAndRestartDeps);
+    }),
+
+  /**
+   * Relay a complete REPL turn into a LIVE interactive run (IDEA-030 / TASK-817).
+   *
+   * The `runId === panelId === sessionId` orchestrator invariant means the runId
+   * IS the panelId, so this forwards straight to facade.relayInput(panelId=runId,
+   * text) with no lookup. The composer appends '\n' to make the text a complete
+   * REPL turn the user submitted; the raw-keystroke path (InteractiveTerminalView)
+   * sends bytes verbatim. The relay writes into the SAME running process (never a
+   * kill+respawn) and is a strict NO-OP for the SDK substrate (no PTY) — so the
+   * structured Workflow panel + SDK path stay byte-identical (Q3).
+   *
+   * Standalone-typecheck invariant: the facade is injected as a function ref via
+   * setRelayDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  relayInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(({ input }): { success: true } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      relayDeps.relayInput(input.runId, input.text);
+      return { success: true };
+    }),
+
+  /**
+   * Relay a PTY geometry change into a LIVE interactive run (IDEA-030 / TASK-817).
+   *
+   * runId IS the panelId per the orchestrator invariant, so this forwards to
+   * facade.relayResize(panelId=runId, cols, rows). Safe to call regardless of the
+   * first-interaction guardrail (resize never mutates session state). NO-OP for
+   * the SDK substrate and a NO-OP on the interactive manager until its resize seam
+   * lands (TASK-818). Throws METHOD_NOT_SUPPORTED until setRelayDeps() is wired.
+   */
+  relayResize: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }))
+    .mutation(({ input }): { success: true } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      relayDeps.relayResize(input.runId, input.cols, input.rows);
+      return { success: true };
     }),
 
   /**

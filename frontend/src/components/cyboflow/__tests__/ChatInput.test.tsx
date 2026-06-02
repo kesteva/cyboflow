@@ -44,6 +44,11 @@ vi.mock('../../../trpc/client', () => ({
         onQuestionAnswered: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
         answer: { mutate: vi.fn(async () => ({})) },
       },
+      // Live-input relay (TASK-817) — the interactive composer drives this.
+      runs: {
+        relayInput: { mutate: vi.fn(async () => ({ success: true })) },
+        relayResize: { mutate: vi.fn(async () => ({ success: true })) },
+      },
       approvals: {
         listPending: { query: vi.fn(async () => []) },
         approve: { mutate: vi.fn(async () => ({})) },
@@ -99,6 +104,8 @@ beforeEach(() => {
 
   mockSendInput.mockClear();
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
 
   // Default: sendInput succeeds
   mockSendInput.mockResolvedValue({ success: true });
@@ -293,6 +300,96 @@ describe('ChatInput — workflow run, active question', () => {
 
     // The key assertion: tRPC answer.mutate must NOT have been called
     expect(vi.mocked(trpc.cyboflow.questions.answer.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
+  const RUN_ID = 'run-interactive-001';
+
+  function makeInteractiveRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-int',
+      project_id: 5,
+      status: 'running',
+      substrate: 'interactive',
+      worktree_path: '/Users/me/worktrees/int',
+      branch_name: 'feature/int',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'sprint',
+      ...overrides,
+    };
+  }
+
+  it('an interactive running run renders an ENABLED composer with the relay placeholder', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+    expect(textarea.placeholder).toBe('Message the running session — relayed safely…');
+  });
+
+  it("Send relays runs.relayInput.mutate({ runId, text: <typed> + '\\n' })", async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'run the tests' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'run the tests\n',
+      });
+    });
+
+    // Textarea cleared after a successful relay.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
+  it('a non-interactive (sdk) workflow run still renders the disabled workflow-idle composer', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { 5: [makeInteractiveRow({ substrate: 'sdk' })] },
+      });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    // The relay mutation must NOT be reachable for a non-interactive run.
+    expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('an interactive run that is NOT running falls back to the disabled workflow-idle composer', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { 5: [makeInteractiveRow({ status: 'awaiting_review' })] },
+      });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).toBeDisabled();
   });
 });
 

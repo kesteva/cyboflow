@@ -28,13 +28,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const xtermBuffer = { viewportY: 0, baseY: 0 };
 
+// Capture the onData handler so tests can drive raw keystrokes through it, and
+// return a disposable (the component disposes it on unmount — TASK-817).
+let onDataHandler: ((data: string) => void) | undefined;
+const onDataDispose = vi.fn();
+
 const termMock = {
   open: vi.fn(),
   write: vi.fn(),
   loadAddon: vi.fn(),
   dispose: vi.fn(),
   scrollToBottom: vi.fn(),
-  onData: vi.fn(),
+  onData: vi.fn((handler: (data: string) => void) => {
+    onDataHandler = handler;
+    return { dispose: onDataDispose };
+  }),
+  // Geometry read by the resize relay (TASK-817).
+  cols: 80,
+  rows: 24,
   buffer: { active: xtermBuffer },
 };
 
@@ -54,7 +65,48 @@ vi.mock('@xterm/addon-fit', () => ({
   })),
 }));
 
+// ---------------------------------------------------------------------------
+// Capturing ResizeObserver — the global setup stub never fires the callback.
+// Capture it here so the resize-relay test can drive a geometry change (TASK-817).
+// ---------------------------------------------------------------------------
+
+let resizeObserverCb: (() => void) | undefined;
+globalThis.ResizeObserver = class {
+  constructor(cb: () => void) {
+    resizeObserverCb = cb;
+  }
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+} as unknown as typeof ResizeObserver;
+
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
+
+// ---------------------------------------------------------------------------
+// Mock the tRPC client — the keystroke + resize relay (TASK-817) call
+// runs.relayInput / runs.relayResize. We assert verbatim relay gating + resize.
+// ---------------------------------------------------------------------------
+
+// vi.hoisted so the relay-mutation spies exist at vi.mock-factory hoist time.
+const { relayInputMutate, relayResizeMutate } = vi.hoisted(() => ({
+  relayInputMutate: vi.fn<(input: { runId: string; text: string }) => Promise<{ success: true }>>(
+    async () => ({ success: true }),
+  ),
+  relayResizeMutate: vi.fn<(input: { runId: string; cols: number; rows: number }) => Promise<{ success: true }>>(
+    async () => ({ success: true }),
+  ),
+}));
+
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        relayInput: { mutate: relayInputMutate },
+        relayResize: { mutate: relayResizeMutate },
+      },
+    },
+  },
+}));
 
 // ---------------------------------------------------------------------------
 // Stub window.electron so the REAL subscribeToPtyBytes registers on it.
@@ -112,6 +164,13 @@ beforeEach(() => {
   termMock.dispose.mockClear();
   termMock.scrollToBottom.mockClear();
   termMock.onData.mockClear();
+  onDataDispose.mockClear();
+  onDataHandler = undefined;
+  relayInputMutate.mockClear();
+  relayResizeMutate.mockClear();
+  termMock.cols = 80;
+  termMock.rows = 24;
+  resizeObserverCb = undefined;
   onSpy.mockClear();
   offSpy.mockClear();
   registered = undefined;
@@ -179,12 +238,17 @@ describe('InteractiveTerminalView', () => {
     expect(useCyboflowStore.getState().streamEvents.length).toBe(0);
   });
 
-  it('constructs the Terminal read-only (disableStdin: true) and never registers term.onData', () => {
+  it('constructs the Terminal read-only (disableStdin: true) and binds an INERT onData (relay gated off by default)', () => {
     render(<InteractiveTerminalView runId="run-ro" />);
 
     expect(lastTerminalOptions?.disableStdin).toBe(true);
-    // No keystroke-input relay at this stage (TASK-817 adds it).
-    expect(termMock.onData).not.toHaveBeenCalled();
+    // TASK-817: onData IS bound (once) but the relay is gated on the per-run
+    // "Interact anyway" flag — inert by default, so no keystroke is relayed until
+    // the user opts in (the warn-modal guardrail stays intact).
+    expect(termMock.onData).toHaveBeenCalledTimes(1);
+    expect(typeof onDataHandler).toBe('function');
+    onDataHandler?.('x');
+    expect(relayInputMutate).not.toHaveBeenCalled();
   });
 
   it('re-pins to the bottom on write only when the viewport is at the bottom', () => {
@@ -313,5 +377,67 @@ describe('InteractiveTerminalView — TASK-816 warn guardrail + chrome', () => {
       expect(cls).not.toContain('animate-spin');
       expect(cls).not.toContain('blink');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-817 additive cases — keystroke relay gating + resize relay.
+// ---------------------------------------------------------------------------
+
+describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => {
+  it('onData is INERT before "Interact anyway" — no relay on keystroke (the warn gate holds)', () => {
+    render(<InteractiveTerminalView runId="run-relay-off" substrate="interactive" />);
+
+    expect(typeof onDataHandler).toBe('function');
+    // Simulate a keystroke before the flag is flipped.
+    onDataHandler?.('a');
+    expect(relayInputMutate).not.toHaveBeenCalled();
+  });
+
+  it('relays raw keystrokes VERBATIM (no appended newline) ONLY after "Interact anyway" flips the flag', () => {
+    render(<InteractiveTerminalView runId="run-relay-on" substrate="interactive" />);
+
+    // Flip the per-run relay flag via the warn dialog's "Interact anyway".
+    const surface = screen.getByTestId('interactive-terminal-surface');
+    fireEvent.mouseDown(surface);
+    fireEvent.click(screen.getByText('Interact anyway'));
+
+    // A bare keystroke ('h') relays verbatim — NO '\n' appended.
+    onDataHandler?.('h');
+    expect(relayInputMutate).toHaveBeenCalledWith({ runId: 'run-relay-on', text: 'h' });
+
+    // xterm encodes Enter as '\r' — that must also pass through verbatim.
+    relayInputMutate.mockClear();
+    onDataHandler?.('\r');
+    expect(relayInputMutate).toHaveBeenCalledWith({ runId: 'run-relay-on', text: '\r' });
+  });
+
+  it('relays a geometry change to runs.relayResize with the new cols/rows', () => {
+    vi.useFakeTimers();
+    try {
+      render(<InteractiveTerminalView runId="run-resize" substrate="interactive" />);
+
+      // Change the reported geometry, then fire the captured ResizeObserver cb.
+      termMock.cols = 120;
+      termMock.rows = 40;
+      expect(typeof resizeObserverCb).toBe('function');
+      act(() => {
+        resizeObserverCb?.();
+      });
+      // Flush the 100ms debounce.
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+
+      expect(relayResizeMutate).toHaveBeenCalledWith({ runId: 'run-resize', cols: 120, rows: 40 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disposes the onData binding on unmount', () => {
+    const { unmount } = render(<InteractiveTerminalView runId="run-relay-dispose" substrate="interactive" />);
+    unmount();
+    expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 });

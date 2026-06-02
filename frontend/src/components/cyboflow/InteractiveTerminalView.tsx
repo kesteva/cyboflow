@@ -12,11 +12,13 @@
  *      `term.write()` and NEVER into the structured cyboflow stream store. The
  *      structured `cyboflow:stream:<runId>` pipeline (Workflow panel + SDK path)
  *      is untouched.
- *   2. Read-only at this stage. The terminal is view-only: `disableStdin: true`,
- *      NO input relay, NO PTY resize relay. Two-way interactivity (keystroke
- *      relay + first-interaction warn modal + resize) is owned by TASK-816 /
- *      TASK-817, which edit this file ADDITIVELY on the 815 → 816 → 817 chain.
- *      Do NOT add input wiring here.
+ *   2. Two-way via the guarded relay (TASK-817). `disableStdin: true` keeps xterm
+ *      from echoing locally, but `term.onData` relays raw keystrokes VERBATIM to
+ *      `cyboflow.runs.relayInput` — ONLY while the per-run "Interact anyway" flag
+ *      (set by TASK-816's warn modal) is true; otherwise it is inert and the chat
+ *      composer is the sole input path. A ResizeObserver also relays geometry to
+ *      `cyboflow.runs.relayResize`. The relay routes to the interactive manager's
+ *      live PTY and NO-OPs for the SDK substrate (Q3 byte-identical).
  *
  * The xterm construct / open / fit / dispose lifecycle is cloned from
  * `TerminalPanel.tsx`, with two deltas: the mono font is read from the
@@ -29,6 +31,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { subscribeToPtyBytes } from '../../utils/cyboflowApi';
 import { cn } from '../../utils/cn';
+import { trpc } from '../../trpc/client';
 import { InteractiveWarnDialog } from './InteractiveWarnDialog';
 import '@xterm/xterm/css/xterm.css';
 
@@ -136,7 +139,15 @@ export function InteractiveTerminalView({
   // `xterm.onData`; this task SETS the flag but does NOT wire the relay.
   const [hasWarned, setHasWarned] = useState(false);
   const [warnOpen, setWarnOpen] = useState(false);
-  const [, setRelayEnabled] = useState(false);
+  const [relayEnabled, setRelayEnabled] = useState(false);
+
+  // Mirror the relay flag into a ref so the once-bound `term.onData` handler
+  // (TASK-817) reads the LATEST value without a stale closure. `onData` is bound
+  // a single time inside the mount effect; gating it on `relayEnabledRef.current`
+  // keeps the first-interaction warn-modal guardrail intact (default = inert)
+  // while flipping live the instant "Interact anyway" sets the flag.
+  const relayEnabledRef = useRef(relayEnabled);
+  relayEnabledRef.current = relayEnabled;
 
   const elapsed = useElapsed(isInteractive);
 
@@ -195,16 +206,47 @@ export function InteractiveTerminalView({
       },
     });
 
-    // Local geometry only — fit re-flows the xterm to the container. Do NOT relay
-    // cols/rows to the PTY here (resize relay is TASK-817).
+    // Raw-keystroke relay (TASK-817). Bound ONCE here; gated on the per-run
+    // "Interact anyway" flag via relayEnabledRef so it stays inert by default
+    // (the first-interaction warn modal is the gate). Bytes are relayed VERBATIM
+    // — xterm already encodes Enter as '\r', so NO '\n' is appended (the composer
+    // owns the '\n' turn semantics; appending one here would corrupt the REPL).
+    // The input type is AppRouter-inferred (no local mirror interface).
+    const inputDisposable = term.onData((data) => {
+      if (disposed || !relayEnabledRef.current) return;
+      void trpc.cyboflow.runs.relayInput.mutate({ runId, text: data });
+    });
+
+    // Resize relay (TASK-817). The ResizeObserver re-flows the xterm via fit()
+    // (local geometry) AND relays the new cols/rows into the live PTY. Resize is
+    // safe regardless of the relay flag (it never mutates session state), but is
+    // debounced lightly to avoid flooding the PTY during a drag. The backend
+    // relayResize is a no-op until the manager resize seam lands (TASK-818).
+    let lastCols = -1;
+    let lastRows = -1;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeObserver = new ResizeObserver(() => {
-      if (!disposed) fit.fit();
+      if (disposed) return;
+      fit.fit();
+      const cols = term.cols;
+      const rows = term.rows;
+      if (cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      if (cols <= 0 || rows <= 0) return;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (disposed) return;
+        void trpc.cyboflow.runs.relayResize.mutate({ runId, cols, rows });
+      }, 100);
     });
     resizeObserver.observe(container);
 
     return () => {
       disposed = true;
+      if (resizeTimer) clearTimeout(resizeTimer);
       resizeObserver.disconnect();
+      inputDisposable.dispose();
       off();
       try {
         fit.dispose();
