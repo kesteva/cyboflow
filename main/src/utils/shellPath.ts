@@ -225,6 +225,25 @@ export function getShellPath(): string {
       }
     }
 
+    // Common standard executable locations that interactive/login shells
+    // frequently add to PATH (e.g. ~/.local/bin for pipx/uv/`claude` installs)
+    // but that a non-interactive `sh -c 'echo $PATH'` probe can miss when the
+    // entry is exported only from an interactive rc file (.zshrc). The
+    // interactive CLI substrate needs the real `claude` binary on PATH (the SDK
+    // substrate uses the npm SDK and never hits this), so a missing ~/.local/bin
+    // here surfaces as "claude executable not found in PATH". Existence-checked
+    // to avoid adding noise.
+    const commonBinPaths = [
+      path.join(os.homedir(), '.local', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    ];
+    for (const binPath of commonBinPaths) {
+      if (fs.existsSync(binPath)) {
+        additionalPaths.push(binPath);
+      }
+    }
+
     // Add user-configured additional paths
     const userAdditionalPaths = getAdditionalPaths();
     if (userAdditionalPaths.length > 0) {
