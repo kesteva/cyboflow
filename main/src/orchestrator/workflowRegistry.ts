@@ -32,10 +32,8 @@ export interface WorkflowDescriptor {
 // The built-in workflow descriptors now live in-repo. See
 // `workflows/builtInWorkflows.ts` (`buildBuiltInWorkflows()`), which points each
 // flow at its sibling prompt `.md` file resolved relative to the compiled
-// bundle. The historical SoloFlow plugin-cache discovery
-// (resolveSoloFlowPluginRoot / buildDefaultSoloFlowWorkflows /
-// DEFAULT_SOLOFLOW_WORKFLOWS / FALLBACK_SOLOFLOW_VERSION) has been removed: the
-// app no longer depends on `~/.claude/plugins/cache/soloflow/...` at runtime.
+// bundle. The historical plugin-cache discovery helpers were removed: the app
+// no longer depends on the external plugin cache directory at runtime.
 
 // ---------------------------------------------------------------------------
 // Constants
