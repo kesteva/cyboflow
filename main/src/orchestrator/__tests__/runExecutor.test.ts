@@ -582,6 +582,167 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
 });
 
 // ---------------------------------------------------------------------------
+// Migration 017 (Piece A): getPrompt seed-idea injection
+// ---------------------------------------------------------------------------
+
+import type { IdeaBodyReaderLike } from '../runExecutor';
+
+/** Stub idea-body reader backed by an in-memory map. */
+function makeIdeaReader(
+  entries: Record<string, NonNullable<ReturnType<IdeaBodyReaderLike['read']>>>,
+): IdeaBodyReaderLike {
+  return {
+    read: (id: string) => entries[id] ?? null,
+  };
+}
+
+/** Build a base RunExecutor with the idea-body reader in the trailing (11th) slot. */
+function makeSeedExecutor(
+  spawner: ClaudeSpawnerLike,
+  registry: WorkflowRegistryLike,
+  reader: WorkflowPromptReaderLike,
+  ideaReader?: IdeaBodyReaderLike,
+): RunExecutor {
+  return new RunExecutor(
+    spawner,
+    registry,
+    makeSpyLogger(),
+    reader,
+    undefined, // lifecycleTransitions
+    undefined, // publisher
+    undefined, // db
+    undefined, // source
+    undefined, // stepEmitter
+    undefined, // taskStageDeriver
+    ideaReader, // ideaBodyReader (11th arg)
+  );
+}
+
+function spawnedPrompt(spawner: ClaudeSpawnerLike): string {
+  const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+  return opts.prompt;
+}
+
+describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => {
+  it('prepends a `# Selected idea` block when run.seed_idea_id resolves a body', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', seed_idea_id: 'IDEA-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'My idea', summary: 'A short summary', body: 'The idea body.', scope: 'small' },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).toContain('## My idea');
+    expect(prompt).toContain('A short summary');
+    expect(prompt).toContain('The idea body.');
+    // The base prompt is preserved after the injected block.
+    expect(prompt).toContain('PLAN BODY');
+    expect(prompt.indexOf('# Selected idea')).toBeLessThan(prompt.indexOf('PLAN BODY'));
+  });
+
+  it('omits the summary line when the idea has no summary', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-2' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-2': { type: 'idea', title: 'Bare idea', summary: null, body: 'Just a body.', scope: null },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt).toContain('## Bare idea');
+    expect(prompt).toContain('Just a body.');
+  });
+
+  it('returns the base prompt verbatim when the run has no seed_idea_id', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no seed_idea_id
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({});
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
+  });
+
+  it('returns the base prompt verbatim when the reader resolves no entity', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'MISSING' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({}); // 'MISSING' resolves to null
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
+  });
+
+  it('returns the base prompt verbatim when the resolved body is empty/whitespace', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-EMPTY' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-EMPTY': { type: 'idea', title: 'Empty', summary: null, body: '   \n  ', scope: null },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
+  });
+
+  it('returns the base prompt verbatim when no ideaBodyReader is injected', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    // No ideaReader passed → seed-idea branch is inert.
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-662: Lifecycle transition tests
 // ---------------------------------------------------------------------------
 

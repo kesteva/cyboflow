@@ -40,6 +40,28 @@ export interface WorkflowPromptReaderLike {
 }
 
 /**
+ * Narrow interface for resolving a backlog idea's prose body by id (migration 017).
+ *
+ * The real implementation delegates to `selectTaskById` (which UNIONs the
+ * ideas/epics/tasks tables) in main/src/index.ts; tests inject a stub. Returns
+ * null when the id resolves to no entity. When injected and a run carries a
+ * `seed_idea_id`, getPrompt() prepends the resolved idea body to the planner's
+ * MAIN prompt as a `# Selected idea` block (Piece A).
+ *
+ * NOTE: this is a Pre-launch idea-selection collaborator only — it participates
+ * in NO stage derivation (distinct from the task_id / taskStageDeriver path).
+ */
+export interface IdeaBodyReaderLike {
+  read(id: string): {
+    type: string;
+    title: string;
+    summary: string | null;
+    body: string | null;
+    scope: string | null;
+  } | null;
+}
+
+/**
  * Options accepted by ClaudeCodeManager.spawnCliProcess (narrow shape).
  * The real ClaudeCodeManager satisfies this interface; tests use a vi.fn() stub.
  */
@@ -201,6 +223,15 @@ export class RunExecutor {
      * write its outcome). When absent, task derivation is silently skipped.
      */
     private readonly taskStageDeriver?: TaskStageRecomputeLike,
+    /**
+     * Optional idea-body reader (migration 017). When injected and a run carries
+     * a `seed_idea_id`, getPrompt() prepends the resolved idea body to the
+     * planner's MAIN prompt as a `# Selected idea` block (Piece A pre-launch idea
+     * selection). When absent, or when the run has no seed_idea_id, or when the
+     * reader resolves no/empty body, getPrompt() returns the base prompt verbatim
+     * (zero-behavior-change floor). Participates in NO stage derivation.
+     */
+    private readonly ideaBodyReader?: IdeaBodyReaderLike,
   ) {}
 
   /**
@@ -389,6 +420,16 @@ export class RunExecutor {
    *
    * Throws NOT_IMPLEMENTED if neither a reader nor a subclass override is available.
    *
+   * Injection branches (shared seam for Piece A + Piece C). After resolving the
+   * base prompt + stashing systemPromptAppend, the run state is read via the
+   * already-held registry (no interface widening) and composed in priority order:
+   *   1. (Piece C — added later) pending nudge → return JUST the nudge text
+   *      (the resumed conversation already holds planner.md; do NOT re-send it).
+   *   2. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
+   *      `# Selected idea` block to the MAIN prompt (never systemPromptAppend,
+   *      which is invisible to the chat transcript).
+   *   3. neither → return the base prompt verbatim (zero-behavior-change floor).
+   *
    * @param runId    The workflow run ID — used to stash systemPromptAppend.
    * @param workflow The workflow row containing workflow_path.
    */
@@ -401,7 +442,47 @@ export class RunExecutor {
     }
     const { prompt, systemPromptAppend } = this.promptReader.read(workflow.workflow_path);
     this.pendingSystemPromptAppend.set(runId, systemPromptAppend);
+
+    // Piece A — seed-idea injection. Read the run via the already-held registry
+    // (no WorkflowRegistryLike widening). Fail-soft on every miss: null run /
+    // null seed_idea_id / sentinel runId / no reader / unresolved or empty body
+    // → fall through to the base prompt unchanged.
+    const seedBlock = this.buildSeedIdeaBlock(runId);
+    if (seedBlock) {
+      return Promise.resolve(`# Selected idea\n\n${seedBlock}\n\n${prompt}`);
+    }
+
     return Promise.resolve(prompt);
+  }
+
+  /**
+   * Resolve the `# Selected idea` block body for a run's seed_idea_id (Piece A).
+   *
+   * Returns null (so getPrompt falls through to the base prompt) when: no
+   * ideaBodyReader is injected, the run is missing or carries no seed_idea_id,
+   * the reader resolves no entity, or the resolved body is empty/whitespace.
+   * The block is title + (summary, when present) + body, trimmed.
+   *
+   * Kept as a separate helper so Piece C can layer its pending-nudge branch
+   * ahead of this one in getPrompt without re-deriving the seed-idea logic.
+   */
+  private buildSeedIdeaBlock(runId: string): string | null {
+    if (!this.ideaBodyReader) return null;
+    const run = this.registry.getRunById(runId);
+    const seedIdeaId = run?.seed_idea_id ?? null;
+    if (!seedIdeaId) return null;
+
+    const idea = this.ideaBodyReader.read(seedIdeaId);
+    if (!idea) return null;
+
+    const body = idea.body?.trim() ?? '';
+    if (body === '') return null;
+
+    const parts: string[] = [`## ${idea.title}`];
+    const summary = idea.summary?.trim() ?? '';
+    if (summary !== '') parts.push(summary);
+    parts.push(body);
+    return parts.join('\n\n');
   }
 
   /**

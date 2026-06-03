@@ -23,6 +23,10 @@ self-contained idea: the problem, the proposed direction, and the scope hint
 its scope hint via the available `cyboflow_*` capture tool. Surface the idea spec
 to the user for review.
 
+A selected idea is provided at the top of your prompt when one was chosen at
+launch (a `# Selected idea` block) — treat it as the raw idea to refine and do
+**not** re-capture it. Otherwise parse the user's free-form prompt.
+
 ### Step `research` (optional)
 If the idea benefits from external context, pull in docs, prior art, and library
 references (web search / context7). Fold the findings into the idea body. Skip

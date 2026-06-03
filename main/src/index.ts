@@ -54,7 +54,8 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { LifecycleTransitionsLike, StepTransitionEmitterLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike } from './orchestrator/runExecutor';
+import { selectTaskById } from './orchestrator/taskListing';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -700,6 +701,26 @@ async function initializeServices() {
   // `completed` is set ONLY by an explicit user accept (Merge / Create-PR) in the
   // runs router. This supersedes the old GAP-A pending-work probe (never
   // auto-completing subsumes "don't complete while a gate is pending").
+  // Idea-body reader (migration 017): resolves a run's seed_idea_id to its prose
+  // body via selectTaskById (UNION over ideas/epics/tasks). Injected as the
+  // trailing RunExecutor arg so getPrompt can prepend a `# Selected idea` block
+  // to the planner's prompt. Reads through the narrow DatabaseLike adapter
+  // (cyboflowDb) — the same handle selectTaskById receives in the tasks router.
+  const ideaBodyReader: IdeaBodyReaderLike = {
+    read: (id) => {
+      const item = selectTaskById(cyboflowDb, id);
+      return item
+        ? {
+            type: item.type,
+            title: item.title,
+            summary: item.summary,
+            body: item.body,
+            scope: item.scope,
+          }
+        : null;
+    },
+  };
+
   const runExecutor = new RunExecutor(
     substrateFacade,
     workflowRegistry,
@@ -711,6 +732,7 @@ async function initializeServices() {
     substrateFacade,
     stepTransitionEmitter,
     taskChangeRouter,
+    ideaBodyReader,
   );
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
