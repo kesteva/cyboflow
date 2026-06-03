@@ -724,7 +724,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (claudeCodeManager.ts:478), which interactive `claude` cannot use because
     // the REPL has no SDK `systemPrompt.append` channel. See composePromptBody.
     const promptToSend = this.composePromptBody(runId, options.prompt);
-    this.sendInput(panelId, promptToSend + '\n');
+    // Submit the prompt with a CARRIAGE RETURN ('\r'), NOT a newline ('\n').
+    // claude's interactive REPL commits the input line on '\r' (Enter); '\n' is
+    // treated as a literal newline INSIDE the input and never submits — so the
+    // prompt sits typed-but-unsent, claude stays idle, no transcript is written,
+    // and the run hangs on 'running'. Verified empirically against claude 2.1.x:
+    // '\r' and '\r\n' submit (transcript written), '\n' alone does NOT. Interior
+    // '\n's in this multi-line prompt are preserved; only the trailing '\r' commits.
+    this.sendInput(panelId, promptToSend + '\r');
 
     return spawnPromise;
   }
@@ -877,8 +884,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     try {
       // EOF (Ctrl-D) then `/exit` — either ends the REPL turn so the inherited
       // onExit fires and (after the settle window) resolves the spawn promise.
+      // `/exit` is committed with '\r' (the REPL's submit key); '\n' would leave
+      // the slash-command typed but unexecuted (same CR-not-LF rule as the initial
+      // prompt send). The preceding EOF usually terminates first; the '\r'-committed
+      // `/exit` is the fallback when input remains buffered.
       cliProcess.process.write(EOF_BYTE);
-      cliProcess.process.write('/exit\n');
+      cliProcess.process.write('/exit\r');
     } catch (err) {
       this.logger?.warn(`[InteractiveClaudeManager] failed to write EOF/exit for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`);
     }

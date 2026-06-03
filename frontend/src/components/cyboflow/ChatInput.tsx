@@ -151,13 +151,16 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
 
     if (mode === 'workflow-interactive') {
       // Relay the line as a complete REPL turn into the live interactive PTY.
-      // The trailing '\n' submits the turn — the raw-keystroke path
-      // (InteractiveTerminalView) sends bytes verbatim, so the newline is owned
-      // HERE only. The input type is AppRouter-inferred (no local RelayInput).
+      // The trailing '\r' (carriage return) submits the turn — claude's REPL
+      // commits the input on '\r' (Enter), NOT '\n' (which it treats as a literal
+      // newline inside the input and never submits). The raw-keystroke path
+      // (InteractiveTerminalView) already sends Enter as '\r' verbatim; the submit
+      // char is owned HERE only for the composer path. The input type is
+      // AppRouter-inferred (no local RelayInput).
       setIsSending(true);
       setSendError(null);
       try {
-        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: text + '\n' });
+        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: text + '\r' });
         setText('');
       } catch (err: unknown) {
         setSendError(err instanceof Error ? err.message : 'Send failed');
