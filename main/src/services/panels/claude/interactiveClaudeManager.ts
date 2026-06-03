@@ -175,6 +175,17 @@ const SETTLE_MS = 500;
 const EOF_BYTE = '\x04';
 
 /**
+ * Delay (ms) between writing a prompt body and the separate '\r' that submits it.
+ * claude 2.1.x enables bracketed-paste mode, so a single input burst is captured
+ * as a PASTE — a '\r' appended to the body rides inside that paste as a literal
+ * newline (never Enter) and the prompt sits unsubmitted in the composer. Sending
+ * '\r' as its OWN keystroke after the paste-coalescing window closes is what
+ * commits the turn. 250ms is empirically sufficient (PTY harness, claude 2.1.161);
+ * 300ms adds margin for a busy event loop. See submitToRepl.
+ */
+const SUBMIT_DELAY_MS = 300;
+
+/**
  * Payload of the 'turn-end' event emitted on each assistant turn boundary of a
  * persistent interactive REPL (IDEA-030 / TASK-818). The SubstrateDispatchFacade
  * fans this in and re-emits it by reference; RunExecutor's event-driven rest
@@ -691,20 +702,23 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
-    // Wait for transcript discovery (loud diagnostic on timeout), THEN send the
-    // prompt.
+    // Submit the prompt FIRST — BEFORE awaiting discovery. claude writes the
+    // transcript `.jsonl` only AFTER it processes a SUBMITTED prompt, so
+    // waitForFirstLine can succeed only once the prompt is in. Submitting after
+    // the await deadlocks: discovery times out and TranscriptTailSource.
+    // onDiscoveryTimeout calls clearDiscovery(), which IRREVERSIBLY stops the 50ms
+    // poller — so even when claude later writes the transcript nothing is watching
+    // and the run hangs on 'running'.
     //
-    // KNOWN DEADLOCK (reverted to keep the branch non-freezing): this ordering
-    // hangs the run — discovery waits for a transcript `.jsonl` that claude only
-    // writes AFTER it processes a prompt, but the prompt is sent only after this
-    // await. Moving the sendInput BEFORE this await fixes the deadlock — BUT that
-    // reorder reliably FREEZES the Electron MAIN process at ~100% CPU the moment
-    // claude actually engages (n=3). The freeze appears to be in NATIVE code (the
-    // V8 inspector cannot attach/interrupt it during the spin), so it resists the
-    // CDP-profile approach. Re-applying the reorder is a PRECONDITION for an
-    // engaged run; root-cause the freeze FIRST (try `--prof` tick-log which
-    // survives SIGKILL, or a fix-forward throttle of the raw pty-output fan-out).
-    // See [[project_interactive_persistent_session]].
+    // submitToRepl writes the body then a SEPARATE '\r' after the bracketed-paste
+    // window closes: claude 2.1.x captures a one-shot `body + '\r'` as a paste
+    // whose trailing '\r' is a literal newline (never Enter), so the prompt would
+    // otherwise sit in the composer unsubmitted (verified via PTY harness).
+    // Interior '\n's of the multi-line prompt are preserved as one user turn.
+    const promptToSend = this.composePromptBody(runId, options.prompt);
+    this.submitToRepl(panelId, promptToSend);
+
+    // Now await transcript discovery (claude is engaging) — loud on timeout.
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
@@ -718,13 +732,6 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // belongs to the SDK substrate — the two NEVER both run for one run, so this
     // does not race/clobber the SDK path.
     this.persistDiscoveredSessionId(sessionId, tailSource);
-
-    // Submit the prompt with a CARRIAGE RETURN ('\r'), NOT a newline ('\n').
-    // claude's interactive REPL commits the input line on '\r'; '\n' is a literal
-    // newline inside the input and never submits (verified empirically). Interior
-    // '\n's of this multi-line prompt are preserved; only the trailing '\r' commits.
-    const promptToSend = this.composePromptBody(runId, options.prompt);
-    this.sendInput(panelId, promptToSend + '\r');
 
     return spawnPromise;
   }
@@ -864,6 +871,34 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
+   * Submit a line to the live REPL the way a human paste+Enter does: write the
+   * BODY, then send '\r' (Enter) as a SEPARATE keystroke after the bracketed-paste
+   * window closes (SUBMIT_DELAY_MS). Writing `body + '\r'` in one PTY write fails
+   * on claude 2.1.x — the whole burst is captured as a bracketed paste and the
+   * trailing '\r' rides inside it as a literal newline (never Enter), so the text
+   * lands in the composer and never submits (verified: no transcript, run stuck
+   * on 'running'). No-op when no live process exists; the deferred '\r' write is
+   * guarded because the panel can be torn down within the delay window. The
+   * raw-keystroke path (xterm -> relayInput, where Enter is already its own '\r')
+   * must NOT route through here.
+   */
+  private submitToRepl(panelId: string, body: string): void {
+    const cliProcess = this.processes.get(panelId);
+    if (!cliProcess) return;
+    this.sendInput(panelId, body);
+    setTimeout(() => {
+      if (!this.processes.has(panelId)) return;
+      try {
+        this.sendInput(panelId, '\r');
+      } catch (err) {
+        this.logger?.warn(
+          `[InteractiveClaudeManager] deferred submit '\\r' failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, SUBMIT_DELAY_MS);
+  }
+
+  /**
    * Write the EOF (Ctrl-D) + `/exit` control sequence into the live PTY stdin to
    * end the REPL turn / session. Shared by the legacy single-turn turn-end path
    * and the explicit-termination seam (endSession) so BOTH route through the same
@@ -877,12 +912,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     try {
       // EOF (Ctrl-D) then `/exit` — either ends the REPL turn so the inherited
       // onExit fires and (after the settle window) resolves the spawn promise.
-      // `/exit` is committed with '\r' (the REPL's submit key); '\n' would leave
-      // the slash-command typed but unexecuted (same CR-not-LF rule as the initial
-      // prompt send). The preceding EOF usually terminates first; the '\r'-committed
-      // `/exit` is the fallback when input remains buffered.
+      // `/exit` is submitted via submitToRepl (body then a SEPARATE '\r'): a
+      // one-shot `'/exit\r'` would be swallowed by bracketed-paste as a literal
+      // newline and never execute (same paste rule as the initial prompt send).
+      // The preceding EOF usually terminates first; the submitted `/exit` is the
+      // fallback when input remains buffered.
       cliProcess.process.write(EOF_BYTE);
-      cliProcess.process.write('/exit\r');
+      this.submitToRepl(panelId, '/exit');
     } catch (err) {
       this.logger?.warn(`[InteractiveClaudeManager] failed to write EOF/exit for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`);
     }
