@@ -23,8 +23,6 @@ export const AGENT_OPTIONS = [
   'code-reviewer',
   'verifier',
   'visual-verifier',
-  'compounder',
-  'pruner',
 ] as const;
 
 /** Suggested MCP / tool ids for the MCP tab toggle rows. */

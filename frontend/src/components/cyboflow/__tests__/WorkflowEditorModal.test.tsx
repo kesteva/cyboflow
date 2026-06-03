@@ -26,7 +26,7 @@ import type { WorkflowDefinition, WorkflowRow } from '../../../../../shared/type
 const EDIT_WORKFLOW_ID = 'wf-1';
 
 const SEED_DEFINITION: WorkflowDefinition = {
-  id: 'soloflow',
+  id: 'planner',
   phases: [
     {
       id: 'plan',
@@ -43,7 +43,7 @@ const SEED_DEFINITION: WorkflowDefinition = {
 const SEED_ROW: WorkflowRow = {
   id: EDIT_WORKFLOW_ID,
   project_id: 1,
-  name: 'soloflow',
+  name: 'planner',
   workflow_path: null,
   permission_mode: 'default',
   spec_json: '{}',
@@ -160,7 +160,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     // The seeded definition's first step is rendered in the canvas.
     expect(screen.getByTestId('editor-step-node-context')).toBeInTheDocument();
     // The name input carries the loaded workflow name.
-    expect(screen.getByTestId('editor-name-input')).toHaveValue('soloflow');
+    expect(screen.getByTestId('editor-name-input')).toHaveValue('planner');
   });
 
   it('Save is disabled until an edit makes the editor dirty', async () => {
@@ -321,8 +321,8 @@ describe('WorkflowEditorModal — edit mode', () => {
 });
 
 describe('WorkflowEditorModal — create mode', () => {
-  it('clones the project soloflow definition and offers "Save as new flow"', async () => {
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('cloned-flow');
+  it('seeds a hardcoded skeleton (no clone) and offers "Save as new flow"', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('new-flow');
     const onSaved = vi.fn();
 
     render(
@@ -338,9 +338,12 @@ describe('WorkflowEditorModal — create mode', () => {
 
     await screen.findByTestId('workflow-editor-canvas');
 
-    // Create mode resolves the soloflow row from the project list, then clones it.
-    expect(mockList).toHaveBeenCalledWith({ projectId: 1 });
-    expect(mockGetDefinition).toHaveBeenCalledWith({ workflowId: EDIT_WORKFLOW_ID });
+    // Create mode no longer clones the dropped 'soloflow' built-in: it seeds a
+    // local skeleton synchronously, so no list/getDefinition round-trip fires.
+    expect(mockList).not.toHaveBeenCalled();
+    expect(mockGetDefinition).not.toHaveBeenCalled();
+    // The skeleton's single step is rendered.
+    expect(screen.getByTestId('editor-step-node-step-1')).toBeInTheDocument();
 
     // No edit-mode Save button (create mode persists only via "save as new").
     expect(screen.queryByTestId('editor-save-button')).toBeNull();
@@ -351,7 +354,7 @@ describe('WorkflowEditorModal — create mode', () => {
 
     expect(promptSpy).toHaveBeenCalled();
     expect(mockCreateCustom).toHaveBeenCalledOnce();
-    expect(mockCreateCustom.mock.calls[0][0].name).toBe('cloned-flow');
+    expect(mockCreateCustom.mock.calls[0][0].name).toBe('new-flow');
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
   });
 });

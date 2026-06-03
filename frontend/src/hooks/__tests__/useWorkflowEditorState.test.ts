@@ -28,7 +28,7 @@ const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** A two-phase definition with a loopback inside the second phase. */
 function makeDefinition(): WorkflowDefinition {
   return {
-    id: 'soloflow',
+    id: 'planner',
     phases: [
       {
         id: 'plan',
@@ -53,7 +53,7 @@ function makeDefinition(): WorkflowDefinition {
 }
 
 function makeState(): WorkflowEditorState {
-  return initWorkflowEditorState(makeDefinition(), 'soloflow');
+  return initWorkflowEditorState(makeDefinition(), 'planner');
 }
 
 /** Find a step by id across all phases. */
@@ -77,7 +77,7 @@ function findPhase(def: WorkflowDefinition, phaseId: string) {
 describe('initWorkflowEditorState', () => {
   it('selects the first step of the first phase', () => {
     const state = makeState();
-    expect(state.name).toBe('soloflow');
+    expect(state.name).toBe('planner');
     expect(state.selectedStepId).toBe('context');
     expect(state.definition.phases).toHaveLength(2);
   });

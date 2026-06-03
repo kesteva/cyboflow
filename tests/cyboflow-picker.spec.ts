@@ -94,13 +94,13 @@ test.describe('CyboflowRoot / WorkflowPicker', () => {
     await page.waitForFunction(
       () => {
         const sel = document.querySelector('select[aria-label="Select workflow"]');
-        return sel !== null && sel.querySelectorAll('option').length >= 5;
+        return sel !== null && sel.querySelectorAll('option').length >= 2;
       },
       { timeout: 10_000 },
     );
 
     const options = await select.locator('option').allTextContents();
-    const expectedNames = ['soloflow', 'planner', 'sprint', 'compound', 'prune'];
+    const expectedNames = ['planner', 'sprint'];
     for (const name of expectedNames) {
       expect(options).toContain(name);
     }

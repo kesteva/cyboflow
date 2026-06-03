@@ -1,5 +1,6 @@
 /**
- * WorkflowPicker — dropdown of the SoloFlow workflows + Start Run button.
+ * WorkflowPicker — dropdown of the cyboflow workflows (Planner + Sprint) +
+ * Start Run button.
  *
  * Accepts a `projectId` prop; on mount it calls `trpc.cyboflow.workflows.list`
  * and populates a `<select>`.  Clicking "Start Run" calls

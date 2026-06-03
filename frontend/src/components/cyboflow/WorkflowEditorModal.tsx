@@ -4,9 +4,8 @@
  *
  * Two modes:
  *   - 'edit'   — seed from `trpc.cyboflow.workflows.getDefinition.query({ workflowId })`.
- *   - 'create' — clone the project's built-in 'soloflow' definition (via the same
- *                getDefinition query against the resolved soloflow workflow row),
- *                falling back to a minimal skeleton when no soloflow row exists.
+ *   - 'create' — start from a minimal hardcoded custom skeleton (the
+ *                built-in 'soloflow' template was removed in the 2-flow rework).
  *
  * Header actions:
  *   Cancel              — close without saving.
@@ -25,10 +24,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import {
-  isCyboflowWorkflowName,
-  WORKFLOW_DEFINITIONS,
-} from '../../../../shared/types/workflows';
+import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
@@ -46,7 +42,7 @@ export interface WorkflowEditorModalProps {
   onSaved?: (workflowId: string) => void;
 }
 
-/** Minimal skeleton used when no soloflow row can be cloned in create mode. */
+/** Minimal skeleton seeded for a brand-new custom flow (create mode). */
 const SKELETON_DEFINITION: WorkflowDefinition = {
   id: 'custom',
   phases: [
@@ -134,29 +130,18 @@ export function WorkflowEditorModal({
       }
     };
 
-    const loadCreate = async () => {
-      try {
-        // Clone the project's built-in 'soloflow' definition. Resolve its row id
-        // from the project workflow list; fall back to the static built-in, then
-        // to a minimal skeleton.
-        const rows = await trpc.cyboflow.workflows.list.query({ projectId });
-        const soloflowRow = rows.find((r) => r.name === 'soloflow');
-        let cloned: WorkflowDefinition;
-        if (soloflowRow) {
-          setSourcePermissionMode(soloflowRow.permission_mode);
-          cloned = await trpc.cyboflow.workflows.getDefinition.query({ workflowId: soloflowRow.id });
-        } else {
-          cloned = WORKFLOW_DEFINITIONS.soloflow;
-        }
-        seed(cloned, '');
-      } catch {
-        // Network/seed failure → start from the local skeleton rather than block.
-        seed(SKELETON_DEFINITION, '');
-      }
+    const loadCreate = () => {
+      // A brand-new custom flow starts from a minimal hardcoded skeleton. The
+      // built-in 'soloflow' template that create mode used to clone was removed
+      // in the 2-flow rework; users build their custom graph from scratch (or
+      // edit a built-in via 'edit' mode). A forked flow inherits no source row,
+      // so the permission mode defaults to 'default'.
+      setSourcePermissionMode('default');
+      seed(SKELETON_DEFINITION, '');
     };
 
     if (mode === 'create') {
-      void loadCreate();
+      loadCreate();
     } else {
       void loadEdit();
     }

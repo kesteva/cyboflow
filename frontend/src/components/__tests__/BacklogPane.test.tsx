@@ -44,7 +44,7 @@ vi.mock('../../stores/backlogStore', () => {
 // trpc client mock for run-launch (workflows.list, runs.start) + create.
 const mockStart = vi.fn().mockResolvedValue({ runId: 'run-1' });
 const mockCreate = vi.fn().mockResolvedValue({ taskId: 'tsk_new' });
-const mockWorkflowsList = vi.fn().mockResolvedValue([{ id: 'wf-1', name: 'soloflow' }]);
+const mockWorkflowsList = vi.fn().mockResolvedValue([{ id: 'wf-1', name: 'planner' }]);
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
