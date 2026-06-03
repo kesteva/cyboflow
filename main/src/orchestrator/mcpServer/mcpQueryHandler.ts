@@ -7,6 +7,11 @@
  *   - mcp-get-run                 (SELECT from workflow_runs)
  *   - mcp-submit-checkpoint       (INSERT into raw_events with event_type='cyboflow_checkpoint')
  *   - mcp-report-step             (observational workflow-step transition)
+ *   - mcp-create-task / -update-task / -set-task-stage (entity-aware task writes
+ *                                  via the TaskChangeRouter chokepoint)
+ *   - mcp-report-finding          (NON-BLOCKING review-item create via the
+ *                                  ReviewItemRouter chokepoint; replies ok:true
+ *                                  immediately and never pauses the run)
  *
  * Plus the INTERACTIVE-substrate PreToolUse gate (IDEA-013 S5 / TASK-810):
  *   - shell-approval-request      (ASYNC-DEFERRED — the first handler that does
@@ -47,7 +52,15 @@ import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor } from '../taskChangeRouter';
+import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
+import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
+import type {
+  ReviewItemEntityType,
+  ReviewItemKind,
+  ReviewItemPayload,
+  ReviewItemSeverity,
+} from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,6 +107,24 @@ export type McpQueryMessage =
       entityType?: TaskType;
       stageId: string;
       expectedVersion?: number;
+    }
+  | {
+      type: 'mcp-report-finding';
+      requestId: string;
+      runId: string;
+      title: string;
+      body: string;
+      /** Only meaningful for findings; stored on the row as given. */
+      severity?: ReviewItemSeverity;
+      /** Item kind; the MCP tool excludes 'permission' (folded via the approval path). Defaults to 'finding'. */
+      kind?: Exclude<ReviewItemKind, 'permission'>;
+      /** Whether this item gates run resume; defaults to false (findings are non-blocking). */
+      blocking?: boolean;
+      /** Soft polymorphic entity link — both must be set together or both omitted. */
+      entityType?: ReviewItemEntityType;
+      entityId?: string;
+      /** Per-kind payload JSON; its discriminant must equal `kind`. */
+      payloadJson?: string;
     }
   | {
       type: 'shell-approval-request';
@@ -201,6 +232,11 @@ export class McpQueryHandler {
           break;
         case 'mcp-set-task-stage':
           await this.handleSetTaskStage(msg, client);
+          break;
+        case 'mcp-report-finding':
+          // NON-BLOCKING: writes its response synchronously after enqueuing the
+          // review-item create — the run is NEVER paused waiting on the inbox.
+          this.handleReportFinding(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -715,6 +751,227 @@ export class McpQueryHandler {
       requestId,
       ok: false,
       error: 'task_change_failed',
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Review-item write (cyboflow_report_finding)
+  //
+  // Findings (and decisions / human_tasks) emitted by Sprint agents route
+  // through the SINGLE review-queue chokepoint ReviewItemRouter.applyReviewItem —
+  // they NEVER INSERT review_items directly. The item is NON-BLOCKING by default
+  // (a finding never pauses the run): the handler validates the run context +
+  // payload SYNCHRONOUSLY (so a bad request surfaces immediately), then enqueues
+  // the create and writes the ok:true response WITHOUT awaiting the per-project
+  // queue — the agent's run continues regardless of inbox contention. The soft
+  // entity-link and per-kind-payload-discriminant validations are enforced INSIDE
+  // applyReviewItem and surface as ReviewItemError.code via writeReviewItemError.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Resolve the calling run into the project scope + agent actor needed to create
+   * a review item. Mirrors resolveTaskRunContext exactly:
+   *   - the 'orchestrator' sentinel runId has no workflow_runs row → reject
+   *     before any DB touch (finding_requires_real_run);
+   *   - a missing run row → run_not_found;
+   *   - a terminal run (completed | failed | canceled) must not write findings →
+   *     run_not_active.
+   * Actor derivation mirrors TaskChangeRouter.resolveAgentLabel
+   * (agent:<snapshot[step] | step | 'unknown'>).
+   */
+  private resolveReviewItemRunContext(
+    runId: string,
+  ): { ok: true; projectId: number; actor: ReviewActor } | { ok: false; error: string } {
+    if (runId === 'orchestrator') {
+      return { ok: false, error: 'finding_requires_real_run' };
+    }
+
+    const row = this.db
+      .prepare(
+        `SELECT project_id AS projectId, status, current_step_id AS currentStepId,
+                steps_snapshot_json AS stepsSnapshotJson
+           FROM workflow_runs WHERE id = ?`,
+      )
+      .get(runId) as
+      | {
+          projectId?: unknown;
+          status?: unknown;
+          currentStepId?: unknown;
+          stepsSnapshotJson?: unknown;
+        }
+      | undefined;
+
+    if (!row) {
+      return { ok: false, error: 'run_not_found' };
+    }
+
+    const status = typeof row.status === 'string' ? row.status : '';
+    if (status === 'completed' || status === 'failed' || status === 'canceled') {
+      return { ok: false, error: 'run_not_active' };
+    }
+
+    const projectId = typeof row.projectId === 'number' ? row.projectId : Number(row.projectId);
+    const currentStepId = typeof row.currentStepId === 'string' ? row.currentStepId : null;
+    const stepsSnapshotJson = typeof row.stepsSnapshotJson === 'string' ? row.stepsSnapshotJson : null;
+
+    let label = 'unknown';
+    if (currentStepId && stepsSnapshotJson) {
+      try {
+        const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
+        const agent = snapshot[currentStepId];
+        if (typeof agent === 'string' && agent.length > 0) {
+          label = agent;
+        } else {
+          label = currentStepId;
+        }
+      } catch {
+        label = currentStepId;
+      }
+    } else if (currentStepId) {
+      label = currentStepId;
+    }
+
+    const actor: ReviewActor = `agent:${label}`;
+    return { ok: true, projectId, actor };
+  }
+
+  /**
+   * Report a finding/decision/human_task into the unified review queue.
+   *
+   * NON-BLOCKING contract: the run is never paused on the inbox. This handler
+   * validates the run context AND parses/validates payload_json SYNCHRONOUSLY
+   * (so a bad request fails fast), then fires ReviewItemRouter.applyReviewItem
+   * and writes the ok:true response IMMEDIATELY — it does NOT await the
+   * per-project queue. A late chokepoint rejection (e.g. invalid_entity from the
+   * soft-link guard) is logged but cannot retroactively block the already-replied
+   * run; the synchronous validations below catch the common misuse before reply.
+   */
+  private handleReportFinding(
+    msg: Extract<McpQueryMessage, { type: 'mcp-report-finding' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const kind: Exclude<ReviewItemKind, 'permission'> = msg.kind ?? 'finding';
+
+    // Soft entity-link guard (both set together or both omitted) — surfaced
+    // synchronously through writeReviewItemError so the caller gets the SAME
+    // 'invalid_entity' code the chokepoint would have thrown, but BEFORE we reply
+    // ok:true (the non-blocking create cannot un-reply the run after the fact).
+    if ((msg.entityType === undefined) !== (msg.entityId === undefined)) {
+      this.writeReviewItemError(
+        client,
+        msg.requestId,
+        new ReviewItemError('invalid_entity', 'entityType and entityId must be set together or both omitted'),
+      );
+      return;
+    }
+
+    // Parse + validate the per-kind payload BEFORE the async create. The
+    // discriminant must equal `kind` (the same check the chokepoint runs); doing
+    // it here keeps the malformed-payload rejection synchronous.
+    let payload: ReviewItemPayload | null = null;
+    if (msg.payloadJson !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(msg.payloadJson);
+      } catch {
+        this.writeReviewItemError(
+          client,
+          msg.requestId,
+          new ReviewItemError('invalid_payload', 'payload_json is not valid JSON'),
+        );
+        return;
+      }
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        (parsed as { kind?: unknown }).kind !== kind
+      ) {
+        this.writeReviewItemError(
+          client,
+          msg.requestId,
+          new ReviewItemError('invalid_payload', `payload.kind does not match item kind '${kind}'`),
+        );
+        return;
+      }
+      payload = parsed as ReviewItemPayload;
+    }
+
+    const create: ReviewItemCreate = {
+      op: 'create',
+      actor: ctx.actor,
+      kind,
+      title: msg.title,
+      body: msg.body,
+      blocking: msg.blocking ?? false,
+      severity: msg.severity ?? null,
+      source: ctx.actor,
+      entityType: msg.entityType ?? null,
+      entityId: msg.entityId ?? null,
+      runId: msg.runId,
+      payload,
+    };
+
+    // Fire-and-forget: the run is NEVER gated on the inbox. A late failure is
+    // logged (it cannot un-reply the run), but the synchronous validations above
+    // already caught the common misuse, so this path is for genuine DB faults.
+    void ReviewItemRouter.getInstance()
+      .applyReviewItem(ctx.projectId, create)
+      .catch((err) => {
+        this.logger?.error('[Cyboflow MCP Query] review-item create failed (non-blocking)', {
+          runId: msg.runId,
+          error: err instanceof ReviewItemError ? err.code : err instanceof Error ? err.message : String(err),
+        });
+      });
+
+    // Reply IMMEDIATELY — do not await the queue.
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { accepted: true, kind, blocking: msg.blocking ?? false },
+    });
+  }
+
+  /**
+   * Surface a review-item failure as an ok:false response. A ReviewItemError maps
+   * to its discriminated .code (mirrors writeTaskChangeError); anything else is
+   * logged and collapsed to the opaque 'review_item_failed'.
+   *
+   * Used by the SYNCHRONOUS pre-create validations on the report-finding path
+   * (entity-link + payload-discriminant), which construct ReviewItemError so the
+   * codes are single-sourced from the chokepoint's error type. The async create
+   * itself is fire-and-forget (the run is already replied to), so a late
+   * chokepoint rejection there is logged, not written through this helper.
+   */
+  private writeReviewItemError(client: net.Socket, requestId: string, err: unknown): void {
+    if (err instanceof ReviewItemError) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: err.code,
+      });
+      return;
+    }
+    this.logger?.error('[Cyboflow MCP Query] review item failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId,
+      ok: false,
+      error: 'review_item_failed',
     });
   }
 
