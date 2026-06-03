@@ -27,6 +27,9 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryResponse } from '../mcpQueryHandler';
 import { OrchSocketServer } from '../orchSocketServer';
@@ -405,6 +408,115 @@ describe('shell-approval-request handler branch', () => {
       db.prepare(`SELECT status FROM workflow_runs WHERE id = ?`).get('run-auq') as { status: string }
     ).status;
     expect(status).not.toBe('awaiting_input');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4: the interactive shell-approval path folds a permission review_item while
+// preserving the socket-held-open invariant. Uses a migration-backed DB so the
+// co-write (which is a no-op on the GATE_SCHEMA DB the block above uses) is
+// observable.
+// ---------------------------------------------------------------------------
+
+describe('shell-approval-request review_item fold (P4, socket still held)', () => {
+  let db: Database.Database;
+  let handler: McpQueryHandler;
+  const worktrees: string[] = [];
+  let realHome: string | undefined;
+  let fakeHome: string;
+
+  function buildReviewDb(): Database.Database {
+    const reviewDb = new BetterSqlite3(':memory:');
+    reviewDb.pragma('foreign_keys = ON');
+    reviewDb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    reviewDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    reviewDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    reviewDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    reviewDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    reviewDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    return reviewDb;
+  }
+
+  function seedReviewRun(runId: string): string {
+    const worktree = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-wt-${process.pid}-`));
+    worktrees.push(worktree);
+    fs.mkdirSync(path.join(worktree, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: [] } }), 'utf8');
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status) VALUES (?, 'wf-1', 1, ?, 'running')`,
+    ).run(runId, worktree);
+    return worktree;
+  }
+
+  beforeEach(() => {
+    db = buildReviewDb();
+    ApprovalRouter.initialize(dbAdapter(db));
+    handler = new McpQueryHandler(dbAdapter(db), makeSpyLogger());
+    realHome = process.env.HOME;
+    fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-home-${process.pid}-`));
+    process.env.HOME = fakeHome;
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    db.close();
+    for (const w of worktrees.splice(0)) fs.rmSync(w, { recursive: true, force: true });
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('writes a blocking permission review_item (source approval:interactive), holds the socket, and resolves on respond', async () => {
+    seedReviewRun('run-iv');
+    const { socket, writes } = makeEmitterSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'req-iv',
+        runId: 'run-iv',
+        toolName: 'Bash',
+        toolInput: { command: 'rm -rf /tmp/x' },
+      },
+      socket,
+    );
+    await flush();
+
+    // Socket-held-open invariant: NO synchronous verdict yet.
+    expect(writes).toHaveLength(0);
+
+    // The folded permission review_item is present, blocking, and tagged with the
+    // interactive provenance.
+    const row = db
+      .prepare("SELECT kind, blocking, status, source FROM review_items WHERE run_id = 'run-iv'")
+      .get() as { kind: string; blocking: number; status: string; source: string };
+    expect(row.kind).toBe('permission');
+    expect(row.blocking).toBe(1);
+    expect(row.status).toBe('pending');
+    expect(row.source).toBe('approval:interactive');
+
+    // Resolve via the router — the verdict is delivered on the held-open socket
+    // AND the folded review_item is resolved.
+    const approvalId = ApprovalRouter.getInstance().getPending()[0].id;
+    await ApprovalRouter.getInstance().respond(approvalId, { behavior: 'allow' });
+    await flush();
+
+    expect(decisionOf(writes)).toBe('allow');
+    const resolved = db
+      .prepare("SELECT status FROM review_items WHERE run_id = 'run-iv'")
+      .get() as { status: string };
+    expect(resolved.status).toBe('resolved');
   });
 });
 

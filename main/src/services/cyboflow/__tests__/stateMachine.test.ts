@@ -286,3 +286,39 @@ describe('(d) terminal-state lockdown', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// (e) P4 review_items fold — no new states; the run-pause/aggregate-blocking
+//     invariant reuses awaiting_review / awaiting_input.
+// ---------------------------------------------------------------------------
+
+describe('(e) P4 review-item fold reuses existing pause states (no new states)', () => {
+  it('the status set is still exactly the 9 documented states — the review fold adds NONE', () => {
+    // P4 routes permissions/decisions/human-gates into review_items, NOT into new
+    // workflow_runs statuses. A run pauses by reusing awaiting_review (permission /
+    // human-gate / clean-drain rest) or awaiting_input (AskUserQuestion). If a new
+    // state were ever added the count here drifts and this guard fires.
+    expect(ALL_STATUSES).toHaveLength(9);
+    expect(Object.keys(ALLOWED_TRANSITIONS).sort()).toEqual([...ALL_STATUSES].sort());
+  });
+
+  it('the human-gate pause path (running -> awaiting_review) is a legal edge', () => {
+    // HumanStepManager.openHumanGate issues this exact transition; it must be
+    // allowed by the table (it is — shared with the tool-approval gate).
+    expect(isTransitionAllowed('running', 'awaiting_review')).toBe(true);
+  });
+
+  it('the aggregate-unblock auto-resume edge (awaiting_review -> running) is legal', () => {
+    // HumanStepManager.maybeResumeRun / resolveHumanGate issue this when the last
+    // blocking review_item resolves. The "cannot leave awaiting_review while a
+    // blocking item is still pending" rule is an AGGREGATE-DB gate enforced by
+    // HumanStepManager.countPendingBlockingReviewItems — NOT a per-edge state
+    // rule — so the edge itself stays legal here (see reviewItemFold.test.ts +
+    // mcpQueryHandler.test.ts for the behavioral aggregate-blocking proof).
+    expect(isTransitionAllowed('awaiting_review', 'running')).toBe(true);
+  });
+
+  it('awaiting_input -> running (question resolve auto-resume) is legal', () => {
+    expect(isTransitionAllowed('awaiting_input', 'running')).toBe(true);
+  });
+});

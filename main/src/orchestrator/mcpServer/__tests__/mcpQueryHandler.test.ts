@@ -30,6 +30,7 @@ import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestrator
 import { stepTransitionEvents } from '../../trpc/routers/events';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
+import { HumanStepManager } from '../../humanStepManager';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -1491,5 +1492,130 @@ describe('McpQueryHandler', () => {
       expect(response.ok).toBe(false);
       expect(response.error).toBe('unknown_message_type');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. mcp-report-step human gate (P4) — a step with human:true PAUSES the run via
+//    a blocking decision review_item; the run does NOT transparently pass it.
+// ---------------------------------------------------------------------------
+
+describe('mcp-report-step human gate (P4 run-pause)', () => {
+  // The gate path reaches HumanStepManager.openHumanGate, which writes
+  // review_items (016) + entity_events (015) + transitions workflow_runs. Build a
+  // migration-backed DB (projects + 006/011/014/015/016) and initialize the
+  // HumanStepManager singleton against it.
+  function buildGateDb(): Database.Database {
+    const gateDb = new Database(':memory:');
+    gateDb.pragma('foreign_keys = ON');
+    gateDb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    gateDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    gateDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    return gateDb;
+  }
+
+  // Seed a 'sprint' run (built-in def has a human:true 'human-review' step).
+  function seedSprintRun(gateDb: Database.Database, runId: string): void {
+    gateDb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-s', 1, 'sprint', '{}')`)
+      .run();
+    gateDb
+      .prepare(`INSERT INTO workflow_runs (id, workflow_id, project_id, status) VALUES (?, 'wf-s', 1, 'running')`)
+      .run(runId);
+  }
+
+  let gateDb: Database.Database;
+  let gateHandler: McpQueryHandler;
+
+  beforeEach(() => {
+    gateDb = buildGateDb();
+    HumanStepManager.initialize(dbAdapter(gateDb));
+    gateHandler = new McpQueryHandler(dbAdapter(gateDb));
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  afterEach(() => {
+    HumanStepManager._resetForTesting();
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  it('opens a blocking decision review_item AND pauses the run when a human step is reported (running)', async () => {
+    seedSprintRun(gateDb, 'run-g');
+
+    const { socket, writes } = makeSocketDouble();
+    // 'human-review' is the human:true step in the built-in sprint def.
+    await gateHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'hg-1', runId: 'run-g', stepId: 'human-review', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toMatchObject({ step_id: 'human-review', status: 'running', human_gate: true });
+
+    // The run is PAUSED — it did NOT transparently pass the human step.
+    const status = (gateDb.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-g') as { status: string })
+      .status;
+    expect(status).toBe('awaiting_review');
+
+    // Exactly one blocking decision review_item was created for the run.
+    const row = gateDb
+      .prepare("SELECT kind, blocking, status, source FROM review_items WHERE run_id = 'run-g'")
+      .get() as { kind: string; blocking: number; status: string; source: string };
+    expect(row.kind).toBe('decision');
+    expect(row.blocking).toBe(1);
+    expect(row.status).toBe('pending');
+    expect(row.source).toBe('gate:human-step:human-review');
+  });
+
+  it('does NOT open a gate (and does not crash) for a non-human step', async () => {
+    seedSprintRun(gateDb, 'run-g');
+
+    const { socket, writes } = makeSocketDouble();
+    await gateHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'hg-2', runId: 'run-g', stepId: 'implement', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toEqual({ step_id: 'implement', status: 'running' });
+
+    // No pause, no review_item.
+    const status = (gateDb.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-g') as { status: string })
+      .status;
+    expect(status).toBe('running');
+    expect(gateDb.prepare("SELECT COUNT(*) AS n FROM review_items WHERE run_id = 'run-g'").get()).toEqual({ n: 0 });
+  });
+
+  it('is idempotent — reporting the human step twice opens at most one gate', async () => {
+    seedSprintRun(gateDb, 'run-g');
+    const { socket } = makeSocketDouble();
+
+    await gateHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'hg-3a', runId: 'run-g', stepId: 'human-review', status: 'running' },
+      socket,
+    );
+    // A second 'running' report for the same step (e.g. a retry) must not open a
+    // second gate — the run is already awaiting_review (running-guard no-op).
+    await gateHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'hg-3b', runId: 'run-g', stepId: 'human-review', status: 'running' },
+      socket,
+    );
+
+    expect(gateDb.prepare("SELECT COUNT(*) AS n FROM review_items WHERE run_id = 'run-g'").get()).toEqual({ n: 1 });
   });
 });
