@@ -3,16 +3,16 @@
  *
  * Implements list/get (read) and getDefinition/updateSpec/resetSpec/createCustom
  * (blueprint-editor) procedures backed by WorkflowRegistry.
- * Auto-seeds the 5 default SoloFlow workflows when a project has none.
+ * Auto-seeds the two in-repo built-in workflows (Planner + Sprint) when a
+ * project has none.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
 import { z } from 'zod';
-import * as os from 'os';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
-import { buildDefaultSoloFlowWorkflows, resolveSoloFlowPluginRoot } from '../../workflowRegistry';
+import { buildBuiltInWorkflows } from '../../workflows/builtInWorkflows';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -30,9 +30,7 @@ export const workflowsRouter = router({
       }
       let workflows = ctx.workflowRegistry.listByProject(input.projectId);
       if (workflows.length === 0) {
-        const { root: pluginRoot } = resolveSoloFlowPluginRoot(os.homedir());
-        const descriptors = buildDefaultSoloFlowWorkflows(pluginRoot);
-        ctx.workflowRegistry.seed(input.projectId, descriptors);
+        ctx.workflowRegistry.seed(input.projectId, buildBuiltInWorkflows());
         workflows = ctx.workflowRegistry.listByProject(input.projectId);
       }
       return workflows;
