@@ -103,13 +103,16 @@ export interface WorkflowRunListRow {
   stuck_reason: string | null;
 }
 
-export const CYBOFLOW_WORKFLOW_NAMES = [
-  'soloflow',
-  'planner',
-  'sprint',
-  'compound',
-  'prune',
-] as const;
+/**
+ * The two user-facing built-in flows in cyboflow v1.
+ *
+ * Narrowed from the historical SoloFlow set of five (the dropped
+ * `soloflow` / `compound` / `prune` flows have their prose preserved under
+ * `docs/workflows-future/` for a future cyboflow-native rebuild). The internal
+ * `__quick__` sentinel is NOT a member here — it is filtered out of the picker
+ * and handled separately by the quick-session pipeline.
+ */
+export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint'] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
@@ -220,190 +223,12 @@ export interface WorkflowStepTransitionEvent {
 // The v1 loopback invariant still holds: `loopback` is intra-phase only.
 
 /**
- * The built-in workflow definitions, keyed by `CyboflowWorkflowName`.
+ * The two built-in workflow definitions, keyed by `CyboflowWorkflowName`.
  * `Readonly<Record<…>>` forces the compiler to flag any missing key.
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
 
-  // /soloflow — full lifecycle: idea → planner → sprint → compound
-  soloflow: {
-    id: 'soloflow',
-    phases: [
-      {
-        id: 'plan',
-        label: 'Plan',
-        color: '#3b6dd6',
-        steps: [
-          {
-            id: 'context',
-            name: 'Get context on user idea',
-            agent: 'idea-extractor',
-            mcps: ['filesystem', 'web-search'],
-            retries: 0,
-            human: true,
-            desc: 'Parse the raw user input, scan the codebase, write IDEA-NNN.md.',
-          },
-          {
-            id: 'research',
-            name: 'Research',
-            agent: 'researcher',
-            mcps: ['web-search', 'context7'],
-            retries: 1,
-            optional: true,
-            desc: 'Optional. Pulls in docs, prior art, and library references.',
-          },
-          {
-            id: 'approve-idea',
-            name: 'Approve idea spec',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You read the IDEA-NNN.md and approve, edit, or reject.',
-          },
-        ],
-      },
-      {
-        id: 'refine',
-        label: 'Refine',
-        color: '#5a4ad6',
-        steps: [
-          {
-            id: 'epics',
-            name: 'Create epics',
-            agent: 'task-refiner',
-            mcps: ['filesystem', 'linear'],
-            retries: 0,
-            desc: 'Group the idea into epics with file ownership and dependency edges.',
-          },
-          {
-            id: 'tasks',
-            name: 'Fill out task details',
-            agent: 'task-refiner',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Write each TASK-NNN.md with acceptance criteria and test plan.',
-          },
-          {
-            id: 'approve-plan',
-            name: 'Approve task plan',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You confirm scope, ordering, and acceptance criteria before sprint.',
-          },
-        ],
-      },
-      {
-        id: 'execute',
-        label: 'Execute',
-        color: '#c96442',
-        steps: [
-          {
-            id: 'implement',
-            name: 'Implement task',
-            agent: 'executor',
-            mcps: ['filesystem', 'bash', 'git'],
-            retries: 3,
-            desc: 'Reads CODE-PATTERNS.md, writes the diff, runs local checks.',
-          },
-          {
-            id: 'write-tests',
-            name: 'Write tests',
-            agent: 'test-writer',
-            mcps: ['filesystem', 'bash'],
-            retries: 1,
-            desc: 'Adds unit / integration tests covering the new diff before verification.',
-          },
-          {
-            id: 'code-review',
-            name: 'Code review',
-            agent: 'code-reviewer',
-            mcps: ['filesystem', 'git'],
-            retries: 0,
-            desc: 'Inline review of the diff — naming, layering, pattern compliance.',
-          },
-          {
-            id: 'task-verify',
-            name: 'Task verification',
-            agent: 'verifier',
-            mcps: ['filesystem', 'bash'],
-            retries: 3,
-            loopback: 'implement',
-            desc: 'Checks acceptance criteria. Bounces back up to 3× before escalating.',
-          },
-          {
-            id: 'visual-verify',
-            name: 'Visual verification',
-            agent: 'visual-verifier',
-            mcps: ['maestro', 'playwright'],
-            retries: 1,
-            optional: true,
-            desc: 'Maestro / Playwright snapshot diff. Off unless enabled in config.',
-          },
-        ],
-      },
-      {
-        id: 'verify',
-        label: 'Sprint review',
-        color: '#a87a2c',
-        steps: [
-          {
-            id: 'sprint-verify',
-            name: 'Sprint verification',
-            agent: 'verifier',
-            mcps: ['filesystem', 'bash', 'playwright'],
-            retries: 1,
-            desc: 'Runs the full suite once after every task is archived.',
-          },
-          {
-            id: 'sprint-review',
-            name: 'Code review',
-            agent: 'code-reviewer',
-            mcps: ['filesystem', 'git'],
-            retries: 0,
-            desc: 'Taste pass — naming, layering, CLAUDE.md drift.',
-          },
-          {
-            id: 'human-review',
-            name: 'Human review',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You do the taste-level review. All functional checks already passed.',
-          },
-        ],
-      },
-      {
-        id: 'compound',
-        label: 'Compound',
-        color: '#8b5cf6',
-        steps: [
-          {
-            id: 'extract',
-            name: 'Extract learnings',
-            agent: 'compounder',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Reads sprint diffs + verifier reports, drafts solution files.',
-          },
-          {
-            id: 'approve-learnings',
-            name: 'Review and approve learnings',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You decide which learnings get merged into shared docs.',
-          },
-        ],
-      },
-    ],
-  },
-
-  // /soloflow:planner — idea → tasks only (no execute, no compound)
+  // planner — idea → epics → tasks (board stages 1-6); writes via cyboflow_* MCP tools
   planner: {
     id: 'planner',
     phases: [
@@ -419,7 +244,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem', 'web-search'],
             retries: 0,
             human: true,
-            desc: "Parse the user's prompt, scan the codebase, write IDEA-NNN.md.",
+            desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
           },
           {
             id: 'research',
@@ -450,7 +275,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             id: 'epics',
             name: 'Create epics',
             agent: 'task-refiner',
-            mcps: ['filesystem', 'linear'],
+            mcps: ['filesystem'],
             retries: 0,
             desc: 'Decompose the idea into epics with dependency edges.',
           },
@@ -460,7 +285,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'task-refiner',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Write each TASK-NNN.md with acceptance criteria.',
+            desc: 'Capture each task via cyboflow_create_task with acceptance criteria.',
           },
           {
             id: 'approve-plan',
@@ -476,7 +301,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
     ],
   },
 
-  // /soloflow:sprint — execute the queued tasks
+  // sprint — execute ready tasks (board stages 7-10); emits findings via cyboflow_report_finding
   sprint: {
     id: 'sprint',
     phases: [
@@ -548,7 +373,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'code-reviewer',
             mcps: ['filesystem', 'git'],
             retries: 0,
-            desc: 'Taste pass over the whole sprint diff.',
+            desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',
           },
           {
             id: 'human-review',
@@ -558,100 +383,6 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: 'Final taste check before the sprint is sealed.',
-          },
-        ],
-      },
-    ],
-  },
-
-  // /soloflow:compound — pull learnings out of the most recent sprint
-  compound: {
-    id: 'compound',
-    phases: [
-      {
-        id: 'compound',
-        label: 'Compound',
-        color: '#8b5cf6',
-        steps: [
-          {
-            id: 'load-sprint',
-            name: 'Load sprint artifacts',
-            agent: 'compounder',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Reads the sprint diff, verifier reports, and stuck-task notes.',
-          },
-          {
-            id: 'extract',
-            name: 'Extract learnings',
-            agent: 'compounder',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Drafts solution files for future sessions.',
-          },
-          {
-            id: 'approve-learnings',
-            name: 'Review and approve learnings',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You decide which learnings get merged into shared docs.',
-          },
-          {
-            id: 'write-back',
-            name: 'Write to solution files',
-            agent: 'compounder',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Persists approved learnings into CLAUDE.md / CODE-PATTERNS.md / backlog.',
-          },
-        ],
-      },
-    ],
-  },
-
-  // /soloflow:prune — sweep stale ideas, archived sprints, orphan tasks
-  prune: {
-    id: 'prune',
-    phases: [
-      {
-        id: 'prune',
-        label: 'Prune',
-        color: '#8a4a4a',
-        steps: [
-          {
-            id: 'scan',
-            name: 'Scan .soloflow state',
-            agent: 'pruner',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Walks .soloflow/ for archived sprints, stale ideas, orphan tasks.',
-          },
-          {
-            id: 'propose',
-            name: 'Propose deletions',
-            agent: 'pruner',
-            mcps: ['filesystem'],
-            retries: 0,
-            desc: 'Drafts a deletion plan with reasons. Nothing is removed yet.',
-          },
-          {
-            id: 'approve-prune',
-            name: 'Approve deletions',
-            agent: 'human',
-            mcps: [],
-            retries: 0,
-            human: true,
-            desc: 'You confirm what gets deleted. Default is keep everything.',
-          },
-          {
-            id: 'execute-prune',
-            name: 'Execute deletions',
-            agent: 'pruner',
-            mcps: ['filesystem', 'git'],
-            retries: 0,
-            desc: 'Removes approved entries and commits the cleanup.',
           },
         ],
       },
