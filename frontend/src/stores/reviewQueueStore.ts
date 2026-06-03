@@ -185,29 +185,13 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
           setConnectionStatus('disconnected');
         });
 
-      // Subscribe to incremental additions.
-      // The event type emitted by onApprovalCreated is the orchestrator's
-      // placeholder ApprovalCreated shape today; the approval-router epic will
-      // update it to include the full Approval record.  We type the handler as
-      // `unknown` and apply a runtime guard so the store remains type-safe while
-      // the backend implementation evolves.
+      // Subscribe to incremental additions. The payload is AppRouter-inferred
+      // (ApprovalCreatedEvent = { approval: Approval }) — no local mirror type
+      // and no (evt: unknown)+guard. addApproval is idempotent on duplicate id,
+      // and the full-state resync on init() remains the source of truth.
       const subscription = trpc.cyboflow.events.onApprovalCreated.subscribe(undefined, {
-        onData: (evt: unknown) => {
-          // Expected shape once the approval-router epic lands:
-          //   { approval: Approval }
-          // Guard: only call addApproval when the event carries the full record.
-          if (
-            typeof evt === 'object' &&
-            evt !== null &&
-            'approval' in evt &&
-            typeof (evt as Record<string, unknown>).approval === 'object' &&
-            (evt as Record<string, unknown>).approval !== null
-          ) {
-            addApproval((evt as { approval: Approval }).approval);
-          }
-          // If the event doesn't carry a full approval (current placeholder shape),
-          // we silently ignore it — the full-state resync on init() is the source
-          // of truth, not the delta subscription.
+        onData: (event) => {
+          addApproval(event.approval);
         },
         onError: (err: unknown) => {
           console.error('[reviewQueueStore] onApprovalCreated subscription error:', err);
@@ -223,15 +207,9 @@ export const useReviewQueueStore = create<ReviewQueueState>((set, get) => {
       // approves/rejects or the gate times out. The full-state listPending sync
       // remains the source of truth on reconnect; deltas are an optimisation.
       const decidedSubscription = trpc.cyboflow.events.onApprovalDecided.subscribe(undefined, {
-        onData: (evt: unknown) => {
-          if (
-            typeof evt === 'object' &&
-            evt !== null &&
-            'approvalId' in evt &&
-            typeof (evt as Record<string, unknown>).approvalId === 'string'
-          ) {
-            removeApproval((evt as { approvalId: string }).approvalId);
-          }
+        onData: (event) => {
+          // Payload AppRouter-inferred (ApprovalDecidedEvent = { approvalId, decision }).
+          removeApproval(event.approvalId);
         },
         onError: (err: unknown) => {
           console.error('[reviewQueueStore] onApprovalDecided subscription error:', err);
