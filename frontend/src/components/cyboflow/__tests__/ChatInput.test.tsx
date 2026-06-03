@@ -338,7 +338,7 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     expect(textarea.placeholder).toBe('Message the running session — relayed safely…');
   });
 
-  it("Send relays runs.relayInput.mutate({ runId, text: <typed> + '\\n' })", async () => {
+  it("Send relays the body, then a SEPARATE '\\r' (Enter) — claude 2.1 paste+submit", async () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun(RUN_ID);
       useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
@@ -350,14 +350,24 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     fireEvent.change(textarea, { target: { value: 'run the tests' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
+    // First: the body alone (lands as a bracketed paste in claude's composer).
     await waitFor(() => {
-      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenCalledWith({
+      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenNthCalledWith(1, {
         runId: RUN_ID,
-        text: 'run the tests\n',
+        text: 'run the tests',
       });
     });
 
-    // Textarea cleared after a successful relay.
+    // Then: '\r' as its own keystroke (Enter) — a '\r' appended to the body would
+    // be swallowed by bracketed-paste and never submit.
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenNthCalledWith(2, {
+        runId: RUN_ID,
+        text: '\r',
+      });
+    });
+
+    // Textarea cleared after both relays complete.
     await waitFor(() => {
       expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
     });

@@ -37,6 +37,16 @@ import { trpc } from '../../trpc/client';
 /** Max composer height (px) before the textarea scrolls instead of growing. */
 const MAX_COMPOSER_HEIGHT = 160;
 
+/**
+ * Delay (ms) between relaying the message body and the separate '\r' that submits
+ * it. claude 2.1.x captures a single input burst as a bracketed paste, so a '\r'
+ * appended to the body is swallowed as a literal newline and never submits; the
+ * Enter must arrive as its own keystroke after the paste-coalescing window closes.
+ * Mirrors SUBMIT_DELAY_MS in main's interactiveClaudeManager (the initial-prompt
+ * submit path).
+ */
+const SUBMIT_DELAY_MS = 300;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -150,17 +160,20 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     }
 
     if (mode === 'workflow-interactive') {
-      // Relay the line as a complete REPL turn into the live interactive PTY.
-      // The trailing '\r' (carriage return) submits the turn — claude's REPL
-      // commits the input on '\r' (Enter), NOT '\n' (which it treats as a literal
-      // newline inside the input and never submits). The raw-keystroke path
-      // (InteractiveTerminalView) already sends Enter as '\r' verbatim; the submit
-      // char is owned HERE only for the composer path. The input type is
+      // Submit the message the way a human paste+Enter does: relay the BODY as a
+      // paste, then relay '\r' (Enter) as a SEPARATE keystroke after the
+      // bracketed-paste window closes. claude 2.1.x captures a one-shot
+      // `text + '\r'` as a paste whose trailing '\r' is a literal newline (never
+      // Enter), so it would land in the composer and never submit. The
+      // raw-keystroke path (InteractiveTerminalView) already sends Enter as its
+      // own '\r'; this composer path owns the body/submit split. The input type is
       // AppRouter-inferred (no local RelayInput).
       setIsSending(true);
       setSendError(null);
       try {
-        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: text + '\r' });
+        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text });
+        await new Promise((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
+        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: '\r' });
         setText('');
       } catch (err: unknown) {
         setSendError(err instanceof Error ? err.message : 'Send failed');
