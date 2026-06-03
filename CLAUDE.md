@@ -1,6 +1,12 @@
 # cyboflow
 
-cyboflow is an Electron desktop app for running multiple AI coding assistants in parallel against the same project, isolated via git worktrees. It is a fork of [Crystal](https://github.com/stravu/crystal) (`stravu/crystal@0.3.5`) currently being narrowed and rebuilt — see `docs/cyboflow_system_design.md` for the target scope and `docs/ARCHITECTURE.md` for the current component layout.
+cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships two built-in flows — **Planner** and **Sprint** — whose prompt bodies live in app source (`main/src/orchestrator/workflows/planner.md` + `sprint.md`); there is NO runtime dependency on the SoloFlow plugin cache. It is a fork of [Crystal](https://github.com/stravu/crystal) (`stravu/crystal@0.3.5`) currently being narrowed and rebuilt — see `docs/cyboflow_system_design.md` for the target scope and `docs/ARCHITECTURE.md` for the current component layout.
+
+> The `.soloflow/` directory, `.claude/agents/`, and `.claude/settings.json` are the SoloFlow DEV PLUGIN that tracks cyboflow's OWN development — they are NOT part of the shipped app and have no runtime relationship to it. Do not confuse them with the app's built-in flows.
+
+## Entity model + review queue
+
+The DB-canonical backlog is a **3-table entity model** — `ideas` / `epics` / `tasks` (migration 015), each with its own columns + a single markdown `body`, sharing **one 12-stage board** (union view; terminal `Decomposed` stage for retired ideas). A polymorphic `entity_events` log replaces the old task-scoped `task_events`. ALL entity writes funnel through the single chokepoint `TaskChangeRouter.applyChange` (`main/src/orchestrator/taskChangeRouter.ts`) — nothing UPDATEs those tables directly. A unified **`review_items`** inbox (migration 016) backs the review queue (`kind in finding|permission|decision|human_task`, per-item `blocking`, soft polymorphic entity link); all its writes go through `ReviewItemRouter`. The flow agents write the entity model exclusively via the `cyboflow_*` MCP tools — never markdown state files. The built-in flow names are `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint']`) in `shared/types/workflows.ts` (type `CyboflowWorkflowName`, guard `isCyboflowWorkflowName`); the dropped `compound` / `prune` flows have their prose preserved under `docs/workflows-future/`. See `docs/ARCHITECTURE.md` "Data Model" and `docs/CODE-PATTERNS.md` for the chokepoint patterns.
 
 ## Reference Docs
 

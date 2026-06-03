@@ -20,13 +20,15 @@ The remaining doc is a guide put together by Claude desktop
 
 ## 1. Product Thesis
 
-**The thing being built.** Cyboflow is a desktop app that orchestrates Claude Code as a multi-agent workflow runner. Users start one of five pre-set SoloFlow workflows against a repo; the app spawns Claude Code in an isolated git worktree per run, parses the structured stream-json output, surfaces the work in a custom UI, and pauses on tool-use approvals that bubble up to a workspace-scoped review queue.
+**The thing being built.** Cyboflow is a **self-contained** desktop app that orchestrates Claude Code as a multi-agent workflow runner. It ships **two native flows** — **Planner** (turn a raw idea into a reviewed backlog of epics + tasks) and **Sprint** (execute the ready tasks) — whose prompt bodies live in the app source; there is no runtime dependency on any external workflow-runner plugin. Users start a flow against a repo; the app spawns Claude Code in an isolated git worktree per run, parses the structured stream-json output, surfaces the work in a custom UI, writes the app's own DB-canonical backlog, and concentrates everything that needs human attention into a single review queue.
 
-**The differentiator.** Everyone in this category is competing on agent autonomy, parallelism, or hand-off ergonomics. Cyboflow's bet is that the scarce resource is *human attention*, not agent time. The cross-workflow review queue — a single pane that aggregates pending approvals from every running workflow — is the product. Everything else is the substrate that makes it possible.
+**The differentiator.** Everyone in this category is competing on agent autonomy, parallelism, or hand-off ergonomics. Cyboflow's bet is that the scarce resource is *human attention*, not agent time. The unified review queue — one pane aggregating tool-use approvals, agent findings, human-gate decisions, and manual tasks from every running flow — is the product. Everything else is the substrate that makes it possible.
 
-**The user, the wedge, and what's out of scope.** The v1 user is a solo developer running multiple parallel SoloFlow workflows on their own repos. The wedge is workspace-scoped review concentration combined with native integration to existing SoloFlow markdown workflows. Out of scope for v1: cloud agents, teams, multi-user, auth, custom DAG editing, agent customization, workflow versioning, anything that requires a backend service.
+> **Naming note (P0 SoloFlow rip-out).** This document predates the rebuild that brought the flows in-app. Historical references below to "five pre-set SoloFlow workflows" describe the original fork posture; the shipped app exposes exactly two built-in flows (Planner + Sprint). The dropped `soloflow` / `compound` / `prune` flows had their prose preserved under `docs/workflows-future/` for a future cyboflow-native rebuild. The `__quick__` sentinel remains an internal, picker-hidden lightweight path.
 
-**The two-week MVP.** A signed, notarized macOS app that can: pick one of five pre-set workflows, run it in a git worktree against a real repo, stream Claude Code's structured output into a custom UI, surface tool-use approvals in a workspace-scoped review queue, and reliably pause-and-resume runs based on human approval decisions.
+**The user, the wedge, and what's out of scope.** The v1 user is a solo developer running multiple parallel flows on their own repos. The wedge is workspace-scoped review concentration over a fully self-contained planner→sprint pipeline. Out of scope for v1: cloud agents, teams, multi-user, auth, custom DAG editing beyond the in-app step editor, agent customization, workflow versioning, anything that requires a backend service.
+
+**The two-week MVP (historical milestone).** A signed, notarized macOS app that can: pick a built-in flow, run it in a git worktree against a real repo, stream Claude Code's structured output into a custom UI, surface tool-use approvals in a workspace-scoped review queue, and reliably pause-and-resume runs based on human approval decisions.
 
 ---
 
@@ -46,7 +48,7 @@ The stack is chosen for time-to-MVP given a TypeScript-fluent developer working 
 - `electron-trpc` + `@trpc/server` + `@trpc/client` (v11) for typed RPC between renderer and orchestrator
 - `superjson` as tRPC transformer for Date/BigInt fidelity
 - `zod` for runtime validation at the stream-parsing boundary only
-- `@modelcontextprotocol/sdk` for the SoloFlow MCP server
+- `@modelcontextprotocol/sdk` for the cyboflow MCP server
 - `p-queue` for per-run mutation serialization and concurrency limits
 - `tailwindcss` for styling
 - `vite` for renderer bundling
@@ -94,7 +96,7 @@ The decision rule for any related judgment call the planner faces: if the code w
 
 **Database is a service, not a file.** The orchestrator owns all database mutations. The renderer never writes to SQLite directly; it goes through tRPC mutations. This preserves the option of moving the database behind a network service in v2 without rewriting the client.
 
-**The MCP server is a separate process from day one.** Even in v1 where it's bundled in the same binary, the SoloFlow MCP server runs as a stdio subprocess spawned by the orchestrator. It talks to the orchestrator over a private Unix socket. Same shape as a future "MCP server runs on the team backend" deployment, just running locally.
+**The MCP server is a separate process from day one.** Even in v1 where it's bundled in the same binary, the cyboflow MCP server runs as a stdio subprocess spawned by the orchestrator. It talks to the orchestrator over a private Unix socket. Same shape as a future "MCP server runs on the team backend" deployment, just running locally.
 
 **Typed events at the parser boundary, trusted types inside.** Stream-json from Claude Code is validated with Zod at the parsing boundary and converted into a discriminated TypeScript union. Inside the orchestrator and renderer, the types are trusted — no defensive parsing, no `any`. The boundary is the contract; the interior is the application.
 
@@ -147,9 +149,11 @@ The `assistant.message` variant carrying a `tool_use` block is the single event 
 
 SQLite via `better-sqlite3`, WAL mode, single-process. Hand-rolled migrations following Crystal's pattern (don't reach for an ORM). DB location: `~/.cyboflow/cyboflow.db`.
 
-**Five new tables on top of Crystal's existing schema:**
+> **Entity model + review queue (post-MVP rebuild — current source of truth).** The "five new tables" framing below is the original run-substrate design and is still accurate for the *run* tables (`workflows`, `workflow_runs`, `raw_events`, `messages`, `approvals`). On top of it, the app now persists a **DB-canonical 3-table entity model** — `ideas` / `epics` / `tasks` (migration 015), each with its own columns + a single markdown `body`, sharing **one 12-stage board** (union view across all three types, terminal `Decomposed` stage for retired ideas). A polymorphic `entity_events` audit log replaces the task-scoped `task_events`. All entity writes funnel through the single `TaskChangeRouter.applyChange` chokepoint. A unified **`review_items`** inbox (migration 016) backs the review queue: `kind in (finding|permission|decision|human_task)`, per-item `blocking`, a soft polymorphic `(entity_type, entity_id)` entity link, all writes through `ReviewItemRouter`. The planner/sprint agents write the entity model exclusively via the `cyboflow_*` MCP tools (`cyboflow_create_task`, `cyboflow_report_finding`, …) — never markdown state files. See `docs/ARCHITECTURE.md` "Data Model" for the authoritative table-by-table breakdown and `docs/CODE-PATTERNS.md` for the chokepoint patterns.
 
-- `workflows` — registry of the five pre-set workflow markdown files, keyed by project
+**Five new tables on top of Crystal's existing schema (original run-substrate design):**
+
+- `workflows` — registry of the built-in flow definitions (Planner + Sprint), keyed by project
 - `workflow_runs` — single execution of a workflow on a worktree; the central entity
 - `raw_events` — append-only audit log, one row per parsed stream event
 - `messages` — normalized conversation messages, derived from raw events for cheap reads
@@ -191,7 +195,9 @@ Lift Crystal's `electron-builder` configuration entirely. Change only the appId,
 
 ### 5.6 MCP Server Lifecycle
 
-A `CyboflowMcpServer` runs as a stdio subprocess spawned by the orchestrator at app start. It exposes a minimal v1 tool surface to Claude Code sessions:
+> **Tool surface updated (entity-model rebuild).** The read-only "minimal v1" surface sketched below was superseded once the flows became self-contained: agents now WRITE the DB-canonical entity model and review inbox through the MCP runtime — `cyboflow_report_step` (workflow progress), `cyboflow_create_task` and the other entity task-write tools (routed through `TaskChangeRouter.applyChange`), and `cyboflow_report_finding` (non-blocking review_items via `ReviewItemRouter`). The "resist write-state tools" guidance below no longer holds; the human-in-the-loop is preserved instead by the blocking-`review_items` gate (permissions + decisions) and the aggregate-unblock rule. The `cyboflow_*` MCP tools are the ONLY way agents touch the backlog — never markdown state files. See `docs/ARCHITECTURE.md` and the orchestrator `mcpServer/` sources for the live surface.
+
+A `CyboflowMcpServer` runs as a stdio subprocess spawned by the orchestrator at app start. The original read-only sketch was:
 
 - `cyboflow_list_pending_approvals` — read access to the current review queue
 - `cyboflow_get_run` — fetch a workflow run's state by ID
@@ -199,19 +205,21 @@ A `CyboflowMcpServer` runs as a stdio subprocess spawned by the orchestrator at 
 
 The MCP server is configured per-Claude-session via a `.mcp.json` file written into the worktree before `claude -p` is invoked. Per-session scoping is achieved by injecting `CYBOFLOW_RUN_ID` and `CYBOFLOW_ORCH_SOCKET` into the MCP server's environment so it can disambiguate which run a tool call is coming from. The MCP server talks back to the orchestrator over a private Unix socket.
 
-Resist adding write-state tools (e.g. "approve from inside Claude") in v1 — the human-in-the-loop is the product. Tool surface expands in v2 when the surface area is better understood.
+One write boundary stays off-limits even now: agents never *approve* from inside Claude (no "approve from inside Claude" tool) — the human-in-the-loop on permission/decision review items is the product. Agents DO write backlog state (tasks, findings, step progress) through the entity-model chokepoints, but they cannot resolve their own blocking review items; that gate remains human-only.
 
 The pattern is templated from Crystal's `PermissionIpcServer` but is new code — Crystal does not have an outbound MCP server today.
 
 ### 5.7 Human Review Queue (LOAD-BEARING DIFFERENTIATOR)
 
-**The product, made concrete.** A workspace-scoped left rail (or top tab) called `<ReviewQueueView />` lists all pending approvals across every running workflow. Each card shows: workflow name, tool name (e.g. "Bash"), payload preview (the command or file edit), Claude's preceding rationale text, age, and Approve / Reject buttons. Sorted oldest-pending first; blocking items pinned to top. Dock badge shows count.
+> **Generalized to a unified inbox (`review_items`).** This section was written when the queue held only tool-use *approvals*. The shipped queue (`<ReviewQueueView />`) is the unified `review_items` inbox: `finding | permission | decision | human_task`, each with a per-item `blocking` flag. Permissions fold the approval path described below (`blocking=true`); decisions come from the `approve-idea` / `approve-plan` human gates and AUTO-RESUME the run on resolution subject to **aggregate-unblock** (a run stays `awaiting_review` until ALL its blocking items resolve); findings are non-blocking and live in a SEPARATE UI section so blocking items stay prominent; human tasks are manual to-dos (blocking per item). Triage can resolve / dismiss / promote a finding to a real task. All writes go through `ReviewItemRouter`. Each card opens the idea/epic/task detail editor via a dedicated **Edit** affordance (not full-card click). The approval-specific data flow below remains accurate for the `permission` kind.
+
+**The product, made concrete.** A workspace-scoped left rail (or top tab) called `<ReviewQueueView />` lists all pending review items across every running flow. An approval card shows: flow name, tool name (e.g. "Bash"), payload preview (the command or file edit), Claude's preceding rationale text, age, and Approve / Reject buttons. Sorted oldest-pending first; blocking items pinned to top. Dock badge shows count.
 
 **The data flow.** Stream parser emits an `assistant.message` with a `tool_use` block. `ApprovalRouter` (a main-process module) consults the workflow's policy (per-workflow frontmatter parsed at run start). If approval is required: transaction-write the `approvals` row, transition the run to `awaiting_review`, hold the permission-socket reply, push the event to renderer via tRPC subscription. Renderer's `reviewQueueSlice` reducer adds the item to the queue. User clicks Approve in `<PendingApprovalCard />`. tRPC mutation reaches `ApprovalRouter`, which under the per-run mutex: transaction-updates the approval row, transitions the run back to `running`, replies on the permission socket with `allow`. Claude resumes.
 
 **The pause mechanism.** Crystal's `PermissionIpcServer` provides this directly — Claude is spawned with the socket path in `MCP_PERMISSION_SOCKET`, and any tool invocation routes through the synchronous permission-prompt-tool which blocks on socket reply. This is gold and the single biggest reason to fork Crystal. The only change is what the socket request does on the Cyboflow side: instead of routing to Crystal's per-panel modal, route to `ApprovalRouter` and let it drive the workspace queue.
 
-**Policy.** Per-workflow, defined in frontmatter of the SoloFlow markdown files. SoloFlow workflows like `soloflow.md` and `prune.md` use `permission_mode: "default"` (everything prompts). `sprint.md` uses `acceptEdits` (file edits auto-allow, bash prompts). `compound.md` uses `dontAsk` with an explicit allowlist. Policy is parsed at run start and stored on the `workflow_runs` row.
+**Policy.** Per-flow, defined in the frontmatter of the in-repo prompt files (`main/src/orchestrator/workflows/*.md`). Both shipped flows — `planner.md` and `sprint.md` — declare `permission_mode: default` (everything prompts), the conservative posture for v1. The other modes in the contract (`acceptEdits` = file edits auto-allow / bash prompts; `dontAsk` = explicit allowlist) remain valid `PermissionMode` values a future or edited flow can adopt. Policy is parsed at run start (`WorkflowRegistry`) and stored as the `permission_mode_snapshot` on the `workflow_runs` row.
 
 **Failure modes that are non-negotiable to handle correctly:**
 - Pause must actually block Claude — never use post-hoc event inspection
@@ -298,8 +306,8 @@ All of these are real things Cyboflow may want eventually. None of them are part
 
 **Fork source.** `stravu/crystal` at HEAD, MIT-licensed
 
-**SoloFlow integration.** The first Cyboflow workflows will be adapted from SoloFlow workflows (`soloflow`, `planner`, `sprint`, `compound`, `prune`). The reason Cyboflow exists is because the plugin approach is fundamentally limited in its capability to execute these workflows effectively.
+**Workflow self-containment (was "SoloFlow integration").** The first Cyboflow flows were adapted from SoloFlow workflows; the P0 rip-out brought their prompt bodies **into the app source** (`main/src/orchestrator/workflows/planner.md` + `sprint.md`) and severed the runtime dependency on the SoloFlow plugin cache (`~/.claude/plugins/cache/soloflow/...`). The shipped app exposes exactly two built-in flows — **Planner** and **Sprint** — keyed by `CYBOFLOW_WORKFLOW_NAMES` in `shared/types/workflows.ts`. The `soloflow` / `compound` / `prune` flows were dropped; their prose is preserved under `docs/workflows-future/`. Agents write the DB via the `cyboflow_*` MCP tools, not markdown state files. The reason Cyboflow exists is because the plugin approach was fundamentally limited in its capability to execute these workflows effectively — Cyboflow now owns the full flow definitions natively.
 
-**Soloflow will build Cyboflow** I will use soloflow to build cyboflow, starting with the /roadmap command
+**SoloFlow (the dev plugin) builds Cyboflow.** Cyboflow's OWN development is tracked by the SoloFlow dev plugin under `.soloflow/` (roadmap, ideas, plans). That is a development tool, entirely separate from the shipped app's runtime — the app has no dependency on it.
 
 **Crystal commit pinning.** Pin to current HEAD of `stravu/crystal` at fork time. Tag the pinned commit in the Cyboflow README. Do not pull from Crystal or Nimbalyst after fork.
