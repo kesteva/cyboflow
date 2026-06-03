@@ -49,6 +49,7 @@ function rethrowAsTRPCError(err: unknown): never {
     const codeMap: Record<TaskChangeError['code'], TRPCError['code']> = {
       not_found: 'NOT_FOUND',
       invalid_parent: 'BAD_REQUEST',
+      invalid_lineage: 'BAD_REQUEST',
       forbidden_stage: 'FORBIDDEN',
       active_runs: 'CONFLICT',
       concurrency: 'CONFLICT',

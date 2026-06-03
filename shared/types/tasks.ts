@@ -1,11 +1,12 @@
 /**
- * Shared types for the native task backlog (Phase 0 + Phase 1).
+ * Shared types for the native entity backlog (3-table model, migration 015).
  *
  * SINGLE SOURCE OF TRUTH: the SQL columns in
- * main/src/database/migrations/013_native_tasks.sql, the DB row interfaces in
- * main/src/database/models.ts, and the chokepoint output in
- * main/src/orchestrator/taskChangeRouter.ts must all match these shapes
- * field-for-field. The schema-parity test pins TaskRow <-> tasks columns.
+ * main/src/database/migrations/015_entity_model_rebuild.sql, the DB row
+ * interfaces in main/src/database/models.ts (IdeaRow/EpicRow/TaskRow), and the
+ * chokepoint output in main/src/orchestrator/taskChangeRouter.ts must all match
+ * these shapes field-for-field. entitySchemaParity.test.ts pins each row
+ * interface <-> its table.
  *
  * Keep this file free of Node.js built-ins so it imports in any environment
  * (main process AND renderer).
@@ -15,7 +16,15 @@
 // Scalar enums
 // ---------------------------------------------------------------------------
 
+/**
+ * The entity-table discriminator. Table identity IS the type (the 3-table model
+ * has no `type` column), so this is computed on read from WHICH table the row
+ * came from and carried on the read-model item.
+ */
 export type TaskType = 'idea' | 'epic' | 'task';
+
+/** The nullable idea size hint set at idea-spec time. */
+export type IdeaScope = 'small' | 'large';
 
 export type Priority = 'P0' | 'P1' | 'P2';
 
@@ -71,13 +80,21 @@ export interface FlowOverlay {
 export interface BacklogTaskItem {
   id: string;
   project_id: number;
+  /** Computed from the source table (ideas|epics|tasks) — the 3-table model has no `type` column. */
   type: TaskType;
   ref: string;
   title: string;
   summary: string | null;
+  /** Single markdown body. Present on every entity; null when unset. */
+  body: string | null;
   priority: Priority;
   repo: string | null;
+  /** Lineage: only ever set on type='task' (FK->epics). */
   parent_epic_id: string | null;
+  /** Lineage: set on epics + tasks (FK->ideas). null on ideas (the root). */
+  originating_idea_id: string | null;
+  /** Idea size hint ('small'|'large'). Only meaningful on type='idea'; null otherwise. */
+  scope: IdeaScope | null;
   board_id: string;
   stage_id: string;
   version: number;
@@ -96,7 +113,12 @@ export interface BacklogTaskItem {
 // Chokepoint event payload
 // ---------------------------------------------------------------------------
 
-export type TaskChangeAction = 'created' | 'updated' | 'stageMoved' | 'deleted';
+/**
+ * `decomposed` is emitted when an idea retires to the Decomposed terminal stage
+ * (its epics/tasks carry the flow). It is a specialization of a stage move so
+ * the renderer can surface the retirement distinctly from an ordinary move.
+ */
+export type TaskChangeAction = 'created' | 'updated' | 'stageMoved' | 'decomposed' | 'deleted';
 
 export interface TaskChangedEvent {
   projectId: number;

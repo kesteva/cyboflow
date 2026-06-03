@@ -76,6 +76,8 @@ export type McpQueryMessage =
       requestId: string;
       runId: string;
       taskId: string;
+      /** Entity-table discriminator (idea|epic|task). Optional — falls back to a 3-table id lookup. */
+      entityType?: TaskType;
       title?: string;
       summary?: string;
       priority?: Priority;
@@ -88,6 +90,8 @@ export type McpQueryMessage =
       requestId: string;
       runId: string;
       taskId: string;
+      /** Entity-table discriminator (idea|epic|task). Optional — falls back to a 3-table id lookup. */
+      entityType?: TaskType;
       stageId: string;
       expectedVersion?: number;
     }
@@ -521,25 +525,33 @@ export class McpQueryHandler {
   }
 
   /**
-   * Re-read a task's identity columns after a chokepoint write so the response
-   * carries the canonical ref / stage / version / type. Returns undefined only
-   * if the row vanished between commit and read (caller surfaces not_found).
+   * Re-read an entity's identity columns after a chokepoint write so the
+   * response carries the canonical ref / stage / version / type. Table identity
+   * is the discriminator (migration 015), so we try ideas -> epics -> tasks in
+   * turn and return the type of the matching table. Returns undefined only if
+   * the row vanished between commit and read (caller surfaces not_found).
    */
   private readTaskIdentity(
     taskId: string,
   ): { ref: string; stage_id: string; version: number; type: TaskType } | undefined {
-    const row = this.db
-      .prepare(`SELECT ref, stage_id, version, type FROM tasks WHERE id = ?`)
-      .get(taskId) as
-      | { ref?: unknown; stage_id?: unknown; version?: unknown; type?: unknown }
-      | undefined;
-    if (!row) return undefined;
-    return {
-      ref: typeof row.ref === 'string' ? row.ref : '',
-      stage_id: typeof row.stage_id === 'string' ? row.stage_id : '',
-      version: typeof row.version === 'number' ? row.version : Number(row.version),
-      type: row.type as TaskType,
-    };
+    const tables: Array<{ table: string; type: TaskType }> = [
+      { table: 'ideas', type: 'idea' },
+      { table: 'epics', type: 'epic' },
+      { table: 'tasks', type: 'task' },
+    ];
+    for (const { table, type } of tables) {
+      const row = this.db
+        .prepare(`SELECT ref, stage_id, version FROM ${table} WHERE id = ?`)
+        .get(taskId) as { ref?: unknown; stage_id?: unknown; version?: unknown } | undefined;
+      if (!row) continue;
+      return {
+        ref: typeof row.ref === 'string' ? row.ref : '',
+        stage_id: typeof row.stage_id === 'string' ? row.stage_id : '',
+        version: typeof row.version === 'number' ? row.version : Number(row.version),
+        type,
+      };
+    }
+    return undefined;
   }
 
   private async handleCreateTask(
@@ -560,7 +572,7 @@ export class McpQueryHandler {
     const change: TaskChange = {
       actor: ctx.actor,
       runId: msg.runId,
-      type: msg.taskType,
+      entityType: msg.taskType,
       title: msg.title,
       summary: msg.summary,
       priority: msg.priority,
@@ -609,6 +621,7 @@ export class McpQueryHandler {
       actor: ctx.actor,
       runId: msg.runId,
       taskId: msg.taskId,
+      ...(msg.entityType !== undefined ? { entityType: msg.entityType } : {}),
       fields: {
         title: msg.title,
         summary: msg.summary,
@@ -656,6 +669,7 @@ export class McpQueryHandler {
       actor: ctx.actor,
       runId: msg.runId,
       taskId: msg.taskId,
+      ...(msg.entityType !== undefined ? { entityType: msg.entityType } : {}),
       stageId: msg.stageId,
       expectedVersion: msg.expectedVersion,
     };

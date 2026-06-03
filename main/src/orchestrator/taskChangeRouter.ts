@@ -1,18 +1,25 @@
 /**
- * TaskChangeRouter — the SINGLE write chokepoint for native task state.
+ * TaskChangeRouter — the SINGLE write chokepoint for native ENTITY state.
  *
- * INVARIANT: every task-state write (GUI tRPC, orchestrator lifecycle, run
- * close-out) routes through applyChange. Nothing UPDATEs `tasks` directly.
- * Each applyChange atomically (1) mutates `tasks` and (2) appends a per-field
- * delta row to `task_events`, then emits a TaskChangedEvent after commit.
+ * INVARIANT: every entity-state write (GUI tRPC, orchestrator lifecycle, run
+ * close-out, MCP agent tools) routes through applyChange. Nothing UPDATEs
+ * `ideas` / `epics` / `tasks` directly. Each applyChange atomically (1) mutates
+ * the correct entity table and (2) appends a per-field delta row to
+ * `entity_events(entity_type, entity_id)`, then emits a TaskChangedEvent after
+ * commit.
+ *
+ * ENTITY-AWARE (migration 015): the unified `tasks` table is split into three
+ * tables — ideas / epics / tasks. Table identity IS the discriminator, so the
+ * `change` carries `entityType`. Callers at a boundary (tRPC / MCP) SHOULD pass
+ * it; on the update path it is OPTIONAL — when omitted we resolve it by looking
+ * the id up across all three tables. Lineage:
+ *   - parent_epic_id     — only type='task', FK->epics, validated + cycle-checked.
+ *   - originating_idea_id — type='epic' | 'task', FK->ideas, validated.
+ * Decomposition: moving an IDEA to the Decomposed terminal stage is an allowed
+ * asserted move; children are left UNCHANGED (no cascade) — they carry the flow.
  *
  * Mirrors the per-run PQueue serialization pattern in approvalRouter.ts, but
- * keys the queue PER PROJECT (task refs + version bumps are project-scoped).
- *
- * Phase-0/1 scope: in-process callers only (GUI + orchestrator). The `change`
- * shape and the `actor` union are deliberately MCP-ready so the cyboflow_*
- * task tools can be added later as just another actor with NO refactor — but
- * NO MCP wiring is added here.
+ * keys the queue PER PROJECT (entity refs + version bumps are project-scoped).
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*. The DB is
@@ -25,6 +32,7 @@ import type { DatabaseLike } from './types';
 import type {
   BacklogTaskItem,
   FlowOverlay,
+  IdeaScope,
   Priority,
   TaskChangeAction,
   TaskChangedEvent,
@@ -47,12 +55,42 @@ export function taskProjectChannel(projectId: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Entity-table descriptor map — the SINGLE place that knows table identity,
+// id prefix, and which lineage columns each table carries.
+// ---------------------------------------------------------------------------
+
+interface EntityTableDescriptor {
+  table: 'ideas' | 'epics' | 'tasks';
+  idPrefix: string;
+  /** This entity may carry a parent_epic_id (only tasks). */
+  hasParentEpic: boolean;
+  /** This entity may carry an originating_idea_id (epics + tasks). */
+  hasOriginatingIdea: boolean;
+  /** This entity may carry an entry_stage_id (only tasks). */
+  hasEntryStage: boolean;
+  /** This entity may carry a scope (only ideas). */
+  hasScope: boolean;
+}
+
+const ENTITY_TABLES: Record<TaskType, EntityTableDescriptor> = {
+  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true },
+  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false },
+  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false },
+};
+
+/** Resolve a descriptor for an entity type. */
+function describe(type: TaskType): EntityTableDescriptor {
+  return ENTITY_TABLES[type];
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
 export type TaskChangeErrorCode =
   | 'not_found'
   | 'invalid_parent'
+  | 'invalid_lineage'
   | 'forbidden_stage'
   | 'active_runs'
   | 'concurrency';
@@ -72,16 +110,19 @@ export class TaskChangeError extends Error {
 // Change request shape
 // ---------------------------------------------------------------------------
 
-/** Mutable task fields a caller may set. `stageId` and `parentEpicId` are handled separately. */
+/** Mutable entity fields a caller may set. `stageId`/`parentEpicId`/`originatingIdeaId` are handled separately. */
 export interface TaskFieldChanges {
   title?: string;
   summary?: string | null;
+  body?: string | null;
   priority?: Priority;
   repo?: string | null;
+  /** Idea size hint — only valid on type='idea'. */
+  scope?: IdeaScope | null;
   /**
-   * Execution-entry capture. Set by the launch hook the FIRST time a task
-   * leaves a planning stage into execution. Treated as an asserted field that
-   * only the orchestrator path writes.
+   * Execution-entry capture (type='task' only). Set by the launch hook the
+   * FIRST time a task leaves a planning stage into execution. Treated as an
+   * asserted field that only the orchestrator path writes.
    */
   entryStageId?: string | null;
 }
@@ -90,34 +131,46 @@ export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear';
 
 export interface TaskChange {
   actor: TaskActor;
-  /** Omit to CREATE a new task; provide to UPDATE an existing one. */
+  /**
+   * The entity-table discriminator. REQUIRED at the create path (defaults to
+   * 'idea' when omitted for backward-compat). On the update path it is optional
+   * — when omitted we resolve it by id across all three tables.
+   */
+  entityType?: TaskType;
+  /** Omit to CREATE a new entity; provide to UPDATE an existing one. */
   taskId?: string;
-  /** Field-level updates (title/summary/priority/repo/entryStageId). */
+  /** Field-level updates (title/summary/body/priority/repo/scope/entryStageId). */
   fields?: TaskFieldChanges;
-  /** Move the task to this stage (subject to write_policy authority + active-run guard). */
+  /** Move the entity to this stage (subject to write_policy authority + active-run guard). */
   stageId?: string;
   /** Re-parent (only valid for type='task'; null clears the parent). */
   parentEpicId?: string | null;
+  /** Set/clear the originating idea (epics + tasks; null clears). */
+  originatingIdeaId?: string | null;
   /** Optimistic-concurrency guard. If provided and != current version -> concurrency conflict. */
   expectedVersion?: number;
-  /** The run that triggered this change, recorded on the task_events row. */
+  /** The run that triggered this change, recorded on the entity_events row. */
   runId?: string;
   // ----- create-only fields (ignored on update) -----
-  /** Task type for the create path. Defaults to 'idea'. */
+  /** @deprecated use entityType. Kept so existing callers compile; entityType wins. */
   type?: TaskType;
   /** Initial title for the create path. */
   title?: string;
   /** Initial summary for the create path. */
   summary?: string | null;
+  /** Initial body for the create path. */
+  body?: string | null;
   /** Initial priority for the create path. Defaults to 'P2'. */
   priority?: Priority;
   /** Initial repo for the create path. */
   repo?: string | null;
-  /** Board to create the task on. Defaults to the project's default board. */
+  /** Initial scope for the create path (ideas only). */
+  scope?: IdeaScope | null;
+  /** Board to create the entity on. Defaults to the project's default board. */
   boardId?: string;
-  /** Stage to create the task at. Defaults to the board's 'idea' (position 1) stage. */
+  /** Stage to create the entity at. Defaults to the board's position-1 stage. */
   initialStageId?: string;
-  /** Kind label for the emitted task_events row. Defaults to a sensible value per path. */
+  /** Kind label for the emitted entity_events row. Defaults to a sensible value per path. */
   kind?: string;
 }
 
@@ -125,17 +178,20 @@ export interface TaskChange {
 // Internal row shapes for the SELECTs below.
 // ---------------------------------------------------------------------------
 
-interface TaskDbRow {
+/** The common columns every entity row exposes (super-set; lineage cols nullable per-table). */
+interface EntityDbRow {
   id: string;
   project_id: number;
-  type: TaskType;
   ref: string;
   parent_epic_id: string | null;
+  originating_idea_id: string | null;
   board_id: string;
   stage_id: string;
   entry_stage_id: string | null;
   title: string;
   summary: string | null;
+  body: string | null;
+  scope: IdeaScope | null;
   priority: Priority;
   repo: string | null;
   version: number;
@@ -165,6 +221,11 @@ interface FieldDelta {
   from: unknown;
   to: unknown;
 }
+
+/** The board stage position at which an idea is considered "decomposed" (idea-only terminal). */
+const DECOMPOSED_POSITION = 12;
+/** The board stage position considered "done" (merged & archived). */
+const DONE_POSITION = 9;
 
 // ---------------------------------------------------------------------------
 // TaskChangeRouter
@@ -220,16 +281,18 @@ export class TaskChangeRouter {
   // --------------------------------------------------------------------------
 
   /**
-   * Apply a single task change atomically and emit the resulting event.
+   * Apply a single entity change atomically and emit the resulting event.
    *
-   * Create path (no taskId): mints a ref via task_ref_counters, inserts a task
-   * at the idea stage (or a given stage), then logs a 'created' event.
+   * Create path (no taskId): mints a ref via task_ref_counters keyed on the
+   * entity type, inserts a row into the matching table at the position-1 stage
+   * (or a given stage), then logs a 'created' event.
    *
-   * Update path: validates parent + stage authority + active-run guard +
-   * optimistic concurrency, UPDATEs the task (bumping version + updated_at),
-   * and appends a per-field delta to task_events — all in ONE transaction.
+   * Update path: resolves the entity type (from change.entityType or a 3-table
+   * id lookup), validates lineage + stage authority + active-run guard +
+   * optimistic concurrency, UPDATEs the row (bumping version + updated_at), and
+   * appends a per-field delta to entity_events — all in ONE transaction.
    *
-   * @returns the affected taskId + the inserted task_events row id/seq.
+   * @returns the affected entity id + the inserted entity_events row id/seq.
    */
   async applyChange(
     projectId: number,
@@ -250,15 +313,16 @@ export class TaskChangeRouter {
     projectId: number,
     change: TaskChange,
   ): { taskId: string; event: { id: number; seq: number } } {
-    const type: TaskType = change.type ?? 'idea';
+    const type: TaskType = change.entityType ?? change.type ?? 'idea';
+    const desc = describe(type);
     const now = new Date().toISOString();
-    const taskId = `tsk_${randomBytes(10).toString('hex')}`;
+    const taskId = `${desc.idPrefix}_${randomBytes(10).toString('hex')}`;
 
     let eventId = 0;
     let eventSeq = 0;
 
     const txn = this.db.transaction(() => {
-      // Resolve board (default) + stage (idea / position 1, or provided).
+      // Resolve board (default) + stage (position 1, or provided).
       const boardId = change.boardId ?? `board-${projectId}-default`;
       const board = this.db
         .prepare('SELECT id FROM boards WHERE id = ? AND project_id = ?')
@@ -267,8 +331,7 @@ export class TaskChangeRouter {
         throw new TaskChangeError('not_found', `board ${boardId} not found for project ${projectId}`);
       }
 
-      const stageId =
-        change.initialStageId ?? change.stageId ?? `stage-${boardId}-1`;
+      const stageId = change.initialStageId ?? change.stageId ?? `stage-${boardId}-1`;
       const stage = this.lookupStage(stageId);
       if (!stage || stage.board_id !== boardId) {
         throw new TaskChangeError('not_found', `stage ${stageId} not found on board ${boardId}`);
@@ -276,55 +339,119 @@ export class TaskChangeRouter {
       // Authority check also applies on create.
       this.assertStageAuthority(change.actor, stage);
 
-      // Validate parent (only type='task' may have one).
+      // Validate lineage (only the columns this entity type carries).
       const parentEpicId = change.parentEpicId ?? null;
+      const originatingIdeaId = change.originatingIdeaId ?? null;
       if (parentEpicId !== null) {
-        this.validateParent(projectId, type, taskId, parentEpicId);
+        this.validateParentEpic(projectId, type, taskId, parentEpicId);
+      }
+      if (originatingIdeaId !== null) {
+        this.validateOriginatingIdea(projectId, type, originatingIdeaId);
       }
 
       // Mint the ref: UPDATE ... RETURNING. INSERT OR IGNORE seeds the counter row first.
-      this.db
-        .prepare(
-          'INSERT OR IGNORE INTO task_ref_counters (project_id, type, next_seq) VALUES (?, ?, 0)',
-        )
-        .run(projectId, type);
-      const counter = this.db
-        .prepare(
-          'UPDATE task_ref_counters SET next_seq = next_seq + 1 WHERE project_id = ? AND type = ? RETURNING next_seq',
-        )
-        .get(projectId, type) as { next_seq: number };
-      const ref = `${type.toUpperCase()}-${String(counter.next_seq).padStart(3, '0')}`;
+      const ref = this.mintRef(projectId, type);
 
       const title = change.title ?? change.fields?.title ?? 'Untitled';
       const summary = change.summary ?? change.fields?.summary ?? null;
+      const body = change.body ?? change.fields?.body ?? null;
       const priority: Priority = change.priority ?? change.fields?.priority ?? 'P2';
       const repo = change.repo ?? change.fields?.repo ?? null;
+      const scope = desc.hasScope ? (change.scope ?? change.fields?.scope ?? null) : null;
 
-      this.db
-        .prepare(
-          `INSERT INTO tasks
-             (id, project_id, type, ref, parent_epic_id, board_id, stage_id, entry_stage_id,
-              title, summary, priority, repo, version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?)`,
-        )
-        .run(taskId, projectId, type, ref, parentEpicId, boardId, stageId, title, summary, priority, repo, now, now);
+      this.insertEntity(desc, {
+        id: taskId,
+        projectId,
+        ref,
+        title,
+        summary,
+        body,
+        priority,
+        repo,
+        boardId,
+        stageId,
+        scope,
+        parentEpicId,
+        originatingIdeaId,
+        now,
+      });
 
       const changes: FieldDelta[] = [
-        { field: 'type', from: null, to: type },
         { field: 'ref', from: null, to: ref },
         { field: 'stage_id', from: null, to: stageId },
         { field: 'title', from: null, to: title },
       ];
       if (parentEpicId !== null) changes.push({ field: 'parent_epic_id', from: null, to: parentEpicId });
+      if (originatingIdeaId !== null) changes.push({ field: 'originating_idea_id', from: null, to: originatingIdeaId });
+      if (scope !== null) changes.push({ field: 'scope', from: null, to: scope });
 
-      const ev = this.insertEvent(taskId, change.kind ?? 'created', change.actor, change.runId ?? null, changes, now);
+      const ev = this.insertEvent(type, taskId, change.kind ?? 'created', change.actor, change.runId ?? null, changes, now);
       eventId = ev.id;
       eventSeq = ev.seq;
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, taskId, 'created');
+    this.emitChange(projectId, type, taskId, 'created');
     return { taskId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  /** INSERT a row into the matching entity table, only setting columns the table carries. */
+  private insertEntity(
+    desc: EntityTableDescriptor,
+    v: {
+      id: string;
+      projectId: number;
+      ref: string;
+      title: string;
+      summary: string | null;
+      body: string | null;
+      priority: Priority;
+      repo: string | null;
+      boardId: string;
+      stageId: string;
+      scope: IdeaScope | null;
+      parentEpicId: string | null;
+      originatingIdeaId: string | null;
+      now: string;
+    },
+  ): void {
+    const cols = ['id', 'project_id', 'ref', 'title', 'summary', 'body', 'priority', 'repo', 'board_id', 'stage_id'];
+    const vals: unknown[] = [v.id, v.projectId, v.ref, v.title, v.summary, v.body, v.priority, v.repo, v.boardId, v.stageId];
+
+    if (desc.hasScope) {
+      cols.push('scope');
+      vals.push(v.scope);
+    }
+    if (desc.hasEntryStage) {
+      cols.push('entry_stage_id');
+      vals.push(null);
+    }
+    if (desc.hasParentEpic) {
+      cols.push('parent_epic_id');
+      vals.push(v.parentEpicId);
+    }
+    if (desc.hasOriginatingIdea) {
+      cols.push('originating_idea_id');
+      vals.push(v.originatingIdeaId);
+    }
+    cols.push('version', 'created_at', 'updated_at');
+    vals.push(1, v.now, v.now);
+
+    const placeholders = cols.map(() => '?').join(', ');
+    this.db.prepare(`INSERT INTO ${desc.table} (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
+  }
+
+  /** Mint the next ref for (project, type). Seeds the counter first; UPDATE ... RETURNING is atomic in txn. */
+  private mintRef(projectId: number, type: TaskType): string {
+    this.db
+      .prepare('INSERT OR IGNORE INTO task_ref_counters (project_id, type, next_seq) VALUES (?, ?, 0)')
+      .run(projectId, type);
+    const counter = this.db
+      .prepare(
+        'UPDATE task_ref_counters SET next_seq = next_seq + 1 WHERE project_id = ? AND type = ? RETURNING next_seq',
+      )
+      .get(projectId, type) as { next_seq: number };
+    return `${type.toUpperCase()}-${String(counter.next_seq).padStart(3, '0')}`;
   }
 
   // --------------------------------------------------------------------------
@@ -341,20 +468,24 @@ export class TaskChangeRouter {
     let eventId = 0;
     let eventSeq = 0;
     let action: TaskChangeAction = 'updated';
+    let resolvedType: TaskType = 'task';
 
     const txn = this.db.transaction(() => {
-      const current = this.db
-        .prepare('SELECT * FROM tasks WHERE id = ? AND project_id = ?')
-        .get(taskId, projectId) as TaskDbRow | undefined;
-      if (!current) {
-        throw new TaskChangeError('not_found', `task ${taskId} not found for project ${projectId}`);
+      // Resolve the entity type: prefer the declared discriminator, else look up
+      // the id across all three tables.
+      const located = this.locateEntity(projectId, taskId, change.entityType);
+      if (!located) {
+        throw new TaskChangeError('not_found', `entity ${taskId} not found for project ${projectId}`);
       }
+      const { type, row: current } = located;
+      resolvedType = type;
+      const desc = describe(type);
 
       // Optimistic concurrency.
       if (change.expectedVersion !== undefined && change.expectedVersion !== current.version) {
         throw new TaskChangeError(
           'concurrency',
-          `task ${taskId} version is ${current.version}, expected ${change.expectedVersion}`,
+          `entity ${taskId} version is ${current.version}, expected ${change.expectedVersion}`,
         );
       }
 
@@ -378,19 +509,40 @@ export class TaskChangeRouter {
         sets.push('stage_id = ?');
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
-        action = 'stageMoved';
+        // Decomposition: an IDEA moving to the Decomposed terminal stage retires.
+        // Children are intentionally LEFT UNCHANGED here (no cascade) — they carry
+        // the flow. Surface the distinct 'decomposed' action so the UI can react.
+        action =
+          type === 'idea' && targetStage.position === DECOMPOSED_POSITION ? 'decomposed' : 'stageMoved';
       }
 
-      // ----- re-parent -----
+      // ----- re-parent (tasks only) -----
       if (change.parentEpicId !== undefined && change.parentEpicId !== current.parent_epic_id) {
+        if (!desc.hasParentEpic) {
+          throw new TaskChangeError('invalid_parent', `only type='task' may have a parent epic (got '${type}')`);
+        }
         if (change.parentEpicId !== null) {
-          this.validateParent(projectId, current.type, taskId, change.parentEpicId);
-        } else if (current.type !== 'task') {
-          // Clearing is a no-op authority-wise, but only tasks ever had a parent.
+          this.validateParentEpic(projectId, type, taskId, change.parentEpicId);
         }
         sets.push('parent_epic_id = ?');
         params.push(change.parentEpicId);
         deltas.push({ field: 'parent_epic_id', from: current.parent_epic_id, to: change.parentEpicId });
+      }
+
+      // ----- originating idea (epics + tasks) -----
+      if (change.originatingIdeaId !== undefined && change.originatingIdeaId !== current.originating_idea_id) {
+        if (!desc.hasOriginatingIdea) {
+          throw new TaskChangeError(
+            'invalid_lineage',
+            `only epics/tasks may have an originating idea (got '${type}')`,
+          );
+        }
+        if (change.originatingIdeaId !== null) {
+          this.validateOriginatingIdea(projectId, type, change.originatingIdeaId);
+        }
+        sets.push('originating_idea_id = ?');
+        params.push(change.originatingIdeaId);
+        deltas.push({ field: 'originating_idea_id', from: current.originating_idea_id, to: change.originatingIdeaId });
       }
 
       // ----- scalar fields -----
@@ -406,6 +558,11 @@ export class TaskChangeRouter {
           params.push(f.summary);
           deltas.push({ field: 'summary', from: current.summary, to: f.summary });
         }
+        if (f.body !== undefined && f.body !== current.body) {
+          sets.push('body = ?');
+          params.push(f.body);
+          deltas.push({ field: 'body', from: current.body, to: f.body });
+        }
         if (f.priority !== undefined && f.priority !== current.priority) {
           sets.push('priority = ?');
           params.push(f.priority);
@@ -416,7 +573,12 @@ export class TaskChangeRouter {
           params.push(f.repo);
           deltas.push({ field: 'repo', from: current.repo, to: f.repo });
         }
-        if (f.entryStageId !== undefined && f.entryStageId !== current.entry_stage_id) {
+        if (f.scope !== undefined && desc.hasScope && f.scope !== current.scope) {
+          sets.push('scope = ?');
+          params.push(f.scope);
+          deltas.push({ field: 'scope', from: current.scope, to: f.scope });
+        }
+        if (f.entryStageId !== undefined && desc.hasEntryStage && f.entryStageId !== current.entry_stage_id) {
           sets.push('entry_stage_id = ?');
           params.push(f.entryStageId);
           deltas.push({ field: 'entry_stage_id', from: current.entry_stage_id, to: f.entryStageId });
@@ -426,12 +588,11 @@ export class TaskChangeRouter {
       // No-op guard: if nothing actually changed, do NOT bump version or write an event.
       // This preserves the no-orphan-UPDATE invariant (no updated_at change without an event row).
       if (deltas.length === 0) {
-        // Surface the event row that the caller's contract expects: re-read the
-        // latest event seq so callers still get a consistent shape. We do NOT
-        // write anything.
         const last = this.db
-          .prepare('SELECT id, seq FROM task_events WHERE task_id = ? ORDER BY seq DESC LIMIT 1')
-          .get(taskId) as { id: number; seq: number } | undefined;
+          .prepare(
+            'SELECT id, seq FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
+          )
+          .get(type, taskId) as { id: number; seq: number } | undefined;
         eventId = last?.id ?? 0;
         eventSeq = last?.seq ?? 0;
         return;
@@ -442,16 +603,60 @@ export class TaskChangeRouter {
       sets.push('updated_at = ?');
       params.push(now);
       params.push(taskId);
-      this.db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+      this.db.prepare(`UPDATE ${desc.table} SET ${sets.join(', ')} WHERE id = ?`).run(...params);
 
-      const ev = this.insertEvent(taskId, change.kind ?? action, change.actor, change.runId ?? null, deltas, now);
+      const ev = this.insertEvent(type, taskId, change.kind ?? action, change.actor, change.runId ?? null, deltas, now);
       eventId = ev.id;
       eventSeq = ev.seq;
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, taskId, action);
+    this.emitChange(projectId, resolvedType, taskId, action);
     return { taskId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  // --------------------------------------------------------------------------
+  // Entity location / per-table reads
+  // --------------------------------------------------------------------------
+
+  /**
+   * Resolve an id to its entity type + row. If `declared` is given, only that
+   * table is read (the boundary asserted the discriminator); otherwise all three
+   * tables are tried in turn (idea -> epic -> task). Returns undefined when no
+   * matching row exists in the relevant table(s).
+   */
+  private locateEntity(
+    projectId: number,
+    id: string,
+    declared?: TaskType,
+  ): { type: TaskType; row: EntityDbRow } | undefined {
+    const order: TaskType[] = declared ? [declared] : ['idea', 'epic', 'task'];
+    for (const type of order) {
+      const row = this.readEntity(type, projectId, id);
+      if (row) return { type, row };
+    }
+    return undefined;
+  }
+
+  /**
+   * Read one entity row from its table, normalizing the per-table column set to
+   * the common EntityDbRow super-set (lineage columns absent on a table read
+   * back as null).
+   */
+  private readEntity(type: TaskType, projectId: number, id: string): EntityDbRow | undefined {
+    const desc = describe(type);
+    const parentEpic = desc.hasParentEpic ? 'parent_epic_id' : 'NULL AS parent_epic_id';
+    const originatingIdea = desc.hasOriginatingIdea ? 'originating_idea_id' : 'NULL AS originating_idea_id';
+    const entryStage = desc.hasEntryStage ? 'entry_stage_id' : 'NULL AS entry_stage_id';
+    const scope = desc.hasScope ? 'scope' : 'NULL AS scope';
+    const row = this.db
+      .prepare(
+        `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, version,
+                created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}
+           FROM ${desc.table} WHERE id = ? AND project_id = ?`,
+      )
+      .get(id, projectId) as EntityDbRow | undefined;
+    return row;
   }
 
   // --------------------------------------------------------------------------
@@ -459,10 +664,10 @@ export class TaskChangeRouter {
   // --------------------------------------------------------------------------
 
   /**
-   * Recompute and write the DERIVED execution stage for a task by aggregating
-   * over ALL its runs (supports parallel runs). Writes via applyChange with
-   * actor='orchestrator', so the derived-stage authority is satisfied and the
-   * change is logged + emitted like any other.
+   * Recompute and write the DERIVED execution stage for a TASK by aggregating
+   * over ALL its runs (supports parallel runs). Tasks are the only execution
+   * entity, so this reads the `tasks` table directly. Writes via applyChange
+   * with actor='orchestrator' + entityType='task'.
    *
    * Aggregation (first match wins):
    *   any outcome='merged'                                          -> done
@@ -496,7 +701,7 @@ export class TaskChangeRouter {
     const anyRunning = runs.some((r) => r.status === 'running');
 
     if (anyMerged) {
-      targetStageId = this.stageIdForPosition(task.board_id, 9); // done
+      targetStageId = this.stageIdForPosition(task.board_id, DONE_POSITION); // done
     } else if (anyRunning) {
       targetStageId = this.stageIdForPosition(task.board_id, 7); // indev
     } else {
@@ -517,6 +722,7 @@ export class TaskChangeRouter {
 
     await this.applyChange(task.project_id, {
       actor: 'orchestrator',
+      entityType: 'task',
       taskId,
       stageId: targetStageId,
       kind: 'execution-stage',
@@ -570,33 +776,52 @@ export class TaskChangeRouter {
   }
 
   /**
-   * Validate a parent epic reference: exists, type='epic', same project, not
-   * self, and no 1-level cycle (the parent must not itself point back at this
-   * task). Only type='task' may carry a parent.
+   * Validate a parent epic reference: only type='task' may carry one; the parent
+   * must exist in `epics`, be in the same project, and not create a cycle (the
+   * parent epic must not itself originate from this task — and a task can never
+   * be its own parent).
    */
-  private validateParent(projectId: number, childType: TaskType, childId: string, parentId: string): void {
-    if (childType !== 'task') {
-      throw new TaskChangeError('invalid_parent', `only type='task' may have a parent (got '${childType}')`);
+  private validateParentEpic(projectId: number, childType: TaskType, childId: string, parentId: string): void {
+    if (!describe(childType).hasParentEpic) {
+      throw new TaskChangeError('invalid_parent', `only type='task' may have a parent epic (got '${childType}')`);
     }
     if (parentId === childId) {
       throw new TaskChangeError('invalid_parent', 'a task cannot be its own parent');
     }
     const parent = this.db
-      .prepare('SELECT id, project_id, type, parent_epic_id FROM tasks WHERE id = ?')
-      .get(parentId) as
-      | { id: string; project_id: number; type: TaskType; parent_epic_id: string | null }
-      | undefined;
+      .prepare('SELECT id, project_id, originating_idea_id FROM epics WHERE id = ?')
+      .get(parentId) as { id: string; project_id: number; originating_idea_id: string | null } | undefined;
     if (!parent) {
-      throw new TaskChangeError('invalid_parent', `parent ${parentId} not found`);
-    }
-    if (parent.type !== 'epic') {
-      throw new TaskChangeError('invalid_parent', `parent ${parentId} is not an epic (type='${parent.type}')`);
+      throw new TaskChangeError('invalid_parent', `parent epic ${parentId} not found`);
     }
     if (parent.project_id !== projectId) {
-      throw new TaskChangeError('invalid_parent', `parent ${parentId} belongs to a different project`);
+      throw new TaskChangeError('invalid_parent', `parent epic ${parentId} belongs to a different project`);
     }
-    if (parent.parent_epic_id === childId) {
+    // An epic cannot originate from the very task that points at it (cycle guard).
+    if (parent.originating_idea_id === childId) {
       throw new TaskChangeError('invalid_parent', 'parent/child cycle detected');
+    }
+  }
+
+  /**
+   * Validate an originating-idea reference: only epics/tasks may carry one; the
+   * idea must exist in `ideas` and be in the same project.
+   */
+  private validateOriginatingIdea(projectId: number, childType: TaskType, ideaId: string): void {
+    if (!describe(childType).hasOriginatingIdea) {
+      throw new TaskChangeError(
+        'invalid_lineage',
+        `only epics/tasks may have an originating idea (got '${childType}')`,
+      );
+    }
+    const idea = this.db
+      .prepare('SELECT id, project_id FROM ideas WHERE id = ?')
+      .get(ideaId) as { id: string; project_id: number } | undefined;
+    if (!idea) {
+      throw new TaskChangeError('invalid_lineage', `originating idea ${ideaId} not found`);
+    }
+    if (idea.project_id !== projectId) {
+      throw new TaskChangeError('invalid_lineage', `originating idea ${ideaId} belongs to a different project`);
     }
   }
 
@@ -605,7 +830,8 @@ export class TaskChangeRouter {
   // --------------------------------------------------------------------------
 
   private insertEvent(
-    taskId: string,
+    entityType: TaskType,
+    entityId: string,
     kind: string,
     actor: TaskActor,
     runId: string | null,
@@ -613,46 +839,44 @@ export class TaskChangeRouter {
     now: string,
   ): { id: number; seq: number } {
     const maxRow = this.db
-      .prepare('SELECT MAX(seq) AS maxSeq FROM task_events WHERE task_id = ?')
-      .get(taskId) as { maxSeq: number | null };
+      .prepare('SELECT MAX(seq) AS maxSeq FROM entity_events WHERE entity_type = ? AND entity_id = ?')
+      .get(entityType, entityId) as { maxSeq: number | null };
     const seq = (maxRow.maxSeq ?? 0) + 1;
     const info = this.db
       .prepare(
-        `INSERT INTO task_events (task_id, seq, kind, actor, run_id, changes_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(taskId, seq, kind, actor, runId, JSON.stringify(changes), now) as {
+      .run(entityType, entityId, seq, kind, actor, runId, JSON.stringify(changes), now) as {
       lastInsertRowid: number | bigint;
     };
     return { id: Number(info.lastInsertRowid), seq };
   }
 
-  private emitChange(projectId: number, taskId: string, action: TaskChangeAction): void {
-    const task = this.buildBacklogTaskItem(taskId);
+  private emitChange(projectId: number, type: TaskType, taskId: string, action: TaskChangeAction): void {
+    const task = this.buildBacklogTaskItem(type, taskId);
     if (!task) return; // deleted between commit and emit — nothing to broadcast
     const event: TaskChangedEvent = { projectId, taskId, action, task };
     taskChangeEvents.emit(taskProjectChannel(projectId), event);
   }
 
   /**
-   * Build the single-task read-model item carried by the emitted event,
+   * Build the single-entity read-model item carried by the emitted event,
    * including derived overlays. This is a SELF-CONTAINED projection (it does
    * NOT nest children) so the router has no dependency on the consumer's
    * taskListing.ts. The richer list/nesting projection lives there.
+   *
+   * Reads from the table matching `type` (incl body); execution overlays only
+   * ever attach to tasks (ideas/epics have no workflow_runs link), but the
+   * derivation is type-agnostic — a non-task simply has zero matching runs.
    */
-  private buildBacklogTaskItem(taskId: string): BacklogTaskItem | null {
-    const row = this.db
-      .prepare(
-        `SELECT id, project_id, type, ref, title, summary, priority, repo,
-                parent_epic_id, board_id, stage_id, version, created_at, updated_at
-           FROM tasks WHERE id = ?`,
-      )
-      .get(taskId) as TaskDbRow | undefined;
+  private buildBacklogTaskItem(type: TaskType, taskId: string): BacklogTaskItem | null {
+    const row = this.readEntity(type, this.projectIdOf(type, taskId) ?? -1, taskId);
     if (!row) return null;
 
     const stage = this.lookupStage(row.stage_id);
     const isTerminal = stage ? stage.is_terminal === 1 : false;
-    const isDonePosition = stage ? stage.position === 9 : false;
+    const isDonePosition = stage ? stage.position === DONE_POSITION : false;
 
     const runs = this.db
       .prepare(
@@ -679,13 +903,16 @@ export class TaskChangeRouter {
     return {
       id: row.id,
       project_id: row.project_id,
-      type: row.type,
+      type,
       ref: row.ref,
       title: row.title,
       summary: row.summary,
+      body: row.body,
       priority: row.priority,
       repo: row.repo,
       parent_epic_id: row.parent_epic_id,
+      originating_idea_id: row.originating_idea_id,
+      scope: row.scope,
       board_id: row.board_id,
       stage_id: row.stage_id,
       version: row.version,
@@ -695,6 +922,14 @@ export class TaskChangeRouter {
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
+  }
+
+  /** Cheap project_id lookup for the post-commit emit read (the row exists). */
+  private projectIdOf(type: TaskType, id: string): number | undefined {
+    const row = this.db
+      .prepare(`SELECT project_id FROM ${describe(type).table} WHERE id = ?`)
+      .get(id) as { project_id: number } | undefined;
+    return row?.project_id;
   }
 
   /**
