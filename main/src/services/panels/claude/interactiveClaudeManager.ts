@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { execSync } from 'child_process';
 import type Database from 'better-sqlite3';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
@@ -6,6 +7,8 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
@@ -386,11 +389,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--strict-mcp-config');
     }
 
-    // Inject the cyboflow MCP stdio entry. The actual `.mcp.json` is GENERATED
-    // by S5/TASK-810; here we only emit the flag pointed at the path that writer
-    // owns.
+    // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
+    // disk. writeInteractiveMcpConfig (called by spawnCliProcess just before args
+    // are built) writes `<worktree>/.cyboflow/interactive-mcp.json` whenever an
+    // orchestrator socket is injected. Emitting `--mcp-config` at a MISSING path
+    // makes claude exit 1 ("Invalid MCP configuration: MCP config file not found")
+    // and the run never advances past 'running' — the S5/TASK-810 gap this guard
+    // closes. When no socket is present (quick sessions) the file is absent and
+    // the flag is omitted so the REPL still launches.
     const mcpConfigPath = path.join(options.worktreePath, '.cyboflow', 'interactive-mcp.json');
-    args.push('--mcp-config', mcpConfigPath);
+    if (fs.existsSync(mcpConfigPath)) {
+      args.push('--mcp-config', mcpConfigPath);
+    }
 
     // No `--settings` flag is emitted (TASK-819 reconciliation): the PreToolUse
     // shell-approval hook is installed by InteractiveSettingsWriter into the
@@ -404,6 +414,56 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // re-point it at the empty `.cyboflow` file.
 
     return args;
+  }
+
+  /**
+   * Write the per-run interactive MCP config that `--mcp-config` points at.
+   *
+   * Mirrors ClaudeCodeManager.composeMcpServers: a single `cyboflow` MCP server
+   * entry (`node <cyboflowMcpServer.js>`) carrying CYBOFLOW_RUN_ID +
+   * CYBOFLOW_ORCH_SOCKET so the live REPL can call `cyboflow_report_step` et al.
+   * over the orchestrator socket. The SDK path injects this server in-process;
+   * the interactive REPL needs it as an on-disk file because `claude
+   * --mcp-config` reads a path.
+   *
+   * Writes ONLY when an orchestrator socket has been injected (a workflow run).
+   * For quick sessions with no socket there is no server to declare, so the file
+   * is not written and buildCommandArgs omits the `--mcp-config` flag — claude
+   * would otherwise exit 1 on the missing file. If the node executable cannot be
+   * resolved we warn and skip the entry rather than ship a broken `command`
+   * (same fail-soft as composeMcpServers).
+   */
+  protected async writeInteractiveMcpConfig(worktreePath: string, runId: string): Promise<void> {
+    if (!this.orchSocketPath) return;
+
+    let nodeCmd: string;
+    try {
+      nodeCmd = await findNodeExecutable();
+    } catch (nodeErr) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] Could not resolve node executable; omitting cyboflow MCP entry: ${nodeErr instanceof Error ? nodeErr.message : String(nodeErr)}`,
+      );
+      return;
+    }
+
+    const config = {
+      mcpServers: {
+        cyboflow: {
+          command: nodeCmd,
+          args: [resolveMcpServerScriptPath()],
+          env: {
+            CYBOFLOW_RUN_ID: runId,
+            CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
+          },
+        },
+      },
+    };
+
+    const dir = path.join(worktreePath, '.cyboflow');
+    const configPath = path.join(dir, 'interactive-mcp.json');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    this.logger?.info(`[InteractiveClaudeManager] wrote interactive MCP config: ${configPath}`);
   }
 
   /**
@@ -506,6 +566,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // added here (the writer's opt-out branch is the single source of truth).
     // Synchronous fs; no await needed.
     this.settingsWriter.write(worktreePath, { permissionMode: options.permissionMode });
+
+    // Write the per-run interactive MCP config (the path buildCommandArgs points
+    // `--mcp-config` at) BEFORE building args, so the existence-guarded flag is
+    // emitted. Closes the S5/TASK-810 gap that left `claude` exiting 1 on a
+    // missing `--mcp-config` file (the interactive REPL needs an on-disk config;
+    // the SDK path injects the same `cyboflow` server in-process).
+    await this.writeInteractiveMcpConfig(worktreePath, runId);
 
     // Build args + env via the abstract hooks.
     const args = this.buildCommandArgs({ ...options, runId });
@@ -626,6 +693,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     // Wait for the transcript file to be discovered (loud diagnostic on timeout),
     // then write the initial prompt into PTY stdin.
+    //
+    // KNOWN BUG (NOT fixed here — reverted to keep the branch non-freezing): this
+    // ordering is a DEADLOCK. claude does not create its transcript `.jsonl` until
+    // it processes a prompt, but the prompt is sent only AFTER discovery — so
+    // discovery always times out (15s) and the run never advances. Reordering the
+    // sendInput BEFORE waitForFirstLine fixes the deadlock, BUT doing so lets claude
+    // actually engage the cyboflow MCP server / transcript path for the first time,
+    // which exposes a SEPARATE latent main-process busy-loop freeze (100% CPU,
+    // event-loop spin) that must be root-caused (CPU profile) before the reorder can
+    // ship. See [[project_interactive_persistent_session]] for the exact reorder and
+    // freeze findings.
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
