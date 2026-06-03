@@ -186,6 +186,19 @@ const EOF_BYTE = '\x04';
 const SUBMIT_DELAY_MS = 300;
 
 /**
+ * PTY readiness gate (IDEA-030 freeze fix). Writing the prompt to claude's PTY
+ * stdin BEFORE its Ink TUI input loop is reading busy-spins a core: a >1KB prompt
+ * fills the ~1KB PTY kernel buffer and node-pty's `tty.ReadStream` write retries
+ * the unwritten remainder forever on EAGAIN (syscall-proven: ~4M failing write()
+ * to /dev/ptmx). We instead wait until claude has emitted its startup TUI paint
+ * and then gone QUIESCENT for READY_QUIESCENCE_MS (the REPL is idle waiting for
+ * input == draining stdin), with a READY_FALLBACK_MS hard cap so a silent/odd
+ * REPL still receives the prompt (worst case = the pre-gate behavior).
+ */
+const READY_QUIESCENCE_MS = 500;
+const READY_FALLBACK_MS = 8_000;
+
+/**
  * Payload of the 'turn-end' event emitted on each assistant turn boundary of a
  * persistent interactive REPL (IDEA-030 / TASK-818). The SubstrateDispatchFacade
  * fans this in and re-emits it by reference; RunExecutor's event-driven rest
@@ -702,13 +715,22 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
-    // Submit the prompt FIRST — BEFORE awaiting discovery. claude writes the
-    // transcript `.jsonl` only AFTER it processes a SUBMITTED prompt, so
-    // waitForFirstLine can succeed only once the prompt is in. Submitting after
-    // the await deadlocks: discovery times out and TranscriptTailSource.
-    // onDiscoveryTimeout calls clearDiscovery(), which IRREVERSIBLY stops the 50ms
-    // poller — so even when claude later writes the transcript nothing is watching
-    // and the run hangs on 'running'.
+    // Submit the prompt once claude's REPL is READING stdin — but still before
+    // awaiting discovery. Two coupled constraints:
+    //  (1) READINESS GATE (IDEA-030 freeze fix): writing the prompt to the PTY
+    //      master before claude's Ink TUI input loop is reading busy-spins a core
+    //      (a >1KB prompt fills the ~1KB PTY kernel buffer and node-pty's
+    //      tty.ReadStream write retries the unwritten remainder forever on EAGAIN —
+    //      syscall-proven: ~4M failing write() to /dev/ptmx). waitForReplReady
+    //      defers the write until the startup paint settles, so the PTY drains as
+    //      we write and no EAGAIN spin occurs.
+    //  (2) ORDER: the gated submit must still PRECEDE the discovery await. claude
+    //      writes the transcript `.jsonl` only AFTER a SUBMITTED prompt, and a
+    //      waitForFirstLine timeout calls clearDiscovery() — which IRREVERSIBLY
+    //      stops the 50ms poller — so a submit issued after the await could never
+    //      bind. Fire-and-forget the gated submit (void) so discovery runs
+    //      concurrently: readiness settles (~1-2s) -> submitToRepl -> claude engages
+    //      -> waitForFirstLine (below, 15s budget) binds the transcript.
     //
     // submitToRepl writes the body then a SEPARATE '\r' after the bracketed-paste
     // window closes: claude 2.1.x captures a one-shot `body + '\r'` as a paste
@@ -716,7 +738,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // otherwise sit in the composer unsubmitted (verified via PTY harness).
     // Interior '\n's of the multi-line prompt are preserved as one user turn.
     const promptToSend = this.composePromptBody(runId, options.prompt);
-    this.submitToRepl(panelId, promptToSend);
+    void this.waitForReplReady(ptyProcess).then(() => this.submitToRepl(panelId, promptToSend));
 
     // Now await transcript discovery (claude is engaging) — loud on timeout.
     try {
@@ -868,6 +890,52 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     run.turnEnded = true;
     this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
     this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Resolve once claude's interactive REPL is READING stdin, so the subsequent
+   * prompt write to the PTY master drains instead of busy-spinning on EAGAIN (the
+   * IDEA-030 freeze — see READY_QUIESCENCE_MS). Readiness proxy: claude has emitted
+   * its startup TUI paint and then gone quiescent (READY_QUIESCENCE_MS with no new
+   * bytes), which is when the REPL is idle waiting for input. Falls back after
+   * READY_FALLBACK_MS. The detector is a transient, additive `ptyProcess.onData`
+   * listener (node-pty onData is multi-listener — the raw 'pty-output' listener is
+   * the other) disposed on resolve. Overridable so tests resolve immediately
+   * instead of waiting on real timers.
+   */
+  protected waitForReplReady(ptyProcess: pty.IPty): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let bytesSeen = 0;
+      let done = false;
+      let quiesceTimer: ReturnType<typeof setTimeout> | undefined;
+      let disposable: pty.IDisposable | undefined;
+
+      const finish = (reason: string): void => {
+        if (done) return;
+        done = true;
+        if (quiesceTimer !== undefined) clearTimeout(quiesceTimer);
+        clearTimeout(fallbackTimer);
+        try {
+          disposable?.dispose();
+        } catch {
+          /* dispose is best-effort */
+        }
+        this.logger?.verbose(
+          `[InteractiveClaudeManager] REPL ready (${reason}, bytesSeen=${bytesSeen}) — submitting prompt`,
+        );
+        resolve();
+      };
+
+      const fallbackTimer = setTimeout(() => finish('fallback timeout'), READY_FALLBACK_MS);
+
+      // Re-arm the quiescence timer on every chunk; it fires only once the startup
+      // burst stops (TUI painted, REPL now reading stdin).
+      disposable = ptyProcess.onData((data: string) => {
+        bytesSeen += data.length;
+        if (quiesceTimer !== undefined) clearTimeout(quiesceTimer);
+        quiesceTimer = setTimeout(() => finish('paint quiescent'), READY_QUIESCENCE_MS);
+      });
+    });
   }
 
   /**
