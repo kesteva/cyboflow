@@ -122,10 +122,6 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
     this.fakeSources.push(src);
     return src;
   }
-  // Resolve the PTY readiness gate immediately (no real-timer wait in tests).
-  protected override waitForReplReady(): Promise<void> {
-    return Promise.resolve();
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -193,13 +193,6 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
     return src;
   }
 
-  // Resolve the PTY readiness gate immediately so tests don't wait on (or leak)
-  // the real quiescence/fallback timers; the production gate is exercised by the
-  // PTY harness, not the fake PTY.
-  protected override waitForReplReady(): Promise<void> {
-    return Promise.resolve();
-  }
-
   // Test accessors for private maps.
   publicPipelines(): Map<string, unknown> {
     return (this as unknown as { pipelines: Map<string, unknown> }).pipelines;

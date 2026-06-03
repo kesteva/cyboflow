@@ -186,19 +186,6 @@ const EOF_BYTE = '\x04';
 const SUBMIT_DELAY_MS = 300;
 
 /**
- * PTY readiness gate (IDEA-030 freeze fix). Writing the prompt to claude's PTY
- * stdin BEFORE its Ink TUI input loop is reading busy-spins a core: a >1KB prompt
- * fills the ~1KB PTY kernel buffer and node-pty's `tty.ReadStream` write retries
- * the unwritten remainder forever on EAGAIN (syscall-proven: ~4M failing write()
- * to /dev/ptmx). We instead wait until claude has emitted its startup TUI paint
- * and then gone QUIESCENT for READY_QUIESCENCE_MS (the REPL is idle waiting for
- * input == draining stdin), with a READY_FALLBACK_MS hard cap so a silent/odd
- * REPL still receives the prompt (worst case = the pre-gate behavior).
- */
-const READY_QUIESCENCE_MS = 500;
-const READY_FALLBACK_MS = 8_000;
-
-/**
  * Payload of the 'turn-end' event emitted on each assistant turn boundary of a
  * persistent interactive REPL (IDEA-030 / TASK-818). The SubstrateDispatchFacade
  * fans this in and re-emits it by reference; RunExecutor's event-driven rest
@@ -602,10 +589,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const args = this.buildCommandArgs({ ...options, runId });
 
     // Pass the initial prompt as claude's POSITIONAL argument so claude processes
-    // it as the first REPL turn NATIVELY — replacing the post-spawn PTY
-    // byte-injection (waitForReplReady -> submitToRepl below) that silently LOST
-    // the prompt whenever claude's Ink TUI was not reading stdin at inject time
-    // (startup repaints / "Remote Control connecting" lull). The injection was
+    // it as the first REPL turn NATIVELY — replacing the former post-spawn PTY
+    // byte-injection that silently LOST the prompt whenever claude's Ink TUI was
+    // not reading stdin at inject time (startup repaints / "Remote Control
+    // connecting" lull). The injection was
     // proven NONDETERMINISTIC (~1/3 engaged) via a node-pty harness, while the
     // positional arg engaged DETERMINISTICALLY (4/4) and claude STAYS interactive
     // afterward (persistent REPL — what IDEA-030 needs). node-pty's args ARRAY
@@ -893,52 +880,6 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     run.turnEnded = true;
     this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
     this.writeExitToRepl(panelId);
-  }
-
-  /**
-   * Resolve once claude's interactive REPL is READING stdin, so the subsequent
-   * prompt write to the PTY master drains instead of busy-spinning on EAGAIN (the
-   * IDEA-030 freeze — see READY_QUIESCENCE_MS). Readiness proxy: claude has emitted
-   * its startup TUI paint and then gone quiescent (READY_QUIESCENCE_MS with no new
-   * bytes), which is when the REPL is idle waiting for input. Falls back after
-   * READY_FALLBACK_MS. The detector is a transient, additive `ptyProcess.onData`
-   * listener (node-pty onData is multi-listener — the raw 'pty-output' listener is
-   * the other) disposed on resolve. Overridable so tests resolve immediately
-   * instead of waiting on real timers.
-   */
-  protected waitForReplReady(ptyProcess: pty.IPty): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let bytesSeen = 0;
-      let done = false;
-      let quiesceTimer: ReturnType<typeof setTimeout> | undefined;
-      let disposable: pty.IDisposable | undefined;
-
-      const finish = (reason: string): void => {
-        if (done) return;
-        done = true;
-        if (quiesceTimer !== undefined) clearTimeout(quiesceTimer);
-        clearTimeout(fallbackTimer);
-        try {
-          disposable?.dispose();
-        } catch {
-          /* dispose is best-effort */
-        }
-        this.logger?.verbose(
-          `[InteractiveClaudeManager] REPL ready (${reason}, bytesSeen=${bytesSeen}) — submitting prompt`,
-        );
-        resolve();
-      };
-
-      const fallbackTimer = setTimeout(() => finish('fallback timeout'), READY_FALLBACK_MS);
-
-      // Re-arm the quiescence timer on every chunk; it fires only once the startup
-      // burst stops (TUI painted, REPL now reading stdin).
-      disposable = ptyProcess.onData((data: string) => {
-        bytesSeen += data.length;
-        if (quiesceTimer !== undefined) clearTimeout(quiesceTimer);
-        quiesceTimer = setTimeout(() => finish('paint quiescent'), READY_QUIESCENCE_MS);
-      });
-    });
   }
 
   /**
