@@ -151,7 +151,7 @@ export const tasksRouter = router({
       try {
         const { taskId } = await TaskChangeRouter.getInstance().applyChange(input.projectId, {
           actor: 'user',
-          type: input.type,
+          entityType: input.type,
           title: input.title,
           summary: input.summary,
           priority: input.priority,

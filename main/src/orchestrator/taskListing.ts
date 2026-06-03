@@ -1,14 +1,20 @@
 /**
- * taskListing — shared READ-side projection for the native task backlog.
+ * taskListing — shared READ-side projection for the native entity backlog.
  *
  * Exports the queries the cyboflow.tasks tRPC router reads from, kept in this
  * separate module (mirroring approvalListing.ts) so the router stays a thin
  * tRPC wrapper and the projection can be unit-tested against a DatabaseLike
  * without the tRPC plumbing.
  *
+ * 3-TABLE MODEL (migration 015): ideas/epics/tasks are read via a single UNION
+ * that synthesizes the `type` literal per source table and projects each table's
+ * per-table column set onto the common BacklogTaskItem shape (absent lineage /
+ * scope / entry columns read back as NULL). The single onTaskChanged channel +
+ * single list query are preserved — the renderer still sees one BacklogTaskItem[].
+ *
  *  - boardsForProject(db, projectId)  -> Board[]            (board + ordered stages)
- *  - selectProjectBacklog(db, projectId) -> BacklogTaskItem[] (tasks + on-read overlays + epic nesting)
- *  - computeTaskOverlay(db, taskRow)  -> { inFlow, awaitingReview, isDone } (per-task derivation)
+ *  - selectProjectBacklog(db, projectId) -> BacklogTaskItem[] (UNION + on-read overlays + epic nesting)
+ *  - computeTaskOverlay(db, taskRow)  -> { inFlow, awaitingReview, isDone } (per-entity derivation)
  *
  * On-read overlay derivation (kept CONSISTENT with the chokepoint's private
  * buildBacklogTaskItem in taskChangeRouter.ts — foundation note #4):
@@ -56,6 +62,11 @@ interface BoardStageDbRow {
   hidden_by_default: number; // 0 | 1
 }
 
+/**
+ * The unified read row produced by the 3-table UNION. `type` is synthesized as a
+ * literal in each SELECT branch; lineage / scope columns absent on a given table
+ * are projected as NULL so every branch is shape-identical.
+ */
 interface TaskDbRow {
   id: string;
   project_id: number;
@@ -63,14 +74,44 @@ interface TaskDbRow {
   ref: string;
   title: string;
   summary: string | null;
+  body: string | null;
   priority: 'P0' | 'P1' | 'P2';
   repo: string | null;
   parent_epic_id: string | null;
+  originating_idea_id: string | null;
+  scope: 'small' | 'large' | null;
   board_id: string;
   stage_id: string;
   version: number;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The 3-table UNION column list. Each branch synthesizes `type` + projects the
+ * absent lineage/scope columns as typed NULLs so the union shape is uniform. The
+ * column ORDER is fixed and shared by every branch (SQLite unions positionally).
+ */
+const UNION_COLUMNS =
+  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, version, created_at, updated_at';
+
+/** Build the full ideas+epics+tasks UNION subquery for a project, aliased `e`. */
+function entityUnionSql(): string {
+  return `
+    SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
+           NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
+           board_id, stage_id, version, created_at, updated_at
+      FROM ideas WHERE project_id = ?
+    UNION ALL
+    SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
+           NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
+           board_id, stage_id, version, created_at, updated_at
+      FROM epics WHERE project_id = ?
+    UNION ALL
+    SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
+           parent_epic_id, originating_idea_id, NULL AS scope,
+           board_id, stage_id, version, created_at, updated_at
+      FROM tasks WHERE project_id = ?`;
 }
 
 interface StageOverlayRow {
@@ -241,9 +282,12 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     ref: row.ref,
     title: row.title,
     summary: row.summary,
+    body: row.body,
     priority: row.priority,
     repo: row.repo,
     parent_epic_id: row.parent_epic_id,
+    originating_idea_id: row.originating_idea_id,
+    scope: row.scope,
     board_id: row.board_id,
     stage_id: row.stage_id,
     version: row.version,
@@ -264,22 +308,33 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
  * @param taskId - The task id to project.
  */
 export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskItem | null {
-  const row = db
-    .prepare(
-      `SELECT id, project_id, type, ref, title, summary, priority, repo,
-              parent_epic_id, board_id, stage_id, version, created_at, updated_at
-         FROM tasks WHERE id = ?`,
-    )
-    .get(taskId) as TaskDbRow | undefined;
+  // Try each table by id (table identity is the discriminator). Cheaper than a
+  // full UNION when we only want one row.
+  const row =
+    (db.prepare(`SELECT ${UNION_COLUMNS} FROM (
+       SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
+              NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
+              board_id, stage_id, version, created_at, updated_at FROM ideas WHERE id = ?
+       UNION ALL
+       SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
+              NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
+              board_id, stage_id, version, created_at, updated_at FROM epics WHERE id = ?
+       UNION ALL
+       SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
+              parent_epic_id, originating_idea_id, NULL AS scope,
+              board_id, stage_id, version, created_at, updated_at FROM tasks WHERE id = ?
+     )`).get(taskId, taskId, taskId) as TaskDbRow | undefined);
   if (!row) return null;
 
   const item = projectTaskItem(db, row);
 
   if (row.type === 'epic') {
+    // Children are always tasks (only `tasks` carries parent_epic_id).
     const childRows = db
       .prepare(
-        `SELECT id, project_id, type, ref, title, summary, priority, repo,
-                parent_epic_id, board_id, stage_id, version, created_at, updated_at
+        `SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
+                parent_epic_id, originating_idea_id, NULL AS scope,
+                board_id, stage_id, version, created_at, updated_at
            FROM tasks
           WHERE parent_epic_id = ?
           ORDER BY created_at ASC, ref ASC`,
@@ -310,15 +365,14 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
  * @returns BacklogTaskItem[] — top-level items, epics nesting their tasks.
  */
 export function selectProjectBacklog(db: DatabaseLike, projectId: number): BacklogTaskItem[] {
+  // Single UNION across the three entity tables → one BacklogTaskItem[]. The
+  // outer SELECT applies the shared ordering across the merged set.
   const rows = db
     .prepare(
-      `SELECT id, project_id, type, ref, title, summary, priority, repo,
-              parent_epic_id, board_id, stage_id, version, created_at, updated_at
-         FROM tasks
-        WHERE project_id = ?
+      `SELECT ${UNION_COLUMNS} FROM (${entityUnionSql()})
         ORDER BY created_at ASC, ref ASC`,
     )
-    .all(projectId) as TaskDbRow[];
+    .all(projectId, projectId, projectId) as TaskDbRow[];
 
   // First pass: project every row to a BacklogTaskItem keyed by id.
   const itemsById = new Map<string, BacklogTaskItem>();
