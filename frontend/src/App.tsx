@@ -306,7 +306,7 @@ function App() {
                   </div>
                 </div>
               )}>
-                <ReviewQueueView />
+                <ReviewQueueView projectId={activeProjectId} />
               </ErrorBoundary>
             ) : (
               <CyboflowRoot projectId={activeProjectId} />
