@@ -71,6 +71,7 @@ function rethrowAsTRPCError(err: unknown): never {
 
 const taskTypeSchema = z.enum(['idea', 'epic', 'task']);
 const prioritySchema = z.enum(['P0', 'P1', 'P2']);
+const scopeSchema = z.enum(['small', 'large']);
 
 export const tasksRouter = router({
   /**
@@ -181,8 +182,12 @@ export const tasksRouter = router({
         taskId: z.string().min(1),
         title: z.string().optional(),
         summary: z.string().nullable().optional(),
+        /** Single markdown body column (present on every entity). */
+        body: z.string().nullable().optional(),
         priority: prioritySchema.optional(),
         repo: z.string().nullable().optional(),
+        /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
+        scope: scopeSchema.nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
         expectedVersion: z.number().int().optional(),
       }),
@@ -195,8 +200,10 @@ export const tasksRouter = router({
           fields: {
             ...(input.title !== undefined ? { title: input.title } : {}),
             ...(input.summary !== undefined ? { summary: input.summary } : {}),
+            ...(input.body !== undefined ? { body: input.body } : {}),
             ...(input.priority !== undefined ? { priority: input.priority } : {}),
             ...(input.repo !== undefined ? { repo: input.repo } : {}),
+            ...(input.scope !== undefined ? { scope: input.scope } : {}),
           },
           ...(input.parentEpicId !== undefined ? { parentEpicId: input.parentEpicId } : {}),
           ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),

@@ -14,10 +14,12 @@
  * nested epic children also reflect their own in-flight launch correctly.
  */
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Play, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Play, Loader2, Pencil } from 'lucide-react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { TypeTag, PriorityTag, FlowMarker, ReviewMarker, DoneFlag } from './markers';
 import { compactAgo } from './backlogSelectors';
+import { IdeaDetailEditor } from '../IdeaDetailEditor';
+import { EpicDetailEditor } from '../EpicDetailEditor';
 
 interface TaskBodyProps {
   task: BacklogTaskItem;
@@ -44,8 +46,14 @@ function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | nul
   );
 }
 
-/** Footer: repo · time · Run. */
-function CardFooter({ task, onRun, launchingTaskId, now }: TaskBodyProps): React.JSX.Element {
+/** Footer: repo · time · Edit · Run. */
+function CardFooter({
+  task,
+  onRun,
+  onEdit,
+  launchingTaskId,
+  now,
+}: TaskBodyProps & { onEdit: (e: React.MouseEvent) => void }): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
@@ -53,22 +61,57 @@ function CardFooter({ task, onRun, launchingTaskId, now }: TaskBodyProps): React
         {task.repo && <span className="truncate font-medium">{task.repo}</span>}
         <span className="flex-shrink-0">{compactAgo(task.created_at, now)}</span>
       </div>
-      <button
-        type="button"
-        onClick={() => onRun(task)}
-        disabled={isLaunching}
-        data-testid="task-run-button"
-        className="inline-flex flex-shrink-0 items-center gap-1 rounded-button border border-interactive/50 px-2 py-0.5 text-[10.5px] font-semibold text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {isLaunching ? (
-          <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />
-        ) : (
-          <Play className="h-3 w-3" strokeWidth={2.5} />
-        )}
-        Run
-      </button>
+      <div className="flex flex-shrink-0 items-center gap-1.5">
+        {/* Dedicated Edit affordance — opens the type-appropriate detail editor.
+            stopPropagation guards against the click bubbling into the
+            epic-expand toggle or any future full-card handler. */}
+        <button
+          type="button"
+          onClick={onEdit}
+          data-testid="task-edit-button"
+          aria-label={`Edit ${task.ref}`}
+          className="inline-flex items-center gap-1 rounded-button border border-border-primary px-2 py-0.5 text-[10.5px] font-semibold text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+        >
+          <Pencil className="h-3 w-3" strokeWidth={2.5} />
+          Edit
+        </button>
+        <button
+          type="button"
+          onClick={() => onRun(task)}
+          disabled={isLaunching}
+          data-testid="task-run-button"
+          className="inline-flex items-center gap-1 rounded-button border border-interactive/50 px-2 py-0.5 text-[10.5px] font-semibold text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isLaunching ? (
+            <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Play className="h-3 w-3" strokeWidth={2.5} />
+          )}
+          Run
+        </button>
+      </div>
     </div>
   );
+}
+
+/**
+ * Render the type-appropriate detail editor for a card. Ideas open the
+ * IdeaDetailEditor (with the scope hint); epics and solo tasks open the
+ * EpicDetailEditor (title / summary / priority / markdown body).
+ */
+function DetailEditor({
+  task,
+  isOpen,
+  onClose,
+}: {
+  task: BacklogTaskItem;
+  isOpen: boolean;
+  onClose: () => void;
+}): React.JSX.Element {
+  if (task.type === 'idea') {
+    return <IdeaDetailEditor idea={task} isOpen={isOpen} onClose={onClose} />;
+  }
+  return <EpicDetailEditor epic={task} isOpen={isOpen} onClose={onClose} />;
 }
 
 /**
@@ -77,8 +120,15 @@ function CardFooter({ task, onRun, launchingTaskId, now }: TaskBodyProps): React
  */
 export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const isEpic = task.type === 'epic';
   const childCount = task.childCount ?? task.children?.length ?? 0;
+
+  // Guard the Edit click from bubbling into the epic-expand toggle / card body.
+  const handleEdit = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    setEditorOpen(true);
+  };
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -99,7 +149,10 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
         <p className="line-clamp-3 text-[11.5px] leading-snug text-text-secondary">{task.summary}</p>
       )}
 
-      <CardFooter task={task} onRun={onRun} launchingTaskId={launchingTaskId} now={now} />
+      <CardFooter task={task} onRun={onRun} onEdit={handleEdit} launchingTaskId={launchingTaskId} now={now} />
+
+      {/* Type-appropriate detail editor — opened by the dedicated Edit affordance. */}
+      <DetailEditor task={task} isOpen={editorOpen} onClose={() => setEditorOpen(false)} />
 
       {/* Epic expand → nested children */}
       {isEpic && childCount > 0 && (
