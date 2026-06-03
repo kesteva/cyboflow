@@ -18,7 +18,7 @@ import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../
 import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
-import type { SoloFlowWorkflowName } from '../../shared/types/workflows';
+import type { CyboflowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
 import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../main/src/orchestrator/__test_fixtures__/dbAdapter';
@@ -38,8 +38,8 @@ const harnessLogger = makeSpyLogger();
 export interface CyboflowTestHarness {
   launchPair(args: {
     projectPath: string;
-    workflowA: SoloFlowWorkflowName;
-    workflowB: SoloFlowWorkflowName;
+    workflowA: CyboflowWorkflowName;
+    workflowB: CyboflowWorkflowName;
     promptA: string;
     promptB: string;
   }): Promise<{ runIdA: string; runIdB: string }>;

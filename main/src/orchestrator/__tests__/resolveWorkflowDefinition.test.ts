@@ -3,7 +3,7 @@
  * (`shared/types/workflows.ts`).
  *
  * Behaviors covered (per the editable-blueprint contract):
- * 1. isSoloFlowWorkflowName: true for each built-in, false otherwise
+ * 1. isCyboflowWorkflowName: true for each built-in, false otherwise
  * 2. parseWorkflowDefinition: valid spec round-trips; null/undefined/''/'{}' -> null;
  *    invalid JSON -> null; non-object -> null; structurally-broken (no phases,
  *    empty phases, phase missing fields, step missing fields) -> null
@@ -17,10 +17,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  isSoloFlowWorkflowName,
+  isCyboflowWorkflowName,
   parseWorkflowDefinition,
   resolveWorkflowDefinition,
-  SOLOFLOW_WORKFLOW_NAMES,
+  CYBOFLOW_WORKFLOW_NAMES,
   WORKFLOW_DEFINITIONS,
   type WorkflowDefinition,
 } from '../../../../shared/types/workflows';
@@ -48,13 +48,13 @@ function makeValidDefinition(id = 'custom-flow'): WorkflowDefinition {
   };
 }
 
-describe('isSoloFlowWorkflowName', () => {
+describe('isCyboflowWorkflowName', () => {
   // -------------------------------------------------------------------------
   // Case 1: every built-in name is recognised
   // -------------------------------------------------------------------------
   it('returns true for each of the five built-in workflow names', () => {
-    for (const name of SOLOFLOW_WORKFLOW_NAMES) {
-      expect(isSoloFlowWorkflowName(name)).toBe(true);
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
+      expect(isCyboflowWorkflowName(name)).toBe(true);
     }
   });
 
@@ -62,10 +62,10 @@ describe('isSoloFlowWorkflowName', () => {
   // Case 2: anything else is rejected (custom flows, sentinel, empty)
   // -------------------------------------------------------------------------
   it('returns false for custom names, the quick sentinel, and empty strings', () => {
-    expect(isSoloFlowWorkflowName('wf-1-custom-abcd1234')).toBe(false);
-    expect(isSoloFlowWorkflowName('__quick__')).toBe(false);
-    expect(isSoloFlowWorkflowName('SOLOFLOW')).toBe(false);
-    expect(isSoloFlowWorkflowName('')).toBe(false);
+    expect(isCyboflowWorkflowName('wf-1-custom-abcd1234')).toBe(false);
+    expect(isCyboflowWorkflowName('__quick__')).toBe(false);
+    expect(isCyboflowWorkflowName('SOLOFLOW')).toBe(false);
+    expect(isCyboflowWorkflowName('')).toBe(false);
   });
 });
 

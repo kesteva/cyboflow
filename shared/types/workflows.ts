@@ -8,6 +8,16 @@
 
 import type { CliSubstrate } from './substrate';
 
+/**
+ * Workflow-run permission contract consumed by the SDK PreToolUse mapper
+ * (`permissionModeMapper.buildPreToolUseHook`), the frontmatter extractor in
+ * `WorkflowRegistry`, the run snapshot, and the blueprint editor.
+ *
+ * This is intentionally DISTINCT from the session/panel permission contract in
+ * `./permissionMode` (`'approve' | 'ignore'`): the two surfaces have different
+ * vocabularies and different consumers, and `interactiveSettingsWriter`
+ * treats them as parallel (`'ignore'`/`'dontAsk'`). Do NOT collapse them.
+ */
 export type PermissionMode = 'default' | 'acceptEdits' | 'dontAsk';
 
 export interface WorkflowRow {
@@ -93,7 +103,7 @@ export interface WorkflowRunListRow {
   stuck_reason: string | null;
 }
 
-export const SOLOFLOW_WORKFLOW_NAMES = [
+export const CYBOFLOW_WORKFLOW_NAMES = [
   'soloflow',
   'planner',
   'sprint',
@@ -101,7 +111,7 @@ export const SOLOFLOW_WORKFLOW_NAMES = [
   'prune',
 ] as const;
 
-export type SoloFlowWorkflowName = (typeof SOLOFLOW_WORKFLOW_NAMES)[number];
+export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
 // ─── Phase / Step data model ─────────────────────────────────────────────────
 
@@ -168,12 +178,12 @@ export interface WorkflowPhase {
 /**
  * Top-level definition for a cyboflow workflow.
  *
- * `id` is a free-form `string`: for the five built-ins it is the
- * `SoloFlowWorkflowName`, but a user-edited or "save as new" custom flow may
+ * `id` is a free-form `string`: for the built-ins it is the
+ * `CyboflowWorkflowName`, but a user-edited or "save as new" custom flow may
  * carry any id. `WORKFLOW_DEFINITIONS` is still typed
- * `Readonly<Record<SoloFlowWorkflowName, WorkflowDefinition>>`, so the literal
+ * `Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>>`, so the literal
  * built-in ids satisfy this wider type and the Record key set still forces all
- * five built-ins to be present.
+ * built-ins to be present.
  */
 export interface WorkflowDefinition {
   id: string;
@@ -210,10 +220,10 @@ export interface WorkflowStepTransitionEvent {
 // The v1 loopback invariant still holds: `loopback` is intra-phase only.
 
 /**
- * The five built-in workflow definitions, keyed by `SoloFlowWorkflowName`.
+ * The built-in workflow definitions, keyed by `CyboflowWorkflowName`.
  * `Readonly<Record<…>>` forces the compiler to flag any missing key.
  */
-export const WORKFLOW_DEFINITIONS: Readonly<Record<SoloFlowWorkflowName, WorkflowDefinition>> = {
+export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
 
   // /soloflow — full lifecycle: idea → planner → sprint → compound
   soloflow: {
@@ -656,10 +666,10 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<SoloFlowWorkflowName, Workflo
 // main/src/orchestrator/workflowDefinitionSchema.ts (zod, main-only).
 
 /**
- * Type guard: is `name` one of the five built-in `SoloFlowWorkflowName`s?
+ * Type guard: is `name` one of the built-in `CyboflowWorkflowName`s?
  */
-export function isSoloFlowWorkflowName(name: string): name is SoloFlowWorkflowName {
-  return (SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name);
+export function isCyboflowWorkflowName(name: string): name is CyboflowWorkflowName {
+  return (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name);
 }
 
 /**
@@ -743,6 +753,6 @@ export function resolveWorkflowDefinition(
 ): WorkflowDefinition | null {
   return (
     parseWorkflowDefinition(specJson) ??
-    (isSoloFlowWorkflowName(name) ? WORKFLOW_DEFINITIONS[name] : null)
+    (isCyboflowWorkflowName(name) ? WORKFLOW_DEFINITIONS[name] : null)
   );
 }

@@ -54,7 +54,7 @@ export interface SubstrateResolverInputs {
  *
  * An unrecognized value at any level is ignored (never throws) and resolution
  * falls through to the next level — mirroring extractPermissionMode's
- * default-on-unknown and resolveSoloFlowPluginRoot's graceful fall-through.
+ * default-on-unknown and the built-in workflow resolver's graceful fall-through.
  */
 export function resolveSubstrate(inputs: SubstrateResolverInputs): CliSubstrate {
   const env = inputs.env ?? process.env;

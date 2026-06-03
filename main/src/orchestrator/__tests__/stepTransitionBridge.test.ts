@@ -19,7 +19,7 @@ import {
 } from '../stepTransitionBridge';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
-import { SOLOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,8 +65,8 @@ function seedForBridge(workflowName: string, specJson = '{}') {
 // ---------------------------------------------------------------------------
 
 describe('resolveInitialStepId', () => {
-  it('returns a non-null string for every SOLOFLOW_WORKFLOW_NAMES entry', () => {
-    for (const name of SOLOFLOW_WORKFLOW_NAMES) {
+  it('returns a non-null string for every CYBOFLOW_WORKFLOW_NAMES entry', () => {
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
       const stepId = resolveInitialStepId(name);
       expect(stepId, `${name} should resolve to a step id`).not.toBeNull();
       expect(typeof stepId).toBe('string');

@@ -26,7 +26,7 @@ import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import {
-  isSoloFlowWorkflowName,
+  isCyboflowWorkflowName,
   WORKFLOW_DEFINITIONS,
 } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
@@ -101,7 +101,7 @@ export function WorkflowEditorModal({
    */
   const actionInFlightRef = useRef(false);
 
-  const isBuiltIn = isSoloFlowWorkflowName(state.name);
+  const isBuiltIn = isCyboflowWorkflowName(state.name);
 
   // ── Seed on open ──────────────────────────────────────────────────────────
   useEffect(() => {

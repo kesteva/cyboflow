@@ -63,7 +63,7 @@ export const workflowsRouter = router({
    * editor seeds from and the canvas renders).
    *
    * Resolution order is `resolveWorkflowDefinition`: a valid non-empty
-   * `spec_json` wins, else the built-in fallback for a `SoloFlowWorkflowName`,
+   * `spec_json` wins, else the built-in fallback for a `CyboflowWorkflowName`,
    * else null. NOT_FOUND when the row is missing OR resolution is null (a
    * custom flow whose spec is missing/broken).
    */

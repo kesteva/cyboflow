@@ -19,7 +19,7 @@
  * first, so this module stays a pure string builder with no DB/IPC/fs imports.
  *
  * Fail-soft: a `null` definition (a custom flow whose spec is missing/broken,
- * or a non-SoloFlow workflow) yields the empty string — never a throw — so the
+ * or a non-Cyboflow workflow) yields the empty string — never a throw — so the
  * wiring injects nothing rather than garbage. This mirrors
  * `resolveInitialStepId`'s null branch.
  *
@@ -61,7 +61,7 @@ export function flattenStepIds(def: WorkflowDefinition | null): string[] {
  *
  * @param def The already-resolved `WorkflowDefinition` for this run, as returned
  *   by `resolveWorkflowDefinition(name, spec_json)`. Pass `null` when the run's
- *   workflow has no resolvable definition (non-SoloFlow / broken custom spec):
+ *   workflow has no resolvable definition (non-Cyboflow / broken custom spec):
  *   the generator returns `''` (fail-soft, never throws).
  * @returns The append text, or `''` when `def` is null or has no steps.
  */
@@ -94,7 +94,7 @@ export function buildStepReportingAppend(def: WorkflowDefinition | null): string
 
 /**
  * Name-keyed convenience overload for the built-in fallback path: resolves the
- * built-in definition for a `SoloFlowWorkflowName` (or any name) via
+ * built-in definition for a `CyboflowWorkflowName` (or any name) via
  * `resolveWorkflowDefinition(name, '{}')` and delegates to
  * `buildStepReportingAppend`.
  *
@@ -102,7 +102,7 @@ export function buildStepReportingAppend(def: WorkflowDefinition | null): string
  * reaches the built-in seed definition — it MUST NOT be used for a live run,
  * where the row's real `spec_json` may carry user edits. The authoritative id
  * source for a run is always the resolved def passed to
- * `buildStepReportingAppend` directly. Unknown / non-SoloFlow names resolve to
+ * `buildStepReportingAppend` directly. Unknown / non-Cyboflow names resolve to
  * `null` and yield `''` (fail-soft).
  */
 export function buildStepReportingAppendForName(workflowName: string): string {

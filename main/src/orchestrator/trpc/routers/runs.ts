@@ -685,7 +685,7 @@ export const runsRouter = router({
       }
 
       // Resolve the effective definition: an edited/custom `spec_json` wins, else
-      // the built-in fallback for a SoloFlowWorkflowName, else null.
+      // the built-in fallback for a CyboflowWorkflowName, else null.
       const definition = resolveWorkflowDefinition(row.workflow_name, row.spec_json);
       if (definition === null) {
         throw new TRPCError({

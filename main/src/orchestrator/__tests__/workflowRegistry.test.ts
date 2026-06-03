@@ -19,7 +19,7 @@ import type Database from 'better-sqlite3';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
-import type { SoloFlowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
+import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
@@ -36,9 +36,9 @@ function writeTempMd(dir: string, filename: string, content: string): string {
 /** Build five workflow descriptors pointing at real temp files. */
 function buildDescriptors(
   dir: string,
-  overrides: Partial<Record<SoloFlowWorkflowName, string>> = {},
+  overrides: Partial<Record<CyboflowWorkflowName, string>> = {},
 ): WorkflowDescriptor[] {
-  const names: SoloFlowWorkflowName[] = ['soloflow', 'planner', 'sprint', 'compound', 'prune'];
+  const names: CyboflowWorkflowName[] = ['soloflow', 'planner', 'sprint', 'compound', 'prune'];
   return names.map((name) => {
     if (name in overrides) {
       return { name, path: overrides[name]! };
@@ -977,7 +977,7 @@ describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
       const registry = new WorkflowRegistry(dbAdapter(db), logger);
 
       const finalDescriptors = resolvedPaths.map((rp) => ({
-        name: rp.name as import('../../../../shared/types/workflows').SoloFlowWorkflowName,
+        name: rp.name as import('../../../../shared/types/workflows').CyboflowWorkflowName,
         path: rp.resolvedPath,
       }));
 

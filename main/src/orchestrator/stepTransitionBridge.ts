@@ -20,8 +20,8 @@
  */
 import { stepTransitionEvents } from './trpc/routers/events';
 import type { DatabaseLike, LoggerLike } from './types';
-import type { SoloFlowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
-import { SOLOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 
 export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 
@@ -30,13 +30,13 @@ export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflow
 // ---------------------------------------------------------------------------
 
 /**
- * Maps each SoloFlowWorkflowName to its first step id (v1 single-step-per-
+ * Maps each CyboflowWorkflowName to its first step id (v1 single-step-per-
  * workflow model). At run start, current_step_id is set to this step so only
  * it shows "running" and everything after is "pending". When the run
  * terminates, getPhaseState and mergeTransition mark ALL steps as "done"
  * regardless of position.
  */
-const INITIAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
+const INITIAL_STEP_IDS: Record<CyboflowWorkflowName, string> = {
   soloflow: 'context',
   planner:  'context',
   sprint:   'implement',
@@ -45,16 +45,16 @@ const INITIAL_STEP_IDS: Record<SoloFlowWorkflowName, string> = {
 } as const;
 
 /**
- * Returns the stable terminal step id for a given SoloFlow workflow name,
- * or null if the name is not a known SoloFlowWorkflowName.
+ * Returns the stable initial step id for a given Cyboflow workflow name,
+ * or null if the name is not a known CyboflowWorkflowName.
  *
  * When null, the caller MUST skip both the DB write and the emit.
  *
  * @param workflowName - The `workflows.name` value from the database row.
  */
 export function resolveInitialStepId(workflowName: string): string | null {
-  if ((SOLOFLOW_WORKFLOW_NAMES as readonly string[]).includes(workflowName)) {
-    return INITIAL_STEP_IDS[workflowName as SoloFlowWorkflowName];
+  if ((CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(workflowName)) {
+    return INITIAL_STEP_IDS[workflowName as CyboflowWorkflowName];
   }
   return null;
 }

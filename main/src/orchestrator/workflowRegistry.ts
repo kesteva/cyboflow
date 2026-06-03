@@ -17,8 +17,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
-import type { PermissionMode, WorkflowRow, WorkflowRunRow, SoloFlowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isSoloFlowWorkflowName } from '../../../shared/types/workflows';
+import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
+import { isCyboflowWorkflowName } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 
@@ -27,7 +27,7 @@ import { resolveSubstrate } from './substrateResolver';
 // ---------------------------------------------------------------------------
 
 export interface WorkflowDescriptor {
-  name: SoloFlowWorkflowName;
+  name: CyboflowWorkflowName;
   path: string;
 }
 
@@ -149,7 +149,7 @@ export function buildDefaultSoloFlowWorkflows(pluginRoot: string): WorkflowDescr
  * shim with a direct call to buildDefaultSoloFlowWorkflows() +
  * resolveSoloFlowPluginRoot(). Remove this export when that task lands.
  */
-export const DEFAULT_SOLOFLOW_WORKFLOWS: { name: SoloFlowWorkflowName; pathFromHome: string }[] =
+export const DEFAULT_SOLOFLOW_WORKFLOWS: { name: CyboflowWorkflowName; pathFromHome: string }[] =
   (() => {
     const homeDir = os.homedir();
     return buildDefaultSoloFlowWorkflows(
@@ -296,7 +296,7 @@ export class WorkflowRegistry {
     if (!row) {
       throw new Error(`WorkflowRegistry.resetSpec: workflow ${workflowId} not found`);
     }
-    if (!isSoloFlowWorkflowName(row.name)) {
+    if (!isCyboflowWorkflowName(row.name)) {
       throw new Error(
         `WorkflowRegistry.resetSpec: cannot reset a custom workflow to default (${workflowId})`,
       );
@@ -330,7 +330,7 @@ export class WorkflowRegistry {
     definition: WorkflowDefinition,
     permissionMode: PermissionMode,
   ): WorkflowRow {
-    if (isSoloFlowWorkflowName(name) || name === QUICK_WORKFLOW_NAME) {
+    if (isCyboflowWorkflowName(name) || name === QUICK_WORKFLOW_NAME) {
       throw new Error(
         `WorkflowRegistry.createCustom: name '${name}' is reserved`,
       );

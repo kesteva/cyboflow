@@ -34,7 +34,7 @@
  *  (b) Missing ctx.db → TRPCError PRECONDITION_FAILED.
  *
  * runs.getPhaseState (TASK-766):
- *  (a) Returns correct WorkflowDefinition for known SoloFlowWorkflowName.
+ *  (a) Returns correct WorkflowDefinition for known CyboflowWorkflowName.
  *  (b) Throws NOT_FOUND for unknown workflow name.
  *  (c) Returns current_step_id verbatim (string and null cases).
  *  (d) Computes stepStates correctly across four cases:
@@ -62,7 +62,7 @@ import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
-import { SOLOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Seed helpers (inlined — small, out of scope to extract to shared fixture)
@@ -647,7 +647,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a) Returns correct WorkflowDefinition for known SoloFlowWorkflowName
+  // (a) Returns correct WorkflowDefinition for known CyboflowWorkflowName
   // -------------------------------------------------------------------------
   it('(a) returns correct WorkflowDefinition for known workflow name (soloflow)', async () => {
     const runId = 'run-gps-soloflow';
@@ -1118,14 +1118,14 @@ describe('cyboflow.runs.onStepTransition', () => {
 // end-to-end stepId contract parity (TERMINAL_STEP_IDS resolves into
 // WORKFLOW_DEFINITIONS — fixes namespace mismatch, FIND-SPRINT-040-10/13)
 //
-// For every SOLOFLOW_WORKFLOW_NAMES entry, calls buildStepTransitionEvent with
+// For every CYBOFLOW_WORKFLOW_NAMES entry, calls buildStepTransitionEvent with
 // the resolveInitialStepId output, then asserts getPhaseState returns a
 // stepStates entry with status='running' for that stepId. This locks the
 // contract against future namespace drift between the emitter and the consumer.
 // ---------------------------------------------------------------------------
 
 describe('end-to-end stepId contract parity (INITIAL_STEP_IDS resolves into WORKFLOW_DEFINITIONS — fixes namespace mismatch)', () => {
-  for (const name of SOLOFLOW_WORKFLOW_NAMES) {
+  for (const name of CYBOFLOW_WORKFLOW_NAMES) {
     it(`${name}: buildStepTransitionEvent → getPhaseState yields status=running for the resolved initial step`, async () => {
       const stepId = resolveInitialStepId(name);
       expect(stepId).not.toBeNull();
