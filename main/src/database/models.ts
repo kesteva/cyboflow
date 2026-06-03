@@ -184,12 +184,18 @@ export interface CreatePanelExecutionDiffData {
 }
 
 // ---------------------------------------------------------------------------
-// Native task backlog row interfaces (migration 014_native_tasks.sql).
+// Native entity backlog row interfaces (migration 015_entity_model_rebuild.sql).
+//
+// The unified `tasks` table is split into THREE dedicated entity tables —
+// `ideas`, `epics`, `tasks` — each with its own columns plus a single markdown
+// `body` and a `stage_id` onto the shared board. Table identity IS the type
+// discriminator, so NONE of these carry a `type` column. The polymorphic
+// `entity_events` log replaces task_events.
 //
 // These mirror the SQL columns 1:1. SQLite stores BOOLEAN as 0/1, so boolean
 // columns surface as `number` (0|1) on read — consumers normalize to boolean.
 // The shared READ-model + chokepoint types live in shared/types/tasks.ts; the
-// schema-parity test pins TaskRow field names against the `tasks` columns.
+// entitySchemaParity test pins each row interface against its table columns.
 // ---------------------------------------------------------------------------
 
 export interface BoardRow {
@@ -214,19 +220,68 @@ export interface BoardStageRow {
   hidden_by_default: number; // 0 | 1
 }
 
+/**
+ * `ideas` row (migration 015). Table identity is the discriminator — NO `type`
+ * and NO lineage column. `scope` is the nullable size hint set at idea-spec time.
+ */
+export interface IdeaRow {
+  id: string;
+  project_id: number;
+  ref: string;
+  title: string;
+  summary: string | null;
+  body: string | null;
+  scope: 'small' | 'large' | null;
+  priority: 'P0' | 'P1' | 'P2';
+  repo: string | null;
+  board_id: string;
+  stage_id: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `epics` row (migration 015). Same base as IdeaRow minus `scope`, plus the
+ * `originating_idea_id` lineage FK->ideas(id).
+ */
+export interface EpicRow {
+  id: string;
+  project_id: number;
+  ref: string;
+  title: string;
+  summary: string | null;
+  body: string | null;
+  priority: 'P0' | 'P1' | 'P2';
+  repo: string | null;
+  board_id: string;
+  stage_id: string;
+  originating_idea_id: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `tasks` row (migration 015). Same base, plus the execution-entry capture
+ * (`entry_stage_id`) and both lineage FKs: `parent_epic_id` (FK->epics) and
+ * `originating_idea_id` (FK->ideas, set for the small-idea branch that skips
+ * epics).
+ */
 export interface TaskRow {
   id: string;
   project_id: number;
-  type: 'idea' | 'epic' | 'task';
   ref: string;
-  parent_epic_id: string | null;
+  title: string;
+  summary: string | null;
+  body: string | null;
+  priority: 'P0' | 'P1' | 'P2';
+  repo: string | null;
   board_id: string;
   stage_id: string;
   entry_stage_id: string | null;
-  title: string;
-  summary: string | null;
-  priority: 'P0' | 'P1' | 'P2';
-  repo: string | null;
+  parent_epic_id: string | null;
+  originating_idea_id: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -238,9 +293,15 @@ export interface TaskRefCounterRow {
   next_seq: number;
 }
 
-export interface TaskEventRow {
+/**
+ * `entity_events` row (migration 015) — the polymorphic per-field delta log
+ * that replaces task_events. The (entity_type, entity_id) pair is the soft
+ * polymorphic link; seq is unique per-(entity_type, entity_id).
+ */
+export interface EntityEventRow {
   id: number;
-  task_id: string;
+  entity_type: 'idea' | 'epic' | 'task' | 'review_item';
+  entity_id: string;
   seq: number;
   kind: string;
   actor: string; // 'user' | 'orchestrator' | 'agent:<role>' | 'linear'
