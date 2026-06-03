@@ -8,13 +8,11 @@
  *
  * Frontmatter parsing note: the parser lives in markdownFrontmatter.ts and
  * intentionally avoids js-yaml or any third-party YAML library.  It handles
- * the flat `key: value` blocks used by SoloFlow workflow .md files and
+ * the flat `key: value` blocks used by the in-repo workflow .md files and
  * nothing more complex.
  */
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync } from 'fs';
 import { parseMarkdownFrontmatter } from './markdownFrontmatter';
-import * as os from 'os';
-import * as path from 'path';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
@@ -31,131 +29,13 @@ export interface WorkflowDescriptor {
   path: string;
 }
 
-// ---------------------------------------------------------------------------
-// SoloFlow plugin root discovery
-// ---------------------------------------------------------------------------
-
-/**
- * Documented fallback constant for the SoloFlow plugin version.
- *
- * This value WILL go out of date as new versions of the plugin are released.
- * When the filesystem discovery path fails and the env-var is not set, the
- * resolver uses this constant AND emits a console.warn so the operator is
- * informed that the fallback is in use and should update it or set
- * SOLOFLOW_PLUGIN_ROOT.
- */
-export const FALLBACK_SOLOFLOW_VERSION = '0.10.3';
-
-/**
- * Resolve the SoloFlow plugin root directory at runtime.
- *
- * Resolution order:
- * 1. `env.SOLOFLOW_PLUGIN_ROOT` — if non-empty, return immediately without
- *    touching the filesystem.
- * 2. Filesystem discovery — list subdirectories under
- *    `<homeDir>/.claude/plugins/cache/soloflow/soloflow-dev/` that match
- *    the semver pattern `\d+\.\d+\.\d+`, sort descending by semver, and
- *    return the highest version.
- * 3. Fallback — return the path for `FALLBACK_SOLOFLOW_VERSION` and emit a
- *    `console.warn` (this function does not own a logger instance).
- *
- * @param homeDir  The user's home directory (typically `os.homedir()`).
- * @param env      The process environment object (defaults to `process.env`).
- */
-export function resolveSoloFlowPluginRoot(
-  homeDir: string,
-  env: NodeJS.ProcessEnv = process.env,
-): { root: string; source: 'env' | 'discovered' | 'fallback' } {
-  // 1. Env-var override wins unconditionally.
-  const envOverride = env['SOLOFLOW_PLUGIN_ROOT'];
-  if (envOverride && envOverride.trim() !== '') {
-    return { root: envOverride.trim(), source: 'env' };
-  }
-
-  // 2. Filesystem discovery.
-  const cacheDir = path.join(homeDir, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-  try {
-    const entries = readdirSync(cacheDir, { withFileTypes: true });
-    const semverPattern = /^\d+\.\d+\.\d+$/;
-    const versions = entries
-      .filter((e) => e.isDirectory() && semverPattern.test(e.name))
-      .map((e) => e.name)
-      .sort((a, b) => {
-        const aParts = a.split('.').map(Number);
-        const bParts = b.split('.').map(Number);
-        for (let i = 0; i < 3; i++) {
-          const diff = (bParts[i] ?? 0) - (aParts[i] ?? 0);
-          if (diff !== 0) return diff;
-        }
-        return 0;
-      });
-
-    if (versions.length > 0) {
-      return { root: path.join(cacheDir, versions[0]), source: 'discovered' };
-    }
-  } catch {
-    // cacheDir does not exist or is not readable — fall through to fallback.
-  }
-
-  // 3. Fallback with warning.
-  console.warn(
-    `[WorkflowRegistry] could not discover soloflow plugin under ${cacheDir}. ` +
-      `Using fallback version ${FALLBACK_SOLOFLOW_VERSION}. ` +
-      `Set SOLOFLOW_PLUGIN_ROOT to override.`,
-  );
-  return {
-    root: path.join(cacheDir, FALLBACK_SOLOFLOW_VERSION),
-    source: 'fallback',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Default workflow builders
-// ---------------------------------------------------------------------------
-
-/**
- * Build the 5 default SoloFlow workflow descriptors resolved against a
- * concrete plugin root directory.
- *
- * @param pluginRoot  Absolute path to the versioned plugin directory
- *                    (e.g. `~/.claude/plugins/cache/soloflow/soloflow-dev/0.10.3`).
- */
-export function buildDefaultSoloFlowWorkflows(pluginRoot: string): WorkflowDescriptor[] {
-  return [
-    { name: 'soloflow', path: path.join(pluginRoot, 'commands', 'idea-extractor.md') },
-    { name: 'planner',  path: path.join(pluginRoot, 'commands', 'planner.md') },
-    { name: 'sprint',   path: path.join(pluginRoot, 'commands', 'sprint.md') },
-    { name: 'compound', path: path.join(pluginRoot, 'commands', 'compound.md') },
-    { name: 'prune',    path: path.join(pluginRoot, 'commands', 'prune.md') },
-  ];
-}
-
-/**
- * Backward-compat export for `cyboflow.ts` which calls:
- *
- *   DEFAULT_SOLOFLOW_WORKFLOWS.map((wf) => ({
- *     name: wf.name,
- *     path: path.join(homeDir, wf.pathFromHome),
- *   }))
- *
- * `pathFromHome` stores a **relative** path (relative to the user's home
- * directory) so that `path.join(homeDir, wf.pathFromHome)` resolves correctly
- * on both POSIX and Windows.  Note: `path.join` does NOT anchor on an absolute
- * second segment — that is `path.resolve` behaviour.  Storing an absolute path
- * in `pathFromHome` would produce a doubled-prefix path such as
- * `/Users/me/Users/me/.claude/...` and cause all file lookups to fail.
- *
- * @cyboflow-hidden — TASK-610 owns cyboflow.ts and will replace this compat
- * shim with a direct call to buildDefaultSoloFlowWorkflows() +
- * resolveSoloFlowPluginRoot(). Remove this export when that task lands.
- */
-export const DEFAULT_SOLOFLOW_WORKFLOWS: { name: CyboflowWorkflowName; pathFromHome: string }[] =
-  (() => {
-    const homeDir = os.homedir();
-    return buildDefaultSoloFlowWorkflows(
-      resolveSoloFlowPluginRoot(homeDir).root,
-    ).map((d) => ({ name: d.name, pathFromHome: path.relative(homeDir, d.path) }));
-  })();
+// The built-in workflow descriptors now live in-repo. See
+// `workflows/builtInWorkflows.ts` (`buildBuiltInWorkflows()`), which points each
+// flow at its sibling prompt `.md` file resolved relative to the compiled
+// bundle. The historical SoloFlow plugin-cache discovery
+// (resolveSoloFlowPluginRoot / buildDefaultSoloFlowWorkflows /
+// DEFAULT_SOLOFLOW_WORKFLOWS / FALLBACK_SOLOFLOW_VERSION) has been removed: the
+// app no longer depends on `~/.claude/plugins/cache/soloflow/...` at runtime.
 
 // ---------------------------------------------------------------------------
 // Constants

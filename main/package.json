@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsc -w",
     "build": "rimraf dist && tsc && npm run copy:assets",
-    "copy:assets": "mkdirp dist/main/src/database/migrations && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/",
+    "copy:assets": "mkdirp dist/main/src/database/migrations dist/main/src/orchestrator/workflows && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/ && cp src/orchestrator/workflows/*.md dist/main/src/orchestrator/workflows/",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
