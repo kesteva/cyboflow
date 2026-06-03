@@ -238,6 +238,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['task_id', 'stage_id'],
         },
       },
+      {
+        name: 'cyboflow_report_finding',
+        description:
+          'Report a NON-BLOCKING observation, decision, or human action item into THIS project\'s unified review queue (the human-attention inbox). The item is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single review-item chokepoint, and surfaces in the review queue. By default findings are NON-BLOCKING (the run is never paused, status is unchanged, the user is not interrupted); set blocking:true only for items that should gate run resume. This is OBSERVATIONAL — contrast with the PreToolUse approval gate.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Short headline for the item (required)' },
+            body: { type: 'string', description: 'Markdown detail / context for the item (required)' },
+            severity: { type: 'string', enum: ['info', 'warning', 'error'], description: 'Optional severity; only meaningful for findings' },
+            kind: { type: 'string', enum: ['finding', 'decision', 'human_task'], description: "Optional item kind; defaults to 'finding'" },
+            blocking: { type: 'boolean', description: 'Optional — whether this item gates run resume; defaults to false (non-blocking)' },
+            entity_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: 'Optional soft entity link type (must be paired with entity_id)' },
+            entity_id: { type: 'string', description: 'Optional soft entity link id (must be paired with entity_type)' },
+            payload_json: { type: 'string', description: 'Optional per-kind payload JSON; its discriminant must equal kind' },
+          },
+          required: ['title', 'body'],
+        },
+      },
     ],
   };
 });
@@ -584,6 +603,102 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id, stageId: stage_id };
       if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
       return executeMcpQuery('mcp-set-task-stage', queryParams);
+    }
+
+    case 'cyboflow_report_finding': {
+      const args = (request.params.arguments ?? {}) as {
+        title?: unknown;
+        body?: unknown;
+        severity?: unknown;
+        kind?: unknown;
+        blocking?: unknown;
+        entity_type?: unknown;
+        entity_id?: unknown;
+        payload_json?: unknown;
+      };
+      const { title, body, severity, kind, blocking, entity_type, entity_id, payload_json } = args;
+      if (typeof title !== 'string' || title.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'title: string' }) },
+          ],
+        };
+      }
+      if (typeof body !== 'string' || body.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'body: string' }) },
+          ],
+        };
+      }
+      if (severity !== undefined && severity !== 'info' && severity !== 'warning' && severity !== 'error') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "severity: 'info' | 'warning' | 'error' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (kind !== undefined && kind !== 'finding' && kind !== 'decision' && kind !== 'human_task') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "kind: 'finding' | 'decision' | 'human_task' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (blocking !== undefined && typeof blocking !== 'boolean') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'blocking: boolean (optional)' }),
+            },
+          ],
+        };
+      }
+      if (entity_type !== undefined && entity_type !== 'idea' && entity_type !== 'epic' && entity_type !== 'task') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "entity_type: 'idea' | 'epic' | 'task' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (entity_id !== undefined && typeof entity_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'entity_id: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'payload_json: string (optional)' }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { title, body };
+      if (severity !== undefined) queryParams['severity'] = severity;
+      if (kind !== undefined) queryParams['kind'] = kind;
+      if (blocking !== undefined) queryParams['blocking'] = blocking;
+      if (entity_type !== undefined) queryParams['entityType'] = entity_type;
+      if (entity_id !== undefined) queryParams['entityId'] = entity_id;
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-report-finding', queryParams);
     }
 
     default:
