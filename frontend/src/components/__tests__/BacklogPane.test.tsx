@@ -83,6 +83,8 @@ const STAGES: BoardStage[] = [
   stage(9, 's-done', 'Done', { is_terminal: true }),
   stage(10, 's-wont', "Won't do", { is_terminal: true, hidden_by_default: true }),
   stage(11, 's-arch', 'Archived', { is_terminal: true, hidden_by_default: true }),
+  // Idea-only terminal column (migration 015 position 12) — visible by default.
+  stage(12, 's-decomposed', 'Decomposed', { is_terminal: true }),
 ];
 
 const BOARD: Board = {
@@ -170,16 +172,43 @@ describe('BacklogPane', () => {
   it('renders one Kanban column per visible stage (hidden stages excluded)', () => {
     render(<BacklogPane projectId={1} />);
     const columns = screen.getAllByTestId('kanban-column');
-    // 5 visible stages (positions 1,6,7,8,9); 10 & 11 are hidden_by_default.
-    expect(columns).toHaveLength(5);
+    // 6 visible stages (positions 1,6,7,8,9,12); 10 & 11 are hidden_by_default.
+    // Position 12 (Decomposed) is terminal but visible by default.
+    expect(columns).toHaveLength(6);
     expect(screen.queryByText("Won't do")).not.toBeInTheDocument();
+    expect(screen.getByText('Decomposed')).toBeInTheDocument();
   });
 
   it('reveals hidden stages when the show-archived toggle is on', () => {
     mockShowArchived = true;
     render(<BacklogPane projectId={1} />);
-    expect(screen.getAllByTestId('kanban-column')).toHaveLength(7);
+    // 8 stages: the 6 visible + Won't do + Archived.
+    expect(screen.getAllByTestId('kanban-column')).toHaveLength(8);
     expect(screen.getByText("Won't do")).toBeInTheDocument();
+  });
+
+  it('buckets the UNION of ideas/epics/tasks across the shared board incl Decomposed', () => {
+    mockTasks = [
+      task({ id: 'i-cap', type: 'idea', stage_id: 's-idea', ref: 'IDEA-001', title: 'Captured idea' }),
+      task({ id: 'e-ready', type: 'epic', stage_id: 's-ready', ref: 'EPIC-001', title: 'Extracted epic', childCount: 0 }),
+      task({ id: 't-ready', type: 'task', stage_id: 's-ready', ref: 'TASK-010', title: 'Solo task' }),
+      // A retired idea sits in the idea-only terminal Decomposed column.
+      task({ id: 'i-dec', type: 'idea', stage_id: 's-decomposed', ref: 'IDEA-002', title: 'Retired idea' }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    // All four top-level union items render as cards across their stages.
+    expect(screen.getByText('Captured idea')).toBeInTheDocument();
+    expect(screen.getByText('Extracted epic')).toBeInTheDocument();
+    expect(screen.getByText('Solo task')).toBeInTheDocument();
+    // The decomposed idea lands in the Decomposed column (not dropped).
+    const decomposedCol = screen.getByText('Decomposed').closest('[data-testid="kanban-column"]');
+    expect(decomposedCol).not.toBeNull();
+    expect(within(decomposedCol as HTMLElement).getByText('Retired idea')).toBeInTheDocument();
+    // Header counts derive from the union: 4 items, 1 epic, 1 solo, 2 ideas.
+    const counts = screen.getByTestId('backlog-counts');
+    expect(counts).toHaveTextContent('4');
+    expect(counts).toHaveTextContent('epics');
+    expect(counts).toHaveTextContent('ideas');
   });
 
   it('renders MULTIPLE FlowMarkers for a task with parallel runs', () => {

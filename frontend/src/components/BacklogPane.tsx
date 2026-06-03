@@ -13,6 +13,12 @@
  * drag-and-drop. A "+ New" affordance opens NewTaskDialog; each card has a "Run"
  * action that launches a run for the task (passing the contract's taskId param).
  *
+ * The board is the UNION of all three entity types (ideas / epics / tasks) over
+ * the shared 12-stage board (incl the idea-only terminal "Decomposed" column).
+ * The header counts are derived from that same union result via deriveCounts,
+ * filtered by type (epics / solo / ideas / done) — the board buckets and the
+ * header read from one source of truth.
+ *
  * Hidden-by-default stages (won't-do / archived) are excluded unless the
  * show-archived toggle is on. When no project is active, EmptyBacklogView shows.
  *

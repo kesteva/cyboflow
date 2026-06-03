@@ -33,18 +33,34 @@ export function visibleStages(board: Board, showArchived: boolean): BoardStage[]
 }
 
 /**
- * Top-level tasks only (ideas, epics, and SOLO tasks with no parent). Child
- * tasks of an epic are rendered nested under their parent, never as their own
- * column/row entry.
+ * Top-level items only — the UNION of all three entity types (ideas, epics, and
+ * SOLO tasks) that have no parent epic. Child tasks of an epic are rendered
+ * nested under their parent, never as their own column/row entry.
+ *
+ * The 3-table model has no `type` column on the row; `type` is computed on read
+ * from the source table. We deliberately do NOT filter by `type` here — every
+ * idea / epic / solo task with `parent_epic_id === null` is a top-level board
+ * citizen and shares the single 12-stage board (entity-model rebuild).
  */
 export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
   return tasks.filter((t) => t.parent_epic_id === null);
 }
 
 /**
- * Group the top-level tasks into one bucket per visible stage, preserving the
- * board's stage order. A task whose stage is not in the visible set (e.g. an
- * archived task while showArchived is off) is dropped.
+ * Group the top-level UNION (ideas + epics + tasks) into one bucket per visible
+ * stage across the shared 12-stage board, preserving the board's stage order.
+ *
+ * The 12 stages span the full lineage:
+ *   1 Captured · 2 Researching · 3 Idea spec · 4 Epics extracted ·
+ *   5 Tasks extracted · 6 Plan review · 7 Ready for dev · 8 In development ·
+ *   9 Ready to merge · 10 Done · (Won't do / Archived terminal, hidden by
+ *   default) · 12 Decomposed (idea-only terminal — visible by default).
+ *
+ * All three entity types funnel into the same bucket map keyed by stage_id, so
+ * an idea sitting in stage 12 (Decomposed) lands in that terminal column right
+ * alongside epics/tasks in their own stages. A task whose stage is not in the
+ * visible set (e.g. a Won't-do / Archived item while showArchived is off, since
+ * those stages carry `hidden_by_default`) is dropped — never an orphaned entry.
  */
 export function bucketByStage(
   tasks: BacklogTaskItem[],
@@ -52,9 +68,10 @@ export function bucketByStage(
 ): StageBucket[] {
   const byStage = new Map<string, BacklogTaskItem[]>();
   for (const stage of stages) byStage.set(stage.id, []);
-  for (const task of topLevelTasks(tasks)) {
-    const bucket = byStage.get(task.stage_id);
-    if (bucket) bucket.push(task);
+  // Iterate the full union of top-level ideas/epics/tasks into the shared board.
+  for (const item of topLevelTasks(tasks)) {
+    const bucket = byStage.get(item.stage_id);
+    if (bucket) bucket.push(item);
   }
   return stages.map((stage) => ({ stage, tasks: byStage.get(stage.id) ?? [] }));
 }
