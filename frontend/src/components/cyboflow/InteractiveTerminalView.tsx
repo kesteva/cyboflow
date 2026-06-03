@@ -181,6 +181,13 @@ export function InteractiveTerminalView({
     if (!container) return;
 
     let disposed = false;
+    // `opened`: term.open() has run (once). `renderable`: a fit() on a non-zero
+    // container has produced valid renderer dimensions, so term.write() is safe.
+    let opened = false;
+    let renderable = false;
+    // PTY bytes that arrive before the container is laid out are buffered here
+    // and flushed on the first successful fit — none lost, none written early.
+    const pending: string[] = [];
 
     const term = new Terminal({
       fontSize: 14,
@@ -193,30 +200,48 @@ export function InteractiveTerminalView({
 
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(container);
 
-    // Guard fit(): xterm's FitAddon reads the renderer's `dimensions`, which is
-    // undefined until the container has a non-zero layout box. On a tab/flex
-    // mount the container can be 0×0 on the first frame, which throws
-    // "Cannot read properties of undefined (reading 'dimensions')" and tears down
-    // the terminal. Only fit when the container is measured, and never let a
-    // fit() throw escape (a later ResizeObserver tick re-fits once laid out).
-    const safeFit = (): void => {
+    // Defer term.open() until the container has a non-zero layout box. xterm
+    // measures the character cell at open() time; opening into a 0×0 box — which
+    // a `flex-1` chat child is on its first React commit, before the layout
+    // engine distributes space — leaves the renderer's `dimensions` at 0, and the
+    // first term.write() then crashes in CompositionHelper with "Cannot read
+    // properties of undefined (reading 'dimensions')". TerminalPanel avoids this
+    // only incidentally: its open() sits behind two async IPC awaits that let
+    // layout settle first. We make the precondition explicit — open + fit only
+    // once the container is measured, then flush any bytes buffered until then.
+    const ensureRenderable = (): void => {
+      if (disposed || renderable) return;
       if (container.offsetWidth === 0 || container.offsetHeight === 0) return;
+      if (!opened) {
+        term.open(container);
+        opened = true;
+      }
       try {
         fit.fit();
       } catch {
-        // Renderer not ready yet — the ResizeObserver below will re-fit.
+        // Renderer still not measurable — a later ResizeObserver tick retries.
+        return;
+      }
+      renderable = true;
+      if (pending.length > 0) {
+        const buffered = pending.join('');
+        pending.length = 0;
+        writeWithAutoScroll(term, buffered);
       }
     };
-    safeFit();
 
-    // Subscribe AFTER open so the first bytes land in a live terminal. Raw bytes
-    // go DIRECTLY to term.write — NEVER into the structured cyboflow stream store.
+    // Subscribe immediately so no PTY bytes are lost while we wait for layout.
+    // Raw bytes go DIRECTLY to term.write (via writeWithAutoScroll) — NEVER into
+    // the structured cyboflow stream store — but are buffered until renderable.
     const off = subscribeToPtyBytes({
       runId,
       onData: (chunk) => {
         if (disposed) return;
+        if (!renderable) {
+          pending.push(chunk);
+          return;
+        }
         writeWithAutoScroll(term, chunk);
       },
     });
@@ -232,9 +257,11 @@ export function InteractiveTerminalView({
       void trpc.cyboflow.runs.relayInput.mutate({ runId, text: data });
     });
 
-    // Resize relay (TASK-817). The ResizeObserver re-flows the xterm via fit()
-    // (local geometry) AND relays the new cols/rows into the live PTY. Resize is
-    // safe regardless of the relay flag (it never mutates session state), but is
+    // Resize relay (TASK-817). The ResizeObserver does double duty: its FIRST
+    // non-zero tick drives the deferred open (ensureRenderable opens + fits +
+    // flushes), and every tick thereafter re-flows the xterm via fit() (local
+    // geometry) AND relays the new cols/rows into the live PTY. Resize is safe
+    // regardless of the relay flag (it never mutates session state), but is
     // debounced lightly to avoid flooding the PTY during a drag. The backend
     // relayResize is a no-op until the manager resize seam lands (TASK-818).
     let lastCols = -1;
@@ -242,7 +269,15 @@ export function InteractiveTerminalView({
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeObserver = new ResizeObserver(() => {
       if (disposed) return;
-      safeFit();
+      if (!renderable) {
+        ensureRenderable();
+        return;
+      }
+      try {
+        fit.fit();
+      } catch {
+        return;
+      }
       const cols = term.cols;
       const rows = term.rows;
       if (cols === lastCols && rows === lastRows) return;
@@ -257,8 +292,27 @@ export function InteractiveTerminalView({
     });
     resizeObserver.observe(container);
 
+    // Drive the FIRST open from a deferred frame, NOT synchronously. xterm's
+    // Viewport schedules `setTimeout(() => syncScrollArea())` inside open(); that
+    // raw timeout survives term.dispose(), so if it fires after the terminal is
+    // torn down it reads `renderService.dimensions` on a disposed renderer
+    // (`_renderer.value === undefined`) → the "Cannot read properties of undefined
+    // (reading 'dimensions')" crash. React 18 StrictMode mounts every effect twice
+    // in dev (mount → dispose → mount) and disposes the FIRST terminal
+    // synchronously; opening synchronously would leave that throwaway instance's
+    // syncScrollArea timeout orphaned. Deferring the open to the next frame lets
+    // the synchronous StrictMode cleanup cancel it BEFORE the throwaway ever opens
+    // — exactly why TerminalPanel (whose open() sits behind async IPC awaits, so
+    // its throwaway mount bails on `if (disposed) return`) never hits this. The
+    // ResizeObserver above is a redundant backstop driver for the surviving mount.
+    let openRaf: number | undefined = requestAnimationFrame(() => {
+      openRaf = undefined;
+      ensureRenderable();
+    });
+
     return () => {
       disposed = true;
+      if (openRaf !== undefined) cancelAnimationFrame(openRaf);
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeObserver.disconnect();
       inputDisposable.dispose();
