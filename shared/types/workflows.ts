@@ -61,6 +61,8 @@ export interface WorkflowRunRow {
   task_id?: string | null;
   /** Soft polymorphic link to the idea injected as the planner's first input at launch (migration 017). NULL for non-planner runs / free-launch. NOT a stage-derivation source — distinct from task_id. */
   seed_idea_id?: string | null;
+  /** SDK conversation id captured from the run's first system/init event (migration 018). Used by nudgeRunHandler to re-spawn with `--resume` so an idle-chat nudge continues the same conversation. NULL until the first init event / for runs that never spawned. */
+  claude_session_id?: string | null;
   /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 014). */
   outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */

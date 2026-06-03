@@ -108,6 +108,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN steps_snapshot_json TEXT');
     // Migration 017: planner pre-launch seed-idea link.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT');
+    // Migration 018: idle-chat nudge SDK conversation id.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
   }
   return db;
 }
