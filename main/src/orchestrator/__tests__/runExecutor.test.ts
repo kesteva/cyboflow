@@ -743,6 +743,134 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Migration 018 (Piece C): getPrompt nudge branch + resumeSessionId threading
+// ---------------------------------------------------------------------------
+
+/** Read the full options object passed to the (first) spawnCliProcess call. */
+function spawnedOpts(spawner: ClaudeSpawnerLike): ClaudeSpawnerOptions {
+  return (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+}
+
+describe('RunExecutor — idle-chat nudge (migration 018)', () => {
+  it('getPrompt returns JUST the trimmed nudge text (no planner.md) when a nudge is pending', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingNudge(run.id, '  please also handle the edge case  ');
+    await executor.execute(run.id);
+
+    // The prompt is the trimmed nudge verbatim — planner.md ('PLAN BODY') is NOT re-sent.
+    expect(spawnedPrompt(spawner)).toBe('please also handle the edge case');
+    expect(spawnedPrompt(spawner)).not.toContain('PLAN BODY');
+  });
+
+  it('nudge text wins over the seed-idea branch on a resumed turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-1', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'My idea', summary: null, body: 'The idea body.', scope: null },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    executor.setPendingNudge(run.id, 'the nudge');
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('the nudge');
+    expect(spawnedPrompt(spawner)).not.toContain('# Selected idea');
+  });
+
+  it('threads resumeSessionId = claude_session_id into spawn options when a nudge is pending', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-xyz' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingNudge(run.id, 'follow up');
+    await executor.execute(run.id);
+
+    expect(spawnedOpts(spawner).resumeSessionId).toBe('sess-xyz');
+  });
+
+  it('does NOT thread resumeSessionId when a nudge is pending but no claude_session_id exists', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no claude_session_id
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingNudge(run.id, 'follow up');
+    await executor.execute(run.id);
+
+    expect(spawnedOpts(spawner).resumeSessionId).toBeUndefined();
+  });
+
+  it('a fresh run (no pending nudge) sends byte-identical options — no resumeSessionId', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    // No setPendingNudge call → fresh run floor.
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
+    expect(spawnedOpts(spawner).resumeSessionId).toBeUndefined();
+  });
+
+  it('teardownRun clears the pending nudge — a second execute() is a clean fresh turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    // First turn: nudge delivered.
+    executor.setPendingNudge(run.id, 'the nudge');
+    await executor.execute(run.id);
+    expect(
+      ((spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions).prompt,
+    ).toBe('the nudge');
+
+    // Second turn (no new nudge): teardown cleared the stash → base prompt + no resume.
+    await executor.execute(run.id);
+    const secondOpts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[1][0] as ClaudeSpawnerOptions;
+    expect(secondOpts.prompt).toBe('PLAN BODY');
+    expect(secondOpts.resumeSessionId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-662: Lifecycle transition tests
 // ---------------------------------------------------------------------------
 

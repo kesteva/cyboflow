@@ -29,6 +29,11 @@ import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
 } from '../../cancelAndRestartHandler';
+import {
+  nudgeRunHandler,
+  type NudgeRunDeps,
+  type NudgeRunResult,
+} from '../../nudgeRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +58,27 @@ let cancelAndRestartDeps: CancelAndRestartDeps | null = null;
  */
 export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
   cancelAndRestartDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// nudge dependency bag (Piece C — idle-chat nudge)
+//
+// Injected at boot by main/src/index.ts via setNudgeRunDeps(), alongside the
+// cancelAndRestart / start wiring. Until wired the mutation throws
+// METHOD_NOT_SUPPORTED — same pattern as cancelAndRestart.
+// ---------------------------------------------------------------------------
+
+let nudgeRunDeps: NudgeRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the nudge mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry, and
+ * RunExecutor have been initialized. Until this is called the mutation throws
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setNudgeRunDeps(deps: NudgeRunDeps): void {
+  nudgeRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +409,37 @@ export const runsRouter = router({
       }
 
       return cancelAndRestartHandler(input.runId, cancelAndRestartDeps);
+    }),
+
+  /**
+   * Nudge an idle workflow run (Piece C — idle-chat nudge / conversation resume).
+   *
+   * When a run has drained to `awaiting_review`, its SDK iterator is dead. A
+   * nudge re-spawns the run with `--resume <claude_session_id>` so the agent
+   * continues the SAME conversation as a follow-up turn (not a fresh re-run).
+   *
+   * Returns:
+   *   { delivered: true }            — the run was re-driven with the nudge text.
+   *   { noOp: true; reason }         — the nudge was rejected without re-driving:
+   *     'empty' (blank text) / 'not_found' / 'terminal' / 'not_idle'
+   *     (not awaiting_review) / 'blocked' (pending blocking review items) /
+   *     'no_session' (no captured claude_session_id) / 'race' (concurrent
+   *     transition won the flip) / 'execute_failed'.
+   *
+   * Standalone-typecheck invariant: collaborators (db, runQueues, runExecutor)
+   * are injected via setNudgeRunDeps(). Until wired the mutation throws
+   * METHOD_NOT_SUPPORTED.
+   */
+  nudge: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(async ({ input }): Promise<NudgeRunResult> => {
+      if (!nudgeRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'nudge dependencies not wired yet. Call setNudgeRunDeps() at boot.',
+        });
+      }
+      return nudgeRunHandler(input.runId, input.text, nudgeRunDeps);
     }),
 
   /**

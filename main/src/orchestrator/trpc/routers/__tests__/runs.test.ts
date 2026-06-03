@@ -56,8 +56,9 @@ import { TRPCError } from '@trpc/server';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps } from '../runs';
 import type { RunWorktreeManagerLike } from '../runs';
+import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
@@ -363,6 +364,68 @@ describe('cyboflow.runs.start', () => {
   // isolation guarantees that test file starts with startRunDeps === null.
   // Repeating it here would require a __resetForTest escape hatch in source
   // code — not added because it would exist solely to support tests.
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.nudge — Piece C idle-chat nudge (router delegation)
+//
+// The handler's full guard matrix is covered in nudgeRunHandler.test.ts; here we
+// verify the router forwards { runId, text } to the wired handler and returns
+// its result verbatim. METHOD_NOT_SUPPORTED-when-unwired follows the same
+// per-file-module-isolation rationale documented for runs.start above.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.nudge', () => {
+  it('forwards a delivered nudge: flips the run to running and returns { delivered: true }', async () => {
+    const db = createTestDb({ disableForeignKeys: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-1', runId);
+
+    const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
+    const setPendingNudge = vi.fn<(id: string, text: string) => void>();
+    setNudgeRunDeps({
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: { setPendingNudge, execute },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.nudge({ runId, text: 'keep going' });
+
+      expect(result).toEqual({ delivered: true });
+      expect(setPendingNudge).toHaveBeenCalledWith(runId, 'keep going');
+      expect(execute).toHaveBeenCalledWith(runId);
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('running');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('forwards a noOp result verbatim (idle guard: not_idle)', async () => {
+    const db = createTestDb({ disableForeignKeys: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const { runId } = seedRun(db, { status: 'running' });
+
+    const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
+    setNudgeRunDeps({
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: { setPendingNudge: vi.fn(), execute },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.nudge({ runId, text: 'hi' });
+
+      expect(result).toEqual({ noOp: true, reason: 'not_idle' });
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

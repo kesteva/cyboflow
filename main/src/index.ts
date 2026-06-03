@@ -34,7 +34,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -101,6 +101,9 @@ let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
+// Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
+// same RunExecutor instance built in initializeServices().
+let runExecutor: RunExecutor;
 let orchestratorHealth: OrchestratorHealth;
 
 // Service instances
@@ -721,7 +724,7 @@ async function initializeServices() {
     },
   };
 
-  const runExecutor = new RunExecutor(
+  runExecutor = new RunExecutor(
     substrateFacade,
     workflowRegistry,
     cyboflowLogger,
@@ -942,6 +945,19 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // Piece C — idle-chat nudge. Uses the SAME `db` DatabaseLike adapter +
+    // `runQueues` + `loggerLike` as the cancelAndRestart wiring above, plus the
+    // module-scoped RunExecutor built in initializeServices(). The handler
+    // re-drives runExecutor.execute(runId) with a stashed nudge so the run
+    // resumes its SDK conversation.
+    setNudgeRunDeps({
+      db,
+      runQueues,
+      runExecutor,
+      logger: loggerLike,
+    });
+    console.log('[Main] runs.nudge deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested

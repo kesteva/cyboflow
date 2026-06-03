@@ -40,6 +40,14 @@ interface ClaudeSpawnOptions {
    */
   runId?: string;
   /**
+   * Explicit SDK session id to resume (Piece C — idle-chat nudge). When set,
+   * buildSdkOptions sets `sdkOptions.resume` to this value directly, taking
+   * precedence over the `isResume` panel-customState lookup. Workflow runs use
+   * this because they never create a panel row (so getPanelClaudeSessionId is
+   * empty for them). Quick/panel resume paths (isResume) are unaffected.
+   */
+  resumeSessionId?: string;
+  /**
    * When true, `--strict-mcp-config` is added to the CLI args so that only
    * the per-run `.mcp.json` servers load and user-global MCP servers from
    * `~/.claude.json` cannot interfere with the permission bridge.
@@ -365,6 +373,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     runId: string,
   ): Promise<void> {
     let exitCode = 0;
+    // Piece C — capture the SDK conversation id ONCE per workflow run from the
+    // first system/init event, so an idle-chat nudge can re-spawn with --resume.
+    // Local latch avoids a DB hit on every subsequent event (the guarded UPDATE
+    // is itself idempotent via `claude_session_id IS NULL`).
+    let runClaudeSessionCaptured = false;
     try {
       const q = query({ prompt, options: { ...sdkOptions, abortController } });
       for await (const event of q) {
@@ -372,6 +385,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
         // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
         const typed = this.narrowing.narrow(event);
+
+        // Persist the run's SDK session_id from its first system/init event.
+        if (!runClaudeSessionCaptured) {
+          const captured = this.captureRunClaudeSessionId(runId, event);
+          if (captured) runClaudeSessionCaptured = true;
+        }
 
         try {
           router.emitForRun(runId, typed);
@@ -413,6 +432,46 @@ export class ClaudeCodeManager extends AbstractCliManager {
         signal: null
       });
     }
+  }
+
+  /**
+   * Persist the SDK conversation id for a workflow run (Piece C — idle-chat nudge).
+   *
+   * Reads `session_id` from the first system/init event of the run's SDK query
+   * and writes it to workflow_runs.claude_session_id with a guarded
+   * `claude_session_id IS NULL` clause so only the FIRST init event ever wins.
+   * Returns true once a non-empty session_id has been observed (so the caller
+   * can stop probing subsequent events).
+   *
+   * Fail-soft: any DB error is logged at warn level and swallowed — session-id
+   * capture must never crash the SDK iterator. The quick-session capture
+   * (sessionManager.handleClaudeOutput) is a separate path and untouched.
+   *
+   * `event` is an SDK message of unknown runtime shape; narrowed structurally
+   * here (no `any`) the same way sessionManager.ts:529 does for the quick path.
+   */
+  private captureRunClaudeSessionId(runId: string, event: unknown): boolean {
+    if (typeof event !== 'object' || event === null) return false;
+    const e = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
+    if (e.type !== 'system' || e.subtype !== 'init') return false;
+    if (typeof e.session_id !== 'string' || e.session_id === '') return false;
+
+    try {
+      this.db
+        .prepare(
+          `UPDATE workflow_runs
+              SET claude_session_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND claude_session_id IS NULL`,
+        )
+        .run(e.session_id, runId);
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] failed to capture claude_session_id for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Return true regardless of UPDATE row count: the session_id has been
+    // observed for this run, so the caller stops probing further events.
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -464,7 +523,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.model = options.model;
     }
 
-    if (options.isResume) {
+    // Piece C — idle-chat nudge. An explicit resumeSessionId (threaded by
+    // RunExecutor.execute from workflow_runs.claude_session_id) takes precedence
+    // over the panel-customState lookup that workflow runs cannot satisfy. Only
+    // ONE of the two resume paths is ever active for a given spawn: nudges set
+    // resumeSessionId (and never isResume); quick/panel resumes set isResume.
+    if (options.resumeSessionId) {
+      sdkOptions.resume = options.resumeSessionId;
+    } else if (options.isResume) {
       const claudeSessionId = this.sessionManager.getPanelClaudeSessionId(options.panelId);
       if (!claudeSessionId) {
         throw new Error(`Cannot resume: no Claude session_id stored for Cyboflow session ${options.sessionId}`);
