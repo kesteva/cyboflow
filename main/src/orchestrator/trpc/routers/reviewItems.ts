@@ -38,6 +38,7 @@ import {
 import { TaskChangeRouter, TaskChangeError } from '../../taskChangeRouter';
 import { HumanStepManager } from '../../humanStepManager';
 import { eventToAsyncIterable } from './events';
+import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -119,27 +120,39 @@ export const reviewItemsRouter = router({
     )
     .query(async ({ input, ctx }): Promise<ReviewItem[]> => {
       const db = requireDb(ctx.db, 'list');
-      const clauses: string[] = ['project_id = ?'];
+      const clauses: string[] = ['ri.project_id = ?'];
       const params: unknown[] = [input.projectId];
       if (input.status !== undefined) {
-        clauses.push('status = ?');
+        clauses.push('ri.status = ?');
         params.push(input.status);
       }
       if (input.kind !== undefined) {
-        clauses.push('kind = ?');
+        clauses.push('ri.kind = ?');
         params.push(input.kind);
       }
       if (input.blocking !== undefined) {
-        clauses.push('blocking = ?');
+        clauses.push('ri.blocking = ?');
         params.push(input.blocking ? 1 : 0);
       }
       if (input.runId !== undefined) {
-        clauses.push('run_id = ?');
+        clauses.push('ri.run_id = ?');
         params.push(input.runId);
       }
+      // Hide orphaned PENDING items whose bound run has gone terminal
+      // (canceled/failed/completed): the gate can never be actioned — there is
+      // no live run to resume — so it must not clutter the queue or inflate the
+      // blocking count (ReviewQueueView derives both list + blockingCount from
+      // this query). Items with no run binding (run_id NULL) and items already
+      // resolved/dismissed are unaffected — the LEFT JOIN keeps them.
+      clauses.push(
+        `NOT (ri.status = 'pending' AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
+      );
       const rows = db
         .prepare(
-          `SELECT * FROM review_items WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC, id DESC`,
+          `SELECT ri.* FROM review_items ri
+             LEFT JOIN workflow_runs r ON r.id = ri.run_id
+            WHERE ${clauses.join(' AND ')}
+            ORDER BY ri.created_at DESC, ri.id DESC`,
         )
         .all(...params) as ReviewItemDbRow[];
       return rows.map((r) => ReviewItemRouter.shapeRow(r));

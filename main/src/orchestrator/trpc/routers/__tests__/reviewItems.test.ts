@@ -121,6 +121,42 @@ describe('cyboflow.reviewItems.list / get', () => {
     expect(blocking.map((i) => i.id)).toEqual([b.reviewItemId]);
   });
 
+  it('excludes pending items whose bound run is terminal; keeps live-run and unbound items', async () => {
+    const { caller, db } = buildCaller();
+
+    // Parent workflow row (FK: workflow_runs.workflow_id → workflows.id).
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-planner', 1, 'planner')`).run();
+
+    // Two runs: one terminal (canceled), one live (running).
+    const insertRun = db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, ?, 1, ?, ?, ?, '{}')`,
+    );
+    insertRun.run('run-dead', 'wf-1-planner', '/w/dead', 'b/dead', 'canceled');
+    insertRun.run('run-live', 'wf-1-planner', '/w/live', 'b/live', 'running');
+
+    // Pending blocking gates: one on the dead run (orphaned), one on the live run.
+    const dead = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:planner', kind: 'permission', title: 'gate on dead run', blocking: true, runId: 'run-dead',
+    });
+    const live = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:planner', kind: 'permission', title: 'gate on live run', blocking: true, runId: 'run-live',
+    });
+    const unbound = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'no run binding',
+    });
+
+    const pending = await caller.cyboflow.reviewItems.list({ projectId: 1, status: 'pending' });
+    const ids = pending.map((i) => i.id);
+    expect(ids).toContain(live.reviewItemId);
+    expect(ids).toContain(unbound.reviewItemId);
+    expect(ids).not.toContain(dead.reviewItemId); // orphaned on a terminal run → hidden
+
+    // The blocking filter must also drop the dead-run item (drives blockingCount).
+    const blocking = await caller.cyboflow.reviewItems.list({ projectId: 1, blocking: true });
+    expect(blocking.map((i) => i.id)).toEqual([live.reviewItemId]);
+  });
+
   it('get returns the single item, or null when absent', async () => {
     const { caller } = buildCaller();
     const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
