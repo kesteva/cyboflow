@@ -600,6 +600,24 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     // Build args + env via the abstract hooks.
     const args = this.buildCommandArgs({ ...options, runId });
+
+    // Pass the initial prompt as claude's POSITIONAL argument so claude processes
+    // it as the first REPL turn NATIVELY — replacing the post-spawn PTY
+    // byte-injection (waitForReplReady -> submitToRepl below) that silently LOST
+    // the prompt whenever claude's Ink TUI was not reading stdin at inject time
+    // (startup repaints / "Remote Control connecting" lull). The injection was
+    // proven NONDETERMINISTIC (~1/3 engaged) via a node-pty harness, while the
+    // positional arg engaged DETERMINISTICALLY (4/4) and claude STAYS interactive
+    // afterward (persistent REPL — what IDEA-030 needs). node-pty's args ARRAY
+    // (no shell) passes the multi-line composed prompt verbatim (newlines/quotes
+    // literal), and claude writes its transcript to encodeCwd(worktree) — exactly
+    // where TranscriptTailSource discovers it (validated). Guarded so a prompt-less
+    // quick session still opens a bare REPL.
+    const composedPrompt = this.composePromptBody(runId, options.prompt);
+    if (composedPrompt.length > 0) {
+      args.push(composedPrompt);
+    }
+
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
     const extraEnv = await this.getCliEnvironment({ ...options, runId });
     const systemEnv = await this.getSystemEnvironment();
@@ -715,32 +733,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
-    // Submit the prompt once claude's REPL is READING stdin — but still before
-    // awaiting discovery. Two coupled constraints:
-    //  (1) READINESS GATE (IDEA-030 freeze fix): writing the prompt to the PTY
-    //      master before claude's Ink TUI input loop is reading busy-spins a core
-    //      (a >1KB prompt fills the ~1KB PTY kernel buffer and node-pty's
-    //      tty.ReadStream write retries the unwritten remainder forever on EAGAIN —
-    //      syscall-proven: ~4M failing write() to /dev/ptmx). waitForReplReady
-    //      defers the write until the startup paint settles, so the PTY drains as
-    //      we write and no EAGAIN spin occurs.
-    //  (2) ORDER: the gated submit must still PRECEDE the discovery await. claude
-    //      writes the transcript `.jsonl` only AFTER a SUBMITTED prompt, and a
-    //      waitForFirstLine timeout calls clearDiscovery() — which IRREVERSIBLY
-    //      stops the 50ms poller — so a submit issued after the await could never
-    //      bind. Fire-and-forget the gated submit (void) so discovery runs
-    //      concurrently: readiness settles (~1-2s) -> submitToRepl -> claude engages
-    //      -> waitForFirstLine (below, 15s budget) binds the transcript.
+    // The initial prompt is NOT injected into the PTY here — it rides claude's
+    // POSITIONAL argument (set in spawnCliProcess above), so claude is ALREADY
+    // engaging the prompt as its first turn by the time we reach this point. This
+    // also moots the former EAGAIN freeze (no >1KB PTY write happens at all) and
+    // the bracketed-paste submit problem. We still await discovery here because
+    // claude writes the transcript `.jsonl` only after it starts processing the
+    // argv prompt: ORDER matters — a waitForFirstLine timeout calls
+    // clearDiscovery() which IRREVERSIBLY stops the 50ms poller, so discovery must
+    // be awaited on the same path that spawned claude.
     //
-    // submitToRepl writes the body then a SEPARATE '\r' after the bracketed-paste
-    // window closes: claude 2.1.x captures a one-shot `body + '\r'` as a paste
-    // whose trailing '\r' is a literal newline (never Enter), so the prompt would
-    // otherwise sit in the composer unsubmitted (verified via PTY harness).
-    // Interior '\n's of the multi-line prompt are preserved as one user turn.
-    const promptToSend = this.composePromptBody(runId, options.prompt);
-    void this.waitForReplReady(ptyProcess).then(() => this.submitToRepl(panelId, promptToSend));
-
-    // Now await transcript discovery (claude is engaging) — loud on timeout.
+    // Now await transcript discovery (claude is engaging the argv prompt) — loud on timeout.
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {

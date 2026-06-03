@@ -99,6 +99,8 @@ class FakeTranscriptSource implements TranscriptSource {
 class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   readonly ptys: FakePty[] = [];
   readonly fakeSources: FakeTranscriptSource[] = [];
+  /** Captured argv per spawn — the initial prompt now rides claude's positional arg. */
+  readonly spawnArgs: string[][] = [];
 
   protected override async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
     return { available: true, version: '1.0.0', path: '/fake/bin/claude' };
@@ -109,7 +111,8 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   protected override async getSystemEnvironment(): Promise<{ [key: string]: string }> {
     return { PATH: '/usr/bin' };
   }
-  protected override async spawnPtyProcess(): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
+  protected override async spawnPtyProcess(_command: string, args: string[]): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
+    this.spawnArgs.push(args);
     const fake = new FakePty();
     this.ptys.push(fake);
     return fake as unknown as import('@homebridge/node-pty-prebuilt-multiarch').IPty;
@@ -222,8 +225,8 @@ describe('InteractiveClaudeManager — completion (turn-end driven)', () => {
     const pty = mgr.ptys[0];
     const src = mgr.fakeSources[0];
 
-    // The initial prompt was written.
-    expect(pty.writes.some((w) => w.includes('go'))).toBe(true);
+    // The initial prompt rides claude's POSITIONAL argv (not a PTY byte-injection).
+    expect(mgr.spawnArgs[0]?.some((a) => a.includes('go'))).toBe(true);
     const writesAfterPrompt = pty.writes.length;
 
     // Fire the turn-end signal: a persistent run must NOT write EOF/exit; it must
