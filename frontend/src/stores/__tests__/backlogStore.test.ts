@@ -45,9 +45,12 @@ function makeTask(overrides: Partial<BacklogTaskItem> & { id: string }): Backlog
     ref: overrides.ref ?? 'TASK-001',
     title: overrides.title ?? 'A task',
     summary: overrides.summary ?? null,
+    body: overrides.body ?? null,
     priority: overrides.priority ?? 'P2',
     repo: overrides.repo ?? null,
     parent_epic_id: overrides.parent_epic_id ?? null,
+    originating_idea_id: overrides.originating_idea_id ?? null,
+    scope: overrides.scope ?? null,
     board_id: overrides.board_id ?? 'board-1-default',
     stage_id: overrides.stage_id ?? 'stage-board-1-default-1',
     version: overrides.version ?? 1,
@@ -128,6 +131,32 @@ describe('applyTaskChangeToList', () => {
   it('returns a new array reference (atomic)', () => {
     const orig = [A];
     expect(applyTaskChangeToList(orig, changeEvent('created', B))).not.toBe(orig);
+  });
+
+  it('handles a UNION of idea/epic/task in one flat list (single-channel)', () => {
+    const idea = makeTask({ id: 'ide_1', type: 'idea', ref: 'IDEA-001', scope: 'large', body: '# spec' });
+    const epic = makeTask({ id: 'epc_1', type: 'epic', ref: 'EPIC-001', originating_idea_id: 'ide_1' });
+    const task = makeTask({
+      id: 'tsk_1',
+      type: 'task',
+      ref: 'TASK-001',
+      parent_epic_id: 'epc_1',
+      originating_idea_id: 'ide_1',
+    });
+
+    // The single onTaskChanged channel carries all three entity types.
+    let list: BacklogTaskItem[] = [];
+    list = applyTaskChangeToList(list, changeEvent('created', idea));
+    list = applyTaskChangeToList(list, changeEvent('created', epic));
+    list = applyTaskChangeToList(list, changeEvent('created', task));
+    expect(list.map((t) => t.type)).toEqual(['idea', 'epic', 'task']);
+
+    // The idea retiring to Decomposed is an upsert keyed on id (action='decomposed').
+    const retired = makeTask({ id: 'ide_1', type: 'idea', ref: 'IDEA-001', stage_id: 'stage-board-1-default-12' });
+    list = applyTaskChangeToList(list, changeEvent('decomposed', retired));
+    expect(list.find((t) => t.id === 'ide_1')?.stage_id).toBe('stage-board-1-default-12');
+    // Children are untouched in the store (the backend left them in place).
+    expect(list.find((t) => t.id === 'tsk_1')?.parent_epic_id).toBe('epc_1');
   });
 });
 

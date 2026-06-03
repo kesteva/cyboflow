@@ -603,10 +603,11 @@ describe('McpQueryHandler', () => {
 
   describe('native task write handlers', () => {
     // The task handlers reach TaskChangeRouter.getInstance().applyChange, which
-    // needs the full native-task schema (boards/board_stages/tasks/task_events/
-    // task_ref_counters) plus the workflow_runs run->task link columns. The
-    // GATE_SCHEMA used elsewhere in this file does NOT have those tables, so we
-    // build a migration-backed in-memory DB exactly like taskChangeRouter.test.ts.
+    // needs the full native-entity schema (boards/board_stages/ideas/epics/tasks/
+    // entity_events/task_ref_counters) plus the workflow_runs run->task link
+    // columns. The GATE_SCHEMA used elsewhere in this file does NOT have those
+    // tables, so we build a migration-backed in-memory DB exactly like
+    // taskChangeRouter.test.ts (006 -> 011 -> 014 -> 015).
 
     function buildTaskDb(): Database.Database {
       const taskDb = new Database(':memory:');
@@ -625,11 +626,13 @@ describe('McpQueryHandler', () => {
       taskDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
 
       const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
-      // Production order 013 depends on: 006 (workflow_runs base) -> 011
-      // (current_step_id) -> 014 (native tasks + run->task columns + seed).
+      // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
+      // 014 (unified tasks + run->task columns + seed) -> 015 (entity-model
+      // rebuild: ideas/epics/tasks + entity_events + 12th stage).
       taskDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -693,7 +696,7 @@ describe('McpQueryHandler', () => {
     // -----------------------------------------------------------------------
 
     describe('mcp-create-task', () => {
-      it('happy path: mints IDEA-001 at the idea stage, writes the row + an agent task_event', async () => {
+      it('happy path: mints IDEA-001 at the idea stage, writes the row + an agent entity_event', async () => {
         seedTaskRun(taskDb, {
           runId: 'run-1',
           currentStepId: 'plan',
@@ -732,16 +735,20 @@ describe('McpQueryHandler', () => {
         expect(data.type).toBe('idea');
         expect(data.version).toBe(1);
 
-        // The tasks row actually exists with the canonical ref.
+        // The ideas row actually exists with the canonical ref (table identity
+        // is the discriminator — an idea lives in `ideas`, not `tasks`).
         const task = taskDb
-          .prepare('SELECT ref, stage_id, version FROM tasks WHERE id = ?')
+          .prepare('SELECT ref, stage_id, version FROM ideas WHERE id = ?')
           .get(data.task_id) as { ref: string; stage_id: string; version: number } | undefined;
         expect(task).toBeDefined();
         expect(task!.ref).toBe('IDEA-001');
 
-        // A task_events row was written, attributed to an agent:<label> actor.
+        // An entity_events row was written for entity_type='idea', attributed to
+        // an agent:<label> actor.
         const ev = taskDb
-          .prepare('SELECT actor, kind FROM task_events WHERE task_id = ? ORDER BY seq ASC LIMIT 1')
+          .prepare(
+            "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq ASC LIMIT 1",
+          )
           .get(data.task_id) as { actor: string; kind: string } | undefined;
         expect(ev).toBeDefined();
         expect(ev!.actor.startsWith('agent:')).toBe(true);
@@ -795,7 +802,9 @@ describe('McpQueryHandler', () => {
         expect(response.ok).toBe(true);
         const data = response.data as { task_id: string };
         const ev = taskDb
-          .prepare('SELECT actor FROM task_events WHERE task_id = ? ORDER BY seq ASC LIMIT 1')
+          .prepare(
+            "SELECT actor FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq ASC LIMIT 1",
+          )
           .get(data.task_id) as { actor: string };
         expect(ev.actor).toBe('agent:implement');
       });
@@ -842,7 +851,7 @@ describe('McpQueryHandler', () => {
         expect(data.version).toBe(2);
 
         const task = taskDb
-          .prepare('SELECT title, priority, version FROM tasks WHERE id = ?')
+          .prepare('SELECT title, priority, version FROM ideas WHERE id = ?')
           .get(taskId) as { title: string; priority: string; version: number };
         expect(task.title).toBe('After');
         expect(task.priority).toBe('P0');
@@ -882,7 +891,7 @@ describe('McpQueryHandler', () => {
 
         // The title is unchanged (current version is still 1).
         const task = taskDb
-          .prepare('SELECT title, version FROM tasks WHERE id = ?')
+          .prepare('SELECT title, version FROM ideas WHERE id = ?')
           .get(taskId) as { title: string; version: number };
         expect(task.title).toBe('Stable');
         expect(task.version).toBe(1);
@@ -927,7 +936,7 @@ describe('McpQueryHandler', () => {
         expect(data.stage_id).toBe(stage(3));
 
         const task = taskDb
-          .prepare('SELECT stage_id FROM tasks WHERE id = ?')
+          .prepare('SELECT stage_id FROM ideas WHERE id = ?')
           .get(taskId) as { stage_id: string };
         expect(task.stage_id).toBe(stage(3));
       });
@@ -965,7 +974,7 @@ describe('McpQueryHandler', () => {
 
         // Stage is unchanged (still at the idea stage).
         const task = taskDb
-          .prepare('SELECT stage_id FROM tasks WHERE id = ?')
+          .prepare('SELECT stage_id FROM ideas WHERE id = ?')
           .get(taskId) as { stage_id: string };
         expect(task.stage_id).toBe(stage(1));
       });
@@ -1034,9 +1043,9 @@ describe('McpQueryHandler', () => {
         expect(response.ok).toBe(false);
         expect(response.error).toBe('task_write_requires_real_run');
 
-        // No task and no event were written.
+        // No entity and no event were written (the rejected create targeted ideas).
         const count = (
-          taskDb.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }
+          taskDb.prepare('SELECT COUNT(*) AS n FROM ideas').get() as { n: number }
         ).n;
         expect(count).toBe(0);
       });
@@ -1082,7 +1091,7 @@ describe('McpQueryHandler', () => {
         expect(response.error).toBe('run_not_active');
 
         const count = (
-          taskDb.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }
+          taskDb.prepare('SELECT COUNT(*) AS n FROM ideas').get() as { n: number }
         ).n;
         expect(count).toBe(0);
       });
