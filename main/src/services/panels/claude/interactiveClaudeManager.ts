@@ -691,19 +691,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
-    // Wait for the transcript file to be discovered (loud diagnostic on timeout),
-    // then write the initial prompt into PTY stdin.
+    // Wait for transcript discovery (loud diagnostic on timeout), THEN send the
+    // prompt.
     //
-    // KNOWN BUG (NOT fixed here — reverted to keep the branch non-freezing): this
-    // ordering is a DEADLOCK. claude does not create its transcript `.jsonl` until
-    // it processes a prompt, but the prompt is sent only AFTER discovery — so
-    // discovery always times out (15s) and the run never advances. Reordering the
-    // sendInput BEFORE waitForFirstLine fixes the deadlock, BUT doing so lets claude
-    // actually engage the cyboflow MCP server / transcript path for the first time,
-    // which exposes a SEPARATE latent main-process busy-loop freeze (100% CPU,
-    // event-loop spin) that must be root-caused (CPU profile) before the reorder can
-    // ship. See [[project_interactive_persistent_session]] for the exact reorder and
-    // freeze findings.
+    // KNOWN DEADLOCK (reverted to keep the branch non-freezing): this ordering
+    // hangs the run — discovery waits for a transcript `.jsonl` that claude only
+    // writes AFTER it processes a prompt, but the prompt is sent only after this
+    // await. Moving the sendInput BEFORE this await fixes the deadlock — BUT that
+    // reorder reliably FREEZES the Electron MAIN process at ~100% CPU the moment
+    // claude actually engages (n=3). The freeze appears to be in NATIVE code (the
+    // V8 inspector cannot attach/interrupt it during the spin), so it resists the
+    // CDP-profile approach. Re-applying the reorder is a PRECONDITION for an
+    // engaged run; root-cause the freeze FIRST (try `--prof` tick-log which
+    // survives SIGKILL, or a fix-forward throttle of the raw pty-output fan-out).
+    // See [[project_interactive_persistent_session]].
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
@@ -718,19 +719,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // does not race/clobber the SDK path.
     this.persistDiscoveredSessionId(sessionId, tailSource);
 
-    // Write the initial prompt once the REPL is ready. The step-reporting
-    // instruction (TASK-803) is PREPENDED to the prompt head here — the
-    // interactive analogue of the SDK manager's composeSystemPromptAppend
-    // (claudeCodeManager.ts:478), which interactive `claude` cannot use because
-    // the REPL has no SDK `systemPrompt.append` channel. See composePromptBody.
-    const promptToSend = this.composePromptBody(runId, options.prompt);
     // Submit the prompt with a CARRIAGE RETURN ('\r'), NOT a newline ('\n').
-    // claude's interactive REPL commits the input line on '\r' (Enter); '\n' is
-    // treated as a literal newline INSIDE the input and never submits — so the
-    // prompt sits typed-but-unsent, claude stays idle, no transcript is written,
-    // and the run hangs on 'running'. Verified empirically against claude 2.1.x:
-    // '\r' and '\r\n' submit (transcript written), '\n' alone does NOT. Interior
-    // '\n's in this multi-line prompt are preserved; only the trailing '\r' commits.
+    // claude's interactive REPL commits the input line on '\r'; '\n' is a literal
+    // newline inside the input and never submits (verified empirically). Interior
+    // '\n's of this multi-line prompt are preserved; only the trailing '\r' commits.
+    const promptToSend = this.composePromptBody(runId, options.prompt);
     this.sendInput(panelId, promptToSend + '\r');
 
     return spawnPromise;
