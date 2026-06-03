@@ -106,6 +106,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN base_branch TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN base_sha TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN steps_snapshot_json TEXT');
+    // Migration 017: planner pre-launch seed-idea link.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT');
   }
   return db;
 }

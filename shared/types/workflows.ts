@@ -59,6 +59,8 @@ export interface WorkflowRunRow {
   current_step_id?: string | null;
   /** Native-task link: the task this run executes. One run -> one task; a task has 0..N runs. NULL for runs launched without a task (migration 014). */
   task_id?: string | null;
+  /** Soft polymorphic link to the idea injected as the planner's first input at launch (migration 017). NULL for non-planner runs / free-launch. NOT a stage-derivation source — distinct from task_id. */
+  seed_idea_id?: string | null;
   /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 014). */
   outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
