@@ -141,6 +141,8 @@ export const tasksRouter = router({
         type: taskTypeSchema.optional(),
         title: z.string().optional(),
         summary: z.string().nullable().optional(),
+        /** Single markdown body column (present on every entity). Lets the planner free-text path seed the injectable idea body. */
+        body: z.string().nullable().optional(),
         priority: prioritySchema.optional(),
         repo: z.string().nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
@@ -155,6 +157,7 @@ export const tasksRouter = router({
           entityType: input.type,
           title: input.title,
           summary: input.summary,
+          body: input.body,
           priority: input.priority,
           repo: input.repo,
           parentEpicId: input.parentEpicId,
