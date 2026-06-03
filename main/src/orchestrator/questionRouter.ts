@@ -6,7 +6,11 @@
  * 1. requestQuestion co-writes the questions INSERT and workflow_runs UPDATE
  *    inside a single db.transaction() guarded by `AND status='running'` on
  *    the UPDATE.  If the run is not in 'running' state, the transaction rolls
- *    back and requestQuestion throws RunNotRunningError.
+ *    back and requestQuestion throws RunNotRunningError. P4: that SAME
+ *    transaction also co-writes a blocking decision review_items row (the
+ *    AskUserQuestion gate is a decision the human must make), so the question
+ *    row and the inbox row commit or roll back together; respond() resolves the
+ *    folded item idempotently. No-op on a pre-migration-016 DB.
  *
  * 2. respond uses a guarded UPDATE `WHERE id=? AND status='awaiting_input'`
  *    and checks info.changes > 0 before writing the allow reply on the socket.
@@ -41,6 +45,11 @@ import { randomUUID } from 'node:crypto';
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { QuestionRequest, QuestionAnswer, QuestionPayload } from '../../../shared/types/questions';
+import {
+  coWriteDecisionReviewItem,
+  resolveReviewItemById,
+  hasReviewItemsTable,
+} from './reviewItemListing';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
@@ -110,6 +119,8 @@ interface PendingEntry {
   /** Resolves or rejects the Promise returned from requestQuestion. */
   resolve: (answer: QuestionAnswer) => void;
   reject: (err: unknown) => void;
+  /** The folded decision review_item id (P4); null when the inbox table is absent. */
+  reviewItemId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +201,18 @@ export class QuestionRouter extends EventEmitter {
     QuestionRouter.instance = null;
   }
 
+  /**
+   * Build a concise decision-item title from the gate's questions. Uses the
+   * first question's text (preferred) or header; falls back to a generic label
+   * when the gate carries no questions. Kept short for the inbox row.
+   */
+  private deriveDecisionTitle(questions: QuestionPayload[]): string {
+    const first = questions[0];
+    const text = first?.question?.trim() || first?.header?.trim() || '';
+    if (text.length === 0) return 'Decision required';
+    return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+  }
+
   // --------------------------------------------------------------------------
   // Core API
   // --------------------------------------------------------------------------
@@ -248,6 +271,8 @@ export class QuestionRouter extends EventEmitter {
       rejectAnswer = rej;
     });
 
+    let reviewItemId: string | null = null;
+
     await this.getQuestionQueue(runId).add(async () => {
       // Atomic: UPDATE workflow_runs + INSERT questions in one transaction.
       const txn = this.db.transaction(() => {
@@ -267,6 +292,17 @@ export class QuestionRouter extends EventEmitter {
            VALUES (?, ?, ?, ?, 'pending', ?)`,
         );
         insertStmt.run(questionId, runId, toolUseId, JSON.stringify(questions), now);
+
+        // P4 fold: co-write a blocking decision review_item in the SAME
+        // transaction (the AskUserQuestion gate is a decision the human must
+        // make). Commits or rolls back with the questions row. No-op pre-016.
+        reviewItemId = coWriteDecisionReviewItem(this.db, {
+          runId,
+          title: this.deriveDecisionTitle(questions),
+          source: 'question',
+          payload: null,
+          now,
+        });
       });
 
       // Execute the transaction — throws RunNotRunningError on guard failure.
@@ -277,6 +313,7 @@ export class QuestionRouter extends EventEmitter {
         socketReply,
         resolve: resolveAnswer,
         reject: rejectAnswer,
+        reviewItemId,
       });
 
       // Notify renderer subscribers (e.g. the question queue UI).
@@ -322,7 +359,7 @@ export class QuestionRouter extends EventEmitter {
       // Atomically reserve this entry before any async work.
       this.pending.delete(questionId);
 
-      const { request, socketReply, resolve } = entry;
+      const { request, socketReply, resolve, reviewItemId } = entry;
       const now = new Date().toISOString();
 
       // Fold any attachment file paths into the answer text the agent receives.
@@ -347,6 +384,11 @@ export class QuestionRouter extends EventEmitter {
           `UPDATE questions SET status = 'timed_out', answered_at = ?
            WHERE id = ? AND status = 'pending'`,
         ).run(now, questionId);
+        // Resolve the folded decision review_item too (idempotent) — the gate is
+        // gone (run canceled), so the inbox item must not linger as blocking.
+        if (reviewItemId !== null) {
+          resolveReviewItemById(this.db, reviewItemId, 'system', 'superseded', now, request.runId);
+        }
         // Resolve the requestQuestion promise with a synthetic empty-answers payload
         // so the awaiting caller is not left hanging.
         const emptyAnswer: QuestionAnswer = { answers: {} };
@@ -360,6 +402,10 @@ export class QuestionRouter extends EventEmitter {
         `UPDATE questions SET status = 'answered', answered_at = ?, answer_json = ?
          WHERE id = ?`,
       ).run(now, JSON.stringify(effectiveAnswer), questionId);
+      // Resolve the folded decision review_item (idempotent) — the human answered.
+      if (reviewItemId !== null) {
+        resolveReviewItemById(this.db, reviewItemId, 'user', 'answered', now, request.runId);
+      }
 
       resolve(effectiveAnswer);
       socketReply(effectiveAnswer);
@@ -407,6 +453,10 @@ export class QuestionRouter extends EventEmitter {
           `UPDATE questions SET status = 'timed_out', answered_at = ?
            WHERE id = ? AND status = 'pending'`,
         ).run(now, questionId);
+        // Resolve the folded decision review_item too (idempotent).
+        if (entry.reviewItemId !== null) {
+          resolveReviewItemById(this.db, entry.reviewItemId, 'system', 'run_terminated', now, runId);
+        }
       } catch (err) {
         // Swallow DB errors during shutdown — do not throw.
         console.warn(
@@ -447,6 +497,19 @@ export class QuestionRouter extends EventEmitter {
       this.db
         .prepare(`UPDATE questions SET status = 'timed_out', answered_at = CURRENT_TIMESTAMP WHERE run_id IN (${placeholders}) AND status = 'pending'`)
         .run(...ids);
+      // Reconcile the folded inbox: orphaned pending question-sourced decision
+      // review_items for these recovered runs can never resolve, so resolve them
+      // too so they don't linger as stale blocking items. No-op pre-016.
+      if (hasReviewItemsTable(this.db)) {
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `UPDATE review_items
+                SET status = 'resolved', resolved_by = 'system', resolution = 'app_restart', updated_at = ?
+              WHERE kind = 'decision' AND status = 'pending' AND source = 'question' AND run_id IN (${placeholders})`,
+          )
+          .run(now, ...ids);
+      }
       return staleRunIds.length;
     });
     const count = transition();
