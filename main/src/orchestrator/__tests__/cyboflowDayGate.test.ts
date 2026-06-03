@@ -3,7 +3,7 @@
  *
  * This is the milestone integration test for Phase 1 of the cyboflow substrate.
  * It validates:
- *  1. Two concurrent workflow runs (sprint + prune) can reach 'awaiting_review'
+ *  1. Two concurrent workflow runs (planner + sprint) can reach 'awaiting_review'
  *     independently.
  *  2. Approving one run does NOT unblock the other — they are truly independent.
  *  3. After each approval the run resumes and produces additional stream events.
@@ -75,44 +75,44 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
   });
 
   test.skipIf(!claudeAvailable)(
-    'approves prune first, sprint remains paused, then sprint approves and resumes',
+    'approves planner first, sprint remains paused, then sprint approves and resumes',
     async () => {
       const sprintPrompt = fs.readFileSync(
         path.join(__dirname, '../../../../tests/fixtures/cyboflow-day3-gate/sprint-prompt.md'),
         'utf-8',
       );
-      const prunePrompt = fs.readFileSync(
-        path.join(__dirname, '../../../../tests/fixtures/cyboflow-day3-gate/prune-prompt.md'),
+      const plannerPrompt = fs.readFileSync(
+        path.join(__dirname, '../../../../tests/fixtures/cyboflow-day3-gate/planner-prompt.md'),
         'utf-8',
       );
 
       // Both prompts must include 'Bash' or 'git' to satisfy AC#5
       expect(sprintPrompt).toMatch(/Bash|`git status`/);
-      expect(prunePrompt).toMatch(/Bash|`git log/);
+      expect(plannerPrompt).toMatch(/Bash|`git log/);
 
       // Launch both runs concurrently
-      const { runIdA: sprintRunId, runIdB: pruneRunId } = await harness.launchPair({
+      const { runIdA: sprintRunId, runIdB: plannerRunId } = await harness.launchPair({
         projectPath,
         workflowA: 'sprint',
-        workflowB: 'prune',
+        workflowB: 'planner',
         promptA: sprintPrompt,
-        promptB: prunePrompt,
+        promptB: plannerPrompt,
       });
 
       // Wait for both runs to reach awaiting_review (60s each, independent polls)
-      const [sprintApproval, pruneApproval] = await Promise.all([
+      const [sprintApproval, plannerApproval] = await Promise.all([
         harness.waitForAwaitingReview(sprintRunId, 60_000),
-        harness.waitForAwaitingReview(pruneRunId, 60_000),
+        harness.waitForAwaitingReview(plannerRunId, 60_000),
       ]);
 
       // -----------------------------------------------------------------------
-      // Approve PRUNE first (AC#2: out-of-order approval)
+      // Approve PLANNER first (AC#2: out-of-order approval)
       // -----------------------------------------------------------------------
       const t1 = Date.now();
-      await harness.approveRun(pruneRunId, pruneApproval.approvalId, 'allow');
+      await harness.approveRun(plannerRunId, plannerApproval.approvalId, 'allow');
 
-      // Immediately after prune approval, sprint must still be awaiting_review
-      // (AC#2: the DB read is synchronous — the prune resume is async/in-flight)
+      // Immediately after planner approval, sprint must still be awaiting_review
+      // (AC#2: the DB read is synchronous — the planner resume is async/in-flight)
       const sprintStatusMid = harness.getStatus(sprintRunId);
       expect(sprintStatusMid).toBe('awaiting_review');
 
@@ -132,9 +132,9 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
         `sprint run ${sprintRunId} to reach running|completed`,
       );
       await waitFor(
-        () => ['running', 'completed'].includes(harness.getStatus(pruneRunId)),
+        () => ['running', 'completed'].includes(harness.getStatus(plannerRunId)),
         30_000,
-        `prune run ${pruneRunId} to reach running|completed`,
+        `planner run ${plannerRunId} to reach running|completed`,
       );
 
       // -----------------------------------------------------------------------

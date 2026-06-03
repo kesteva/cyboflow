@@ -108,7 +108,7 @@ describe('buildStepReportingAppend', () => {
   // no drift — emitted ids ∈ resolved def's flat steps (built-in, edited, custom)
   // -------------------------------------------------------------------------
   it('every emitted id is ∈ the RESOLVED def flat steps for each built-in', () => {
-    for (const name of ['soloflow', 'planner', 'sprint', 'compound', 'prune'] as const) {
+    for (const name of ['planner', 'sprint'] as const) {
       const def = resolveWorkflowDefinition(name, '{}');
       expect(def, `built-in '${name}' must resolve`).not.toBeNull();
       const flat = flattenStepIds(def);

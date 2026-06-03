@@ -649,15 +649,15 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   // (a) Returns correct WorkflowDefinition for known CyboflowWorkflowName
   // -------------------------------------------------------------------------
-  it('(a) returns correct WorkflowDefinition for known workflow name (soloflow)', async () => {
-    const runId = 'run-gps-soloflow';
-    seedPhaseRun(db, runId, 'soloflow', null);
+  it('(a) returns correct WorkflowDefinition for known workflow name (planner)', async () => {
+    const runId = 'run-gps-planner';
+    seedPhaseRun(db, runId, 'planner', null);
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
 
-    expect(result.definition.id).toBe('soloflow');
+    expect(result.definition.id).toBe('planner');
     expect(result.definition.phases.length).toBeGreaterThan(0);
   });
 
@@ -683,8 +683,8 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(c) returns current_step_id verbatim when set to a string', async () => {
     const runId = 'run-gps-step-string';
-    // 'context' is the id of the first step in the soloflow 'plan' phase.
-    seedPhaseRun(db, runId, 'soloflow', 'context');
+    // 'context' is the id of the first step in the planner 'plan' phase.
+    seedPhaseRun(db, runId, 'planner', 'context');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -698,7 +698,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(c) returns null for current_step_id when column is NULL', async () => {
     const runId = 'run-gps-step-null';
-    seedPhaseRun(db, runId, 'soloflow', null);
+    seedPhaseRun(db, runId, 'planner', null);
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -712,7 +712,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(d) null currentStepId → all stepStates pending', async () => {
     const runId = 'run-gps-allpending';
-    seedPhaseRun(db, runId, 'soloflow', null);
+    seedPhaseRun(db, runId, 'planner', null);
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -729,8 +729,8 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(d) first-step currentStepId → first running, rest pending', async () => {
     const runId = 'run-gps-first-step';
-    // 'context' is the first step of soloflow (plan.context).
-    seedPhaseRun(db, runId, 'soloflow', 'context');
+    // 'context' is the first step of planner (plan.context).
+    seedPhaseRun(db, runId, 'planner', 'context');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -749,9 +749,9 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(d) middle-step currentStepId → preceding done, matching running, trailing pending', async () => {
     const runId = 'run-gps-middle-step';
-    // 'approve-idea' is the 3rd step (index 2) in soloflow plan phase.
+    // 'approve-idea' is the 3rd step (index 2) in planner plan phase.
     // Steps in order: context(0), research(1), approve-idea(2), epics(3), tasks(4), ...
-    seedPhaseRun(db, runId, 'soloflow', 'approve-idea');
+    seedPhaseRun(db, runId, 'planner', 'approve-idea');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -775,7 +775,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   // -------------------------------------------------------------------------
   it('(d) orphan currentStepId (not in definition) → all pending, no throw', async () => {
     const runId = 'run-gps-orphan';
-    seedPhaseRun(db, runId, 'soloflow', 'nonexistent.orphan-step');
+    seedPhaseRun(db, runId, 'planner', 'nonexistent.orphan-step');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -830,7 +830,7 @@ describe('cyboflow.runs.getPhaseState', () => {
     const workflowId = `wf-${runId}`;
     db.prepare(
       `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
-    ).run(workflowId, 'soloflow');
+    ).run(workflowId, 'planner');
     db.prepare(
       `INSERT INTO workflow_runs
          (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
@@ -892,7 +892,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   it('(g) running status: current step remains status=running (not terminal)', async () => {
     // Verify the fix does not regress live runs.
     const runId = 'run-gps-still-running';
-    seedPhaseRun(db, runId, 'soloflow', 'context');
+    seedPhaseRun(db, runId, 'planner', 'context');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
@@ -963,19 +963,19 @@ describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
 
   it('resolves a built-in workflow normally when spec_json is "{}"', async () => {
     const runId = 'run-gps-spec-builtin';
-    seedPhaseRunWithSpec(db, runId, 'soloflow', '{}', null);
+    seedPhaseRunWithSpec(db, runId, 'planner', '{}', null);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
 
-    expect(result.definition.id).toBe('soloflow');
+    expect(result.definition.id).toBe('planner');
     expect(result.definition.phases.length).toBeGreaterThan(0);
   });
 
   it('prefers a valid spec_json override over the built-in definition', async () => {
     const runId = 'run-gps-spec-override';
-    const override = makeSpecDefinition('soloflow');
-    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), null);
+    const override = makeSpecDefinition('planner');
+    seedPhaseRunWithSpec(db, runId, 'planner', JSON.stringify(override), null);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
@@ -989,8 +989,8 @@ describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
 
   it('marks the override step running when current_step_id points into the override graph', async () => {
     const runId = 'run-gps-spec-override-step';
-    const override = makeSpecDefinition('soloflow');
-    seedPhaseRunWithSpec(db, runId, 'soloflow', JSON.stringify(override), 'edited-step');
+    const override = makeSpecDefinition('planner');
+    seedPhaseRunWithSpec(db, runId, 'planner', JSON.stringify(override), 'edited-step');
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });

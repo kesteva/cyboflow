@@ -83,11 +83,8 @@ describe('resolveInitialStepId', () => {
   });
 
   it('returns stable bare step ids matching the first step of each WORKFLOW_DEFINITIONS entry', () => {
-    expect(resolveInitialStepId('soloflow')).toBe('context');
     expect(resolveInitialStepId('planner')).toBe('context');
     expect(resolveInitialStepId('sprint')).toBe('implement');
-    expect(resolveInitialStepId('compound')).toBe('load-sprint');
-    expect(resolveInitialStepId('prune')).toBe('scan');
   });
 });
 
@@ -174,20 +171,20 @@ describe('buildStepTransitionEvent — happy path', () => {
   });
 
   it('also fires with status=done on run completion', () => {
-    const { db, runId } = seedForBridge('compound');
+    const { db, runId } = seedForBridge('sprint');
     const adapter = dbAdapter(db);
 
-    buildStepTransitionEvent(runId, 'load-sprint', 'done', adapter);
+    buildStepTransitionEvent(runId, 'sprint-verify', 'done', adapter);
 
     expect(emittedEvents).toHaveLength(1);
     expect(emittedEvents[0].status).toBe('done');
-    expect(emittedEvents[0].stepId).toBe('load-sprint');
+    expect(emittedEvents[0].stepId).toBe('sprint-verify');
 
     // Verify DB was also updated.
     const row = db
       .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
       .get(runId) as { current_step_id: string | null } | undefined;
-    expect(row?.current_step_id).toBe('load-sprint');
+    expect(row?.current_step_id).toBe('sprint-verify');
   });
 });
 

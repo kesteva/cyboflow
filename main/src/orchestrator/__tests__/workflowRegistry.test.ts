@@ -2,23 +2,26 @@
  * Unit tests for WorkflowRegistry.
  *
  * Behaviors covered (per TASK-351 / TASK-601 test_strategy):
- * 1. seed inserts five workflows with correct names
+ * 1. seed inserts the built-in workflows with correct names
  * 2. seed is idempotent (second call does not duplicate rows)
  * 3. frontmatter permission_mode parsing: present/absent/file-missing cases
  * 4. createRun snapshots permission_mode onto workflow_runs row
  * 5. missing .md file falls back to 'default' and logs ERROR (TASK-601: raised from WARN)
- * 6. resolveSoloFlowPluginRoot: env-var override, highest-semver discovery, fallback
+ *
+ * The SoloFlow plugin-root discovery + compat-shim tests were removed in P0:
+ * the built-in workflow bodies now live in-repo (see builtInWorkflows.test.ts)
+ * and the app no longer discovers them under ~/.claude/plugins/cache/soloflow.
  *
  * All tests use an in-memory better-sqlite3 instance with the workflow tables
  * applied inline — no file I/O for the DB itself.  Workflow .md files are
  * written to temp paths via os.tmpdir() so fs.readFileSync is exercised
  * end-to-end; missing-file tests simply pass a non-existent path.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync } from 'fs';
 import * as path from 'path';
-import { WorkflowRegistry, resolveSoloFlowPluginRoot, buildDefaultSoloFlowWorkflows, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
+import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -33,12 +36,12 @@ function writeTempMd(dir: string, filename: string, content: string): string {
   return filePath;
 }
 
-/** Build five workflow descriptors pointing at real temp files. */
+/** Build the built-in workflow descriptors pointing at real temp files. */
 function buildDescriptors(
   dir: string,
   overrides: Partial<Record<CyboflowWorkflowName, string>> = {},
 ): WorkflowDescriptor[] {
-  const names: CyboflowWorkflowName[] = ['soloflow', 'planner', 'sprint', 'compound', 'prune'];
+  const names: CyboflowWorkflowName[] = ['planner', 'sprint'];
   return names.map((name) => {
     if (name in overrides) {
       return { name, path: overrides[name]! };
@@ -98,19 +101,19 @@ describe('WorkflowRegistry', () => {
   // -------------------------------------------------------------------------
 
   describe('seed', () => {
-    it('inserts five workflows with correct names', async () => {
+    it('inserts the built-in workflows with correct names', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const descriptors = buildDescriptors(tmpDir);
         registry.seed(1, descriptors);
 
         interface CountRow { count: number }
         const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
-        expect(count).toBe(5);
+        expect(count).toBe(2);
 
         interface NameRow { name: string }
         const rows = db.prepare('SELECT name FROM workflows WHERE project_id = 1 ORDER BY name').all() as NameRow[];
         const names = rows.map((r) => r.name).sort();
-        expect(names).toEqual(['compound', 'planner', 'prune', 'soloflow', 'sprint']);
+        expect(names).toEqual(['planner', 'sprint']);
       });
     });
 
@@ -122,7 +125,7 @@ describe('WorkflowRegistry', () => {
 
         interface CountRow { count: number }
         const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
-        expect(count).toBe(5);
+        expect(count).toBe(2);
       });
     });
 
@@ -145,10 +148,10 @@ describe('WorkflowRegistry', () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const content = `---\ndescription: test\npermission_mode: acceptEdits\n---\n`;
         const path = writeTempMd(tmpDir, 'accepts.md', content);
-        registry.seed(1, [{ name: 'soloflow', path }]);
+        registry.seed(1, [{ name: 'planner', path }]);
 
         interface ModeRow { permission_mode: string }
-        const row = db.prepare('SELECT permission_mode FROM workflows WHERE name = ?').get('soloflow') as ModeRow;
+        const row = db.prepare('SELECT permission_mode FROM workflows WHERE name = ?').get('planner') as ModeRow;
         expect(row.permission_mode).toBe('acceptEdits');
       });
     });
@@ -180,10 +183,10 @@ describe('WorkflowRegistry', () => {
     it('missing .md file falls back to permission_mode "default"', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
-        registry.seed(1, [{ name: 'compound', path: nonExistentPath }]);
+        registry.seed(1, [{ name: 'sprint', path: nonExistentPath }]);
 
         interface ModeRow { permission_mode: string }
-        const row = db.prepare('SELECT permission_mode FROM workflows WHERE name = ?').get('compound') as ModeRow;
+        const row = db.prepare('SELECT permission_mode FROM workflows WHERE name = ?').get('sprint') as ModeRow;
         expect(row.permission_mode).toBe('default');
       });
     });
@@ -191,7 +194,7 @@ describe('WorkflowRegistry', () => {
     it('missing .md file logs ERROR with the path (TASK-601: raised from WARN to fail-loud)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
-        registry.seed(1, [{ name: 'prune', path: nonExistentPath }]);
+        registry.seed(1, [{ name: 'sprint', path: nonExistentPath }]);
 
         // TASK-601: the log level was raised from WARN to ERROR so missing
         // workflow files are fail-loud rather than silently swallowed.
@@ -207,7 +210,7 @@ describe('WorkflowRegistry', () => {
     it('missing .md file does not throw and still inserts the row', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const nonExistentPath = path.join(tmpDir, 'does-not-exist.md');
-        expect(() => registry.seed(1, [{ name: 'prune', path: nonExistentPath }])).not.toThrow();
+        expect(() => registry.seed(1, [{ name: 'sprint', path: nonExistentPath }])).not.toThrow();
 
         interface CountRow { count: number }
         const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
@@ -260,7 +263,7 @@ describe('WorkflowRegistry', () => {
         const descriptors = buildDescriptors(tmpDir);
         registry.seed(1, descriptors);
         const rows = registry.listByProject(1);
-        expect(rows).toHaveLength(5);
+        expect(rows).toHaveLength(2);
       });
     });
 
@@ -280,7 +283,7 @@ describe('WorkflowRegistry', () => {
 
         const rows = registry.listByProject(1);
         // Should still be 5 (no sentinel)
-        expect(rows).toHaveLength(5);
+        expect(rows).toHaveLength(2);
         expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
       });
     });
@@ -360,10 +363,10 @@ describe('WorkflowRegistry', () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const content = `---\npermission_mode: acceptEdits\n---\n`;
         const path = writeTempMd(tmpDir, 'accepts2.md', content);
-        registry.seed(1, [{ name: 'soloflow', path }]);
+        registry.seed(1, [{ name: 'planner', path }]);
 
         interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
         const { runId } = registry.createRun(workflowId);
 
         interface SnapshotRow { permission_mode_snapshot: string }
@@ -404,10 +407,10 @@ describe('WorkflowRegistry', () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const content = `---\npermission_mode: dontAsk\n---\n`;
         const path = writeTempMd(tmpDir, 'dontask2.md', content);
-        registry.seed(1, [{ name: 'compound', path }]);
+        registry.seed(1, [{ name: 'sprint', path }]);
 
         interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('compound') as IdRow;
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
         const result = registry.createRun(workflowId);
 
         expect(result.permissionMode).toBe('dontAsk');
@@ -482,10 +485,10 @@ describe('WorkflowRegistry', () => {
         // confirm all four new nullable columns are projected (not missing from
         // the SELECT) and default to null.
         const path = writeTempMd(tmpDir, 'nullable-cols.md', '---\n---\n');
-        registry.seed(1, [{ name: 'soloflow', path }]);
+        registry.seed(1, [{ name: 'planner', path }]);
 
         interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
         const { runId } = registry.createRun(workflowId);
 
         const run = registry.getRunById(runId);
@@ -528,10 +531,10 @@ describe('WorkflowRegistry', () => {
     it('projects started_at and ended_at as null on a freshly created run', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'started-ended-null.md', '---\n---\n');
-        registry.seed(1, [{ name: 'soloflow', path }]);
+        registry.seed(1, [{ name: 'planner', path }]);
 
         interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
         const { runId } = registry.createRun(workflowId);
 
         const run = registry.getRunById(runId);
@@ -568,10 +571,10 @@ describe('WorkflowRegistry', () => {
     it("getRunById round-trips the stamped substrate ('sdk' default)", async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'substrate-readback.md', '---\n---\n');
-        registry.seed(1, [{ name: 'soloflow', path }]);
+        registry.seed(1, [{ name: 'planner', path }]);
 
         interface IdRow { id: string }
-        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('soloflow') as IdRow;
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
         const { runId, substrate } = registry.createRun(workflowId);
 
         const run = registry.getRunById(runId);
@@ -612,7 +615,7 @@ describe('WorkflowRegistry', () => {
     it('getById returns spec_json (default "{}") on a seeded row', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         registry.seed(1, buildDescriptors(tmpDir));
-        const row = registry.getById('wf-1-soloflow');
+        const row = registry.getById('wf-1-planner');
         expect(row).not.toBeNull();
         // Seeded rows fall back to the schema default of '{}'.
         expect(row!.spec_json).toBe('{}');
@@ -622,19 +625,19 @@ describe('WorkflowRegistry', () => {
     it('getById round-trips a non-default spec_json written directly', () => {
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
-         VALUES ('wf-1-soloflow', 1, 'soloflow', ?, 'default')`,
-      ).run(JSON.stringify(makeDefinition('soloflow')));
+         VALUES ('wf-1-planner', 1, 'planner', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('planner')));
 
-      const row = registry.getById('wf-1-soloflow');
+      const row = registry.getById('wf-1-planner');
       expect(row).not.toBeNull();
-      expect(JSON.parse(row!.spec_json)).toEqual(makeDefinition('soloflow'));
+      expect(JSON.parse(row!.spec_json)).toEqual(makeDefinition('planner'));
     });
 
     it('listByProject projects spec_json on every returned row', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         registry.seed(1, buildDescriptors(tmpDir));
         const rows = registry.listByProject(1);
-        expect(rows).toHaveLength(5);
+        expect(rows).toHaveLength(2);
         for (const r of rows) {
           // Field is present (typed string) — '{}' default for fresh seeds.
           expect(typeof r.spec_json).toBe('string');
@@ -652,14 +655,14 @@ describe('WorkflowRegistry', () => {
     it('persists the JSON-stringified definition onto spec_json', () => {
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
-         VALUES ('wf-1-soloflow', 1, 'soloflow', '{}', 'default')`,
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
       ).run();
 
-      const definition = makeDefinition('soloflow');
-      registry.updateSpec('wf-1-soloflow', definition);
+      const definition = makeDefinition('planner');
+      registry.updateSpec('wf-1-planner', definition);
 
       interface SpecRow { spec_json: string }
-      const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-soloflow') as SpecRow;
+      const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-planner') as SpecRow;
       expect(row.spec_json).toBe(JSON.stringify(definition));
       expect(JSON.parse(row.spec_json)).toEqual(definition);
     });
@@ -761,7 +764,7 @@ describe('WorkflowRegistry', () => {
     });
 
     it('rejects a name that collides with a built-in workflow name', () => {
-      for (const builtIn of ['soloflow', 'planner', 'sprint', 'compound', 'prune']) {
+      for (const builtIn of ['planner', 'sprint']) {
         expect(
           () => registry.createCustom(1, builtIn, makeDefinition(builtIn), 'default'),
           `built-in name '${builtIn}' should be rejected`,
@@ -793,10 +796,10 @@ describe('WorkflowRegistry', () => {
     it('does NOT insert a row when the name is rejected', () => {
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
-         VALUES ('wf-1-soloflow', 1, 'soloflow', '{}', 'default')`,
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
       ).run();
 
-      expect(() => registry.createCustom(1, 'soloflow', makeDefinition('soloflow'), 'default')).toThrow();
+      expect(() => registry.createCustom(1, 'planner', makeDefinition('planner'), 'default')).toThrow();
 
       interface CountRow { count: number }
       const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
@@ -813,188 +816,9 @@ describe('WorkflowRegistry', () => {
     it('resolveWorkflowDefinition-shaped: the persisted spec is the built-in clone when cloned from one', () => {
       // Custom flows are commonly created by cloning a built-in then renaming.
       // Confirm an arbitrary built-in definition survives the round-trip.
-      const cloned = WORKFLOW_DEFINITIONS.soloflow;
-      const row = registry.createCustom(9, 'Cloned Soloflow', cloned, 'default');
+      const cloned = WORKFLOW_DEFINITIONS.planner;
+      const row = registry.createCustom(9, 'Cloned Planner', cloned, 'default');
       expect(JSON.parse(row.spec_json)).toEqual(cloned);
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// resolveSoloFlowPluginRoot (TASK-601)
-// ---------------------------------------------------------------------------
-
-describe('resolveSoloFlowPluginRoot', () => {
-  it('returns env-var value when SOLOFLOW_PLUGIN_ROOT is set', () => {
-    const fakeRoot = '/custom/soloflow/path';
-    const result = resolveSoloFlowPluginRoot('/home/test', {
-      SOLOFLOW_PLUGIN_ROOT: fakeRoot,
-    });
-    expect(result.source).toBe('env');
-    expect(result.root).toBe(fakeRoot);
-  });
-
-  it('env-var wins even when the filesystem has installed versions', async () => {
-    await withTempDir('resolve-test-', async (fakeHome) => {
-      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      mkdirSync(path.join(cacheDir, '0.10.3'), { recursive: true });
-
-      const overridePath = '/override/path';
-      const result = resolveSoloFlowPluginRoot(fakeHome, {
-        SOLOFLOW_PLUGIN_ROOT: overridePath,
-      });
-      expect(result.source).toBe('env');
-      expect(result.root).toBe(overridePath);
-    });
-  });
-
-  it('picks the highest semver from a fixture dir with multiple versions', async () => {
-    await withTempDir('resolve-semver-', async (fakeHome) => {
-      // Build a fake plugin cache with 0.9.12, 0.10.3, and 0.10.10 subdirectories.
-      // The resolver must pick 0.10.10 (highest semver), not 0.10.3 (lexicographic
-      // sort would incorrectly rank 0.10.3 > 0.10.10 since '3' > '1' char-by-char).
-      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      for (const ver of ['0.9.12', '0.10.3', '0.10.10']) {
-        mkdirSync(path.join(cacheDir, ver), { recursive: true });
-      }
-
-      const result = resolveSoloFlowPluginRoot(fakeHome, {});
-      expect(result.source).toBe('discovered');
-      expect(result.root).toBe(path.join(cacheDir, '0.10.10'));
-    });
-  });
-
-  it('returns fallback when no versions are installed', async () => {
-    await withTempDir('resolve-fallback-', async (fakeHome) => {
-      // Do NOT create the cacheDir — readdirSync should throw ENOENT.
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      const result = resolveSoloFlowPluginRoot(fakeHome, {});
-      warnSpy.mockRestore();
-
-      expect(result.source).toBe('fallback');
-      expect(result.root).toContain('soloflow-dev');
-    });
-  });
-
-  it('whitespace-only SOLOFLOW_PLUGIN_ROOT is not treated as an override — falls through to discovery', async () => {
-    await withTempDir('resolve-ws-fallback-', async (fakeHome) => {
-      // The resolver guards with `envOverride.trim() !== ''` so a value of e.g.
-      // '   ' (spaces only) must NOT return source:'env'.  Instead it should
-      // fall through to filesystem discovery (or fallback).
-      // Build one real version dir so we land on 'discovered' rather than
-      // 'fallback' — that lets us assert the guard without a console.warn spy.
-      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      mkdirSync(path.join(cacheDir, '0.10.5'), { recursive: true });
-
-      const result = resolveSoloFlowPluginRoot(fakeHome, {
-        SOLOFLOW_PLUGIN_ROOT: '   ',
-      });
-      expect(result.source).toBe('discovered');
-      expect(result.root).toBe(path.join(cacheDir, '0.10.5'));
-    });
-  });
-
-  it('SOLOFLOW_PLUGIN_ROOT with surrounding whitespace is trimmed before returning', () => {
-    // The resolver calls `.trim()` on the env-var value so a path written
-    // with accidental leading/trailing spaces still resolves correctly.
-    const fakeRoot = '/trimmed/soloflow/path';
-    const result = resolveSoloFlowPluginRoot('/home/test', {
-      SOLOFLOW_PLUGIN_ROOT: `  ${fakeRoot}  `,
-    });
-    expect(result.source).toBe('env');
-    expect(result.root).toBe(fakeRoot);
-  });
-
-  it('falls back when cacheDir exists but contains only non-semver entries', async () => {
-    await withTempDir('resolve-nonsemver-', async (fakeHome) => {
-      // If the cache directory exists but holds only directories whose names do
-      // not match the semver pattern (e.g. 'latest', '.DS_Store', 'node_modules'),
-      // the resolver must skip them all and fall through to the fallback path.
-      const cacheDir = path.join(fakeHome, '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev');
-      for (const nonSemverName of ['latest', '.DS_Store', 'node_modules', '0.10']) {
-        mkdirSync(path.join(cacheDir, nonSemverName), { recursive: true });
-      }
-
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      const result = resolveSoloFlowPluginRoot(fakeHome, {});
-      warnSpy.mockRestore();
-
-      expect(result.source).toBe('fallback');
-      expect(result.root).toContain('soloflow-dev');
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// DEFAULT_SOLOFLOW_WORKFLOWS compat shim regression (TASK-601 bugfix)
-// ---------------------------------------------------------------------------
-
-describe('DEFAULT_SOLOFLOW_WORKFLOWS compat shim', () => {
-  it('pathFromHome is relative so path.join(homeDir, pathFromHome) resolves to an existing file', async () => {
-    await withTempDir('soloflow-shim-test-', async (tmpHome) => {
-      const pluginRoot = path.join(
-        tmpHome,
-        '.claude', 'plugins', 'cache', 'soloflow', 'soloflow-dev', '0.10.3',
-      );
-      const commandsDir = path.join(pluginRoot, 'commands');
-      mkdirSync(commandsDir, { recursive: true });
-
-      // Write real .md files with frontmatter for all 5 default workflows.
-      const workflowNames = ['idea-extractor', 'planner', 'sprint', 'compound', 'prune'];
-      for (const name of workflowNames) {
-        writeFileSync(
-          path.join(commandsDir, `${name}.md`),
-          `---\npermission_mode: acceptEdits\n---\n# ${name}\n`,
-          'utf-8',
-        );
-      }
-
-      // Build descriptors pointing at our tmp tree.
-      const descriptors = buildDefaultSoloFlowWorkflows(pluginRoot);
-
-      // Simulate what the compat shim does: store relative paths.
-      const shimEntries = descriptors.map((d) => ({
-        name: d.name,
-        pathFromHome: path.relative(tmpHome, d.path),
-      }));
-
-      // Simulate what the cyboflow.ts callsite does: path.join(homeDir, pathFromHome).
-      const resolvedPaths = shimEntries.map((wf) => ({
-        name: wf.name,
-        resolvedPath: path.join(tmpHome, wf.pathFromHome),
-      }));
-
-      // Every resolved path must exist on disk (no doubled-prefix).
-      for (const { name, resolvedPath } of resolvedPaths) {
-        expect(existsSync(resolvedPath), `${name}: ${resolvedPath} does not exist`).toBe(true);
-      }
-
-      // Also verify that the permission_mode from the file is parseable as 'acceptEdits'.
-      // We use a fresh registry with an in-memory DB to exercise seed() end-to-end.
-      const db = createTestDb();
-
-      const logger = makeSpyLogger();
-      const registry = new WorkflowRegistry(dbAdapter(db), logger);
-
-      const finalDescriptors = resolvedPaths.map((rp) => ({
-        name: rp.name as import('../../../../shared/types/workflows').CyboflowWorkflowName,
-        path: rp.resolvedPath,
-      }));
-
-      registry.seed(1, finalDescriptors);
-
-      // No ERROR log should fire in the happy path.
-      expect(logger.calls.filter((c) => c.level === 'error').length).toBe(0);
-
-      // All 5 workflows should have permission_mode = 'acceptEdits'.
-      interface ModeRow { name: string; permission_mode: string }
-      const rows = db
-        .prepare('SELECT name, permission_mode FROM workflows WHERE project_id = 1 ORDER BY name')
-        .all() as ModeRow[];
-      expect(rows).toHaveLength(5);
-      for (const row of rows) {
-        expect(row.permission_mode).toBe('acceptEdits');
-      }
     });
   });
 });

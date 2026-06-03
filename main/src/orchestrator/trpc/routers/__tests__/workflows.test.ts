@@ -7,7 +7,7 @@
  *
  * Tests:
  *  (a) list({projectId}) returns seeded rows.
- *  (b) list({projectId}) auto-seeds 5 SoloFlow defaults when project has none.
+ *  (b) list({projectId}) auto-seeds the 2 in-repo built-ins when project has none.
  *  (c) get({workflowId}) returns the matching row by id.
  *  (d) get({workflowId}) throws TRPCError code='NOT_FOUND' for an unknown id.
  *  (e) list and get both throw TRPCError code='PRECONDITION_FAILED' when
@@ -90,7 +90,7 @@ describe('cyboflow.workflows.list', () => {
         `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run('wf-1-soloflow', 1, 'soloflow', '/some/path.md', 'default');
+      .run('wf-1-sprint', 1, 'sprint', '/some/path.md', 'default');
     rawDb
       .prepare(
         `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
@@ -104,16 +104,16 @@ describe('cyboflow.workflows.list', () => {
         `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run('wf-2-soloflow', 2, 'soloflow', '/proj2/path.md', 'default');
+      .run('wf-2-sprint', 2, 'sprint', '/proj2/path.md', 'default');
 
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
 
     expect(result).toHaveLength(2);
     const ids = result.map((r) => r.id);
-    expect(ids).toContain('wf-1-soloflow');
+    expect(ids).toContain('wf-1-sprint');
     expect(ids).toContain('wf-1-planner');
-    expect(ids).not.toContain('wf-2-soloflow');
+    expect(ids).not.toContain('wf-2-sprint');
 
     // Every returned row now carries spec_json (defaults to '{}' for these).
     for (const r of result) {
@@ -122,9 +122,9 @@ describe('cyboflow.workflows.list', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b) list auto-seeds 5 SoloFlow defaults when project has none
+  // (b) list auto-seeds the 2 in-repo built-ins when project has none
   // -------------------------------------------------------------------------
-  it('(b) auto-seeds 5 SoloFlow defaults and returns them when project has no workflows', async () => {
+  it('(b) auto-seeds the 2 in-repo built-ins (planner+sprint) and returns them when project has no workflows', async () => {
     const rawDb = createWorkflowTestDb();
     const adapter = dbAdapter(rawDb);
     const registry = new WorkflowRegistry(adapter, silentLogger);
@@ -132,17 +132,17 @@ describe('cyboflow.workflows.list', () => {
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 42 });
 
-    // 5 defaults must have been seeded.
-    expect(result).toHaveLength(5);
+    // The 2 in-repo built-ins must have been seeded.
+    expect(result).toHaveLength(2);
 
     // All belong to projectId=42.
     for (const wf of result) {
       expect(wf.project_id).toBe(42);
     }
 
-    // Verify the canonical SoloFlow names are present.
+    // Verify the canonical cyboflow built-in names are present.
     const names = result.map((r) => r.name).sort();
-    expect(names).toEqual(['compound', 'planner', 'prune', 'soloflow', 'sprint']);
+    expect(names).toEqual(['planner', 'sprint']);
 
     // Deterministic id format: wf-<projectId>-<name>.
     for (const wf of result) {
@@ -250,24 +250,24 @@ describe('cyboflow.workflows.getDefinition', () => {
   it('returns the built-in definition when spec_json is "{}" and name is a built-in', async () => {
     const rawDb = createWorkflowTestDb();
     const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
-    insertWorkflow(rawDb, 'wf-1-soloflow', 1, 'soloflow');
+    insertWorkflow(rawDb, 'wf-1-planner', 1, 'planner');
 
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
-    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-soloflow' });
+    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-planner' });
 
-    expect(result.id).toBe('soloflow');
-    expect(result).toEqual(WORKFLOW_DEFINITIONS.soloflow);
+    expect(result.id).toBe('planner');
+    expect(result).toEqual(WORKFLOW_DEFINITIONS.planner);
   });
 
   it('prefers a valid spec_json override over the built-in definition', async () => {
     const rawDb = createWorkflowTestDb();
     const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
-    const override = makeDefinition('soloflow');
+    const override = makeDefinition('planner');
     override.phases[0].label = 'Overridden Plan';
-    insertWorkflow(rawDb, 'wf-1-soloflow', 1, 'soloflow', JSON.stringify(override));
+    insertWorkflow(rawDb, 'wf-1-planner', 1, 'planner', JSON.stringify(override));
 
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
-    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-soloflow' });
+    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-planner' });
 
     expect(result).toEqual(override);
     expect(result.phases[0].label).toBe('Overridden Plan');
@@ -320,16 +320,16 @@ describe('cyboflow.workflows.updateSpec', () => {
   it('persists the definition and returns { ok: true }', async () => {
     const rawDb = createWorkflowTestDb();
     const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
-    insertWorkflow(rawDb, 'wf-1-soloflow', 1, 'soloflow');
+    insertWorkflow(rawDb, 'wf-1-planner', 1, 'planner');
 
-    const definition = makeDefinition('soloflow');
+    const definition = makeDefinition('planner');
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
-    const result = await caller.cyboflow.workflows.updateSpec({ workflowId: 'wf-1-soloflow', definition });
+    const result = await caller.cyboflow.workflows.updateSpec({ workflowId: 'wf-1-planner', definition });
 
     expect(result).toEqual({ ok: true });
 
     interface SpecRow { spec_json: string }
-    const row = rawDb.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-soloflow') as SpecRow;
+    const row = rawDb.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-planner') as SpecRow;
     expect(JSON.parse(row.spec_json)).toEqual(definition);
   });
 
@@ -346,15 +346,15 @@ describe('cyboflow.workflows.updateSpec', () => {
   it('rejects a structurally-invalid definition as BAD_REQUEST (input zod schema)', async () => {
     const rawDb = createWorkflowTestDb();
     const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
-    insertWorkflow(rawDb, 'wf-1-soloflow', 1, 'soloflow');
+    insertWorkflow(rawDb, 'wf-1-planner', 1, 'planner');
 
     // Non-kebab phase id violates the strict write-path schema → tRPC BAD_REQUEST.
-    const bad = makeDefinition('soloflow');
+    const bad = makeDefinition('planner');
     bad.phases[0].id = 'Not Kebab';
 
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     await expect(
-      caller.cyboflow.workflows.updateSpec({ workflowId: 'wf-1-soloflow', definition: bad }),
+      caller.cyboflow.workflows.updateSpec({ workflowId: 'wf-1-planner', definition: bad }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
   });
 
@@ -474,8 +474,8 @@ describe('cyboflow.workflows.createCustom', () => {
     await expect(
       caller.cyboflow.workflows.createCustom({
         projectId: 1,
-        name: 'soloflow',
-        definition: makeDefinition('soloflow'),
+        name: 'planner',
+        definition: makeDefinition('planner'),
       }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
   });

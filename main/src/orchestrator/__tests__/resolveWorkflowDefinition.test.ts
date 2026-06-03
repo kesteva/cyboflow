@@ -52,7 +52,7 @@ describe('isCyboflowWorkflowName', () => {
   // -------------------------------------------------------------------------
   // Case 1: every built-in name is recognised
   // -------------------------------------------------------------------------
-  it('returns true for each of the five built-in workflow names', () => {
+  it('returns true for each built-in workflow name (planner/sprint)', () => {
     for (const name of CYBOFLOW_WORKFLOW_NAMES) {
       expect(isCyboflowWorkflowName(name)).toBe(true);
     }
@@ -166,9 +166,8 @@ describe('resolveWorkflowDefinition', () => {
   // Case 1: built-in name with no spec falls back to WORKFLOW_DEFINITIONS
   // -------------------------------------------------------------------------
   it('falls back to the built-in definition when spec is empty', () => {
-    expect(resolveWorkflowDefinition('soloflow', '{}')).toEqual(WORKFLOW_DEFINITIONS.soloflow);
+    expect(resolveWorkflowDefinition('planner', '{}')).toEqual(WORKFLOW_DEFINITIONS.planner);
     expect(resolveWorkflowDefinition('sprint', null)).toEqual(WORKFLOW_DEFINITIONS.sprint);
-    expect(resolveWorkflowDefinition('prune', undefined)).toEqual(WORKFLOW_DEFINITIONS.prune);
     expect(resolveWorkflowDefinition('planner', '')).toEqual(WORKFLOW_DEFINITIONS.planner);
   });
 
@@ -176,21 +175,21 @@ describe('resolveWorkflowDefinition', () => {
   // Case 2: a valid spec overrides the built-in (edited built-in flow)
   // -------------------------------------------------------------------------
   it('uses a valid spec override in preference to the built-in', () => {
-    const edited = makeValidDefinition('soloflow');
-    const resolved = resolveWorkflowDefinition('soloflow', JSON.stringify(edited));
+    const edited = makeValidDefinition('planner');
+    const resolved = resolveWorkflowDefinition('planner', JSON.stringify(edited));
     expect(resolved).toEqual(edited);
-    expect(resolved).not.toEqual(WORKFLOW_DEFINITIONS.soloflow);
+    expect(resolved).not.toEqual(WORKFLOW_DEFINITIONS.planner);
   });
 
   // -------------------------------------------------------------------------
   // Case 3: a built-in with a broken spec still resolves to the built-in
   // -------------------------------------------------------------------------
   it('falls back to the built-in when the spec is structurally broken', () => {
-    expect(resolveWorkflowDefinition('compound', '{ broken json')).toEqual(
-      WORKFLOW_DEFINITIONS.compound,
+    expect(resolveWorkflowDefinition('sprint', '{ broken json')).toEqual(
+      WORKFLOW_DEFINITIONS.sprint,
     );
-    expect(resolveWorkflowDefinition('compound', JSON.stringify({ id: 'x', phases: [] }))).toEqual(
-      WORKFLOW_DEFINITIONS.compound,
+    expect(resolveWorkflowDefinition('sprint', JSON.stringify({ id: 'x', phases: [] }))).toEqual(
+      WORKFLOW_DEFINITIONS.sprint,
     );
   });
 
