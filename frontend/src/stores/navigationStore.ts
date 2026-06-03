@@ -44,14 +44,22 @@ export const useNavigationStore = create<NavigationState>((set) => ({
 
   setActiveProjectId: (projectId) => set({ activeProjectId: projectId }),
 
+  // Navigating to a project dismisses the full-width center panes (task backlog
+  // / human review) — any rail nav away from the task view must clear it, and
+  // centralizing here means individual rail handlers can't forget one pane.
   navigateToProject: (projectId) => set({
     activeView: 'project',
-    activeProjectId: projectId
+    activeProjectId: projectId,
+    humanReviewOpen: false,
+    backlogOpen: false
   }),
 
+  // Navigating to sessions likewise dismisses both full-width center panes.
   navigateToSessions: () => set({
     activeView: 'sessions',
-    activeProjectId: null
+    activeProjectId: null,
+    humanReviewOpen: false,
+    backlogOpen: false
   }),
 
   // Opening human review closes the backlog (the center hosts one full-width

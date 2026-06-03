@@ -113,6 +113,7 @@ vi.mock('../../stores/navigationStore', () => ({
         navigateToProject: vi.fn(),
         setActiveProjectId: mockSetActiveProjectId,
         closeHumanReview: mockCloseHumanReview,
+        closeBacklog: vi.fn(),
       }),
     },
   ),

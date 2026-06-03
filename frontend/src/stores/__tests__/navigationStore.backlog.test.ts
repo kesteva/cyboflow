@@ -68,4 +68,24 @@ describe('navigationStore — backlogOpen', () => {
     expect(state.activeProjectId).toBe(42);
     expect(state.activeView).toBe('project');
   });
+
+  it('navigateToProject dismisses both center panes (rail nav clears the task view)', () => {
+    useNavigationStore.getState().openBacklog();
+    expect(useNavigationStore.getState().backlogOpen).toBe(true);
+    useNavigationStore.getState().navigateToProject(7);
+    const s = useNavigationStore.getState();
+    expect(s.backlogOpen).toBe(false);
+    expect(s.humanReviewOpen).toBe(false);
+    expect(s.activeProjectId).toBe(7);
+    expect(s.activeView).toBe('project');
+  });
+
+  it('navigateToSessions dismisses both center panes', () => {
+    useNavigationStore.getState().openBacklog();
+    useNavigationStore.getState().navigateToSessions();
+    const s = useNavigationStore.getState();
+    expect(s.backlogOpen).toBe(false);
+    expect(s.humanReviewOpen).toBe(false);
+    expect(s.activeView).toBe('sessions');
+  });
 });

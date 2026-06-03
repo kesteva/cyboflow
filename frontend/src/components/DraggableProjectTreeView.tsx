@@ -865,6 +865,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // Done unconditionally (not gated on projectId) so a quick session with a
     // null projectId still dismisses the review pane.
     useNavigationStore.getState().closeHumanReview();
+    useNavigationStore.getState().closeBacklog();
     useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
@@ -878,6 +879,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const handleActiveRunClick = (runId: string, projectId: number) => {
     // Picking a run leaves the human-review overview for the workflow-run pane.
     useNavigationStore.getState().closeHumanReview();
+    useNavigationStore.getState().closeBacklog();
     useCyboflowStore.getState().setActiveRun(runId);
     useNavigationStore.getState().setActiveProjectId(projectId);
   };
