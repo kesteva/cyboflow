@@ -49,4 +49,26 @@ describe('buildBuiltInWorkflows', () => {
       );
     }
   });
+
+  it('planner.md surfaces human gates via AskUserQuestion and forbids silently passing a gate', () => {
+    const planner = buildBuiltInWorkflows().find((d) => d.name === 'planner');
+    expect(planner, 'planner descriptor present').toBeDefined();
+    const body = readFileSync(planner!.path, 'utf-8');
+
+    // The planner names AskUserQuestion as the gate mechanism.
+    expect(body, 'planner must name AskUserQuestion').toMatch(/AskUserQuestion/);
+    // approve-idea gate uses the `Approve idea` header (≤12 char wire limit).
+    // \s allows the soft line-break between "header" and the backtick'd header.
+    expect(body, 'approve-idea must use the `Approve idea` header').toMatch(
+      /header\s+`Approve idea`/,
+    );
+    // approve-plan gate uses the `Approve plan` header (≤12 char wire limit).
+    expect(body, 'approve-plan must use the `Approve plan` header').toMatch(
+      /header\s+`Approve plan`/,
+    );
+    // Hard rules forbid silently proceeding past a gate.
+    expect(body, 'Hard rules must forbid silently passing a gate').toMatch(
+      /never silently proceed past a gate/,
+    );
+  });
 });

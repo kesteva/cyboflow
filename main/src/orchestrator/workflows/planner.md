@@ -27,14 +27,20 @@ A selected idea is provided at the top of your prompt when one was chosen at
 launch (a `# Selected idea` block) — treat it as the raw idea to refine and do
 **not** re-capture it. Otherwise parse the user's free-form prompt.
 
+If the idea is ambiguous, use the **AskUserQuestion** tool to ask up to 2–3
+targeted clarifying questions before capturing the spec (rarely needed when an
+idea was selected at launch).
+
 ### Step `research` (optional)
 If the idea benefits from external context, pull in docs, prior art, and library
 references (web search / context7). Fold the findings into the idea body. Skip
 this step when the idea is already well understood.
 
 ### Step `approve-idea` (human gate)
-Pause for the user to approve, edit, or reject the idea spec. Do not proceed to
-refinement until the idea is approved.
+Use the **AskUserQuestion** tool to surface the idea spec for sign-off (header
+`Approve idea`, options Approve / Revise / Reject; put the full spec in the
+option markdown preview). Do not proceed to refinement until the user answers
+Approve.
 
 ## Phase 2 — Refine
 
@@ -55,8 +61,10 @@ Once tasks exist, the originating idea retires (it is decomposed); the children
 carry the flow forward.
 
 ### Step `approve-plan` (human gate)
-Surface the full task plan for the user to confirm scope, ordering, and
-acceptance criteria. On approval the tasks become ready for a Sprint run.
+Use the **AskUserQuestion** tool to surface the full task plan for sign-off
+(header `Approve plan`, options Approve / Revise; put the scope, ordering, and
+acceptance criteria in the option markdown preview). Do not proceed until the
+user answers Approve — on approval the tasks become ready for a Sprint run.
 
 ## Hard rules
 
@@ -64,3 +72,6 @@ acceptance criteria. On approval the tasks become ready for a Sprint run.
 - Never write planning state to disk — no per-idea or per-task markdown files
   and no plugin state directory. The database is the only store.
 - Report every step transition via `cyboflow_report_step` from this main session.
+- Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-plan`,
+  and any clarifying question); never silently proceed past a gate.
+  `cyboflow_report_step` is observational only and never substitutes for a gate.
