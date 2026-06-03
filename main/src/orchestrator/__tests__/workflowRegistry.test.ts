@@ -287,6 +287,74 @@ describe('WorkflowRegistry', () => {
         expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
       });
     });
+
+    it('excludes dropped legacy built-ins (soloflow/compound/prune) lingering from a pre-refactor DB', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint
+        // Simulate the stale rows a pre-refactor project DB still carries.
+        db.prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json, permission_mode) VALUES
+             ('wf-1-soloflow', 1, 'soloflow', '{}', 'default'),
+             ('wf-1-compound', 1, 'compound', '{}', 'default'),
+             ('wf-1-prune', 1, 'prune', '{}', 'default')`,
+        ).run();
+
+        const names = registry.listByProject(1).map((r) => r.name).sort();
+        expect(names).toEqual(['planner', 'sprint']);
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // reconcileBuiltIns
+  // -------------------------------------------------------------------------
+
+  describe('reconcileBuiltIns', () => {
+    it('re-points an existing built-in row at the in-repo prompt (pre-refactor plugin path -> in-repo)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // A pre-refactor row whose workflow_path points at the old plugin cache.
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+           VALUES ('wf-1-planner', 1, 'planner', '/old/plugins/cache/soloflow/planner.md', 'default')`,
+        ).run();
+
+        const descriptors = buildDescriptors(tmpDir); // real in-repo .md paths
+        const plannerPath = descriptors.find((d) => d.name === 'planner')!.path;
+        registry.reconcileBuiltIns(1, descriptors);
+
+        const row = db
+          .prepare("SELECT workflow_path FROM workflows WHERE id = 'wf-1-planner'")
+          .get() as { workflow_path: string };
+        expect(row.workflow_path).toBe(plannerPath);
+      });
+    });
+
+    it('inserts the built-ins for a fresh project', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.reconcileBuiltIns(7, buildDescriptors(tmpDir));
+        const names = registry.listByProject(7).map((r) => r.name).sort();
+        expect(names).toEqual(['planner', 'sprint']);
+      });
+    });
+
+    it('preserves user spec_json edits while re-pointing the path', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode, spec_json)
+           VALUES ('wf-1-sprint', 1, 'sprint', '/old/sprint.md', 'default', '{"phases":[]}')`,
+        ).run();
+
+        const descriptors = buildDescriptors(tmpDir);
+        const sprintPath = descriptors.find((d) => d.name === 'sprint')!.path;
+        registry.reconcileBuiltIns(1, descriptors);
+
+        const row = db
+          .prepare("SELECT workflow_path, spec_json FROM workflows WHERE id = 'wf-1-sprint'")
+          .get() as { workflow_path: string; spec_json: string };
+        expect(row.workflow_path).toBe(sprintPath);
+        expect(row.spec_json).toBe('{"phases":[]}');
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

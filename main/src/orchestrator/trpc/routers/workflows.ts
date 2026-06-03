@@ -3,8 +3,9 @@
  *
  * Implements list/get (read) and getDefinition/updateSpec/resetSpec/createCustom
  * (blueprint-editor) procedures backed by WorkflowRegistry.
- * Auto-seeds the two in-repo built-in workflows (Planner + Sprint) when a
- * project has none.
+ * Reconciles the two in-repo built-in workflows (Planner + Sprint) on every
+ * list — inserting them for a fresh project and re-pointing a pre-refactor
+ * project's rows at the current in-repo prompts.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
@@ -18,7 +19,7 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
 
 export const workflowsRouter = router({
-  /** List all workflows for a project, auto-seeding defaults when none exist. */
+  /** List all workflows for a project, reconciling the in-repo built-ins first. */
   list: protectedProcedure
     .input(z.object({ projectId: z.number().int().positive() }))
     .query(async ({ ctx, input }): Promise<WorkflowRow[]> => {
@@ -28,12 +29,13 @@ export const workflowsRouter = router({
           message: 'workflowRegistry not wired into tRPC context',
         });
       }
-      let workflows = ctx.workflowRegistry.listByProject(input.projectId);
-      if (workflows.length === 0) {
-        ctx.workflowRegistry.seed(input.projectId, buildBuiltInWorkflows());
-        workflows = ctx.workflowRegistry.listByProject(input.projectId);
-      }
-      return workflows;
+      // Reconcile the in-repo built-ins on every list: a fresh project gets
+      // planner/sprint inserted, and a pre-refactor project whose rows still
+      // point at the old plugin-cache prompt is re-pointed at the in-repo prompt
+      // (preserving any user spec_json edits). Dropped legacy built-ins are
+      // filtered out by listByProject.
+      ctx.workflowRegistry.reconcileBuiltIns(input.projectId, buildBuiltInWorkflows());
+      return ctx.workflowRegistry.listByProject(input.projectId);
     }),
 
   /** Get a single workflow by ID. */

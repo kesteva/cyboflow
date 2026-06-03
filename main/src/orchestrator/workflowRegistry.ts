@@ -49,6 +49,15 @@ export interface WorkflowDescriptor {
  */
 export const QUICK_WORKFLOW_NAME = '__quick__' as const;
 
+/**
+ * Built-in workflow names dropped in the 2-flow refactor (SoloFlow removal).
+ * Rows may still linger in a pre-refactor project DB. listByProject() filters
+ * them so they never appear in the picker — they are NOT deleted, because
+ * workflow_runs.workflow_id has no ON DELETE CASCADE and historical runs would
+ * orphan. A future migration can clean them up with proper FK handling.
+ */
+export const LEGACY_DROPPED_WORKFLOW_NAMES = ['soloflow', 'compound', 'prune'] as const;
+
 // ---------------------------------------------------------------------------
 // WorkflowRegistry
 // ---------------------------------------------------------------------------
@@ -121,6 +130,51 @@ export class WorkflowRegistry {
     });
 
     seedTx();
+  }
+
+  /**
+   * Reconcile the in-repo built-in workflows for a project.
+   *
+   * Unlike seed() (INSERT OR IGNORE — first-write-wins), this UPSERTs each
+   * built-in: a row from a PRIOR app version that still points at the old
+   * SoloFlow plugin-cache `workflow_path` is re-pointed at the current in-repo
+   * prompt, and its `permission_mode` is re-derived from that file. A fresh
+   * project gets the rows inserted. `spec_json` (user step edits) is preserved.
+   *
+   * Dropped legacy built-ins (soloflow/compound/prune) are intentionally NOT
+   * removed here — listByProject() filters them from the picker instead (see
+   * LEGACY_DROPPED_WORKFLOW_NAMES; deleting them would orphan historical runs).
+   */
+  reconcileBuiltIns(projectId: number, workflowDescriptors: WorkflowDescriptor[]): void {
+    const upsert = this.db.prepare(`
+      INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        workflow_path = excluded.workflow_path,
+        permission_mode = excluded.permission_mode
+    `);
+
+    const reconcileTx = this.db.transaction(() => {
+      for (const descriptor of workflowDescriptors) {
+        let permissionMode: PermissionMode = 'default';
+        try {
+          const md = readFileSync(descriptor.path, 'utf-8');
+          permissionMode = this.extractPermissionMode(md);
+        } catch (err) {
+          this.logger.error(
+            `WorkflowRegistry.reconcileBuiltIns: could not read workflow file, defaulting permission_mode to 'default'`,
+            {
+              path: descriptor.path,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+        }
+        const deterministicId = `wf-${projectId}-${descriptor.name}`;
+        upsert.run(deterministicId, projectId, descriptor.name, descriptor.path, permissionMode);
+      }
+    });
+
+    reconcileTx();
   }
 
   /**
@@ -256,13 +310,19 @@ export class WorkflowRegistry {
    * workflow pickers (TASK-787 / IDEA-027).
    */
   listByProject(projectId: number): WorkflowRow[] {
+    // Exclude the __quick__ sentinel AND any dropped legacy built-ins
+    // (soloflow/compound/prune) that linger in a pre-refactor project DB — they
+    // must never appear in the user-facing picker. Filtered, not deleted, to
+    // preserve the workflow_runs FK for historical runs.
+    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
+    const placeholders = excluded.map(() => '?').join(', ');
     const stmt = this.db.prepare(
       `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
        FROM workflows
-       WHERE project_id = ? AND name != ?
+       WHERE project_id = ? AND name NOT IN (${placeholders})
        ORDER BY name`,
     );
-    return stmt.all(projectId, QUICK_WORKFLOW_NAME) as WorkflowRow[];
+    return stmt.all(projectId, ...excluded) as WorkflowRow[];
   }
 
   /**

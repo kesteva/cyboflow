@@ -25,6 +25,8 @@ export interface WorkflowRegistryLike {
   listByProject(projectId: number): WorkflowRow[];
   getById(workflowId: string): WorkflowRow | null;
   seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
+  /** Upsert the in-repo built-ins, re-pointing pre-refactor rows at the in-repo prompts. */
+  reconcileBuiltIns(projectId: number, descriptors: WorkflowDescriptor[]): void;
   /** Persist an edited definition onto a workflow's `spec_json` (editor Save). */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void;
   /** Reset a built-in workflow's spec back to its static default. */
