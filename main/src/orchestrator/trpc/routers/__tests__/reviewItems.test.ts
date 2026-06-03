@@ -31,6 +31,7 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { ReviewItemRouter } from '../../../reviewItemRouter';
 import { TaskChangeRouter } from '../../../taskChangeRouter';
+import { HumanStepManager } from '../../../humanStepManager';
 import type { DatabaseLike } from '../../../types';
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,7 @@ function buildCaller(): {
   const adapter = dbAdapter(db);
   ReviewItemRouter.initialize(adapter);
   TaskChangeRouter.initialize(adapter);
+  HumanStepManager.initialize(adapter);
   const caller = appRouter.createCaller(createContext({ db: adapter }));
   return { caller, db, adapter };
 }
@@ -80,6 +82,7 @@ function buildCaller(): {
 afterEach(() => {
   ReviewItemRouter._resetForTesting();
   TaskChangeRouter._resetForTesting();
+  HumanStepManager._resetForTesting();
 });
 
 describe('cyboflow.reviewItems.list / get', () => {
@@ -149,7 +152,9 @@ describe('cyboflow.reviewItems.resolve / dismiss', () => {
       reviewItemId: created.reviewItemId,
       resolution: 'done',
     });
-    expect(res).toEqual({ reviewItemId: created.reviewItemId });
+    // P4: resolve now returns a `resumed` flag (false for a non-blocking,
+    // non-run-bound finding — there is no run to auto-resume).
+    expect(res).toEqual({ reviewItemId: created.reviewItemId, resumed: false });
     const row = db.prepare('SELECT status, resolution FROM review_items WHERE id = ?').get(created.reviewItemId) as {
       status: string;
       resolution: string;

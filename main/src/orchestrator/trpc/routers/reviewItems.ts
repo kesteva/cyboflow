@@ -36,6 +36,7 @@ import {
   type ReviewItemDbRow,
 } from '../../reviewItemRouter';
 import { TaskChangeRouter, TaskChangeError } from '../../taskChangeRouter';
+import { HumanStepManager } from '../../humanStepManager';
 import { eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -161,6 +162,13 @@ export const reviewItemsRouter = router({
    * Resolve a review item (triage). Forwards to ReviewItemRouter.applyReviewItem
    * with op='resolve' as actor='user'. Re-resolving a terminal item surfaces
    * code:'invalid_status' (TRPCError 'CONFLICT').
+   *
+   * P4 AUTO-RESUME: resolving a BLOCKING item bound to a run triggers
+   * aggregate-unblock — after the chokepoint resolve commits, HumanStepManager
+   * transitions the run awaiting_review -> running ONLY when no other pending
+   * blocking review_item remains for that run (a permission gate or a sibling
+   * decision still open keeps the run paused). The chokepoint owns the audit +
+   * renderer emit; the resume is a follow-on transition.
    */
   resolve: protectedProcedure
     .input(
@@ -170,7 +178,14 @@ export const reviewItemsRouter = router({
         resolution: z.string().nullable().optional(),
       }),
     )
-    .mutation(async ({ input }): Promise<{ reviewItemId: string }> => {
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string; resumed: boolean }> => {
+      const db = requireDb(ctx.db, 'resolve');
+      // Read the item's run binding + blocking flag BEFORE resolving (the resolve
+      // does not change either) so we know whether to apply aggregate-unblock.
+      const before = db
+        .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
+        .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
+
       try {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
           op: 'resolve',
@@ -178,7 +193,13 @@ export const reviewItemsRouter = router({
           reviewItemId: input.reviewItemId,
           ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
         });
-        return { reviewItemId };
+
+        // Aggregate-unblock auto-resume for a blocking, run-bound item.
+        let resumed = false;
+        if (before?.blocking === 1 && before.runId) {
+          resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+        }
+        return { reviewItemId, resumed };
       } catch (err) {
         rethrowAsTRPCError(err);
       }

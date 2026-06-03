@@ -28,6 +28,8 @@ import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
+import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
+import { HumanStepManager } from './orchestrator/humanStepManager';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -531,6 +533,15 @@ async function initializeServices() {
   // getInstance(); its taskChangeEvents emitter is consumed directly by the
   // cyboflow.tasks.onTaskChanged subscription (no bridge needed here).
   const taskChangeRouter = TaskChangeRouter.initialize(cyboflowDb);
+
+  // Unified review-inbox write chokepoint (migration 016 / P3) + the human-gate
+  // run-pause manager (P4). ReviewItemRouter is the single serialized writer for
+  // `review_items`; the reviewItems tRPC router + the report-finding MCP handler
+  // reach it via getInstance(). HumanStepManager owns the human=true step gate:
+  // it opens a blocking decision review_item (pausing the run) and applies
+  // aggregate-unblock auto-resume when the run's last blocking item resolves.
+  ReviewItemRouter.initialize(cyboflowDb);
+  HumanStepManager.initialize(cyboflowDb);
 
   // Concrete publisher: adapts BrowserWindow.webContents.send to the
   // StreamEventPublisher interface.  This is the only place in the codebase

@@ -54,6 +54,7 @@ import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
+import { HumanStepManager } from '../humanStepManager';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
 import type {
   ReviewItemEntityType,
@@ -222,7 +223,7 @@ export class McpQueryHandler {
           this.handleSubmitCheckpoint(msg, client);
           break;
         case 'mcp-report-step':
-          this.handleReportStep(msg, client);
+          await this.handleReportStep(msg, client);
           break;
         case 'mcp-create-task':
           await this.handleCreateTask(msg, client);
@@ -398,10 +399,10 @@ export class McpQueryHandler {
    * and must not fabricate one (CLAUDE.md silent-no-op rule applies only to
    * loggers actually in scope; the bridge falls back to console.warn).
    */
-  private handleReportStep(
+  private async handleReportStep(
     msg: Extract<McpQueryMessage, { type: 'mcp-report-step' }>,
     client: net.Socket,
-  ): void {
+  ): Promise<void> {
     if (msg.runId === 'orchestrator') {
       this.writeResponse(client, {
         type: 'mcp-query-response',
@@ -437,12 +438,10 @@ export class McpQueryHandler {
     // Validate stepId against the run's RESOLVED definition — NOT the static
     // WORKFLOW_DEFINITIONS constant (which is now only the seed/fallback).
     const def = resolveWorkflowDefinition(name, specJson);
-    const validStepIds =
-      def === null
-        ? new Set<string>()
-        : new Set(def.phases.flatMap((p) => p.steps).map((s) => s.id));
+    const allSteps = def === null ? [] : def.phases.flatMap((p) => p.steps);
+    const step = allSteps.find((s) => s.id === msg.stepId);
 
-    if (!validStepIds.has(msg.stepId)) {
+    if (!step) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
@@ -467,11 +466,41 @@ export class McpQueryHandler {
       return;
     }
 
+    // P4 human gate: a step marked `human: true` PAUSES the run. When the agent
+    // reports it (status 'running'), open a blocking decision review_item and
+    // transition the run running -> awaiting_review so it does NOT transparently
+    // pass the step. The gate is idempotent per run+step (a later 'done' report
+    // for the same step does not open a second gate). The run only advances once
+    // a human resolves the gate (aggregate-unblock auto-resume, HumanStepManager).
+    let humanGate: { opened: boolean; reviewItemId: string | null } | undefined;
+    if (step.human === true && status === 'running') {
+      try {
+        const reviewItemId = await HumanStepManager.getInstance().openHumanGate(
+          msg.runId,
+          msg.stepId,
+          step.name,
+        );
+        humanGate = { opened: reviewItemId !== null, reviewItemId };
+      } catch (err) {
+        // Fail-soft: a gate-open failure must not crash the step report. The run
+        // simply does not pause (logged) — better than dropping the step entirely.
+        this.logger?.error('[Cyboflow MCP Query] human-gate open failed (run not paused)', {
+          runId: msg.runId,
+          stepId: msg.stepId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
-      data: { step_id: msg.stepId, status },
+      data: {
+        step_id: msg.stepId,
+        status,
+        ...(humanGate ? { human_gate: humanGate.opened, review_item_id: humanGate.reviewItemId } : {}),
+      },
     });
   }
 
