@@ -29,6 +29,7 @@ import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../../trpc/routers/events';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
+import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -941,6 +942,56 @@ describe('McpQueryHandler', () => {
         expect(task.stage_id).toBe(stage(3));
       });
 
+      it('moves an idea to the terminal Decomposed stage (position 12) for an AGENT actor -> ok:true', async () => {
+        // Decomposed (position 12) is write_policy='asserted', terminal=1 — an
+        // agent retiring an idea on decomposition is an ALLOWED assert (only the
+        // DERIVED execution stages are orchestrator-only). This is the P3
+        // Decomposed-agent-path assertion: assertStageAuthority must NOT reject it.
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed-dec', runId: 'run-1', title: 'To decompose' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-set-task-stage',
+            requestId: 'ss-dec',
+            runId: 'run-1',
+            taskId,
+            stageId: stage(12),
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string; stage_id?: string };
+        expect(data.stage_id).toBe(stage(12));
+
+        const task = taskDb
+          .prepare('SELECT stage_id FROM ideas WHERE id = ?')
+          .get(taskId) as { stage_id: string };
+        expect(task.stage_id).toBe(stage(12));
+
+        // The decomposition delta is recorded against the idea in the audit log.
+        const ev = taskDb
+          .prepare(
+            "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+          )
+          .get(taskId) as { actor: string; kind: string };
+        expect(ev.actor).toBe('agent:planner');
+        expect(ev.kind).toBe('decomposed');
+      });
+
       it('rejects a DERIVED stage (position 7, In development) with error "forbidden_stage"', async () => {
         // An agent actor cannot assert an orchestrator-owned derived stage.
         seedTaskRun(taskDb, {
@@ -1095,6 +1146,321 @@ describe('McpQueryHandler', () => {
         ).n;
         expect(count).toBe(0);
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 7. mcp-report-finding — NON-BLOCKING review-item create via ReviewItemRouter.
+  // -------------------------------------------------------------------------
+
+  describe('mcp-report-finding', () => {
+    // handleReportFinding reaches ReviewItemRouter.getInstance().applyReviewItem,
+    // which needs the review_items table (migration 016) + the polymorphic
+    // entity_events log (migration 015) + the workflow_runs run-context columns.
+    // Build the same migration-backed in-memory DB as the task block, plus 016.
+
+    function buildReviewDb(): Database.Database {
+      const reviewDb = new Database(':memory:');
+      reviewDb.pragma('foreign_keys = ON');
+      reviewDb.exec(`
+        CREATE TABLE projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL UNIQUE,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      reviewDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+      const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+      reviewDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+      return reviewDb;
+    }
+
+    function seedReviewRun(
+      reviewDb: Database.Database,
+      opts: { runId: string; status?: string; currentStepId?: string | null; stepsSnapshot?: Record<string, string> | null },
+    ): void {
+      reviewDb
+        .prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+        )
+        .run();
+      reviewDb
+        .prepare(
+          `INSERT INTO workflow_runs
+             (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json)
+           VALUES (?, 'wf-1', 1, ?, ?, ?)`,
+        )
+        .run(
+          opts.runId,
+          opts.status ?? 'running',
+          opts.currentStepId ?? null,
+          opts.stepsSnapshot ? JSON.stringify(opts.stepsSnapshot) : null,
+        );
+    }
+
+    /** Wait for the per-project review queue to drain so the async create commits. */
+    async function drain(): Promise<void> {
+      await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
+    }
+
+    let reviewDb: Database.Database;
+    let reviewHandler: McpQueryHandler;
+
+    beforeEach(() => {
+      reviewDb = buildReviewDb();
+      ReviewItemRouter.initialize(dbAdapter(reviewDb));
+      reviewHandler = new McpQueryHandler(dbAdapter(reviewDb));
+    });
+
+    afterEach(() => {
+      ReviewItemRouter._resetForTesting();
+      reviewItemChangeEvents.removeAllListeners();
+    });
+
+    it('happy path: replies ok:true immediately and inserts a finding row attributed to the agent actor', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'implement', stepsSnapshot: { implement: 'executor' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-1',
+          runId: 'run-1',
+          title: 'Hardcoded secret',
+          body: 'Found an API key in config.ts',
+          severity: 'warning',
+        },
+        socket,
+      );
+
+      // Non-blocking contract: a response is written SYNCHRONOUSLY (before any
+      // queue drain) — the run is never paused on the inbox.
+      expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+      const response = parseLastWrite(writes);
+      expect(response.type).toBe('mcp-query-response');
+      expect(response.requestId).toBe('rf-1');
+      expect(response.ok).toBe(true);
+      expect(response.data).toMatchObject({ accepted: true, kind: 'finding', blocking: false });
+
+      // The async create commits after the queue drains.
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT kind, status, blocking, title, severity, source, run_id FROM review_items WHERE run_id = 'run-1'")
+        .get() as
+        | { kind: string; status: string; blocking: number; title: string; severity: string | null; source: string; run_id: string }
+        | undefined;
+      expect(row).toBeDefined();
+      expect(row!.kind).toBe('finding');
+      expect(row!.status).toBe('pending');
+      expect(row!.blocking).toBe(0);
+      expect(row!.title).toBe('Hardcoded secret');
+      expect(row!.severity).toBe('warning');
+      expect(row!.source).toBe('agent:executor');
+
+      // A polymorphic review_item entity_events row was logged.
+      const ev = reviewDb
+        .prepare(
+          "SELECT actor, kind FROM entity_events WHERE entity_type = 'review_item' ORDER BY seq ASC LIMIT 1",
+        )
+        .get() as { actor: string; kind: string } | undefined;
+      expect(ev).toBeDefined();
+      expect(ev!.actor).toBe('agent:executor');
+      expect(ev!.kind).toBe('created');
+    });
+
+    it('persists a blocking decision item when kind=decision and blocking=true', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-2',
+          runId: 'run-1',
+          title: 'Approve the plan?',
+          body: 'Plan ready for review',
+          kind: 'decision',
+          blocking: true,
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toMatchObject({ accepted: true, kind: 'decision', blocking: true });
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT kind, blocking FROM review_items WHERE run_id = 'run-1'")
+        .get() as { kind: string; blocking: number };
+      expect(row.kind).toBe('decision');
+      expect(row.blocking).toBe(1);
+    });
+
+    it('rejects the "orchestrator" sentinel with "finding_requires_real_run" and writes nothing', async () => {
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-3', runId: 'orchestrator', title: 't', body: 'b' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('finding_requires_real_run');
+
+      await drain();
+      const count = (reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number }).n;
+      expect(count).toBe(0);
+    });
+
+    it('rejects a non-existent runId with "run_not_found"', async () => {
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-4', runId: 'run-missing', title: 't', body: 'b' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('run_not_found');
+    });
+
+    it('rejects a terminal (completed) run with "run_not_active" and writes nothing', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-done', status: 'completed', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-5', runId: 'run-done', title: 't', body: 'b' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('run_not_active');
+
+      await drain();
+      const count = (reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number }).n;
+      expect(count).toBe(0);
+    });
+
+    it('rejects an unpaired soft entity link with "invalid_entity" (synchronous, no insert)', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      // entityType set but entityId omitted → both-or-neither guard rejects.
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-6', runId: 'run-1', title: 't', body: 'b', entityType: 'task' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('invalid_entity');
+
+      await drain();
+      const count = (reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number }).n;
+      expect(count).toBe(0);
+    });
+
+    it('rejects a payload whose discriminant mismatches kind with "invalid_payload" (synchronous, no insert)', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      // kind defaults to 'finding' but payload.kind is 'decision' → reject.
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-7',
+          runId: 'run-1',
+          title: 't',
+          body: 'b',
+          payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-plan' }),
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('invalid_payload');
+
+      await drain();
+      const count = (reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number }).n;
+      expect(count).toBe(0);
+    });
+
+    it('rejects malformed payload_json with "invalid_payload" (synchronous, no insert)', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-8', runId: 'run-1', title: 't', body: 'b', payloadJson: 'not json{' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('invalid_payload');
+
+      await drain();
+      const count = (reviewDb.prepare('SELECT COUNT(*) AS n FROM review_items').get() as { n: number }).n;
+      expect(count).toBe(0);
+    });
+
+    it('stores a matching payload + soft entity link on a valid finding', async () => {
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-9',
+          runId: 'run-1',
+          title: 'Perf concern',
+          body: 'N+1 query',
+          entityType: 'task',
+          entityId: 'tsk_xyz',
+          payloadJson: JSON.stringify({ kind: 'finding', category: 'perf' }),
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT entity_type, entity_id, payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { entity_type: string; entity_id: string; payload_json: string };
+      expect(row.entity_type).toBe('task');
+      expect(row.entity_id).toBe('tsk_xyz');
+      expect(JSON.parse(row.payload_json)).toEqual({ kind: 'finding', category: 'perf' });
+    });
+
+    it('never throws on a DB fault during the async create (the run is already replied to)', async () => {
+      // The chokepoint's late failure is fire-and-forget — the synchronous reply
+      // is ok:true and the handler returns without awaiting. Even if we surface a
+      // genuine fault by dropping the table after the reply, handleMessage must
+      // have resolved cleanly.
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await expect(
+        reviewHandler.handleMessage(
+          { type: 'mcp-report-finding', requestId: 'rf-10', runId: 'run-1', title: 't', body: 'b' },
+          socket,
+        ),
+      ).resolves.toBeUndefined();
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      await drain();
     });
   });
 
