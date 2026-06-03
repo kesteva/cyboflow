@@ -54,7 +54,6 @@ import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
-import { HumanStepManager } from '../humanStepManager';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
 import type {
   ReviewItemEntityType,
@@ -466,32 +465,13 @@ export class McpQueryHandler {
       return;
     }
 
-    // P4 human gate: a step marked `human: true` PAUSES the run. When the agent
-    // reports it (status 'running'), open a blocking decision review_item and
-    // transition the run running -> awaiting_review so it does NOT transparently
-    // pass the step. The gate is idempotent per run+step (a later 'done' report
-    // for the same step does not open a second gate). The run only advances once
-    // a human resolves the gate (aggregate-unblock auto-resume, HumanStepManager).
-    let humanGate: { opened: boolean; reviewItemId: string | null } | undefined;
-    if (step.human === true && status === 'running') {
-      try {
-        const reviewItemId = await HumanStepManager.getInstance().openHumanGate(
-          msg.runId,
-          msg.stepId,
-          step.name,
-        );
-        humanGate = { opened: reviewItemId !== null, reviewItemId };
-      } catch (err) {
-        // Fail-soft: a gate-open failure must not crash the step report. The run
-        // simply does not pause (logged) — better than dropping the step entirely.
-        this.logger?.error('[Cyboflow MCP Query] human-gate open failed (run not paused)', {
-          runId: msg.runId,
-          stepId: msg.stepId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
+    // Report-step is OBSERVATIONAL: it records the run's current step for the
+    // progress rail and never changes the run's lifecycle state. Human steps
+    // (approve-idea / approve-plan / human-review) are AGENT-driven — the agent
+    // pauses and asks via AskUserQuestion, which QuestionRouter surfaces as a
+    // blocking `decision` review_item. The orchestrator must NOT pause the run on
+    // a human-step report: doing so blocks the very agent that needs to ask (its
+    // own tool calls then fail the status='running' guard → deadlock).
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
@@ -499,7 +479,6 @@ export class McpQueryHandler {
       data: {
         step_id: msg.stepId,
         status,
-        ...(humanGate ? { human_gate: humanGate.opened, review_item_id: humanGate.reviewItemId } : {}),
       },
     });
   }
