@@ -88,12 +88,17 @@ vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 // ---------------------------------------------------------------------------
 
 // vi.hoisted so the relay-mutation spies exist at vi.mock-factory hoist time.
-const { relayInputMutate, relayResizeMutate } = vi.hoisted(() => ({
+const { relayInputMutate, relayResizeMutate, getPtyBacklogQuery } = vi.hoisted(() => ({
   relayInputMutate: vi.fn<(input: { runId: string; text: string }) => Promise<{ success: true }>>(
     async () => ({ success: true }),
   ),
   relayResizeMutate: vi.fn<(input: { runId: string; cols: number; rows: number }) => Promise<{ success: true }>>(
     async () => ({ success: true }),
+  ),
+  // Replay-on-attach backlog fetch (blank-xterm fix). Default: empty backlog so
+  // existing assertions about live bytes are unaffected.
+  getPtyBacklogQuery: vi.fn<(input: { runId: string }) => Promise<{ backlog: string }>>(
+    async () => ({ backlog: '' }),
   ),
 }));
 
@@ -103,6 +108,7 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         relayInput: { mutate: relayInputMutate },
         relayResize: { mutate: relayResizeMutate },
+        getPtyBacklog: { query: getPtyBacklogQuery },
       },
     },
   },
@@ -168,6 +174,8 @@ beforeEach(() => {
   onDataHandler = undefined;
   relayInputMutate.mockClear();
   relayResizeMutate.mockClear();
+  getPtyBacklogQuery.mockClear();
+  getPtyBacklogQuery.mockResolvedValue({ backlog: '' });
   termMock.cols = 80;
   termMock.rows = 24;
   resizeObserverCb = undefined;
@@ -203,6 +211,15 @@ function deliver(chunk: string): void {
   });
 }
 
+// Flush the mount-time replay-backlog fetch (a resolved-microtask trpc query) so
+// the replay gate opens and subsequently-delivered live chunks write through
+// synchronously (blank-xterm fix gates live writes until the backlog is fetched).
+async function flushBacklog(): Promise<void> {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -223,6 +240,15 @@ describe('InteractiveTerminalView', () => {
     deliver(chunk);
 
     expect(termMock.write).toHaveBeenCalledWith(chunk);
+  });
+
+  it('fetches the retained PTY backlog on mount for replay-on-attach (blank-xterm fix)', async () => {
+    render(<InteractiveTerminalView runId="run-replay" />);
+    await flushBacklog();
+    // The mount effect requests the server-side backlog so claude's startup paint
+    // can be replayed into a late-mounting xterm (the write path is exercised in
+    // the manager/facade backend tests; renderable-gated writes are env-limited here).
+    expect(getPtyBacklogQuery).toHaveBeenCalledWith({ runId: 'run-replay' });
   });
 
   it('never routes raw bytes into cyboflowStore.streamEvents (store-isolation)', () => {

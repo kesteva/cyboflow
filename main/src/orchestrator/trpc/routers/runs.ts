@@ -130,6 +130,14 @@ export interface RelayDeps {
    * live-session collaborators (relay + end-session).
    */
   endSession(runId: string): Promise<void>;
+  /**
+   * Return the retained interactive-PTY backlog for a run (IDEA-030 blank-xterm
+   * fix). The renderer fetches this on mount and REPLAYS it into the xterm so a
+   * late-mounting terminal reconstructs claude's current screen instead of
+   * rendering blank (the live `cyboflow:pty:<runId>` channel drops bytes emitted
+   * before a listener exists). Empty string for an unknown/SDK run.
+   */
+  getPtyBacklog(runId: string): string;
 }
 
 let relayDeps: RelayDeps | null = null;
@@ -497,6 +505,26 @@ export const runsRouter = router({
       }
       relayDeps.relayResize(input.runId, input.cols, input.rows);
       return { success: true };
+    }),
+
+  /**
+   * Return the retained interactive-PTY backlog for a run (IDEA-030 blank-xterm
+   * fix). InteractiveTerminalView calls this once on mount and replays the bytes
+   * into the xterm BEFORE live `cyboflow:pty:<runId>` chunks, so claude's startup
+   * TUI paint (emitted before the renderer subscribed) is reconstructed instead of
+   * lost. A read-only query; returns '' for the SDK substrate / unknown run.
+   * Throws METHOD_NOT_SUPPORTED until setRelayDeps() is wired.
+   */
+  getPtyBacklog: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ input }): { backlog: string } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      return { backlog: relayDeps.getPtyBacklog(input.runId) };
     }),
 
   /**

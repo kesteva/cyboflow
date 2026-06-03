@@ -185,8 +185,14 @@ export function InteractiveTerminalView({
     // container has produced valid renderer dimensions, so term.write() is safe.
     let opened = false;
     let renderable = false;
-    // PTY bytes that arrive before the container is laid out are buffered here
-    // and flushed on the first successful fit — none lost, none written early.
+    // `liveSeen`: a LIVE PTY byte has arrived. Once true the live stream owns the
+    // screen, so a late-resolving replay backlog (blank-xterm fix) is SKIPPED — it
+    // would be stale. This keeps live writes immediate (never gated on the async
+    // backlog fetch) while still restoring claude's startup paint when the run is
+    // idle (the actual blank-xterm case: nothing live arrives before the backlog).
+    let liveSeen = false;
+    // PTY bytes that arrive before the container is laid out are buffered here and
+    // flushed on the first successful fit — none lost, none written early.
     const pending: string[] = [];
 
     const term = new Terminal({
@@ -200,6 +206,15 @@ export function InteractiveTerminalView({
 
     const fit = new FitAddon();
     term.loadAddon(fit);
+
+    // Flush buffered PTY bytes (backlog + any pre-layout live bytes, in arrival
+    // order) into the terminal once the container is renderable (measured).
+    const flushPending = (): void => {
+      if (disposed || !renderable || pending.length === 0) return;
+      const buffered = pending.join('');
+      pending.length = 0;
+      writeWithAutoScroll(term, buffered);
+    };
 
     // Defer term.open() until the container has a non-zero layout box. xterm
     // measures the character cell at open() time; opening into a 0×0 box — which
@@ -224,11 +239,7 @@ export function InteractiveTerminalView({
         return;
       }
       renderable = true;
-      if (pending.length > 0) {
-        const buffered = pending.join('');
-        pending.length = 0;
-        writeWithAutoScroll(term, buffered);
-      }
+      flushPending();
     };
 
     // Subscribe immediately so no PTY bytes are lost while we wait for layout.
@@ -238,6 +249,7 @@ export function InteractiveTerminalView({
       runId,
       onData: (chunk) => {
         if (disposed) return;
+        liveSeen = true;
         if (!renderable) {
           pending.push(chunk);
           return;
@@ -245,6 +257,28 @@ export function InteractiveTerminalView({
         writeWithAutoScroll(term, chunk);
       },
     });
+
+    // Replay-on-attach (blank-xterm fix): the live cyboflow:pty channel only
+    // delivers bytes emitted AFTER the subscribe above, so claude's startup TUI
+    // paint (emitted before this view mounted) is missing and the terminal would
+    // render blank until the next repaint. Fetch the server-side backlog and write
+    // it as the FIRST content — but ONLY if no live byte has arrived yet (else the
+    // live stream already owns the screen and the backlog is stale). Idle claude
+    // (the blank-xterm case) sees no live bytes before the backlog, so its screen
+    // is restored. Fail-soft: an unwired/errored query just leaves the live path.
+    void trpc.cyboflow.runs.getPtyBacklog
+      .query({ runId })
+      .then(({ backlog }) => {
+        if (disposed || !backlog || liveSeen) return;
+        if (!renderable) {
+          pending.unshift(backlog);
+          return;
+        }
+        writeWithAutoScroll(term, backlog);
+      })
+      .catch(() => {
+        /* no backlog available — proceed with live bytes only */
+      });
 
     // Raw-keystroke relay (TASK-817). Bound ONCE here; gated on the per-run
     // "Interact anyway" flag via relayEnabledRef so it stays inert by default

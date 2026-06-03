@@ -534,6 +534,75 @@ describe('SubstrateDispatchFacade — pty-output fan-in (interactive only)', () 
 });
 
 // ---------------------------------------------------------------------------
+// PTY backlog (replay-on-attach, blank-xterm fix) — interactive manager ONLY
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — PTY backlog for replay-on-attach', () => {
+  // Mirror of the facade's PTY_BACKLOG_CAP_BYTES (module-private).
+  const CAP = 256 * 1024;
+  const ptyChunk = (runId: string, data: string) => ({
+    panelId: runId,
+    sessionId: runId,
+    runId,
+    type: 'pty',
+    data,
+    timestamp: new Date(),
+  });
+
+  it('accumulates pty-output bytes per run; getPtyBacklog returns them concatenated verbatim', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk(run.id, '\x1b[2Jhel'));
+    interactive.emit('pty-output', ptyChunk(run.id, 'lo paint'));
+
+    expect(facade.getPtyBacklog(run.id)).toBe('\x1b[2Jhello paint');
+  });
+
+  it('caps the backlog to the last CAP bytes (keeps the recent ANSI tail)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk(run.id, 'A'.repeat(CAP)));
+    interactive.emit('pty-output', ptyChunk(run.id, 'TAIL'));
+
+    const backlog = facade.getPtyBacklog(run.id);
+    expect(backlog.length).toBe(CAP);
+    expect(backlog.endsWith('TAIL')).toBe(true);
+  });
+
+  it('clears a run backlog on its REPL exit (panelId === runId)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk(run.id, 'paint'));
+    expect(facade.getPtyBacklog(run.id)).toBe('paint');
+
+    interactive.emit('exit', { panelId: run.id, sessionId: run.id, exitCode: 0, signal: null });
+    expect(facade.getPtyBacklog(run.id)).toBe('');
+  });
+
+  it('getPtyBacklog returns "" for an unknown / SDK run (no backlog entry)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    expect(facade.getPtyBacklog('never-seen')).toBe('');
+  });
+
+  it('dispose() clears all retained backlogs', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), makeRegistry(run), makeSpyLogger());
+    interactive.emit('pty-output', ptyChunk(run.id, 'paint'));
+    facade.dispose();
+    expect(facade.getPtyBacklog(run.id)).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cross-substrate envelope parity through bridgeEvents()
 // ---------------------------------------------------------------------------
 

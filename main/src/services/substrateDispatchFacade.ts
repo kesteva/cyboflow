@@ -47,6 +47,15 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
 type ForwardHandler = (payload: unknown) => void;
 
 /**
+ * Bytes of interactive-PTY output retained per run for replay-on-attach
+ * (IDEA-030 blank-xterm fix). Capped to the last N bytes so a long session does
+ * not grow unbounded; sized to comfortably hold claude's full-screen TUI repaint
+ * (cursor/colour state) so a late-mounting InteractiveTerminalView reconstructs
+ * the current screen rather than rendering blank.
+ */
+const PTY_BACKLOG_CAP_BYTES = 256 * 1024;
+
+/**
  * Narrow capability interface for the interactive manager's PTY resize seam.
  * `AbstractCliManager` does NOT expose a resize method today (PTY geometry is
  * pinned 80×30 at AbstractCliManager.ts:577-578,614-615); the seam ON the
@@ -104,6 +113,18 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   // deliberately NOT subscribed — the SDK path is structurally untouched.
   private readonly interactiveTurnEndHandler: ForwardHandler;
 
+  /**
+   * Per-run rolling backlog of the interactive PTY's VERBATIM output bytes
+   * (IDEA-030 blank-xterm fix). The raw `cyboflow:pty:<runId>` channel is
+   * fire-and-forget — Electron drops any webContents.send with no listener, so
+   * claude's startup TUI paint is lost before InteractiveTerminalView mounts and
+   * subscribes. We retain a bounded tail (PTY_BACKLOG_CAP_BYTES) here so the
+   * renderer can REPLAY it on attach (getPtyBacklog), reconstructing the current
+   * screen. Cleared per run on 'exit'. Interactive-only by construction (only the
+   * interactive manager emits 'pty-output').
+   */
+  private readonly ptyBacklog = new Map<string, string>();
+
   constructor(
     private readonly sdkManager: AbstractCliManager,
     private readonly interactiveManager: AbstractCliManager,
@@ -118,10 +139,18 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkOutputHandler = (payload) => this.emit('output', payload);
     this.sdkExitHandler = (payload) => this.emit('exit', payload);
     this.interactiveOutputHandler = (payload) => this.emit('output', payload);
-    this.interactiveExitHandler = (payload) => this.emit('exit', payload);
-    // Raw-PTY fan-in — re-emit 'pty-output' by reference, mirroring the 'output'
-    // fan-in. Interactive manager ONLY (the SDK manager is never subscribed).
-    this.interactivePtyHandler = (payload) => this.emit('pty-output', payload);
+    this.interactiveExitHandler = (payload) => {
+      // Drop the run's PTY backlog when its REPL exits (panelId === runId).
+      this.clearPtyBacklog(payload);
+      this.emit('exit', payload);
+    };
+    // Raw-PTY fan-in — accumulate a bounded per-run backlog for replay-on-attach
+    // (blank-xterm fix), then re-emit 'pty-output' by reference (live channel
+    // unchanged). Interactive manager ONLY (the SDK manager is never subscribed).
+    this.interactivePtyHandler = (payload) => {
+      this.recordPtyBacklog(payload);
+      this.emit('pty-output', payload);
+    };
     // Turn-end fan-in — re-emit 'turn-end' by reference (TASK-818). Interactive
     // manager ONLY; the SDK manager never emits it.
     this.interactiveTurnEndHandler = (payload) => this.emit('turn-end', payload);
@@ -270,6 +299,33 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
+   * Return the retained interactive-PTY backlog for a run so a newly-mounted
+   * InteractiveTerminalView can REPLAY it and reconstruct claude's current screen
+   * (IDEA-030 blank-xterm fix). Empty string for an unknown/SDK run (the SDK
+   * substrate never emits 'pty-output', so it never has a backlog entry).
+   */
+  getPtyBacklog(runId: string): string {
+    return this.ptyBacklog.get(runId) ?? '';
+  }
+
+  /** Append a 'pty-output' chunk to the run's bounded backlog (last N bytes kept). */
+  private recordPtyBacklog(payload: unknown): void {
+    const evt = payload as { runId?: unknown; data?: unknown };
+    if (typeof evt.runId !== 'string' || typeof evt.data !== 'string') return;
+    const next = (this.ptyBacklog.get(evt.runId) ?? '') + evt.data;
+    this.ptyBacklog.set(
+      evt.runId,
+      next.length > PTY_BACKLOG_CAP_BYTES ? next.slice(-PTY_BACKLOG_CAP_BYTES) : next,
+    );
+  }
+
+  /** Drop a run's backlog on REPL exit (CliExitEvent.panelId === runId). */
+  private clearPtyBacklog(payload: unknown): void {
+    const evt = payload as { panelId?: unknown };
+    if (typeof evt.panelId === 'string') this.ptyBacklog.delete(evt.panelId);
+  }
+
+  /**
    * Tear down the fan-in subscriptions so a re-init does not leak listeners. Off()s
    * the exact bound handlers stored at construction and clears the facade's own
    * listeners + the panelOwners map. Idempotent.
@@ -283,6 +339,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.off('turn-end', this.interactiveTurnEndHandler);
     this.removeAllListeners();
     this.panelOwners.clear();
+    this.ptyBacklog.clear();
     this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');
   }
 }

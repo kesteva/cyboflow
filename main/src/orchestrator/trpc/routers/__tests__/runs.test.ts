@@ -124,6 +124,9 @@ function makeUnwiredRelayDeps(): RelayDeps {
     endSession: vi.fn(async () => {
       throw new Error('not wired');
     }),
+    getPtyBacklog: vi.fn(() => {
+      throw new Error('not wired');
+    }),
   };
 }
 
@@ -396,7 +399,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
     const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
-    setRelayDeps({ relayInput, relayResize, endSession });
+    setRelayDeps({ relayInput, relayResize, endSession, getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -415,7 +418,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
     const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
-    setRelayDeps({ relayInput, relayResize, endSession });
+    setRelayDeps({ relayInput, relayResize, endSession, getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -425,6 +428,26 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
       expect(relayResize).toHaveBeenCalledOnce();
       expect(relayResize).toHaveBeenCalledWith('run-relay', 120, 40);
       expect(relayInput).not.toHaveBeenCalled();
+    } finally {
+      setRelayDeps(makeUnwiredRelayDeps());
+    }
+  });
+
+  it('(c) getPtyBacklog returns deps.getPtyBacklog(runId) once wired', async () => {
+    const getPtyBacklog = vi.fn<RelayDeps['getPtyBacklog']>(() => '\x1b[32mclaude paint\x1b[0m');
+    setRelayDeps({
+      relayInput: vi.fn<RelayDeps['relayInput']>(),
+      relayResize: vi.fn<RelayDeps['relayResize']>(),
+      endSession: vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined),
+      getPtyBacklog,
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result = await caller.cyboflow.runs.getPtyBacklog({ runId: 'run-backlog' });
+
+      expect(result).toEqual({ backlog: '\x1b[32mclaude paint\x1b[0m' });
+      expect(getPtyBacklog).toHaveBeenCalledWith('run-backlog');
     } finally {
       setRelayDeps(makeUnwiredRelayDeps());
     }
@@ -722,6 +745,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       relayInput: vi.fn<RelayDeps['relayInput']>(),
       relayResize: vi.fn<RelayDeps['relayResize']>(),
       endSession,
+      getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => ''),
     });
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
@@ -751,6 +775,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       relayInput: vi.fn<RelayDeps['relayInput']>(),
       relayResize: vi.fn<RelayDeps['relayResize']>(),
       endSession,
+      getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => ''),
     });
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
