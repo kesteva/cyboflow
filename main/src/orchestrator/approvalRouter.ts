@@ -6,7 +6,11 @@
  * 1. requestApproval co-writes the approvals INSERT and workflow_runs UPDATE
  *    inside a single db.transaction() guarded by `AND status='running'` on
  *    the UPDATE.  If the run is not in 'running' state, the transaction rolls
- *    back and requestApproval throws RunNotRunningError.
+ *    back and requestApproval throws RunNotRunningError. P4: that SAME
+ *    transaction also co-writes a blocking permission review_items row (the
+ *    unified-inbox fold), so the approval row and the inbox row commit or roll
+ *    back together; respond() resolves the folded item idempotently. The fold is
+ *    a no-op on a pre-migration-016 DB (table-existence guarded).
  *
  * 2. respond uses a guarded UPDATE `WHERE id=? AND status='awaiting_review'`
  *    and checks info.changes > 0 before writing the allow reply on the socket.
@@ -37,6 +41,11 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
+import {
+  coWritePermissionReviewItem,
+  resolvePermissionReviewItem,
+  hasReviewItemsTable,
+} from './reviewItemListing';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -236,6 +245,20 @@ export class ApprovalRouter extends EventEmitter {
         // canonical tool-use identifier until TASK-304 threads the real Claude
         // tool_use_id through the pipeline.
         insertStmt.run(approvalId, runId, toolName, JSON.stringify(input), approvalId, now);
+
+        // P4 fold: co-write a blocking permission review_item in the SAME
+        // transaction so the unified inbox row and the approvals row commit (or
+        // roll back) together. No-op on a pre-migration-016 DB. The folded item
+        // links back to this approval via payload.approvalId so respond() can
+        // resolve it idempotently.
+        coWritePermissionReviewItem(this.db, {
+          approvalId,
+          runId,
+          toolName,
+          input,
+          source: 'approval',
+          now,
+        });
       });
 
       // Execute the transaction — throws RunNotRunningError on guard failure.
@@ -326,6 +349,8 @@ export class ApprovalRouter extends EventEmitter {
             `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'auto-policy'
              WHERE id = ?`,
           ).run(now, approvalId);
+          // Resolve the folded permission review_item too (idempotent).
+          resolvePermissionReviewItem(this.db, approvalId, 'auto-policy', 'superseded', now, request.runId);
           // Resolve the requestApproval promise with a synthetic deny so the
           // awaiting caller is not left hanging.
           resolve({ behavior: 'deny', message: 'Run was canceled before approval could be processed' });
@@ -338,6 +363,8 @@ export class ApprovalRouter extends EventEmitter {
           `UPDATE approvals SET status = 'approved', decided_at = ?, decided_by = 'user'
            WHERE id = ?`,
         ).run(now, approvalId);
+        // Resolve the folded permission review_item (idempotent).
+        resolvePermissionReviewItem(this.db, approvalId, 'user', 'approved', now, request.runId);
 
         resolve(decision);
         socketReply(decision);
@@ -356,6 +383,10 @@ export class ApprovalRouter extends EventEmitter {
           `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'user'
            WHERE id = ?`,
         ).run(now, approvalId);
+        // Resolve the folded permission review_item (idempotent). A deny resolves
+        // the inbox item: the gate has been triaged; Claude is free to retry with
+        // a different tool, which opens a fresh approval + review_item.
+        resolvePermissionReviewItem(this.db, approvalId, 'user', 'rejected', now, request.runId);
 
         resolve(decision);
         socketReply(decision);
@@ -383,6 +414,8 @@ export class ApprovalRouter extends EventEmitter {
          WHERE id = ? AND status = 'pending'`,
       ).run(status, now, approvalId) as { changes: number };
       if (info.changes > 0) {
+        // Resolve any folded permission review_item for this approval (idempotent).
+        resolvePermissionReviewItem(this.db, approvalId, 'user', status, now, null);
         this.emit('approvalDecided', { approvalId, decision: status });
         return true;
       }
@@ -437,6 +470,8 @@ export class ApprovalRouter extends EventEmitter {
           `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
            WHERE id = ? AND status = 'pending'`,
         ).run(now, approvalId);
+        // Resolve the folded permission review_item too (idempotent).
+        resolvePermissionReviewItem(this.db, approvalId, 'system', 'run_terminated', now, runId);
       } catch (err) {
         // Swallow DB errors during shutdown — do not throw.
         console.warn(
@@ -463,6 +498,7 @@ export class ApprovalRouter extends EventEmitter {
           `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
            WHERE id = ? AND status = 'pending'`,
         ).run(now, id);
+        resolvePermissionReviewItem(this.db, id, 'system', 'run_terminated', now, runId);
         this.emit('approvalDecided', { approvalId: id, decision: 'rejected' });
       }
     } catch (err) {
@@ -514,6 +550,19 @@ export class ApprovalRouter extends EventEmitter {
       this.db
         .prepare(`UPDATE approvals SET status = 'timed_out', decided_at = CURRENT_TIMESTAMP, decided_by = 'system' WHERE run_id IN (${placeholders}) AND status = 'pending'`)
         .run(...ids);
+      // Reconcile the folded inbox: orphaned pending permission review_items for
+      // these recovered runs can never resolve (the socket is gone), so resolve
+      // them too so they don't linger as stale blocking items. No-op pre-016.
+      if (hasReviewItemsTable(this.db)) {
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `UPDATE review_items
+                SET status = 'resolved', resolved_by = 'system', resolution = 'app_restart', updated_at = ?
+              WHERE kind = 'permission' AND status = 'pending' AND run_id IN (${placeholders})`,
+          )
+          .run(now, ...ids);
+      }
       return staleRunIds.length;
     });
     const count = transition();
