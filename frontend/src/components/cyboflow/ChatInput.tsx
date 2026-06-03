@@ -12,9 +12,13 @@
  *                       AskUserQuestionCard remains the sole submit authority
  *                       for the final answers payload.
  *
- *   workflow-idle     — `runId` is non-null but no pending Question exists;
- *                       textarea and Send button are both disabled with a
- *                       tooltip explaining why.
+ *   workflow-idle     — `runId` is non-null but no pending Question exists.
+ *                       When the run rests in `awaiting_review` the input is
+ *                       ENABLED for a free-form "nudge": the text re-spawns the
+ *                       run with `--resume` (a follow-up turn on the same SDK
+ *                       conversation) via `trpc.cyboflow.runs.nudge`. In any
+ *                       other idle status (running / starting / stuck) the
+ *                       textarea and Send button stay disabled with a tooltip.
  *
  *   none              — neither `runId` nor `activeQuickSessionId` is set;
  *                       renders nothing.
@@ -32,6 +36,7 @@ import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../utils/cn';
 import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 
 /** Max composer height (px) before the textarea scrolls instead of growing. */
 const MAX_COMPOSER_HEIGHT = 160;
@@ -111,7 +116,11 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   // Derived flags
   // -------------------------------------------------------------------------
 
-  const isDisabled = mode === 'workflow-idle';
+  // A run resting in `awaiting_review` is nudgeable: the user can type a
+  // free-form follow-up that re-drives the (drained) SDK conversation. Any
+  // other idle status (running / starting / stuck) keeps the input disabled.
+  const isIdleNudgeable = mode === 'workflow-idle' && activeRun?.status === 'awaiting_review';
+  const isDisabled = mode === 'workflow-idle' && !isIdleNudgeable;
   const canSend = !isDisabled && text.trim().length > 0 && !isSending;
 
   // -------------------------------------------------------------------------
@@ -147,6 +156,31 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       }
       setOtherText(activeQuestion.id, text);
       setText('');
+      return;
+    }
+
+    if (mode === 'workflow-idle' && isIdleNudgeable) {
+      if (runId == null) {
+        // Defensive: should not happen given mode guard, but log and no-op.
+        console.warn('[ChatInput] workflow-idle nudge but runId is null at send time');
+        return;
+      }
+      // Free-form nudge — re-drives the run's SDK conversation as a follow-up
+      // turn. Bypasses questionStore entirely (this is NOT an answer payload).
+      setIsSending(true);
+      setSendError(null);
+      try {
+        const result = await trpc.cyboflow.runs.nudge.mutate({ runId, text });
+        if ('delivered' in result) {
+          setText('');
+        } else {
+          setSendError(`Nudge ignored: ${result.reason}`);
+        }
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Nudge failed');
+      } finally {
+        setIsSending(false);
+      }
     }
   };
 
@@ -179,7 +213,13 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder={mode === 'quick' ? 'Send a message…' : 'Type your answer…'}
+        placeholder={
+          mode === 'quick'
+            ? 'Send a message…'
+            : isIdleNudgeable
+              ? 'Nudge the agent — continues the conversation…'
+              : 'Type your answer…'
+        }
         disabled={isDisabled}
         rows={1}
         style={{ maxHeight: MAX_COMPOSER_HEIGHT }}
@@ -240,8 +280,8 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   return (
     <div className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2">
       {statusBar}
-      {mode === 'workflow-idle' ? (
-        <Tooltip content="Input enabled only when the agent asks a question">
+      {isDisabled ? (
+        <Tooltip content="Input enabled when the agent asks a question or the run is awaiting your review">
           {composer}
         </Tooltip>
       ) : (

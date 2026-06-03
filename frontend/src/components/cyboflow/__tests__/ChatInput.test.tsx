@@ -38,6 +38,9 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
+      runs: {
+        nudge: { mutate: vi.fn(async () => ({ delivered: true })) },
+      },
       questions: {
         listPending: { query: vi.fn(async () => []) },
         onQuestionCreated: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
@@ -231,7 +234,9 @@ describe('ChatInput — quick session mode', () => {
 });
 
 describe('ChatInput — workflow run, no question', () => {
-  it('workflow run, no question: textarea disabled, tooltip rendered', () => {
+  it('workflow run, no question, not awaiting_review: textarea disabled, tooltip rendered', () => {
+    // run-001 is NOT in activeRunsStore → activeRun is null → not nudgeable →
+    // the idle input stays disabled (this is the non-awaiting_review idle case).
     render(<ChatInput runId="run-001" />);
 
     const textarea = screen.getByRole('textbox');
@@ -245,7 +250,9 @@ describe('ChatInput — workflow run, no question', () => {
     expect(tooltipWrapper).not.toBeNull();
     fireEvent.mouseEnter(tooltipWrapper!);
 
-    expect(screen.getByText('Input enabled only when the agent asks a question')).toBeInTheDocument();
+    expect(
+      screen.getByText('Input enabled when the agent asks a question or the run is awaiting your review'),
+    ).toBeInTheDocument();
   });
 });
 
@@ -293,6 +300,87 @@ describe('ChatInput — workflow run, active question', () => {
 
     // The key assertion: tRPC answer.mutate must NOT have been called
     expect(vi.mocked(trpc.cyboflow.questions.answer.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
+  const RUN_ID = 'run-idle-001';
+  const PROJECT_ID = 9;
+
+  function makeAwaitingRow(): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-1',
+      project_id: PROJECT_ID,
+      status: 'awaiting_review',
+      worktree_path: '/Users/me/worktrees/idea-x',
+      branch_name: 'planner/idea-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'planner',
+    };
+  }
+
+  beforeEach(() => {
+    vi.mocked(trpc.cyboflow.runs.nudge.mutate).mockClear();
+    vi.mocked(trpc.cyboflow.runs.nudge.mutate).mockResolvedValue({ delivered: true });
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeAwaitingRow()] } });
+    });
+  });
+
+  it('enables the input when the run rests in awaiting_review', () => {
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).not.toBeDisabled();
+  });
+
+  it('sends a nudge via trpc.cyboflow.runs.nudge and clears the textarea on delivery', async () => {
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'also handle the empty case' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'also handle the empty case',
+      });
+    });
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
+  it('surfaces the noOp reason and keeps the text when the nudge is ignored', async () => {
+    vi.mocked(trpc.cyboflow.runs.nudge.mutate).mockResolvedValue({ noOp: true, reason: 'blocked' });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'try anyway' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Nudge ignored: blocked');
+    });
+    // Text retained so the user can retry once the gate clears.
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('try anyway');
+  });
+
+  it('keeps the input disabled when the idle run is NOT awaiting_review (running)', () => {
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), status: 'running' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
   });
 });
 
