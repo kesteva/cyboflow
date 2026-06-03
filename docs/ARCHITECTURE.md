@@ -3,14 +3,25 @@
 ## Purpose
 
 Cyboflow is a macOS desktop app that orchestrates Claude Code as a multi-agent workflow runner.
-Users select one of five pre-set SoloFlow workflows, the app spawns Claude Code in an isolated
-git worktree per run, streams and parses its structured output, and surfaces tool-use approvals
-in a workspace-scoped cross-workflow review queue. The review queue — a single pane aggregating
-pending approvals from all running workflows — is the product differentiator.
+It is **self-contained**: the two user-facing flows — **Planner** and **Sprint** — and their
+prompt bodies ship inside the app source (`main/src/orchestrator/workflows/`). There is **no
+runtime dependency on the SoloFlow plugin cache** (`~/.claude/plugins/cache/soloflow/...`). The
+app spawns Claude Code in an isolated git worktree per run, streams and parses its structured
+output, and concentrates everything that needs human attention — tool-use approvals, agent
+findings, human-gate decisions, and manual tasks — into a single workspace-scoped **review
+queue**. That review queue, backed by a DB-canonical `review_items` inbox, is the product
+differentiator.
+
+Planner and Sprint write the app's own DB-canonical **3-table entity model** (`ideas` / `epics`
+/ `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or `TASK-NNN.md`
+files. All entities share a single 12-stage board (see "Data Model"). The `__quick__` sentinel
+flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
 branding, IPC transport, and Crystal-specific features are being progressively replaced. See
-`docs/cyboflow_system_design.md` for the full product spec and cut decisions.
+`docs/cyboflow_system_design.md` for the full product spec and cut decisions. The original
+`compound` / `prune` SoloFlow flows were dropped from the app; their prose is preserved under
+`docs/workflows-future/` for a future cyboflow-native rebuild.
 
 ## Entry Points
 
@@ -46,7 +57,7 @@ collaborators and two optional narrow interfaces:
 - **`logger: LoggerLike`** — structured log surface (info/warn/error/debug).
 - **`runQueues: RunQueueRegistry`** — per-run mutation queue; `drainAll()` is awaited in `stop()`.
 - **`claudeManager?: ClaudeManagerLike`** *(optional)* — narrow `hasActiveRunForId(runId)` interface used by `StuckDetector` to classify `orphan_pty` reasons. When omitted, that classification is effectively disabled.
-- **`permissionServer?: PermissionServerLike`** *(optional)* — narrow `hasClientForRun(runId)` interface used by `StuckDetector` to classify `stale_socket` reasons. When omitted, `stale_socket` classification is disabled with a one-time WARN. The concrete server is **not yet built** — see "Planned / Not Yet Built" below.
+- **`permissionServer?: PermissionServerLike`** *(optional)* — narrow `hasClientForRun(runId)` interface used by `StuckDetector` to classify `stale_socket` reasons. When omitted, `stale_socket` classification is disabled with a one-time WARN. The concrete socket bridge is now live as `OrchSocketServer` (the orchestrator-side half of the Cyboflow MCP IPC link, wired in `index.ts`).
 
 `start()` is idempotent; `stop()` drains all run queues before resolving.
 
@@ -68,6 +79,34 @@ clean runtime imports today (zod + `node:events`; `better-sqlite3` is type-only)
 `streamParser` ever pulls in `electron` or `better-sqlite3` at value position,
 `runEventBridge.ts` must switch to constructor injection. Do NOT add value imports from
 `services/*` to any other file under `orchestrator/**` without extending this list.
+
+#### Entity write chokepoints (single-writer-via-orchestrator)
+
+Two single-table write chokepoints own ALL mutations to the entity and review tables. Both
+key a per-PROJECT `p-queue({concurrency: 1})` (entity refs + version bumps are project-scoped),
+mirror each other's structure, and uphold the standalone-typecheck invariant (`DatabaseLike`
+injected, no `electron` / `better-sqlite3` / `services/*` imports):
+
+- **`taskChangeRouter.ts` (`TaskChangeRouter.applyChange`)** — the SINGLE write chokepoint for
+  the 3-table entity model. Every entity write (GUI tRPC, orchestrator lifecycle, run close-out,
+  `cyboflow_*` MCP agent tools) routes through it; nothing UPDATEs `ideas` / `epics` / `tasks`
+  directly. Each `applyChange` atomically (1) mutates the correct entity table and (2) appends a
+  per-field delta row to `entity_events`, minting the per-`(entity_type, entity_id)` `seq` UNIQUE
+  **inside** the same transaction, then emits a `TaskChangedEvent` on `taskChangeEvents` after
+  commit. It is **entity-aware**: table identity is the discriminator, so the change carries an
+  `entityType` (optional on the update path — resolved by id lookup across the three tables when
+  omitted). Lineage (`parent_epic_id` task→epic, `originating_idea_id` epic/task→idea) is both
+  FK-enforced and validated/cycle-checked in the router. Moving an idea to the `Decomposed`
+  terminal stage is an allowed asserted move with **no cascade** — children carry the flow.
+- **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE write chokepoint for
+  `review_items`. Every write (Sprint-agent findings via MCP, the folded PreToolUse/approval path,
+  approve-idea/approve-plan decision gates, manual human tasks, triage resolve/dismiss) routes
+  through it. Each call atomically mutates the row and appends a delta to `entity_events` with
+  `entity_type='review_item'` (migration 015 widened the CHECK to allow it — no new event table),
+  then emits a `ReviewItemChangedEvent`. `promote-to-task` is NOT handled here: it is a two-
+  chokepoint triage operation (resolve the item via this router AND mint a real task via
+  `TaskChangeRouter`) orchestrated in the `reviewItems` tRPC router so each router stays
+  single-table.
 
 ### Services (`main/src/services/`)
 
@@ -200,10 +239,24 @@ data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 - **`worktreeManager.ts`** — `git worktree add -b ...` lifecycle; collision-safe naming;
   background cleanup.
 - **`database.ts`** — `better-sqlite3` wrapper, WAL mode, hand-rolled migration runner.
+  Also owns `seedDefaultBoard(projectId)`, which seeds the default board + its 12 canonical
+  stages for each NEW project. It MUST stay field-for-field in sync with the seed blocks in
+  migrations 014 (stages 1..11) + 015 (stage 12 `Decomposed`); a cross-check test asserts
+  `seedDefaultBoard` === the migration 015 12-stage seed.
 - **`sessionManager.ts`** — Coordinates session state across services.
 
-> The previously documented `permissionIpcServer.ts` does not exist as a service today —
-> the file is owned by the future approval-router epic. See "Planned / Not Yet Built".
+In-repo workflow prompt bodies live in `main/src/orchestrator/workflows/` (`planner.md`,
+`sprint.md`, `builtInWorkflows.ts`). `buildBuiltInWorkflows()` returns one
+`WorkflowDescriptor` per `CYBOFLOW_WORKFLOW_NAMES` entry, with `workflow_path` resolved relative
+to the compiled bundle (`join(__dirname, '<name>.md')`). `copy:assets` (in `main/package.json`)
+places these `.md` files at `dist/main/src/orchestrator/workflows/*.md` so the path resolves in
+both dev and packaged builds. This is what severs the old runtime dependency on the SoloFlow
+plugin cache.
+
+> The synchronous permission/socket bridge is now live as `OrchSocketServer`
+> (`main/src/orchestrator/mcpServer/orchSocketServer.ts`), wired in `index.ts`. It carries the
+> async-deferred `shell-approval-request` branch on the interactive substrate and holds the
+> socket reply open until the user decides (the `socketReply` invariant).
 
 ### IPC Layer
 
@@ -228,11 +281,12 @@ lived in `main/src/trpc/` has been deleted (TASK-717).
 #### cyboflow.* transport status
 
 **Raw-IPC stub** — handler present in `main/src/ipc/cyboflow.ts` but returns NOT_IMPLEMENTED:
-- `cyboflow:approveRun` — approve / deny a day-3 gate approval. Full implementation
-  lands in the approval-router epic (epic 7).
+- `cyboflow:approveRun` — a dead legacy raw-IPC stub. Approve/deny is now served live by the
+  tRPC `cyboflow.approvals.*` procedures (below) routed through `ApprovalRouter`; this raw
+  channel is unused by the renderer and kept only so the handler registration stays exhaustive.
 
 The renderer is fully cut over to tRPC for all data-plane `cyboflow.*` procedures except
-the `cyboflow:stream:<runId>` push channel and the `cyboflow:approveRun` stub above.
+the `cyboflow:stream:<runId>` push channel.
 
 **tRPC live** — all procedures in `main/src/orchestrator/trpc/routers/` with real
 implementations wired today:
@@ -254,6 +308,12 @@ implementations wired today:
 - `cyboflow.events.onApprovalCreated`, `cyboflow.events.onApprovalDecided`,
   `cyboflow.events.onStreamEvent`, `cyboflow.events.setBadgeCount` — push subscriptions
   and badge management.
+- `cyboflow.tasks.*` — entity-model reads + writes (board buckets across ideas/epics/tasks,
+  detail editors, lineage edits). All writes delegate to `TaskChangeRouter.applyChange`.
+- `cyboflow.reviewItems.list` / `.get` — project review-inbox reads; `.resolve` / `.dismiss` —
+  triage mutations through `ReviewItemRouter` (resolve returns `{ reviewItemId, resumed }`
+  where `resumed` reflects aggregate-unblock); `.promoteToTask` — the only TWO-chokepoint
+  operation (mints a task via `TaskChangeRouter` AND resolves the item via `ReviewItemRouter`).
 
 All procedures are consumed by their respective Zustand stores and React components.
 
@@ -265,9 +325,10 @@ All procedures are consumed by their respective Zustand stores and React compone
 - **`stores/`** — Zustand slices, one per domain:
   - Crystal-baseline: `sessionStore`, `panelStore`, `configStore`, `navigationStore`,
     `errorStore`, `sessionHistoryStore`, `sessionPreferencesStore`, `slashCommandStore`.
-  - Cyboflow-era: `cyboflowStore` (workflows & runs), `mcpHealthStore` (sidebar dot),
-    `reviewQueueStore` + `reviewQueueSlice` (cross-workflow approvals pane — the product
-    differentiator).
+  - Cyboflow-era: `cyboflowStore` (workflows & runs), `activeRunsStore`, `mcpHealthStore`
+    (sidebar dot), `questionStore`, `backlogStore` (the 3-table entity board buckets),
+    `reviewQueueStore` + `reviewQueueSlice` + `reviewItemsSlice` (the unified review-queue inbox
+    across finding/permission/decision/human_task — the product differentiator).
 - **`utils/api.ts`** — Thin IPC call wrapper used by all frontend components for raw IPC.
 - **`utils/cyboflowApi.ts`** — Helper for the raw `cyboflow:*` channels.
 - **`trpc/client.ts`** *(via `trpc-electron` client)* — Typed entry point for
@@ -281,7 +342,9 @@ cross-package concern.
 - **Crystal-baseline:** `models.ts`, `panels.ts`, `cliPanels.ts`, `aiPanelConfig.ts`.
 - **Cyboflow-era:** `cyboflow.ts`, `workflows.ts`, `approval.ts`, `approvals.ts`,
   `mcpHealth.ts`, `stuckDetection.ts`, `stuckInspection.ts`, `claudeStream.ts`,
-  `unifiedMessage.ts`.
+  `unifiedMessage.ts`, `substrate.ts`, `tasks.ts` (the 3-table entity model: `IdeaRow` /
+  `EpicRow` / `TaskRow`, `TaskChangeAction`, board types), `reviews.ts` (`ReviewItem`,
+  the per-kind payload union, `ReviewItemChangeAction`).
 - **Transport contract:** `trpc.ts` re-exports the inferred `AppRouter` type from
   `main/src/orchestrator/trpc/router.ts` so the renderer's `trpc/client.ts` is fully typed
   without importing main-process code.
@@ -332,13 +395,88 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
   the corresponding inline markers are present, so those files are never double-applied.
 
 Central tables (Crystal baseline): `sessions`, `panels`, `execution_diffs`, `projects`.
-Cyboflow-era additions (migration `006_cyboflow_schema.sql`): `workflows`, `workflow_runs`,
-`raw_events`, `messages`, `approvals` — designed in system design §5.
+Cyboflow-era run-substrate tables (migration `006_cyboflow_schema.sql`): `workflows`,
+`workflow_runs`, `raw_events`, `messages`, `approvals` — designed in system design §5.
+
+#### Entity model — 3 tables + a single shared board (migration 015)
+
+The DB-canonical backlog is a **3-table entity model**, one table per type — table identity IS
+the type discriminator (no `type` column):
+
+- **`ideas`** — captured input. Carries a nullable `scope` size hint (`'small' | 'large'`, set
+  at idea-spec time). No lineage FK.
+- **`epics`** — `originating_idea_id` FK→`ideas`. Created only on the LARGE-idea branch.
+- **`tasks`** — `parent_epic_id` FK→`epics` + `originating_idea_id` FK→`ideas` (small-idea
+  branch carries the idea directly) + `entry_stage_id` (planning stage captured at first
+  execution; revert target).
+
+Each table carries its own columns plus a single markdown `body` column, a `priority`, a
+`version` (optimistic concurrency), and a `(board_id, stage_id)` placement onto **one shared
+board**. The board's 12 canonical stages (seeded by migrations 014 + 015 and
+`seedDefaultBoard`) form a union view across all three entity types:
+
+| # | Stage | Owner | Notes |
+|---|-------|-------|-------|
+| 1 | Idea | idea | Raw input captured |
+| 2 | Research | idea | Optional · prior art |
+| 3 | Idea spec | idea | Spec drafted — the BRANCH point |
+| 4 | Epics extracted | epic | LARGE-idea branch only |
+| 5 | Tasks extracted | task | |
+| 6 | Ready for development | task | Approved · queued (after the human approve-plan gate) |
+| 7 | In development | task | Executor/verifier loop — orchestrator-`derived` |
+| 8 | Ready to merge | task | Checks green · awaiting merge — orchestrator-`derived` |
+| 9 | Done | task | Merged & archived — terminal |
+| 10 | Won't do | any | terminal · hidden by default |
+| 11 | Archived | any | terminal · hidden by default |
+| 12 | Decomposed | idea | Idea-only terminal: idea RETIRES here on decomposition; children carry the flow |
+
+**Branch:** a small idea moves `3 → 5` (skipping epics); a large idea moves `3 → 4 → 5`. On
+decomposition the idea retires to `Decomposed` and its children carry the flow. The
+post-extraction source of truth for small-vs-large is the presence of epics; the `ideas.scope`
+hint is the pre-extraction signal. Stages 7 and 8 are `derived` (written only by the
+orchestrator from run lifecycle); the rest are `asserted`.
+
+- **`entity_events`** — polymorphic append-only audit log (`entity_type IN
+  ('idea','epic','task','review_item')`, `entity_id`, per-`(entity_type, entity_id)` UNIQUE
+  `seq`, `kind`, `actor`, optional `run_id`, `changes_json`). Replaces the old task-scoped
+  `task_events`. Written ONLY inside the two chokepoints' transactions.
+- **Task satellites** — `task_acceptance_criteria`, `task_dependencies`, `task_files`,
+  `task_external_links` stay **task-scoped** (FK→`tasks`).
+- **`task_ref_counters`** — per-`(project_id, type)` display-ref sequence (`IDEA-NNN`,
+  `EPIC-NNN`, `TASK-NNN`).
+
+#### Review queue — the unified human-attention inbox (migration 016)
+
+- **`review_items`** — one project-scoped inbox aggregating everything that needs human
+  attention. `kind IN ('finding','permission','decision','human_task')`; `status IN
+  ('pending','resolved','dismissed')`; a per-item `blocking` boolean. The entity link is a
+  **SOFT polymorphic** `(entity_type, entity_id)` pair — both nullable, `entity_type`
+  CHECK-constrained to `(idea|epic|task)`, validated in code (the `ReviewItemRouter`), with NO
+  per-type FK split (the referenced row may be deleted; the item survives for the audit trail).
+  Lifecycle deltas reuse `entity_events` (no new event table). Kinds:
+  - **finding** — emitted by Sprint agents via the `cyboflow_report_finding` MCP tool;
+    non-blocking. Surfaced in a SEPARATE UI section so blocking items stay prominent.
+  - **permission** — folds the real-time PreToolUse/approval path; `blocking=true`.
+  - **decision** — minted by the `approve-idea` / `approve-plan` human gates; resolving one
+    AUTO-RESUMES the run, subject to **aggregate-unblock** (a run stays `awaiting_review` until
+    ALL of its blocking `review_items` resolve).
+  - **human_task** — manual to-do; `blocking` per item. Triage can resolve / dismiss / promote
+    a finding to a real task (minted through `TaskChangeRouter`).
+
+#### Migration file list
 
 Migration files present today under `main/src/database/migrations/`: `003_add_tool_panels.sql`,
-`004_claude_panels.sql`, `005_unified_panel_settings.sql`, `006_cyboflow_schema.sql`, and
-`007_add_stuck_reason.sql` (adds the `stuck_reason` column to `workflow_runs` used by
-`StuckDetector`).
+`004_claude_panels.sql`, `005_unified_panel_settings.sql`, `006_cyboflow_schema.sql`,
+`007_add_stuck_reason.sql`, `008_permission_mode_approve_default.sql`, `009_sessions_run_id.sql`,
+`010_questions.sql`, `011_workflow_step_tracking.sql`, `012_quick_workflow_sentinel.sql`,
+`013_workflow_run_substrate.sql`, `014_native_tasks.sql` (board + the unified-`tasks` model +
+satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_events` + the
+12th `Decomposed` stage), and `016_review_items.sql` (the unified inbox). 015 and 016 are
+forward-only with no backfill (no prod data existed); the destructive DROP+recreate in 015 is
+intentional and safe.
+
+`copy:assets` (in `main/package.json`) copies BOTH `*.sql` migrations and the workflow `*.md`
+prompt bodies into the build output, so new migrations and prompt files ship in packaged builds.
 
 ## Build & Run
 
@@ -390,21 +528,11 @@ the list of confirmed dead dependencies pending removal).
 
 ## Planned / Not Yet Built
 
-The pieces below are referenced in the codebase (interfaces, stubs, comments, or socket-path
-injection points) but have no live implementation today. They are concentrated in the
-**approval-router epic (epic 7)** with one transport-cutover follow-up.
-
-### Approval-router epic (epic 7) — owns the gap
-
-- **`permissionIpcServer`** — Unix-socket server that bridges renderer approval decisions
-  back into the orchestrator and the cyboflow MCP server subprocess. Today only the path
-  injection point is wired: `ClaudeCodeManager.setOrchSocketPath()` is called against this
-  expected file, and `main/src/index.ts:533` throws
-  `"cyboflow: orchSocketProvider not yet wired (epic 7 owns permissionIpcServer)"` when an
-  attempt to wire it is made. `OrchestratorDeps.permissionServer?` is the narrow interface
-  the orchestrator will consume once the server lands.
-- **`cyboflow:approveRun`** (raw IPC) — handler exists and returns
-  `NOT_IMPLEMENTED: cyboflow:approveRun is pending epic 7`.
+The approval-router / MCP-runtime gap that this section previously tracked has SHIPPED:
+`ApprovalRouter`, the `OrchSocketServer` socket bridge, and the `cyboflow_*` MCP runtime
+(including `cyboflow_report_step` and `cyboflow_report_finding`) are all live and wired in
+`main/src/index.ts`. The only remaining stub is the dead `cyboflow:approveRun` raw-IPC handler,
+superseded by the live tRPC `cyboflow.approvals.*` path (see "cyboflow.* transport status").
 
 ### Team-tier v2 — long-horizon
 

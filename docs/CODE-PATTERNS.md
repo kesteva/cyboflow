@@ -279,12 +279,90 @@ applying stale state after teardown.
 **Anti-pattern:** pre-retrofit `WorkflowProgressTimeline.tsx` ran two sibling effects;
 the query's `setStepStates` overwrote subscription deltas (FIND-SPRINT-040-12).
 
+### Entity-aware write chokepoint (`TaskChangeRouter.applyChange`)
+
+Every write to the 3-table entity model (`ideas` / `epics` / `tasks`) MUST route through
+`TaskChangeRouter.applyChange` (`main/src/orchestrator/taskChangeRouter.ts`). Nothing — not a
+tRPC handler, not the orchestrator lifecycle, not an MCP agent tool — UPDATEs those tables
+directly. Each `applyChange`:
+
+1. Serializes on a per-PROJECT `p-queue({concurrency: 1})` (entity refs + `version` bumps are
+   project-scoped — mirror `approvalRouter.ts`'s per-run queue keyed per project instead).
+2. In ONE transaction: mutates the correct entity table AND appends a per-field delta row to
+   `entity_events`, minting the per-`(entity_type, entity_id)` UNIQUE `seq` **inside** that same
+   transaction (never pre-read the max and write outside — the read/write must be atomic).
+3. Emits a `TaskChangedEvent` on `taskChangeEvents` AFTER commit.
+
+It is **entity-aware**: table identity is the type discriminator (no `type` column). The change
+carries an `entityType`; boundary callers (tRPC / MCP) SHOULD pass it, but on the update path it
+is optional and resolved by id lookup across the three tables. Lineage edits (`parent_epic_id`
+task→epic, `originating_idea_id` epic/task→idea) are FK-enforced AND validated + cycle-checked
+in the router. The single `ENTITY_TABLES` descriptor map is the ONLY place that knows table
+identity, id prefix, and which lineage/`scope`/`entry_stage_id` columns each table carries — add
+a new per-type column there, not via scattered `if (type === 'idea')` branches. Decomposing an
+idea (moving it to the `Decomposed` terminal stage) is an allowed asserted move with NO cascade.
+
+- **Canonical example:** `main/src/orchestrator/taskChangeRouter.ts`;
+  `main/src/orchestrator/__tests__/taskChangeRouter.test.ts`.
+
+### review_items write pattern (`ReviewItemRouter.applyReviewItem`)
+
+Every `review_items` write routes through `ReviewItemRouter.applyReviewItem`
+(`main/src/orchestrator/reviewItemRouter.ts`) — the second single-table chokepoint, structurally
+a twin of `TaskChangeRouter` (per-project queue, atomic mutate + `entity_events` delta with
+`entity_type='review_item'`, post-commit `ReviewItemChangedEvent`). Rules:
+
+- The entity link is a **SOFT polymorphic** `(entity_type, entity_id)` pair — both nullable,
+  `entity_type` is CHECK-constrained to `(idea|epic|task)`, and the pairing is validated in the
+  router (NO per-type FK split, NO hard FK on `entity_id` — the referenced row may be deleted and
+  the review item survives for the audit trail). Do NOT add a hard FK or split this into
+  per-type columns.
+- `blocking` is per-item. A run stays `awaiting_review` until ALL its blocking `review_items`
+  resolve (aggregate-unblock). Findings are non-blocking; permissions/decisions default blocking.
+- `promote-to-task` is NOT a router op — it is a TWO-chokepoint triage operation (resolve the
+  item via `ReviewItemRouter` AND mint a real task via `TaskChangeRouter`), orchestrated in the
+  `reviewItems` tRPC router so each router stays single-table. Do NOT collapse the two chokepoints.
+
+- **Canonical example:** `main/src/orchestrator/reviewItemRouter.ts`;
+  `main/src/orchestrator/trpc/routers/reviewItems.ts` (the two-chokepoint `promoteToTask`).
+
+### In-repo workflow prompt bodies (self-containment)
+
+The two user-facing flows (Planner + Sprint) and their prompt BODIES live in app source at
+`main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `builtInWorkflows.ts`). There is
+NO runtime read from `~/.claude/plugins/cache/soloflow/...`. Rules when touching workflows:
+
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint']`) in
+  `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over it, so adding/removing a flow
+  there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
+  (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*` names — NOT the historical
+  `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` / `SOLOFLOW_WORKFLOW_NAMES` /
+  `isSoloFlowWorkflowName` / `resolveSoloFlowPluginRoot` / `buildDefaultSoloFlowWorkflows`).
+- `workflow_path` resolves relative to the compiled bundle (`join(__dirname, '<name>.md')`).
+  Any new prompt `.md` MUST be copied to `dist/...` by `copy:assets` (in `main/package.json`) —
+  the glob already covers `src/orchestrator/workflows/*.md` and `src/database/migrations/*.sql`;
+  extend it before adding a prompt/migration under a new directory.
+- Prompt bodies are SELF-CONTAINED: agents write the DB via `cyboflow_*` MCP tools, never
+  `.soloflow/IDEA-NNN.md` / `TASK-NNN.md` files. `builtInWorkflows.test.ts` asserts the bodies
+  contain no `.soloflow` / `IDEA-NNN.md` / `TASK-NNN.md` reference — keep that green.
+- Dropped flows (`compound` / `prune`) have their prose preserved under
+  `docs/workflows-future/` for a future cyboflow-native rebuild — do NOT re-add them to
+  `WORKFLOW_DEFINITIONS`.
+
+- **Canonical example:** `main/src/orchestrator/workflows/builtInWorkflows.ts`;
+  `main/src/orchestrator/workflows/__tests__/builtInWorkflows.test.ts`.
+
 ### Database access
 
 `main/src/services/database.ts` is the singleton. All mutations go through the main process —
 the renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
+
+ENTITY writes are the exception that proves the rule: they do not go through ad-hoc `database.ts`
+methods but through the `TaskChangeRouter` / `ReviewItemRouter` chokepoints above. `database.ts`
+still owns `seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the
+12-stage seed in migrations 014 + 015 (cross-check test pins this).
 
 ### Schema reconciliation
 
@@ -446,14 +524,37 @@ and `test/setup.ts` — do not rely on a `.test.*` glob.
 
 ### Canonical DDL Source
 
-The `workflow_runs` table and other cyboflow-era tables (`workflows`, `approvals`, `raw_events`, `messages`) live in TWO files that MUST stay in sync:
+The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`, `raw_events`,
+`messages`) live in TWO files that MUST stay in sync:
 
 - `main/src/database/schema.sql` — fresh-install fast path. Run once on a new DB.
 - `main/src/database/migrations/006_cyboflow_schema.sql` — upgrade path. Applied via `runFileBasedMigrations()` for existing DBs.
 
-**canonical DDL source for cyboflow tables: migration 006.** Treat it as the authoritative declaration; mirror any column add/drop into `schema.sql` in the same commit. Migration 007 (and any future 00N) extends the schema additively.
+**canonical DDL source for those tables: migration 006.** Treat it as the authoritative
+declaration; mirror any column add/drop into `schema.sql` in the same commit. Migrations 007..016
+extend the schema additively (the entity model rebuild in 015 being the one destructive,
+forward-only, no-prod-data exception).
 
-A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite, applies the two paths side-by-side, and asserts the resulting column sets and FKs match. The script lives at `scripts/verify-schema-parity.js`; it does NOT compare test fixtures like `registrySchema.ts` — those are documented subsets and any drift is caught by the test suites that import them.
+**The 3-table entity model + the review inbox have their own row-shape source of truth.**
+`ideas` / `epics` / `tasks` / `entity_events` (migration 015) and `review_items` (migration 016)
+are pinned field-for-field against the TypeScript row interfaces in `main/src/database/models.ts`
+(`IdeaRow` / `EpicRow` / `TaskRow` / `EntityEventRow` / `ReviewItemRow`) and the shared types in
+`shared/types/tasks.ts` + `shared/types/reviews.ts` by
+`main/src/database/__tests__/entitySchemaParity.test.ts`. When you add or change a column on any
+of these tables, update the migration, `schema.sql`, the `*Row` interface, and the shared type in
+the same commit — `entitySchemaParity` is the tripwire.
+
+**The 12-stage board seed is triple-sourced.** The default board stages live in migration 014
+(stages 1..11), migration 015 (stage 12 `Decomposed`), AND `database.ts` `seedDefaultBoard`
+(for new projects). All three MUST be field-for-field identical; the cross-check test asserts
+`seedDefaultBoard` === the migration 015 12-stage seed. Stages 7/8 are `derived` (orchestrator-
+written only); the rest are `asserted`.
+
+A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite,
+applies the schema.sql + migrations path side-by-side with the migrations-only path, and asserts
+the resulting column sets and FKs match. The script lives at `scripts/verify-schema-parity.js`;
+it does NOT compare test fixtures like `registrySchema.ts` — those are documented subsets and any
+drift is caught by the test suites that import them.
 
 ## permissionMode contract
 
