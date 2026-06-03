@@ -891,3 +891,110 @@ describe('RunLauncher constructor validation', () => {
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// RunLauncher.launch — ideaId seed (migration 017)
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch ideaId seed', () => {
+  /**
+   * Builds a launcher whose registry seeds a queued run row, plus a deriver spy.
+   * Returns the launcher, db, deriver spies, and the canned runId.
+   */
+  function makeSeedFixture(db: Database.Database, tmpDir: string) {
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'planner', '/fake/planner.md', 'default')",
+    ).run(seedWorkflowId);
+
+    interface IdRow { id: string }
+    const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'planner', cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/planner/${cannedRunId.slice(0, 8)}`;
+
+    const fakeRegistry = {
+      getById: (id: string) => {
+        const row = db.prepare(
+          'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+        ).get(id);
+        return row ?? null;
+      },
+      createRun: vi.fn(() => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'default' as const };
+      }),
+    } as unknown as WorkflowRegistry;
+
+    const fakeWorktree = {
+      createDeterministicWorktree: vi.fn().mockResolvedValue({
+        worktreePath: cannedWorktreePath,
+        branchName: cannedBranchName,
+        baseCommit: 'abc123',
+        baseBranch: 'HEAD',
+      }),
+    } as unknown as WorktreeManager;
+
+    const recomputeSpy = vi.fn().mockResolvedValue(undefined);
+    const applyChangeSpy = vi.fn();
+    const deriver = { applyChange: applyChangeSpy, recomputeTaskExecutionStage: recomputeSpy };
+
+    const launcher = new RunLauncher(
+      adapter,
+      fakeRegistry,
+      fakeWorktree,
+      logger,
+      fakeMcpConfigWriter,
+      fakeOrchSocketProvider,
+      fakeBridgeScriptResolver,
+      fakeNodeResolver,
+      undefined, // publisher
+      undefined, // runExecutor
+      undefined, // runQueueRegistry
+      deriver,   // taskStageDeriver (12th arg)
+    );
+
+    return { launcher, workflowId, cannedRunId, recomputeSpy };
+  }
+
+  it('writes seed_idea_id directly and does NOT call the task-stage deriver', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId, recomputeSpy } = makeSeedFixture(db, tmpDir);
+
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, 'IDEA-42');
+
+      interface SeedRow { seed_idea_id: string | null; task_id: string | null }
+      const row = db
+        .prepare('SELECT seed_idea_id, task_id FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as SeedRow;
+
+      // seed_idea_id is written; task_id stays null (no task link from an ideaId).
+      expect(row.seed_idea_id).toBe('IDEA-42');
+      expect(row.task_id).toBeNull();
+      // The seed idea participates in NO stage derivation.
+      expect(recomputeSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('leaves seed_idea_id null when no ideaId is supplied', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId } = makeSeedFixture(db, tmpDir);
+
+      await launcher.launch(workflowId, tmpDir);
+
+      const row = db
+        .prepare('SELECT seed_idea_id FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_idea_id: string | null };
+
+      expect(row.seed_idea_id).toBeNull();
+    });
+  });
+});

@@ -150,6 +150,11 @@ export class RunLauncher {
     // (substrate?, taskId?) shape so taskId lands in the 4th argument slot.
     _substrate?: CliSubstrate,
     taskId?: string,
+    // Planner pre-launch seed idea (migration 017). Written DIRECTLY to
+    // workflow_runs.seed_idea_id — NOT routed through linkRunToTaskAndDerive
+    // (no entry-stage capture, no recomputeTaskExecutionStage, so no not_found
+    // throw for an id absent from the tasks table). task_id stays task-only.
+    ideaId?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -186,6 +191,17 @@ export class RunLauncher {
           'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         )
         .run(worktreePath, branchName, 'starting', runId);
+
+      // Planner pre-launch seed idea (migration 017). A direct workflow_runs
+      // write — NOT a tasks write, and NOT routed through the stage deriver
+      // (the seed idea participates in no stage derivation). RunExecutor.getPrompt
+      // reads this column to inject the `# Selected idea` block. Idempotent and
+      // independent of any taskId link below.
+      if (ideaId) {
+        this.db
+          .prepare('UPDATE workflow_runs SET seed_idea_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(ideaId, runId);
+      }
 
       // Native-task linkage + in-process stage derivation (migration 014).
       // No-op when no taskId was supplied or no deriver is wired. Wrapped in its

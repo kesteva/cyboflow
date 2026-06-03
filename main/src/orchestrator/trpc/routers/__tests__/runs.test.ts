@@ -295,6 +295,38 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
+  // (a2) ideaId supplied (migration 017) → full-form launch with the seed idea.
+  // -------------------------------------------------------------------------
+  it('(a2) ideaId supplied → forwards the full-form launch with the seed idea', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-idea',
+      worktreePath: '/tmp/wt/idea',
+      branchName: 'cyboflow/planner/idea1234',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, ideaId: 'IDEA-7' });
+
+      // With an ideaId present, start calls the full-form launch — substrate +
+      // taskId undefined, ideaId in the 5th slot — so the launcher writes
+      // workflow_runs.seed_idea_id directly (no stage derivation).
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7');
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // (b) Project not found → NOT_FOUND (AC7)
   // -------------------------------------------------------------------------
   it('(b) project not found → TRPCError NOT_FOUND', async () => {

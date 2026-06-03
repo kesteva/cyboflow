@@ -67,12 +67,14 @@ export interface RunLauncherLike {
   /**
    * Launch a workflow run. `substrate` carries the user's per-run CLI choice
    * (IDEA-013) down to the S1 resolver/stamp in WorkflowRegistry.createRun;
-   * `taskId` links the run to a native backlog task (migration 014). Both are
-   * OPTIONAL — when substrate is omitted the run falls through the resolver
-   * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId is omitted no task link is
-   * recorded.
+   * `taskId` links the run to a native backlog task (migration 014); `ideaId`
+   * is the planner's pre-launch seed idea (migration 017), written DIRECTLY to
+   * workflow_runs.seed_idea_id (NOT routed through the task-stage deriver). All
+   * are OPTIONAL — when substrate is omitted the run falls through the resolver
+   * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no
+   * link is recorded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -305,6 +307,10 @@ export const runsRouter = router({
       // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
+      // Optional planner pre-launch seed idea (migration 017). When supplied, the
+      // launcher writes workflow_runs.seed_idea_id DIRECTLY (no stage derivation);
+      // RunExecutor.getPrompt injects the idea body as a `# Selected idea` block.
+      ideaId: z.string().min(1).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -320,15 +326,16 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      // Forward the per-run substrate choice (IDEA-013) and native-task link
-      // (migration 014). When BOTH are omitted, call the legacy 2-arg shape so
-      // the resolver ladder owns the substrate decision and the SDK-default call
-      // site stays byte-identical (zero-behavior-change floor); otherwise pass
-      // both (substrate may be undefined, which the resolver treats as default).
+      // Forward the per-run substrate choice (IDEA-013), native-task link
+      // (migration 014), and planner seed idea (migration 017). When ALL are
+      // omitted, call the legacy 2-arg shape so the resolver ladder owns the
+      // substrate decision and the SDK-default call site stays byte-identical
+      // (zero-behavior-change floor); otherwise pass all (any may be undefined,
+      // which the launcher treats as "no link / resolver default").
       const { runId, worktreePath, branchName } =
-        input.substrate === undefined && input.taskId === undefined
+        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined
           ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
-          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId);
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId);
       return { runId, worktreePath, branchName };
     }),
 
