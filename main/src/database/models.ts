@@ -310,6 +310,34 @@ export interface EntityEventRow {
   created_at: string;
 }
 
+/**
+ * `review_items` row (migration 016) — the unified human-attention inbox. The
+ * (entity_type, entity_id) pair is a SOFT polymorphic link (both nullable,
+ * code-validated, NO hard FK). SQLite stores BOOLEAN as 0/1, so `blocking`
+ * surfaces as `number` (0|1) on read — consumers normalize to boolean. The
+ * shared READ-model + chokepoint types live in shared/types/reviews.ts; the
+ * reviewItemSchemaParity test pins this interface against the table columns.
+ */
+export interface ReviewItemRow {
+  id: string;
+  project_id: number;
+  run_id: string | null;
+  entity_type: 'idea' | 'epic' | 'task' | null;
+  entity_id: string | null;
+  kind: 'finding' | 'permission' | 'decision' | 'human_task';
+  status: 'pending' | 'resolved' | 'dismissed';
+  blocking: number; // 0 | 1
+  title: string;
+  body: string | null;
+  severity: 'info' | 'warning' | 'error' | null;
+  source: string | null;
+  payload_json: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_by: string | null;
+  resolution: string | null;
+}
+
 export interface TaskAcceptanceCriterionRow {
   id: number;
   task_id: string;
