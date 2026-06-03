@@ -512,8 +512,10 @@ export class RunExecutor {
    *
    * Returns null (so getPrompt falls through to the base prompt) when: no
    * ideaBodyReader is injected, the run is missing or carries no seed_idea_id,
-   * the reader resolves no entity, or the resolved body is empty/whitespace.
-   * The block is title + (summary, when present) + body, trimmed.
+   * the reader resolves no entity, or the resolved entity has no usable content
+   * (title, summary AND body all empty/whitespace). A title-only idea IS valid
+   * and is injected. The block is title + (summary + body, each when present),
+   * trimmed.
    *
    * Kept as a separate helper so Piece C can layer its pending-nudge branch
    * ahead of this one in getPrompt without re-deriving the seed-idea logic.
@@ -527,13 +529,19 @@ export class RunExecutor {
     const idea = this.ideaBodyReader.read(seedIdeaId);
     if (!idea) return null;
 
-    const body = idea.body?.trim() ?? '';
-    if (body === '') return null;
-
-    const parts: string[] = [`## ${idea.title}`];
+    // A title-only idea is valid — the title IS the idea (e.g. "Create a
+    // website for tester"). Render whatever fields are present; only bail when
+    // the resolved entity has no usable content at all (title + summary + body
+    // all empty/whitespace).
+    const title = idea.title?.trim() ?? '';
     const summary = idea.summary?.trim() ?? '';
+    const body = idea.body?.trim() ?? '';
+    if (title === '' && summary === '' && body === '') return null;
+
+    const parts: string[] = [];
+    if (title !== '') parts.push(`## ${title}`);
     if (summary !== '') parts.push(summary);
-    parts.push(body);
+    if (body !== '') parts.push(body);
     return parts.join('\n\n');
   }
 

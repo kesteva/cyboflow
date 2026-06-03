@@ -705,8 +705,11 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
     expect(spawnedPrompt(spawner)).toBe('PLAN BODY');
   });
 
-  it('returns the base prompt verbatim when the resolved body is empty/whitespace', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-EMPTY' });
+  it('prepends a title-only block when summary+body are empty (the title IS the idea)', async () => {
+    // Regression: a free-text idea entered as just a title (empty body/summary)
+    // must still be injected — previously the empty-body guard suppressed it and
+    // the planner saw no `# Selected idea` block.
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-TITLE-ONLY' });
     const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
@@ -715,7 +718,30 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
     const spawner = makeSpawner();
     const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
     const ideaReader = makeIdeaReader({
-      'IDEA-EMPTY': { type: 'idea', title: 'Empty', summary: null, body: '   \n  ', scope: null },
+      'IDEA-TITLE-ONLY': { type: 'idea', title: 'Create a website for tester', summary: '', body: '   \n  ', scope: null },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).toContain('## Create a website for tester');
+    expect(prompt).toContain('PLAN BODY');
+    expect(prompt.indexOf('# Selected idea')).toBeLessThan(prompt.indexOf('PLAN BODY'));
+  });
+
+  it('returns the base prompt verbatim when title, summary AND body are all empty/whitespace', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-BLANK' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-BLANK': { type: 'idea', title: '   ', summary: '', body: '  \n ', scope: null },
     });
     const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
 
