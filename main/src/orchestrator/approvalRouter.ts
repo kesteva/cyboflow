@@ -191,14 +191,21 @@ export class ApprovalRouter extends EventEmitter {
    * @param socketReply  - Closure invoked exactly once by respond() to convey
    *                       the decision back to the caller. Under the SDK
    *                       PreToolUse path this is a no-op (the caller awaits
-   *                       the returned promise directly), kept for backward
-   *                       compatibility with any future transport adapter.
+   *                       the returned promise directly); the INTERACTIVE shell
+   *                       transport (handleShellApprovalRequest) uses it to write
+   *                       the verdict on the held-open socket — load-bearing,
+   *                       must NOT regress.
+   * @param source       - Provenance stamped on the folded permission
+   *                       review_item (default 'approval'; the interactive shell
+   *                       path passes 'approval:interactive'). Optional so every
+   *                       existing SDK caller is unchanged.
    */
   async requestApproval(
     runId: string,
     toolName: string,
     input: Record<string, unknown>,
     socketReply: (decision: ApprovalDecision) => void,
+    source: string = 'approval',
   ): Promise<ApprovalDecision> {
     if (!this.db) throw new Error('ApprovalRouter db handle undefined');
 
@@ -256,7 +263,7 @@ export class ApprovalRouter extends EventEmitter {
           runId,
           toolName,
           input,
-          source: 'approval',
+          source,
           now,
         });
       });

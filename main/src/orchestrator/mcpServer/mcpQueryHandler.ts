@@ -1026,6 +1026,11 @@ export class McpQueryHandler {
    *   (c) otherwise route through ApprovalRouter.requestApproval, writing the
    *       verdict back on the held-open socket from the socketReply closure.
    *
+   * P4 fold: requestApproval co-writes a blocking permission review_item into the
+   * unified inbox (source 'approval:interactive') inside its own transaction. The
+   * socket-held-open contract is UNCHANGED — the review_item is purely additive
+   * and the socketReply closure remains the only place a verdict is written.
+   *
    * CYBOFLOW_RUN_ID precondition (TASK-800): if runId is not a real
    * workflow_runs.id (e.g. still the Claude session UUID), requestApproval's
    * guarded UPDATE finds changes===0 → RunNotRunningError → we surface a logged
@@ -1073,12 +1078,22 @@ export class McpQueryHandler {
 
     const router = ApprovalRouter.getInstance();
     void router
-      .requestApproval(msg.runId, msg.toolName, msg.toolInput, (decision) => {
-        // socketReply: the ONLY place a verdict is written for this transport.
-        // (Under the SDK path this closure is a no-op; the shell transport uses it.)
-        this.completeInFlightShellApproval(msg.runId, entry);
-        this.writeShellVerdict(client, msg.requestId, decision);
-      })
+      .requestApproval(
+        msg.runId,
+        msg.toolName,
+        msg.toolInput,
+        (decision) => {
+          // socketReply: the ONLY place a verdict is written for this transport.
+          // (Under the SDK path this closure is a no-op; the shell transport uses
+          // it — load-bearing, held open across the human-decision window.)
+          this.completeInFlightShellApproval(msg.runId, entry);
+          this.writeShellVerdict(client, msg.requestId, decision);
+        },
+        // P4: stamp the folded permission review_item with the interactive
+        // substrate provenance. The co-write happens inside requestApproval's
+        // transaction (commit 1); the socketReply closure above is unchanged.
+        'approval:interactive',
+      )
       .then((decision) => {
         // requestApproval resolves with the SAME decision the socketReply got
         // (or a synthetic deny when the run was canceled before the socketReply
