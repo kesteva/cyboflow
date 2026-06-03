@@ -36,10 +36,17 @@ vi.mock('../../../trpc/client', () => ({
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([
-            { id: 'wf-1', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', created_at: '' },
-            { id: 'wf-2', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', created_at: '' },
+            // Sprint fixtures so "Start Run" exercises the DIRECT launch path.
+            // The Planner flow is gated behind IdeaPickerModal (migration 017) and
+            // is covered by its own describe block below.
+            { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
+            { id: 'wf-2', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
           ]),
         },
+      },
+      tasks: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+        create: { mutate: vi.fn().mockResolvedValue({ taskId: 'IDEA-NEW' }) },
       },
       health: {
         mcpServer: { query: vi.fn().mockResolvedValue({ status: 'running', restartAttempts: 0 }) },
@@ -113,6 +120,8 @@ import type { ToolPanel } from '../../../../../shared/types/panels';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
+const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
+const mockTasksList = vi.mocked(trpc.cyboflow.tasks.list.query);
 
 beforeEach(() => {
   // Reset store state
@@ -364,5 +373,57 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     // Approval gating DID ship for the interactive substrate (TASK-810), so the
     // "approval routing unavailable" caveat must NOT appear.
     expect(caveats).not.toHaveTextContent(/approval routing/i);
+  });
+});
+
+describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    // Override the list to a single Planner flow so "Start Run" hits the gate.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+    mockTasksList.mockResolvedValue([]);
+  });
+
+  it('opens IdeaPickerModal on Start Run and does NOT launch until an idea is picked', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // The picker opened; no run was started yet.
+    expect(await screen.findByTestId('idea-picker-submit')).toBeInTheDocument();
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('threads the picked idea id into runs.start.mutate', async () => {
+    // An open idea in the backlog so the picker's select renders.
+    mockTasksList.mockResolvedValue([
+      {
+        id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
+        body: 'prose', priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'idea', version: 1, inFlow: [], awaitingReview: false,
+        isDone: false, created_at: '', updated_at: '',
+      },
+    ]);
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // Pick the idea and confirm.
+    await screen.findByLabelText('Select idea');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-planner', projectId: 1, substrate: 'sdk', ideaId: 'IDEA-9' });
   });
 });

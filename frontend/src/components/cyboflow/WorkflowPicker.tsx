@@ -16,6 +16,7 @@ import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
+import { IdeaPickerModal } from './IdeaPickerModal';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 
@@ -55,6 +56,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
+
+  // Planner pre-launch idea-selection gate (migration 017). When the selected
+  // workflow is the Planner, "Start Run" opens this picker first; the chosen
+  // idea id is threaded into runs.start.mutate({ ideaId }).
+  const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
 
   /**
    * Synchronous in-flight latch for "Start Run". The `isStarting` STATE guard is
@@ -120,22 +126,57 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     [loadWorkflows],
   );
 
+  /**
+   * Fire the actual runs.start mutation. `ideaId` is the Planner's pre-launch
+   * seed idea (migration 017) — undefined for Sprint (and any free Planner
+   * launch). The synchronous in-flight latch flips HERE (at the real mutate),
+   * NOT on modal open, so opening the picker is freely cancellable.
+   */
+  const launchRun = useCallback(
+    async (workflowId: string, ideaId?: string): Promise<void> => {
+      if (startInFlightRef.current) return;
+      startInFlightRef.current = true;
+      setError(null);
+      setIsStarting(true);
+      try {
+        const result = await trpc.cyboflow.runs.start.mutate(
+          ideaId === undefined
+            ? { workflowId, projectId, substrate }
+            : { workflowId, projectId, substrate, ideaId },
+        );
+        useCyboflowStore.getState().setActiveRun(result.runId);
+        onWorkflowStarted?.(result.runId);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to start run');
+      } finally {
+        setIsStarting(false);
+        startInFlightRef.current = false;
+      }
+    },
+    [projectId, substrate, onWorkflowStarted],
+  );
+
   const handleStartRun = async () => {
     if (selectedId === null || startInFlightRef.current) return;
-    startInFlightRef.current = true;
-    setError(null);
-    setIsStarting(true);
-    try {
-      const result = await trpc.cyboflow.runs.start.mutate({ workflowId: selectedId, projectId, substrate });
-      useCyboflowStore.getState().setActiveRun(result.runId);
-      onWorkflowStarted?.(result.runId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to start run');
-    } finally {
-      setIsStarting(false);
-      startInFlightRef.current = false;
+    // Planner is gated behind the idea picker. Workflow `name` is the lowercase
+    // CyboflowWorkflowName seeded by WorkflowRegistry — compare to 'planner'.
+    const selected = workflows.find((wf) => wf.id === selectedId);
+    if (selected?.name === 'planner') {
+      setError(null);
+      setIdeaPickerOpen(true);
+      return;
     }
+    await launchRun(selectedId);
   };
+
+  const handleIdeaPicked = useCallback(
+    (ideaId: string): void => {
+      setIdeaPickerOpen(false);
+      if (selectedId === null) return;
+      void launchRun(selectedId, ideaId);
+    },
+    [selectedId, launchRun],
+  );
 
   const combinedError = error ?? quickError;
 
@@ -240,6 +281,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
           projectId={projectId}
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
+        />
+      )}
+
+      {ideaPickerOpen && (
+        <IdeaPickerModal
+          isOpen
+          projectId={projectId}
+          onClose={() => setIdeaPickerOpen(false)}
+          onPicked={handleIdeaPicked}
         />
       )}
 
