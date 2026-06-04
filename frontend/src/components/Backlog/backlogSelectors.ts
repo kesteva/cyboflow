@@ -32,6 +32,72 @@ export function visibleStages(board: Board, showArchived: boolean): BoardStage[]
     .sort((a, b) => a.position - b.position);
 }
 
+// ---------------------------------------------------------------------------
+// Stage helpers for the per-card actions menu (manual stage move + archive)
+// ---------------------------------------------------------------------------
+
+/** Board position of the terminal "Archived" stage (database.ts seedDefaultBoard). */
+export const ARCHIVED_POSITION = 11;
+/**
+ * Board position of the idea-only terminal "Decomposed" stage. It is reached
+ * automatically when an idea's first child is created — never a manual target —
+ * so it is excluded from the change-stage picker.
+ */
+export const DECOMPOSED_POSITION = 12;
+
+/** The board stage a row currently sits in, or null when its stage_id is unknown to the board. */
+export function findStageById(board: Board, stageId: string): BoardStage | null {
+  return board.stages.find((s) => s.id === stageId) ?? null;
+}
+
+/** The terminal "Archived" stage of a board (by canonical position, falling back to label), or null. */
+export function findArchivedStage(board: Board): BoardStage | null {
+  return (
+    board.stages.find((s) => s.position === ARCHIVED_POSITION) ??
+    board.stages.find((s) => s.label === 'Archived') ??
+    null
+  );
+}
+
+/**
+ * The stages a USER may manually move an item to, sorted by position. Excludes:
+ *  - DERIVED execution stages (write_policy === 'derived', positions 7/8) — the
+ *    chokepoint rejects user asserts on those (code 'forbidden_stage').
+ *  - the item's CURRENT stage (a no-op move).
+ *  - the auto-only "Decomposed" terminal (idea retirement is never hand-set).
+ * Terminal planning stages (Done / Won't do / Archived) ARE offered so the user
+ * can mark an item done / parked / archived by hand.
+ */
+export function selectableStages(board: Board, currentStageId: string): BoardStage[] {
+  return board.stages
+    .filter(
+      (s) =>
+        s.write_policy === 'asserted' &&
+        s.id !== currentStageId &&
+        s.position !== DECOMPOSED_POSITION,
+    )
+    .slice()
+    .sort((a, b) => a.position - b.position);
+}
+
+/**
+ * Map a setStage rejection to a human message for the card-action dialogs. The
+ * chokepoint discriminated code is prefixed onto the TRPCError message
+ * (`${code}: ${msg}`), so match on the code substring; fall back to the raw
+ * message, then a generic line.
+ */
+export function friendlyStageError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : '';
+  if (msg.includes('active_runs'))
+    return 'This item has an active run. Cancel or finish the run before changing its stage.';
+  if (msg.includes('concurrency'))
+    return 'This item changed since you opened it. Close this dialog and try again.';
+  if (msg.includes('forbidden_stage'))
+    return 'That stage is set automatically by the orchestrator and can’t be changed by hand.';
+  if (msg.includes('not_found')) return 'This item or stage no longer exists. Refresh the backlog.';
+  return msg.length > 0 ? msg : 'Could not update the stage. Please try again.';
+}
+
 /**
  * Top-level items only — the UNION of all three entity types (ideas, epics, and
  * SOLO tasks) that have no parent epic. Child tasks of an epic are rendered
