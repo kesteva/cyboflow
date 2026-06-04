@@ -1592,3 +1592,161 @@ describe('mcp-report-step does not pause on human steps', () => {
     expect(gateDb.prepare("SELECT COUNT(*) AS n FROM review_items WHERE run_id = 'run-g'").get()).toEqual({ n: 0 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 9. FIX-STAGE-MODEL (C): mcp-report-step advances the run's SEED idea stage.
+//    context->Idea(1), research->Research(2), approve-idea->Idea spec(3).
+//    NON-PAUSING (run stays 'running'); fail-soft when there is no seed idea.
+// ---------------------------------------------------------------------------
+
+describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () => {
+  // Migration-backed DB through 017 (adds workflow_runs.seed_idea_id) so the
+  // report path can resolve + move the seed idea via the TaskChangeRouter.
+  function buildSeedDb(): Database.Database {
+    const seedDb = new Database(':memory:');
+    seedDb.pragma('foreign_keys = ON');
+    seedDb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    seedDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    seedDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
+    return seedDb;
+  }
+
+  function stage(position: number): string {
+    return `stage-board-1-default-${position}`;
+  }
+
+  // Seed a 'planner' run (built-in def has context/research/approve-idea steps).
+  function seedPlannerRun(seedDb: Database.Database, runId: string, seedIdeaId: string | null): void {
+    seedDb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-p', 1, 'planner', '{}')`)
+      .run();
+    seedDb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, seed_idea_id) VALUES (?, 'wf-p', 1, 'running', ?)`,
+      )
+      .run(runId, seedIdeaId);
+  }
+
+  let seedDb: Database.Database;
+  let seedHandler: McpQueryHandler;
+
+  beforeEach(() => {
+    seedDb = buildSeedDb();
+    TaskChangeRouter.initialize(dbAdapter(seedDb));
+    seedHandler = new McpQueryHandler(dbAdapter(seedDb));
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  async function createSeedIdea(): Promise<string> {
+    const { taskId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Seed idea',
+    });
+    return taskId;
+  }
+
+  it('research step moves the seed idea to Research (position 2) WITHOUT pausing the run', async () => {
+    const ideaId = await createSeedIdea();
+    // Created at the idea type-default (position 1).
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(1),
+    );
+    seedPlannerRun(seedDb, 'run-p', ideaId);
+
+    const { socket, writes } = makeSocketDouble();
+    await seedHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'sc-1', runId: 'run-p', stepId: 'research', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    // Observational shape is unchanged — no seed-idea field leaks into the reply.
+    expect(response.data).toEqual({ step_id: 'research', status: 'running' });
+
+    // The seed idea advanced to Research (position 2)...
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(2),
+    );
+    // ...and the run is STILL running (non-pausing).
+    expect((seedDb.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-p') as { status: string }).status).toBe(
+      'running',
+    );
+    // The move is orchestrator-attributed.
+    const ev = seedDb
+      .prepare("SELECT actor FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(ideaId) as { actor: string };
+    expect(ev.actor).toBe('orchestrator');
+  });
+
+  it('approve-idea step moves the seed idea to Idea spec (position 3)', async () => {
+    const ideaId = await createSeedIdea();
+    seedPlannerRun(seedDb, 'run-p', ideaId);
+
+    const { socket, writes } = makeSocketDouble();
+    await seedHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'sc-2', runId: 'run-p', stepId: 'approve-idea', status: 'running' },
+      socket,
+    );
+
+    expect(parseLastWrite(writes).ok).toBe(true);
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(3),
+    );
+  });
+
+  it('fail-soft: a run with no seed_idea_id reports normally and touches no idea', async () => {
+    const ideaId = await createSeedIdea();
+    seedPlannerRun(seedDb, 'run-p', null); // NO seed idea linked
+
+    const { socket, writes } = makeSocketDouble();
+    await seedHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'sc-3', runId: 'run-p', stepId: 'research', status: 'running' },
+      socket,
+    );
+
+    expect(parseLastWrite(writes).ok).toBe(true);
+    // The unrelated idea is untouched at its create stage.
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(1),
+    );
+  });
+
+  it('fail-soft: an UNMAPPED planner step (epics) does not move the seed idea', async () => {
+    const ideaId = await createSeedIdea();
+    seedPlannerRun(seedDb, 'run-p', ideaId);
+
+    const { socket, writes } = makeSocketDouble();
+    await seedHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'sc-4', runId: 'run-p', stepId: 'epics', status: 'running' },
+      socket,
+    );
+
+    expect(parseLastWrite(writes).ok).toBe(true);
+    // 'epics' is not in PLANNER_STEP_TO_IDEA_POSITION — idea stays at position 1.
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(1),
+    );
+  });
+});

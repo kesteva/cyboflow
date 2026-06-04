@@ -142,6 +142,25 @@ export interface McpQueryResponse {
   error?: string;
 }
 
+/**
+ * FIX-STAGE-MODEL (C): planner-step -> SEED-IDEA board-stage coupling.
+ *
+ * When the planner reports a step transition, the run's seed idea
+ * (workflow_runs.seed_idea_id) advances to the matching planning stage so the
+ * board reflects the run's progress WITHOUT the agent having to call
+ * cyboflow_set_task_stage. Positions are verified against database.ts
+ * seedDefaultBoard: 1=Idea, 2=Research, 3=Idea spec. Steps not in this map (and
+ * the later refine/decompose steps, which are handled by idea->Decomposed via
+ * FIX (B)) are intentionally absent — an unmapped step is a no-op.
+ *
+ * This is the SINGLE source for the coupling so it stays easy to extend.
+ */
+const PLANNER_STEP_TO_IDEA_POSITION: Readonly<Record<string, number>> = {
+  context: 1, // Idea
+  research: 2, // Research
+  'approve-idea': 3, // Idea spec
+};
+
 // ---------------------------------------------------------------------------
 // Internal row shapes (enough for safe narrowing — not a full ORM mapping)
 // ---------------------------------------------------------------------------
@@ -465,6 +484,14 @@ export class McpQueryHandler {
       return;
     }
 
+    // FIX-STAGE-MODEL (C): advance the run's SEED idea to the planning stage that
+    // matches this step (context->Idea, research->Research, approve-idea->Idea
+    // spec). NON-PAUSING — the run stays 'running'; this opens NO gate. Fail-soft:
+    // no seed_idea_id / sentinel / unmapped step → no-op. Awaited so the move
+    // commits before we reply (keeps the board consistent with the rail), but any
+    // failure is swallowed so a stage hiccup never breaks the observational report.
+    await this.advanceSeedIdeaStageForStep(msg.runId, msg.stepId);
+
     // Report-step is OBSERVATIONAL: it records the run's current step for the
     // progress rail and never changes the run's lifecycle state. Human steps
     // (approve-idea / approve-plan / human-review) are AGENT-driven — the agent
@@ -481,6 +508,62 @@ export class McpQueryHandler {
         status,
       },
     });
+  }
+
+  /**
+   * FIX-STAGE-MODEL (C): move the run's SEED idea to the board stage mapped to
+   * `stepId` via PLANNER_STEP_TO_IDEA_POSITION. The write goes through the
+   * TaskChangeRouter chokepoint with actor='orchestrator' (non-pausing — it never
+   * touches workflow_runs.status). Fully fail-soft: returns silently when the run
+   * is the sentinel, has no seed_idea_id (or the column is absent on an older
+   * DB), the step is unmapped, the idea/board/stage cannot be resolved, or the
+   * chokepoint rejects. NEVER throws — the report-step response is unaffected.
+   */
+  private async advanceSeedIdeaStageForStep(runId: string, stepId: string): Promise<void> {
+    if (runId === 'orchestrator') return;
+
+    const position = PLANNER_STEP_TO_IDEA_POSITION[stepId];
+    if (position === undefined) return; // unmapped step — no-op
+
+    try {
+      // seed_idea_id is migration 017; read defensively so a pre-017 DB (or a run
+      // with no selected idea) is a clean no-op rather than a thrown error.
+      const runRow = this.db
+        .prepare('SELECT project_id AS projectId, seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { projectId?: unknown; seedIdeaId?: unknown } | undefined;
+      const seedIdeaId = typeof runRow?.seedIdeaId === 'string' ? runRow.seedIdeaId : null;
+      if (!runRow || !seedIdeaId) return;
+
+      const projectId = typeof runRow.projectId === 'number' ? runRow.projectId : Number(runRow.projectId);
+
+      // Resolve the idea's board → the stage id at the mapped position.
+      const ideaRow = this.db
+        .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
+        .get(seedIdeaId) as { boardId?: unknown; stageId?: unknown } | undefined;
+      const boardId = typeof ideaRow?.boardId === 'string' ? ideaRow.boardId : null;
+      if (!ideaRow || !boardId) return;
+
+      const stageRow = this.db
+        .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+        .get(boardId, position) as { id?: unknown } | undefined;
+      const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
+      if (!targetStageId || targetStageId === ideaRow.stageId) return; // unresolved or already there
+
+      await TaskChangeRouter.getInstance().applyChange(projectId, {
+        actor: 'orchestrator',
+        entityType: 'idea',
+        taskId: seedIdeaId,
+        stageId: targetStageId,
+        runId,
+        kind: 'seed-idea-stage',
+      });
+    } catch (err) {
+      this.logger?.debug('[Cyboflow MCP Query] seed-idea stage advance skipped (fail-soft)', {
+        runId,
+        stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // --------------------------------------------------------------------------
