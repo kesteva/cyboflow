@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import {
   listRunFiles,
   readRunFile,
@@ -180,6 +181,54 @@ describe('runFileExplorer', () => {
     } finally {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // fs hardening — special files + symlink metadata containment
+  // -------------------------------------------------------------------------
+  it('rejects a non-regular file (FIFO) instead of reading it (no threadpool hang)', () => {
+    const fifo = path.join(worktree, 'pipe');
+    try {
+      execFileSync('mkfifo', [fifo]);
+    } catch {
+      return; // mkfifo unavailable on this platform — skip
+    }
+    // Must reject promptly via the stat/isFile guard, never block on readFile.
+    return expect(readRunFile(dbAdapter(db), RUN_ID, 'pipe')).rejects.toMatchObject({
+      reason: 'not-a-file',
+    });
+  });
+
+  it('does not leak the size/type of a symlink whose target is OUTSIDE the worktree', async () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-outside-'));
+    const secret = path.join(outsideDir, 'secret.txt');
+    fs.writeFileSync(secret, 'top secret payload'); // 18 bytes — must NOT surface
+    try {
+      fs.symlinkSync(secret, path.join(worktree, 'leak'));
+      const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+      const leak = entries.find((e) => e.name === 'leak');
+      expect(leak).toBeDefined();
+      // Reported as a non-traversable leaf with no size — target metadata hidden.
+      expect(leak).toMatchObject({ name: 'leak', isDirectory: false });
+      expect(leak?.size).toBeUndefined();
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('follows an IN-worktree symlink for type and size', async () => {
+    fs.mkdirSync(path.join(worktree, 'realdir'));
+    fs.writeFileSync(path.join(worktree, 'realfile.txt'), 'hello in-tree'); // 13 bytes
+    fs.symlinkSync(path.join(worktree, 'realfile.txt'), path.join(worktree, 'linkfile'));
+    fs.symlinkSync(path.join(worktree, 'realdir'), path.join(worktree, 'linkdir'));
+
+    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const linkfile = entries.find((e) => e.name === 'linkfile');
+    const linkdir = entries.find((e) => e.name === 'linkdir');
+    // In-worktree symlinks are safely followed: file size + dir classification.
+    expect(linkfile).toMatchObject({ isDirectory: false });
+    expect(linkfile?.size).toBe(Buffer.byteLength('hello in-tree'));
+    expect(linkdir).toMatchObject({ isDirectory: true });
   });
 
   // -------------------------------------------------------------------------
