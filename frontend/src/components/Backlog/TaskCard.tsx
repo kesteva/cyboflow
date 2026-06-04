@@ -18,6 +18,7 @@ import { ChevronDown, ChevronRight, Play, Loader2, Pencil } from 'lucide-react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { TypeTag, PriorityTag, FlowMarker, ReviewMarker, DoneFlag } from './markers';
 import { compactAgo } from './backlogSelectors';
+import { CardActionsMenu } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
 
@@ -89,6 +90,8 @@ function CardFooter({
           )}
           Run
         </button>
+        {/* Secondary actions (Change stage… / Archive) tucked behind a ⋯ menu. */}
+        <CardActionsMenu task={task} />
       </div>
     </div>
   );
