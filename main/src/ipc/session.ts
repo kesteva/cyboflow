@@ -183,24 +183,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  ipcMain.handle('sessions:get-archived-with-projects', async () => {
-    try {
-      const allProjects = databaseService.getAllProjects();
-      const projectsWithArchivedSessions = allProjects.map(project => {
-        const archivedSessions = databaseService.getArchivedSessions(project.id);
-        return {
-          ...project,
-          sessions: archivedSessions,
-          folders: [] // Archived sessions don't need folders
-        };
-      }).filter(project => project.sessions.length > 0); // Only include projects with archived sessions
-      return { success: true, data: projectsWithArchivedSessions };
-    } catch (error) {
-      console.error('Failed to get archived sessions with projects:', error);
-      return { success: false, error: 'Failed to get archived sessions with projects' };
-    }
-  });
-
   ipcMain.handle('sessions:create', async (_event, request: CreateSessionRequest) => {
     try {
       let targetProject;

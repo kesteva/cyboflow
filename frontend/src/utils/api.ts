@@ -53,11 +53,6 @@ export class API {
       return window.electronAPI.sessions.getAllWithProjects();
     },
 
-    async getArchivedWithProjects() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getArchivedWithProjects();
-    },
-
     async get(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.get(sessionId);

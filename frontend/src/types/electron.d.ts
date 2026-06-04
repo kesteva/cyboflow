@@ -68,7 +68,6 @@ interface ElectronAPI {
     // but that type is locally defined in DraggableProjectTreeView.
     // Typed as unknown[] here; callers cast to their local interface.
     getAllWithProjects: () => Promise<IPCResponse<unknown[]>>;
-    getArchivedWithProjects: () => Promise<IPCResponse<unknown[]>>;
     get: (sessionId: string) => Promise<IPCResponse<Session>>;
     create: (request: CreateSessionRequest) => Promise<IPCResponse<Session>>;
     createQuick: (request: CreateSessionRequest) => Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string }>>;
