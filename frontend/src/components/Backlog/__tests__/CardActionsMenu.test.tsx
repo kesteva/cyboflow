@@ -92,11 +92,19 @@ describe('CardActionsMenu', () => {
     expect(screen.queryByTestId('task-actions-trigger')).not.toBeInTheDocument();
   });
 
-  it('exposes Change stage… and Archive for a normal item', () => {
+  it('exposes Change stage… and Archive (with no active-run hint) for a normal item', () => {
     render(<CardActionsMenu task={makeTask()} />);
     fireEvent.click(screen.getByTestId('task-actions-trigger'));
     expect(screen.getByText('Change stage…')).toBeInTheDocument();
     expect(screen.getByText('Archive')).toBeInTheDocument();
+    // Enabled items carry no disabled-reason hint.
+    expect(screen.queryByText('Finish or cancel the active run first.')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the default board when the task board_id is not in the store', () => {
+    render(<CardActionsMenu task={makeTask({ board_id: 'gone' })} />);
+    // BOARD is is_default, so pickDefaultBoard resolves it → the menu still renders.
+    expect(screen.getByTestId('task-actions-trigger')).toBeInTheDocument();
   });
 
   it('hides Archive when the item already sits in the Archived stage', () => {
@@ -106,10 +114,18 @@ describe('CardActionsMenu', () => {
     expect(screen.queryByText('Archive')).not.toBeInTheDocument();
   });
 
-  it('disables both actions while the card has an active run', () => {
+  it('disables both actions (with a hint) while the card has an active run', () => {
     render(
       <CardActionsMenu task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null }] })} />,
     );
+    fireEvent.click(screen.getByTestId('task-actions-trigger'));
+    expect(screen.getByText('Change stage…').closest('button')).toBeDisabled();
+    expect(screen.getByText('Archive').closest('button')).toBeDisabled();
+    expect(screen.getAllByText('Finish or cancel the active run first.').length).toBeGreaterThan(0);
+  });
+
+  it('disables actions while the card is awaiting review (non-terminal run the server would reject)', () => {
+    render(<CardActionsMenu task={makeTask({ awaitingReview: true })} />);
     fireEvent.click(screen.getByTestId('task-actions-trigger'));
     expect(screen.getByText('Change stage…').closest('button')).toBeDisabled();
     expect(screen.getByText('Archive').closest('button')).toBeDisabled();

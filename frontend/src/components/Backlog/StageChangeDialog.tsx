@@ -106,9 +106,9 @@ export function StageChangeDialog({
             <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-status-warning" />
             <p className="text-xs leading-snug text-status-warning">
               <span className="font-semibold">Heads up:</span> manually setting a stage skips the
-              normal flow. Stages usually advance on their own as the planner/sprint produces what
+              normal flow. Stages normally advance as the planner or sprint runs and produces what
               each one needs (research, the idea spec, epics, tasks, approvals). Moving an item here
-              by hand can leave later steps without their inputs
+              by hand can leave later steps without those inputs
               {target ? ` — only do this if the work for “${target.label}” is genuinely done.` : '.'}
             </p>
           </div>

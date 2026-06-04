@@ -120,6 +120,10 @@ describe('friendlyStageError', () => {
     ).toMatch(/automatically/i);
   });
 
+  it('maps the not-found code', () => {
+    expect(friendlyStageError(new Error('not_found: task gone'))).toMatch(/no longer exists/i);
+  });
+
   it('falls back to a generic message for a non-Error / empty message', () => {
     expect(friendlyStageError('boom')).toMatch(/could not update/i);
     expect(friendlyStageError(new Error(''))).toMatch(/could not update/i);

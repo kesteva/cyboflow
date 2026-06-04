@@ -95,6 +95,14 @@ describe('StageChangeDialog', () => {
     expect(screen.getByText('Tasks extracted')).toBeInTheDocument();
   });
 
+  it('reflects the selected target stage in the warning', () => {
+    render(<StageChangeDialog task={makeTask()} board={board()} isOpen onClose={vi.fn()} />);
+    // No stage chosen yet → the warning does not name a target.
+    expect(screen.getByTestId('stage-change-warning')).not.toHaveTextContent('Ready for development');
+    fireEvent.change(screen.getByTestId('stage-change-select'), { target: { value: 's-6' } });
+    expect(screen.getByTestId('stage-change-warning')).toHaveTextContent('Ready for development');
+  });
+
   it('offers only user-settable stages (no current / derived / Decomposed)', () => {
     render(<StageChangeDialog task={makeTask()} board={board()} isOpen onClose={vi.fn()} />);
     const select = screen.getByTestId('stage-change-select') as HTMLSelectElement;

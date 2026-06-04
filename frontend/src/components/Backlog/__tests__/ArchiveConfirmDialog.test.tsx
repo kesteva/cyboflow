@@ -106,10 +106,13 @@ describe('ArchiveConfirmDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('disables the action when the board has no Archived stage', () => {
+  it('disables the action and never calls setStage when the board has no Archived stage', () => {
     render(
       <ArchiveConfirmDialog task={makeTask()} board={board([stage(1, 'Idea')])} isOpen onClose={vi.fn()} />,
     );
-    expect(screen.getByTestId('archive-confirm-button')).toBeDisabled();
+    const btn = screen.getByTestId('archive-confirm-button');
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn);
+    expect(mockSetStage).not.toHaveBeenCalled();
   });
 });

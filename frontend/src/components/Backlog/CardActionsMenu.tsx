@@ -36,8 +36,13 @@ export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Eleme
 
   const currentStage = findStageById(board, task.stage_id);
   const isArchived = currentStage?.position === ARCHIVED_POSITION;
-  const hasActiveRun = task.inFlow.length > 0;
-  const runHint = hasActiveRun ? 'Cancel the active run first.' : undefined;
+  // The chokepoint rejects USER stage moves on a task with ANY non-terminal run
+  // (active_runs). BacklogTaskItem only exposes `inFlow` (running) + `awaitingReview`
+  // (awaiting_review / pr_open / pending approvals) overlays, so we gate on both to
+  // cover the common run + review window; rarer transient states (queued / stuck /
+  // awaiting_input) still degrade gracefully via the server rejection + friendly error.
+  const hasActiveRun = task.inFlow.length > 0 || task.awaitingReview;
+  const runHint = hasActiveRun ? 'Finish or cancel the active run first.' : undefined;
 
   const items: DropdownItem[] = [
     {
@@ -66,17 +71,19 @@ export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Eleme
     // the dedicated Edit affordance's stopPropagation guard).
     <span onClick={(e) => e.stopPropagation()} className="inline-flex">
       <Dropdown
-        position="bottom-right"
+        position="auto"
         width="sm"
         items={items}
         trigger={
-          <span
+          <button
+            type="button"
             data-testid="task-actions-trigger"
+            aria-haspopup="menu"
             aria-label={`Actions for ${task.ref}`}
             className="inline-flex items-center rounded-button border border-border-primary px-1.5 py-0.5 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
             <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={2.5} />
-          </span>
+          </button>
         }
       />
       <StageChangeDialog
