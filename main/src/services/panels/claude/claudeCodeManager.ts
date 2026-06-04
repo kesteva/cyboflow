@@ -250,16 +250,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Approval cleanup is done in runSdkQuery's finally block via
     // ApprovalRouter.getInstance().clearPendingForRun(panelId) — using panelId
     // (the id under which requestApproval() was called) rather than sessionId.
+    // cleanupCliResources fires on the ABORT path (killProcess); normal completion
+    // tears down via runSdkQuery's finally. Bundle removal is routed through the
+    // shared helper from BOTH so it never depends on which path ended the run.
+    this.removeBundleForSession(sessionId);
+  }
 
-    // Remove the run's cyboflow-* command/agent bundle from the worktree (IDEA-013
-    // rung-(ii); strips ONLY cyboflow files, leaves user agents/commands intact).
-    // worktreePath was captured by sessionId at spawn; no-op when nothing was
-    // written (quick sessions / custom flows).
+  /**
+   * Remove the run's cyboflow-* command/agent bundle from the worktree (IDEA-013
+   * rung-(ii); strips ONLY cyboflow files, leaves user agents/commands intact) and
+   * drop the per-session worktree record. Idempotent + no-op when nothing was
+   * written (quick sessions / custom flows). Called from runSdkQuery's finally
+   * (normal completion + abort-via-iterator-settle) AND cleanupCliResources (the
+   * base killProcess path) so the bundle and the bundleWorktrees entry never leak.
+   */
+  private removeBundleForSession(sessionId: string): void {
     const worktreePath = this.bundleWorktrees.get(sessionId);
-    if (worktreePath !== undefined) {
-      this.bundleWriter.remove(worktreePath);
-      this.bundleWorktrees.delete(sessionId);
-    }
+    if (worktreePath === undefined) return;
+    this.bundleWriter.remove(worktreePath);
+    this.bundleWorktrees.delete(sessionId);
   }
 
   protected async getCliEnvironment(_options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
@@ -464,6 +473,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // requestApproval() / requestQuestion() via makePreToolUseHook.
       ApprovalRouter.getInstance().clearPendingForRun(runId);
       QuestionRouter.getInstance().clearPendingForRun(runId);
+      // Remove the run's cyboflow-* command/agent bundle on normal completion
+      // (cleanupCliResources only fires on the abort path) — single-sourced with
+      // it via removeBundleForSession so the bundleWorktrees entry never leaks.
+      this.removeBundleForSession(sessionId);
       this.processes.delete(panelId);
       this.sdkRuns.delete(panelId);
       this.emit('exit', {
