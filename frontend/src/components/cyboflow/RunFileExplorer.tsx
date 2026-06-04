@@ -321,6 +321,9 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
         <button
           key={entry.path}
           type="button"
+          role="treeitem"
+          aria-level={depth + 1}
+          aria-expanded={entry.isDirectory ? isOpen : undefined}
           data-testid={`run-file-explorer-node-${entry.path}`}
           onClick={() => (entry.isDirectory ? toggleDir(entry.path) : void openFileAt(entry.path))}
           style={{ paddingLeft: indent }}
@@ -443,7 +446,9 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             No files in this worktree.
           </div>
         ) : (
-          <div data-testid="run-file-explorer-tree">{renderRows(ROOT, 0)}</div>
+          <div data-testid="run-file-explorer-tree" role="tree" aria-label="Worktree files">
+            {renderRows(ROOT, 0)}
+          </div>
         )}
       </div>
     </div>
