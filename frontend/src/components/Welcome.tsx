@@ -1,6 +1,6 @@
 import React from 'react';
 import { Zap, CheckCircle, GitBranch } from 'lucide-react';
-import cyboflowLogo from '../assets/cyboflow-logo.svg';
+import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
 import { Modal, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 
@@ -46,12 +46,10 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
       {/* Header with gradient */}
       <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center justify-between">
-          <div className="flex items-center">
-            <img src={cyboflowLogo} alt="Cyboflow" className="h-10 w-10 mr-3" />
-            <div>
-              <h1 className="text-2xl font-bold">Welcome to Cyboflow</h1>
-              <p className="text-interactive-text/80">Multi-Session Claude Code Manager</p>
-            </div>
+          <div>
+            <img src={cyboflowWordmark} alt="Cyboflow" className="h-9 w-auto mb-2" />
+            <h1 className="text-2xl font-bold">Welcome</h1>
+            <p className="text-interactive-text/80">Multi-Session Claude Code Manager</p>
           </div>
         </div>
       </div>

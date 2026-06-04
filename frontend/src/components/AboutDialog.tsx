@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { X, ExternalLink } from 'lucide-react';
+import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
 
 interface VersionInfo {
   current: string;
@@ -70,16 +71,12 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
         <div className="flex items-center justify-between p-6 border-b border-border-primary">
           <div className="flex items-center space-x-3">
             <img
-              src="/cyboflow-logo.svg"
+              src={cyboflowWordmark}
               alt="Cyboflow"
-              className="w-8 h-8"
-              onError={(e) => {
-                // Fallback if logo not found
-                (e.target as HTMLImageElement).style.display = 'none';
-              }}
+              className="h-7 w-auto"
             />
             <h2 className="text-xl font-semibold text-text-primary">
-              About Cyboflow
+              About
             </h2>
           </div>
           <button

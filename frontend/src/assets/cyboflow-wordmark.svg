@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="232" height="40" viewBox="0 0 232 40" role="img" aria-label="cyboflow">
+
+  <rect x="1" y="6" width="28" height="28" fill="#ffffff" stroke="#1a1815" stroke-width="1.4"></rect>
+  <path d="M8.5 12.5 L17.5 20 L8.5 27.5" fill="none" stroke="#c96442" stroke-width="2.6" stroke-linecap="square" stroke-linejoin="miter"></path>
+  <rect x="19" y="25.4" width="5" height="2" fill="#1a1815"></rect>
+
+  <text x="40" y="28" font-family="'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace" font-size="22" font-weight="700" letter-spacing="-0.5" fill="#1a1815">cyboflow</text>
+</svg>
