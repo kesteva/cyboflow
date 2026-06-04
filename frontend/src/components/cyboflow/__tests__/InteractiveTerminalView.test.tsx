@@ -201,6 +201,10 @@ beforeEach(() => {
 
 afterEach(() => {
   Reflect.deleteProperty(window, 'electron');
+  // Drop the per-test renderable layout overrides (makeRenderable) so they never
+  // bleed into a test that asserts the default 0-dimension (buffered) behavior.
+  Reflect.deleteProperty(HTMLElement.prototype, 'offsetWidth');
+  Reflect.deleteProperty(HTMLElement.prototype, 'offsetHeight');
 });
 
 // Deliver a chunk through the captured IPC handler the way the preload bridge
@@ -220,6 +224,21 @@ async function flushBacklog(): Promise<void> {
   });
 }
 
+// Drive the component to a RENDERABLE state the way a real browser would. The
+// xterm 0-dimension crash guard (ensureRenderable) gates every write/resize on a
+// measurable container box + a layout tick; jsdom reports offsetWidth/Height = 0
+// and the mount rAF resolves async, so writes stay buffered until we emulate
+// layout here: report a non-zero box and fire the captured ResizeObserver, whose
+// first tick runs ensureRenderable() → term.open()+fit() (both mocked) →
+// renderable = true, flushing any buffered bytes. Restored in afterEach.
+function makeRenderable(): void {
+  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => 800 });
+  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get: () => 600 });
+  act(() => {
+    resizeObserverCb?.();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -235,6 +254,7 @@ describe('InteractiveTerminalView', () => {
 
   it('writes each delivered chunk VERBATIM to term.write', () => {
     render(<InteractiveTerminalView runId="run-1" />);
+    makeRenderable();
 
     const chunk = '[32mhello[0m world\r\n';
     deliver(chunk);
@@ -255,6 +275,7 @@ describe('InteractiveTerminalView', () => {
     expect(useCyboflowStore.getState().streamEvents.length).toBe(0);
 
     render(<InteractiveTerminalView runId="run-iso" />);
+    makeRenderable();
 
     deliver('chunk-a');
     deliver('chunk-b');
@@ -279,6 +300,7 @@ describe('InteractiveTerminalView', () => {
 
   it('re-pins to the bottom on write only when the viewport is at the bottom', () => {
     render(<InteractiveTerminalView runId="run-scroll" />);
+    makeRenderable();
 
     // At bottom: viewportY === baseY → re-pin.
     xtermBuffer.viewportY = 10;
@@ -442,6 +464,9 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
     vi.useFakeTimers();
     try {
       render(<InteractiveTerminalView runId="run-resize" substrate="interactive" />);
+      // First observer tick only flips renderable (ensureRenderable returns
+      // without relaying); the tick AFTER the geometry change below is the relay.
+      makeRenderable();
 
       // Change the reported geometry, then fire the captured ResizeObserver cb.
       termMock.cols = 120;

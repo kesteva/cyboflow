@@ -396,19 +396,33 @@ describe('InteractiveClaudeManager', () => {
       expect(withoutFlag).not.toContain('--strict-mcp-config');
     });
 
-    it('includes --mcp-config and does NOT emit the dangling --settings flag (TASK-819)', () => {
-      const args = mgr.callBuildCommandArgs({
-        panelId: 'p1',
-        sessionId: 's1',
-        worktreePath: '/tmp/wt',
-        prompt: 'hi',
-      });
-      expect(args).toContain('--mcp-config');
-      // The dangling `--settings <.cyboflow/interactive-settings.json>` flag is
-      // dropped (TASK-819): the PreToolUse hook is installed by the writer into
-      // the worktree's default `.claude/settings.json` that `claude` reads, so
-      // no `--settings` flag is emitted.
-      expect(args).not.toContain('--settings');
+    it('includes --mcp-config (pointing at the per-run config) and does NOT emit the dangling --settings flag (TASK-819)', () => {
+      // buildCommandArgs emits --mcp-config ONLY when the per-run config exists on
+      // disk — writeInteractiveMcpConfig writes `<worktree>/.cyboflow/interactive-
+      // mcp.json` before args are built, and a MISSING path would make `claude`
+      // exit 1, so the flag is existence-guarded. Create the file so the guard
+      // passes and the assertion exercises the real contract.
+      const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-buildargs-'));
+      const mcpConfigPath = path.join(wt, '.cyboflow', 'interactive-mcp.json');
+      fs.mkdirSync(path.dirname(mcpConfigPath), { recursive: true });
+      fs.writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }), 'utf8');
+      try {
+        const args = mgr.callBuildCommandArgs({
+          panelId: 'p1',
+          sessionId: 's1',
+          worktreePath: wt,
+          prompt: 'hi',
+        });
+        expect(args).toContain('--mcp-config');
+        expect(args).toContain(mcpConfigPath);
+        // The dangling `--settings <.cyboflow/interactive-settings.json>` flag is
+        // dropped (TASK-819): the PreToolUse hook is installed by the writer into
+        // the worktree's default `.claude/settings.json` that `claude` reads, so
+        // no `--settings` flag is emitted.
+        expect(args).not.toContain('--settings');
+      } finally {
+        fs.rmSync(wt, { recursive: true, force: true });
+      }
     });
   });
 
