@@ -130,6 +130,7 @@ function PhaseBand({ phase, phaseIndex, phaseCount, selectedStepId, dispatch }: 
           fontSize: 10,
           letterSpacing: '0.18em',
           textTransform: 'uppercase',
+          whiteSpace: 'nowrap',
           color: phase.color,
         }}
         data-testid={`editor-phase-label-${phase.id}`}
