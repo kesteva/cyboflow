@@ -556,10 +556,17 @@ async function initializeServices() {
   // no raw_events persistence and no cyboflow:stream coupling (Q3
   // panel-preservation). The facade subscription that drives this is wired below
   // where substrateFacade + mainWindow are both in scope (near the RunExecutor ctor).
-  const ptyPublisher = (runId: string, data: string, timestamp: Date | string): void => {
+  const ptyPublisher = (runId: string, data: string): void => {
     const win = mainWindow;
     if (!win || win.isDestroyed()) return;
-    win.webContents.send(`cyboflow:pty:${runId}`, { runId, data, timestamp });
+    // Send the VERBATIM chunk as a bare string — the renderer contract
+    // (`subscribeToPtyBytes` / InteractiveTerminalView, and its tests) treats the
+    // preload-bridged `args[0]` as the raw PTY ANSI string and writes it directly
+    // to `xterm.write`. Wrapping it in an object made `term.write` receive
+    // `{runId,data,timestamp}` and render NOTHING — the blank live terminal seen
+    // on the first IDEA-030 live smoke. The channel is already runId-scoped, so no
+    // envelope is needed.
+    win.webContents.send(`cyboflow:pty:${runId}`, data);
   };
 
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
@@ -730,8 +737,8 @@ async function initializeServices() {
   // shape (NO `any`). This deliberately bypasses runEventBridge — the bytes are
   // ephemeral live-view only and are never persisted to raw_events.
   substrateFacade.on('pty-output', (payload) => {
-    const evt = payload as { runId: string; data: string; timestamp: Date | string };
-    ptyPublisher(evt.runId, evt.data, evt.timestamp);
+    const evt = payload as { runId: string; data: string };
+    ptyPublisher(evt.runId, evt.data);
   });
 
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
