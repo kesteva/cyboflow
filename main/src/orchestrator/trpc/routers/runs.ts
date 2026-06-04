@@ -131,6 +131,16 @@ export interface RelayDeps {
    */
   endSession(runId: string): Promise<void>;
   /**
+   * HARD-terminate a LIVE interactive run's persistent REPL (IDEA-030). The
+   * discard twin of `endSession`: routes to the manager's `killProcess` (teardown
+   * + process-tree kill) instead of a graceful EOF/`/exit`, because a RUNNING
+   * claude is busy and never reads the polite request — so on Dismiss of an
+   * in-flight flow the process would linger orphaned. Used by `dismiss` ONLY;
+   * merge / createPr keep `endSession` (their claude is idle at awaiting-review).
+   * Strict NO-OP for the SDK substrate. Idempotent.
+   */
+  killSession(runId: string): Promise<void>;
+  /**
    * Return the retained interactive-PTY backlog for a run (IDEA-030 blank-xterm
    * fix). The renderer fetches this on mount and REPLAYS it into the xterm so a
    * late-mounting terminal reconstructs claude's current screen instead of
@@ -344,6 +354,29 @@ async function endLiveInteractiveSession(runId: string): Promise<void> {
   } catch (err) {
     console.error(
       `[runs.closeout] endSession failed (run ${runId}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * HARD-terminate a LIVE interactive run's persistent REPL as part of the DISMISS
+ * close-out (IDEA-030). Routes through the RelayDeps `killSession` seam (backed
+ * by SubstrateDispatchFacade.killSession → manager.killProcess), which kills the
+ * process tree + tears the run down — NOT the graceful EOF/`/exit` of
+ * `endSession`, which a RUNNING (busy) claude never reads, leaving the process
+ * orphaned. Dismiss discards the run, so a hard kill is correct. Strict NO-OP for
+ * the SDK substrate. Same fail-soft + opt-in contract as endLiveInteractiveSession:
+ * a missing relay bag or a throwing kill is swallowed so close-out still proceeds
+ * (the guarded UPDATE marks the run terminal regardless).
+ */
+async function killLiveInteractiveSession(runId: string): Promise<void> {
+  if (!relayDeps) return;
+  try {
+    await relayDeps.killSession(runId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] killSession failed (run ${runId}):`,
       err instanceof Error ? err.message : String(err),
     );
   }
@@ -673,10 +706,14 @@ export const runsRouter = router({
       }
       const deps = runCloseoutDeps;
       const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
-      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE removing
-      // the worktree so its spawn promise resolves as part of close-out. NO-OP
+      // HARD-kill the live interactive REPL (IDEA-030) BEFORE removing the
+      // worktree. Dismiss can target a RUNNING flow whose claude is busy and never
+      // reads a graceful EOF/`/exit`, so endSession would leave the process alive
+      // (orphaned in the Claude app) and holding the worktree open during removal.
+      // killSession routes to killProcess (teardown + process-tree kill); the
+      // spawn-promise settle on kill is the designed RunExecutor close path. NO-OP
       // for the SDK substrate and when the relay bag is unwired.
-      await endLiveInteractiveSession(input.runId);
+      await killLiveInteractiveSession(input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
       // Dismiss discards the run — force-delete its branch too (its commits go
       // with it), so close-out doesn't leave an orphaned ref. No-op when the run

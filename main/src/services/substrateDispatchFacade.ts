@@ -299,6 +299,29 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
+   * HARD-terminate a LIVE interactive run's persistent REPL (IDEA-030).
+   *
+   * The discard twin of `endSession`: where `endSession` writes a GRACEFUL
+   * EOF/`/exit` (which a RUNNING claude — busy, not reading PTY stdin — never
+   * reads, so the process would linger orphaned in the Claude app), this routes
+   * to the manager's inherited `killProcess`, which runs cleanupCliResources/
+   * teardownRun AND kills the process tree. Idempotent (no-op when the process is
+   * already gone). Used by the Dismiss close-out, where the run is being discarded
+   * and a polite request is the wrong tool. Strict NO-OP for the SDK substrate
+   * (no PTY; the SDK iterator owns its own drain) — Q3 byte-identity holds.
+   * panelId === runId per the orchestrator invariant. `killProcess` is on
+   * `AbstractCliManager` so no feature-detection is needed.
+   */
+  async killSession(panelId: string): Promise<void> {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      this.logger.debug('[SubstrateDispatchFacade] killSession no-op for SDK substrate', { panelId });
+      return;
+    }
+    await mgr.killProcess(panelId);
+  }
+
+  /**
    * Return the retained interactive-PTY backlog for a run so a newly-mounted
    * InteractiveTerminalView can REPLAY it and reconstruct claude's current screen
    * (IDEA-030 blank-xterm fix). Empty string for an unknown/SDK run (the SDK

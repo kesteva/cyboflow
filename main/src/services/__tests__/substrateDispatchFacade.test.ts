@@ -303,6 +303,41 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
 });
 
 // ---------------------------------------------------------------------------
+// killSession (IDEA-030) — the Dismiss close-out's HARD-kill twin of endSession.
+// Resolves the manager by per-run substrate and routes to killProcess (teardown
+// + process-tree kill) for interactive; strict NO-OP for SDK.
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — killSession hard-kills the interactive REPL', () => {
+  it('killSession(runId) routes to interactiveManager.killProcess for an interactive run', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.killSession(run.id);
+
+    expect(interactive.killProcess).toHaveBeenCalledOnce();
+    expect(interactive.killProcess).toHaveBeenCalledWith(run.id);
+    expect(sdk.killProcess).not.toHaveBeenCalled();
+  });
+
+  it('killSession(runId) is a strict NO-OP for an SDK run (no PTY to kill)', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.killSession(run.id);
+
+    expect(sdk.killProcess).not.toHaveBeenCalled();
+    expect(interactive.killProcess).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // live-input relay (TASK-817) — relayInput / relayResize
 // ---------------------------------------------------------------------------
 

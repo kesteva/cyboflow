@@ -124,6 +124,9 @@ function makeUnwiredRelayDeps(): RelayDeps {
     endSession: vi.fn(async () => {
       throw new Error('not wired');
     }),
+    killSession: vi.fn(async () => {
+      throw new Error('not wired');
+    }),
     getPtyBacklog: vi.fn(() => {
       throw new Error('not wired');
     }),
@@ -399,7 +402,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
     const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
-    setRelayDeps({ relayInput, relayResize, endSession, getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
+    setRelayDeps({ relayInput, relayResize, endSession, killSession: vi.fn<RelayDeps['killSession']>().mockResolvedValue(undefined), getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -418,7 +421,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
     const relayInput = vi.fn<RelayDeps['relayInput']>();
     const relayResize = vi.fn<RelayDeps['relayResize']>();
     const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
-    setRelayDeps({ relayInput, relayResize, endSession, getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
+    setRelayDeps({ relayInput, relayResize, endSession, killSession: vi.fn<RelayDeps['killSession']>().mockResolvedValue(undefined), getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => '') });
 
     try {
       const caller = appRouter.createCaller(createContext());
@@ -439,6 +442,7 @@ describe('cyboflow.runs.relayInput / relayResize (IDEA-030 / TASK-817)', () => {
       relayInput: vi.fn<RelayDeps['relayInput']>(),
       relayResize: vi.fn<RelayDeps['relayResize']>(),
       endSession: vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined),
+      killSession: vi.fn<RelayDeps['killSession']>().mockResolvedValue(undefined),
       getPtyBacklog,
     });
 
@@ -745,6 +749,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       relayInput: vi.fn<RelayDeps['relayInput']>(),
       relayResize: vi.fn<RelayDeps['relayResize']>(),
       endSession,
+      killSession: vi.fn<RelayDeps['killSession']>().mockResolvedValue(undefined),
       getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => ''),
     });
 
@@ -761,11 +766,12 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
     expect(getStatus('run-iz-merge')).toBe('completed');
   });
 
-  it('dismiss calls endSession(runId) before removing the worktree', async () => {
+  it('dismiss HARD-kills via killSession(runId) (not the graceful endSession) before removing the worktree', async () => {
     seedRun(db, { id: 'run-iz-dismiss', status: 'awaiting_review', worktreePath: '/tmp/wt/run-iz-dismiss' });
 
     const removeWorktreeByPath = vi.fn().mockResolvedValue(undefined);
     const endSession = vi.fn<RelayDeps['endSession']>().mockResolvedValue(undefined);
+    const killSession = vi.fn<RelayDeps['killSession']>().mockResolvedValue(undefined);
     setRunCloseoutDeps({
       worktreeManager: { ...makeWmStub(), removeWorktreeByPath },
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
@@ -775,18 +781,22 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       relayInput: vi.fn<RelayDeps['relayInput']>(),
       relayResize: vi.fn<RelayDeps['relayResize']>(),
       endSession,
+      killSession,
       getPtyBacklog: vi.fn<RelayDeps['getPtyBacklog']>(() => ''),
     });
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     await caller.cyboflow.runs.dismiss({ runId: 'run-iz-dismiss' });
 
-    // endSession fired, and it ran BEFORE the worktree removal.
-    expect(endSession).toHaveBeenCalledWith('run-iz-dismiss');
+    // Dismiss is a discard — it must HARD-kill the live REPL (a RUNNING claude
+    // never reads a graceful EOF/exit), so killSession fires (NOT endSession) and
+    // it ran BEFORE the worktree removal.
+    expect(killSession).toHaveBeenCalledWith('run-iz-dismiss');
+    expect(endSession).not.toHaveBeenCalled();
     expect(removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-iz-dismiss');
-    const endOrder = endSession.mock.invocationCallOrder[0];
+    const killOrder = killSession.mock.invocationCallOrder[0];
     const removeOrder = removeWorktreeByPath.mock.invocationCallOrder[0];
-    expect(endOrder).toBeLessThan(removeOrder);
+    expect(killOrder).toBeLessThan(removeOrder);
     expect(getStatus('run-iz-dismiss')).toBe('canceled');
   });
 

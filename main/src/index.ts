@@ -972,9 +972,10 @@ app.whenReady().then(async () => {
       relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
       relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),
       endSession: (runId) => substrateFacade.endSession(runId),
+      killSession: (runId) => substrateFacade.killSession(runId),
       getPtyBacklog: (runId) => substrateFacade.getPtyBacklog(runId),
     });
-    console.log('[Main] runs.relayInput/relayResize/endSession/getPtyBacklog deps wired');
+    console.log('[Main] runs.relayInput/relayResize/endSession/killSession/getPtyBacklog deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested
