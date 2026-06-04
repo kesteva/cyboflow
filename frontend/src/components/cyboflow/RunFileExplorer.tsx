@@ -13,7 +13,7 @@
  * Paths on the wire are relative to the worktree root with POSIX separators
  * (see shared/types/runFiles.ts); the empty string denotes the root.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -80,26 +80,43 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
 
+  // Staleness guards. The component instance is REUSED across runs (RunRightRail
+  // renders it without a `key`), so an in-flight fetch from a previous run — or a
+  // previous file open — can resolve after the user has moved on. The async
+  // setState calls below bail when their request is no longer current:
+  //   - runIdRef holds the live runId (updated synchronously in the root effect);
+  //     a resolved fetch whose captured runId != runIdRef.current is dropped.
+  //   - fileReqId increments on every openFileAt / closeFile; a resolved read
+  //     whose captured id != fileReqIdRef.current is dropped (covers click-A →
+  //     back → click-B, where A would otherwise paint under B's header).
+  const runIdRef = useRef(runId);
+  const fileReqIdRef = useRef(0);
+
   // Fetch one directory level into childrenByDir.
   const loadDir = useCallback(
     async (dirPath: string): Promise<void> => {
+      const reqRunId = runId;
       setLoadingDirs((prev) => new Set(prev).add(dirPath));
       try {
         const entries = await trpc.cyboflow.runs.listFiles.query({
-          runId,
+          runId: reqRunId,
           path: dirPath === ROOT ? undefined : dirPath,
         });
+        if (runIdRef.current !== reqRunId) return; // run switched mid-flight — drop
         setChildrenByDir((prev) => ({ ...prev, [dirPath]: entries }));
         if (dirPath === ROOT) setRootError(null);
       } catch (err) {
+        if (runIdRef.current !== reqRunId) return;
         const msg = err instanceof Error ? err.message : 'Failed to list files';
         if (dirPath === ROOT) setRootError(msg);
       } finally {
-        setLoadingDirs((prev) => {
-          const next = new Set(prev);
-          next.delete(dirPath);
-          return next;
-        });
+        if (runIdRef.current === reqRunId) {
+          setLoadingDirs((prev) => {
+            const next = new Set(prev);
+            next.delete(dirPath);
+            return next;
+          });
+        }
       }
     },
     [runId],
@@ -107,6 +124,9 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
 
   // Load the root whenever the run changes; reset all per-run state first.
   useEffect(() => {
+    // Mark this run current BEFORE any await so a prior run's in-flight loadDir /
+    // openFileAt resolution sees the switch and drops itself.
+    runIdRef.current = runId;
     let cancelled = false;
     setChildrenByDir({});
     setExpanded(new Set());
@@ -156,23 +176,30 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
 
   const openFileAt = useCallback(
     async (filePath: string): Promise<void> => {
+      const reqRunId = runId;
+      const reqId = ++fileReqIdRef.current;
+      const isCurrent = (): boolean => runIdRef.current === reqRunId && fileReqIdRef.current === reqId;
       setOpenFile(filePath);
       setFileContent(null);
       setFileError(null);
       setFileLoading(true);
       try {
-        const content = await trpc.cyboflow.runs.readFile.query({ runId, path: filePath });
+        const content = await trpc.cyboflow.runs.readFile.query({ runId: reqRunId, path: filePath });
+        if (!isCurrent()) return; // superseded by a newer open / run switch — drop
         setFileContent(content);
       } catch (err) {
+        if (!isCurrent()) return;
         setFileError(err instanceof Error ? err.message : 'Failed to read file');
       } finally {
-        setFileLoading(false);
+        if (isCurrent()) setFileLoading(false);
       }
     },
     [runId],
   );
 
   const closeFile = useCallback((): void => {
+    // Abandon any in-flight read so it can't paint after we return to the tree.
+    fileReqIdRef.current++;
     setOpenFile(null);
     setFileContent(null);
     setFileError(null);
