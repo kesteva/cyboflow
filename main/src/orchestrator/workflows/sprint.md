@@ -10,45 +10,25 @@ development and drive it to "ready to merge", updating task state in the cyboflo
 database through the `cyboflow_*` MCP tools. There are no per-task markdown files
 and no plugin state directory — the database is the single source of truth.
 
-Report your progress through each step with `cyboflow_report_step`. Move the task
-through its board stages with `cyboflow_set_task_stage` / `cyboflow_update_task`
-as the work progresses.
+## How to run this flow
 
-## Phase 1 — Execute
+Each phase below is a slash command installed in `.claude/commands/`. Run the flow
+by **invoking each command in order** with the SlashCommand tool, following its
+instructions fully before moving to the next. As you begin each step, call
+`cyboflow_report_step`; move the task through its board stages with
+`cyboflow_set_task_stage` / `cyboflow_update_task` as the work progresses.
 
-### Step `implement`
-Implement the task. Read the project's CODE-PATTERNS.md, write the diff, and run
-local checks. Keep the change scoped to the task's acceptance criteria. (Retries
-up to 3× with loopback from verification.)
+### Phase 1 — Execute
+1. `/cyboflow-implement` — implement the task, scoped to its acceptance criteria.
+2. `/cyboflow-write-tests` — add tests covering the new diff.
+3. `/cyboflow-code-review` — inline review; out-of-scope issues become findings.
+4. `/cyboflow-task-verify` — check against acceptance criteria; loop back to implement on failure (up to 3×).
+5. `/cyboflow-visual-verify` — optional; snapshot diff when visual verification is enabled.
 
-### Step `write-tests`
-Add unit / integration tests covering the new diff before verification.
-
-### Step `code-review`
-Inline review of the diff — naming, layering, pattern compliance. If you spot an
-issue that is out of scope for this task (tech debt, an adjacent bug, a doc gap),
-record it as a **finding** via `cyboflow_report_finding` instead of expanding the
-task. Findings are non-blocking and land in the review queue for human triage.
-
-### Step `task-verify`
-Check the diff against the task's acceptance criteria. If it fails, loop back to
-`implement` (up to 3× before escalating).
-
-### Step `visual-verify` (optional)
-When visual verification is enabled, run a snapshot diff. Off unless configured.
-
-## Phase 2 — Sprint review
-
-### Step `sprint-verify`
-Run the full suite once after the task's work is complete.
-
-### Step `sprint-review`
-Taste pass over the whole diff — naming, layering, CLAUDE.md drift. Emit any
-issues you find as findings via `cyboflow_report_finding` (non-blocking); they
-are triaged from the review queue, not fixed inline here.
-
-### Step `human-review` (human gate)
-Final taste-level review by the user. All functional checks have already passed.
+### Phase 2 — Sprint review
+6. `/cyboflow-sprint-verify` — run the full suite once.
+7. `/cyboflow-sprint-review` — taste pass over the whole diff; emit findings.
+8. `/cyboflow-human-review` — **human gate**: final taste-level review by the user.
 
 ## Hard rules
 

@@ -24,10 +24,29 @@ describe('built-in workflow bundles', () => {
       'research',
       'tasks',
     ]);
-    // Every command carries a description frontmatter line and reports its step.
-    for (const cmd of bundle.commands) {
-      expect(cmd.content).toMatch(/^---[\s\S]*description:/);
-      expect(cmd.content).toContain('cyboflow_report_step');
-    }
+    assertCommandShape(bundle.commands);
+  });
+
+  it('sprint ships its 8 phase commands in order', () => {
+    const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'sprint.md'));
+    expect(bundle.commands.map((c) => c.name)).toEqual([
+      'code-review',
+      'human-review',
+      'implement',
+      'sprint-review',
+      'sprint-verify',
+      'task-verify',
+      'visual-verify',
+      'write-tests',
+    ]);
+    assertCommandShape(bundle.commands);
   });
 });
+
+/** Every phase command carries a description frontmatter line and reports its step. */
+function assertCommandShape(commands: { name: string; content: string }[]): void {
+  for (const cmd of commands) {
+    expect(cmd.content).toMatch(/^---[\s\S]*description:/);
+    expect(cmd.content).toContain('cyboflow_report_step');
+  }
+}
