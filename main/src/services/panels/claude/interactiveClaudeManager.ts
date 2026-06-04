@@ -16,6 +16,7 @@ import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamPar
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
 import { InteractiveSettingsWriter } from './interactiveSettingsWriter';
+import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -242,6 +243,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private readonly settingsWriter: InteractiveSettingsWriter;
 
   /**
+   * Pre-enables the worktree's project `.mcp.json` MCP servers in
+   * `.claude/settings.local.json` so the interactive `claude` REPL launches
+   * without the blocking "N new MCP servers found — enable?" modal (which has no
+   * human to answer it in an app-driven run). Restores parity with the SDK
+   * substrate's unconditional `getBaseProjectMcpServers` injection. Runs on
+   * EVERY spawn (NOT gated by permissionMode — the modal blocks even in ignore
+   * mode). Logger PASSED (CLAUDE.md optional-logger rule).
+   */
+  private readonly mcpEnabler: InteractiveMcpEnabler;
+
+  /**
    * Injected deny-on-teardown shell-approval canceller (TASK-819). Wired at boot
    * via setShellApprovalCanceller to OrchSocketServer.cancelInFlightShellApprovals
    * (which delegates to the handler's shipped twin). Null until wired — quick
@@ -267,6 +279,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // omitting it, which would silently no-op the writer's diagnostics. The shim
     // is undefined when no logger was supplied so the writer's own opt-out holds.
     this.settingsWriter = new InteractiveSettingsWriter(this.toLoggerLike(this.logger));
+    this.mcpEnabler = new InteractiveMcpEnabler(this.toLoggerLike(this.logger));
   }
 
   /**
@@ -578,6 +591,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Synchronous fs; no await needed.
     this.settingsWriter.write(worktreePath, { permissionMode: options.permissionMode });
 
+    // Pre-enable the worktree's project `.mcp.json` MCP servers (TASK-IDEA-030
+    // launch fix). The committed project `.mcp.json` (e.g. playwright/maestro)
+    // makes the interactive `claude` REPL render a BLOCKING "N new MCP servers
+    // found — enable?" modal at launch for any server not yet in
+    // `enabledMcpjsonServers`; an app-driven run has no human to answer it and
+    // the REPL hangs (the second of the two IDEA-030 launch defects, alongside
+    // the `--mcp-config` variadic eating the positional prompt below). The
+    // enabler unions the project server names into `.claude/settings.local.json`
+    // so the modal is skipped and the run loads exactly the project servers the
+    // SDK substrate injects unconditionally (parity). Runs REGARDLESS of
+    // permissionMode (the modal blocks even in ignore mode). Synchronous fs.
+    this.mcpEnabler.enable(worktreePath);
+
     // Write the per-run interactive MCP config (the path buildCommandArgs points
     // `--mcp-config` at) BEFORE building args, so the existence-guarded flag is
     // emitted. Closes the S5/TASK-810 gap that left `claude` exiting 1 on a
@@ -600,9 +626,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // literal), and claude writes its transcript to encodeCwd(worktree) — exactly
     // where TranscriptTailSource discovers it (validated). Guarded so a prompt-less
     // quick session still opens a bare REPL.
+    //
+    // CRITICAL: the prompt MUST be preceded by a `--` end-of-options separator.
+    // claude's `--mcp-config <configs...>` is a VARIADIC option (commander
+    // `<configs...>`): bare `claude --mcp-config <file> "<prompt>"` makes the
+    // variadic greedily SWALLOW the trailing prompt as a SECOND config path,
+    // resolve it relative to cwd, fail to find that "file", and exit 1
+    // ("Invalid MCP configuration: MCP config file not found: <cwd>/<prompt>") —
+    // the run dies before the first turn. `--` terminates option parsing so the
+    // prompt is parsed as the lone positional operand regardless of which
+    // variadic flags (--mcp-config, --add-dir, …) precede it. Verified against a
+    // real worktree spawn: the `--` form removes the Invalid-MCP-config error
+    // while keeping the prompt as the operand claude engages.
     const composedPrompt = this.composePromptBody(runId, options.prompt);
     if (composedPrompt.length > 0) {
-      args.push(composedPrompt);
+      args.push('--', composedPrompt);
     }
 
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
