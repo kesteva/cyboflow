@@ -8,6 +8,16 @@ epic: interactive-persistent-terminal
 files_owned:
   - main/src/orchestrator/runQueries.ts
   - main/src/orchestrator/__tests__/listRunsHandler.test.ts
+  # AMENDED 2026-06-02 (execution): the original plan froze the two below as
+  # readonly, but listRunsHandler's new SELECT projects `substrate`, and
+  # runs.test.ts (cyboflow.runs.list) exercises that handler through the SHARED
+  # fixture — so the fixture MUST carry the column or that test throws
+  # "no such column: substrate". Added here as an additive, orthogonal
+  # `includeSubstrate` flag (mirroring includeStuckDetectedAt /
+  # includeWorkflowRunTaskColumns) plus the single runs.list opt-in site.
+  # GATE_SCHEMA / registrySchema.ts and the shared seedRun helper stay byte-identical.
+  - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
+  - main/src/orchestrator/trpc/routers/__tests__/runs.test.ts
 files_readonly:
   - shared/types/workflows.ts
   - frontend/src/stores/activeRunsStore.ts
@@ -15,7 +25,6 @@ files_readonly:
   - frontend/src/components/cyboflow/CyboflowRoot.tsx
   - shared/types/substrate.ts
   - main/src/database/migrations/013_workflow_run_substrate.sql
-  - main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts
   - main/src/database/__test_fixtures__/registrySchema.ts
 acceptance_criteria:
   - criterion: "listRunsHandler's SELECT in runQueries.ts includes the `substrate` column so cyboflow.runs.list rows carry it end-to-end. A seeded interactive run returns substrate==='interactive'; a legacy/null run reads back 'sdk' (the migration-013 NOT NULL DEFAULT 'sdk')."
@@ -23,11 +32,11 @@ acceptance_criteria:
   - criterion: "WorkflowRunListRow is returned UNCHANGED in shape — no new field is added to the type (substrate? at shared/types/workflows.ts:78 already exists) and the SELECT result cast stays `as WorkflowRunListRow[]` (no `any`, no double-cast)."
     verification: "grep -n 'as WorkflowRunListRow\\[\\]' main/src/orchestrator/runQueries.ts:32 shows the unchanged cast; git diff --stat shows 0 changed lines on shared/types/workflows.ts; pnpm typecheck exits 0 with zero edits to shared/types/workflows.ts."
   - criterion: "The tRPC runs.list output type and the renderer store are reached with ZERO edits: runs.ts list already declares `: WorkflowRunListRow[]` (runs.ts:211) and ActiveRunRow extends the RouterOutputs-inferred WorkflowRunListRow (activeRunsStore.ts:47,74), so activeRun.substrate populates to CyboflowRoot purely from this one column. No renderer or router edits in this task."
-    verification: "git diff --name-only shows ONLY main/src/orchestrator/runQueries.ts and main/src/orchestrator/__tests__/listRunsHandler.test.ts changed; grep -n 'WorkflowRunListRow\\[\\]' main/src/orchestrator/trpc/routers/runs.ts:211 confirms the output type is already inferred unchanged."
+    verification: "No PRODUCTION renderer or router edits. git diff --name-only shows changes ONLY to main/src/orchestrator/runQueries.ts (the SELECT), main/src/orchestrator/__tests__/listRunsHandler.test.ts (handler test), main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts (additive includeSubstrate flag), and main/src/orchestrator/trpc/routers/__tests__/runs.test.ts (the single cyboflow.runs.list opt-in site) — NO change to runs.ts / activeRunsStore.ts / CyboflowRoot.tsx / shared types. grep -n 'WorkflowRunListRow\\[\\]' main/src/orchestrator/trpc/routers/runs.ts confirms the output type is already inferred unchanged (line ~280 post native-tasks merge)."
   - criterion: "Standalone-typecheck invariant preserved: runQueries.ts adds NO imports from electron/better-sqlite3/main services — only the existing DatabaseLike + WorkflowRunListRow imports remain."
     verification: "grep -n 'import' main/src/orchestrator/runQueries.ts shows only `./types` (DatabaseLike) and `../../../shared/types/workflows` (WorkflowRunListRow); grep -nE \"from '(electron|better-sqlite3)'|services/\" main/src/orchestrator/runQueries.ts returns 0 matches."
-  - criterion: "The listRunsHandler test seeds the substrate column via migration 013's ALTER (additive, NOT by mutating GATE_SCHEMA or the shared seedRun fixture) so the parity-pinned base schema and orchestratorTestDb.ts stay byte-identical."
-    verification: "git diff --stat shows 0 changed lines on main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts and main/src/database/__test_fixtures__/registrySchema.ts; grep -n 'ADD COLUMN substrate' main/src/orchestrator/__tests__/listRunsHandler.test.ts shows the ALTER applied inside the test's own setup."
+  - criterion: "The substrate column is layered additively via a NEW orthogonal `includeSubstrate` flag on the shared fixture (mirroring the existing includeStuckDetectedAt / includeWorkflowRunTaskColumns flags), NEVER by mutating GATE_SCHEMA or the shared seedRun helper — so the parity-pinned base schema stays byte-identical. listRunsHandler.test.ts and the single cyboflow.runs.list block in runs.test.ts opt in via the flag."
+    verification: "git diff --stat shows 0 changed lines on main/src/database/__test_fixtures__/registrySchema.ts (GATE_SCHEMA untouched); grep -n 'includeSubstrate' main/src/orchestrator/__test_fixtures__/orchestratorTestDb.ts shows the additive flag + its guarded ALTER; the GATE_SCHEMA parity test in orchestratorTestDb.test.ts stays green (createTestDb() with no options carries no substrate column)."
   - criterion: "No use of the `any` type in any file this task owns."
     verification: "grep -nE ':\\s*any(\\b|\\[)|<any>|as any' main/src/orchestrator/runQueries.ts main/src/orchestrator/__tests__/listRunsHandler.test.ts returns 0 matches."
   - criterion: "Full unit gate green and types/lint clean."
@@ -91,5 +100,5 @@ Everything downstream is ALREADY in place and stays untouched: `WorkflowRunListR
 - `sendTurn` / live-input relay, the runs mutation, composer relay, Interact-anyway keystroke relay, and PTY resize — IT-5 (TASK-817).
 - The persistence/completion rework (gate the turn-end EOF/'/exit' kill behind the persistent flag, route the turn-end event through SubstrateDispatchFacade to a new RunExecutor handler that calls `restAwaitingReview` WITHOUT resolving the spawn promise, make explicit End/Merge/Dismiss the only spawn-promise resolver, keep the SDK path byte-identical) — IT-6 (TASK-818). This task touches NONE of `runExecutor.ts`, `interactiveClaudeManager.ts`, or the completion model.
 - The interactive approval-gate wiring (call `InteractiveSettingsWriter.write` on spawn, implement the `denyInFlightShellApprovals`/`removeGeneratedSettings` teardown stubs) — IT-7 (TASK-819).
-- Modifying the shared `orchestratorTestDb.ts` fixture, `GATE_SCHEMA`, or `seedRun` — the substrate column is applied additively inside this task's own test setup; the parity-pinned fixtures stay byte-identical.
+- Modifying `GATE_SCHEMA` / `registrySchema.ts` or the shared `seedRun` helper — those stay byte-identical. (AMENDED 2026-06-02: the shared `orchestratorTestDb.ts` fixture IS extended with an additive, orthogonal `includeSubstrate` flag — required because `runs.test.ts` exercises `listRunsHandler` through the shared fixture, a coupling the original plan missed. The flag never widens GATE_SCHEMA, so the parity test still passes.)
 - A `pnpm test:e2e` gate — the verifier gate is `pnpm test:unit` per CLAUDE.md.

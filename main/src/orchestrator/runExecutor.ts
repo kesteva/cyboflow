@@ -183,6 +183,15 @@ export class RunExecutor {
   private readonly activePanelIds: Map<string, string> = new Map();
 
   /**
+   * Per-run 'turn-end' listeners bound to the `source` EventEmitter, keyed by
+   * runId (IDEA-030 / TASK-818). Registered for INTERACTIVE/persistent runs only
+   * (gated in execute()); removed by teardownRun() so a re-init does not leak
+   * listeners. The SDK path never registers one (sdk runs never receive a
+   * 'turn-end' event — the facade only fans in the interactive manager).
+   */
+  private readonly turnEndListeners: Map<string, (payload: unknown) => void> = new Map();
+
+  /**
    * Per-run systemPromptAppend values stashed by getPrompt() and consumed by
    * buildOptionsOverrides(). Cleared by teardownRun() to prevent leaks.
    */
@@ -313,6 +322,17 @@ export class RunExecutor {
         this.bridges.set(runId, bridgeHandle);
       }
 
+      // Event-driven rest for the persistent interactive substrate (IDEA-030 /
+      // TASK-818). For an interactive run the spawn promise stays PENDING across
+      // turns (it resolves only on explicit end-session / kill), so the
+      // 'drained' path below never fires per-turn. Instead each assistant
+      // turn-end emits a 'turn-end' event (interactive manager -> facade ->
+      // here) that rests the run in awaiting_review WITHOUT touching the spawn
+      // promise. Registered BEFORE spawn (mirrors bridgeEvents) so no turn-end
+      // is lost. Gated so SDK runs NEVER take this path — they drain via the
+      // query() iterator and the unchanged 'drained' arm.
+      this.registerTurnEndRest(runId, run);
+
       await this.onLifecycleTransition(runId, 'pre_spawn');
       // Emit step 'running' after the run transitions to running status (write-then-emit
       // ordering mirrors stepTransitionBridge: lifecycle transition fires first, then step emit).
@@ -362,6 +382,50 @@ export class RunExecutor {
     } finally {
       this.teardownRun(runId);
     }
+  }
+
+  /**
+   * Register the event-driven REST handler for a persistent interactive run
+   * (IDEA-030 / TASK-818).
+   *
+   * Gated on `run.substrate === 'interactive'` AND a wired `source` EventEmitter
+   * — an SDK run (or any run with no source) registers NOTHING and so never
+   * takes the event-driven rest path (it drains via the query() iterator and the
+   * unchanged 'drained' arm). For an interactive run, each assistant turn-end
+   * emits a 'turn-end' event (interactive manager -> SubstrateDispatchFacade ->
+   * this source) whose payload carries the runId. On each such event we route
+   * through onLifecycleTransition('drained') -> restAwaitingReview WITHOUT
+   * resolving the spawn promise (the promise stays pending across turns; it
+   * settles only on explicit end-session / kill). restAwaitingReview is guarded
+   * on status='running', so firing it per-turn while an approval/question gate is
+   * already open is a swallowed no-op — safe and re-entrant. NEVER emits step
+   * 'done' here (the run rests between turns; it is NOT terminal).
+   *
+   * The payload is opaque `unknown` on the source EventEmitter, so it is narrowed
+   * through a typed local shape (NO `any`); a payload whose runId does not match
+   * is ignored (defensive — the facade fan-in does not pre-filter by runId).
+   */
+  private registerTurnEndRest(runId: string, run: WorkflowRunRow): void {
+    if (!this.source || run.substrate !== 'interactive') return;
+
+    const onTurnEnd = (payload: unknown): void => {
+      if (typeof payload !== 'object' || payload === null || !('runId' in payload)) return;
+      const evt = payload as { runId: string };
+      if (evt.runId !== runId) return;
+      // Rest the run in awaiting_review WITHOUT resolving the spawn promise.
+      // Fire-and-forget: the transition is fail-soft (a rejected rest is
+      // swallowed inside onLifecycleTransition), so a rejected promise here is
+      // already handled — catch defensively to avoid an unhandled rejection.
+      void this.onLifecycleTransition(runId, 'drained').catch((err) => {
+        this.logger.warn('[RunExecutor] event-driven rest transition threw (fail-soft)', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
+
+    this.source.on('turn-end', onTurnEnd);
+    this.turnEndListeners.set(runId, onTurnEnd);
   }
 
   /**
@@ -417,6 +481,17 @@ export class RunExecutor {
       bridge.dispose();
       this.bridges.delete(runId);
     }
+    // Remove the per-run 'turn-end' listener (interactive runs only — the map is
+    // empty for SDK runs). For a persistent interactive run teardownRun fires
+    // only AFTER the spawn promise settles on explicit end-session / kill (the
+    // `finally` in execute() blocks on the still-pending spawn until then), so
+    // the listener stays live across every turn and is removed exactly once at
+    // terminal close-out — never mid-REPL.
+    const turnEndListener = this.turnEndListeners.get(runId);
+    if (turnEndListener && this.source) {
+      this.source.off('turn-end', turnEndListener);
+    }
+    this.turnEndListeners.delete(runId);
     this.activePanelIds.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);

@@ -38,8 +38,11 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
+      // idle-chat nudge (Piece C) + live-input relay (TASK-817) — both ride runs.*.
       runs: {
         nudge: { mutate: vi.fn(async () => ({ delivered: true })) },
+        relayInput: { mutate: vi.fn(async () => ({ success: true })) },
+        relayResize: { mutate: vi.fn(async () => ({ success: true })) },
       },
       questions: {
         listPending: { query: vi.fn(async () => []) },
@@ -102,6 +105,8 @@ beforeEach(() => {
 
   mockSendInput.mockClear();
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
 
   // Default: sendInput succeeds
   mockSendInput.mockResolvedValue({ success: true });
@@ -381,6 +386,109 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     render(<ChatInput runId={RUN_ID} />);
     expect(screen.getByRole('textbox')).toBeDisabled();
     expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
+  const RUN_ID = 'run-interactive-001';
+
+  function makeInteractiveRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-int',
+      project_id: 5,
+      status: 'running',
+      substrate: 'interactive',
+      worktree_path: '/Users/me/worktrees/int',
+      branch_name: 'feature/int',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'sprint',
+      ...overrides,
+    };
+  }
+
+  it('an interactive running run renders an ENABLED composer with the relay placeholder', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+    expect(textarea.placeholder).toBe('Message the running session — relayed safely…');
+  });
+
+  it("Send relays the body, then a SEPARATE '\\r' (Enter) — claude 2.1 paste+submit", async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'run the tests' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    // First: the body alone (lands as a bracketed paste in claude's composer).
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenNthCalledWith(1, {
+        runId: RUN_ID,
+        text: 'run the tests',
+      });
+    });
+
+    // Then: '\r' as its own keystroke (Enter) — a '\r' appended to the body would
+    // be swallowed by bracketed-paste and never submit.
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).toHaveBeenNthCalledWith(2, {
+        runId: RUN_ID,
+        text: '\r',
+      });
+    });
+
+    // Textarea cleared after both relays complete.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
+  it('a non-interactive (sdk) workflow run still renders the disabled workflow-idle composer', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        // sdk + non-awaiting_review status → disabled workflow-idle composer.
+        runsByProject: { 5: [makeInteractiveRow({ substrate: 'sdk', status: 'running' })] },
+      });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    // The relay mutation must NOT be reachable for a non-interactive run.
+    expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('an interactive run that is NOT running falls back to the disabled workflow-idle composer', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        // 'stuck' is non-running AND non-nudgeable (not awaiting_review), so the
+        // merged idle composer stays disabled (awaiting_review is now nudgeable).
+        runsByProject: { 5: [makeInteractiveRow({ status: 'stuck' })] },
+      });
+    });
+
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).toBeDisabled();
   });
 });
 

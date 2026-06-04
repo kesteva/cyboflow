@@ -131,6 +131,66 @@ export function setStartRunDeps(deps: StartRunDeps): void {
 }
 
 // ---------------------------------------------------------------------------
+// live-input relay dependency bag (IDEA-030 / TASK-817)
+//
+// The ONLY post-spawn input path into a LIVE interactive run. Injected at boot
+// by main/src/index.ts via setRelayDeps(), backed by SubstrateDispatchFacade's
+// relayInput/relayResize (which route to the interactive manager's live PTY and
+// NO-OP for the SDK substrate). Function-reference shape (mirrors
+// CancelAndRestartDeps.claudeManagerStop) keeps the router free of any
+// services/* import (standalone-typecheck invariant). Until wired, the relay
+// mutations throw METHOD_NOT_SUPPORTED — same stub pattern as the other dep-bags.
+// ---------------------------------------------------------------------------
+
+export interface RelayDeps {
+  /** Relay a complete REPL turn (text + '\n') into the live interactive PTY. */
+  relayInput(runId: string, text: string): void;
+  /** Relay a PTY geometry change into the live interactive node-pty. */
+  relayResize(runId: string, cols: number, rows: number): void;
+  /**
+   * Explicitly END a LIVE interactive run's persistent REPL (IDEA-030 /
+   * TASK-818). Writes the EOF/`/exit` control sequence so the interactive
+   * manager's inherited onExit settles the run's spawn promise and tears the run
+   * down — the ONLY non-kill spawn-promise resolver for a persistent interactive
+   * run. Strict NO-OP for the SDK substrate (no PTY). Called by the close-out
+   * mutations (merge / createPr / dismiss) BEFORE worktree removal so the live
+   * REPL is terminated as part of close-out. RelayDeps is the SINGLE bag for
+   * live-session collaborators (relay + end-session).
+   */
+  endSession(runId: string): Promise<void>;
+  /**
+   * HARD-terminate a LIVE interactive run's persistent REPL (IDEA-030). The
+   * discard twin of `endSession`: routes to the manager's `killProcess` (teardown
+   * + process-tree kill) instead of a graceful EOF/`/exit`, because a RUNNING
+   * claude is busy and never reads the polite request — so on Dismiss of an
+   * in-flight flow the process would linger orphaned. Used by `dismiss` ONLY;
+   * merge / createPr keep `endSession` (their claude is idle at awaiting-review).
+   * Strict NO-OP for the SDK substrate. Idempotent.
+   */
+  killSession(runId: string): Promise<void>;
+  /**
+   * Return the retained interactive-PTY backlog for a run (IDEA-030 blank-xterm
+   * fix). The renderer fetches this on mount and REPLAYS it into the xterm so a
+   * late-mounting terminal reconstructs claude's current screen instead of
+   * rendering blank (the live `cyboflow:pty:<runId>` channel drops bytes emitted
+   * before a listener exists). Empty string for an unknown/SDK run.
+   */
+  getPtyBacklog(runId: string): string;
+}
+
+let relayDeps: RelayDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the relayInput / relayResize mutations.
+ *
+ * Called once at boot by main/src/index.ts after the SubstrateDispatchFacade is
+ * constructed. Until this is called the mutations throw METHOD_NOT_SUPPORTED.
+ */
+export function setRelayDeps(deps: RelayDeps): void {
+  relayDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
 // run close-out dependency bag (GAP-B)
 //
 // Planner / workflow runs never create a `sessions` row (a sessions row would
@@ -336,6 +396,55 @@ async function stampOutcomeAndDeriveTask(
   }
 }
 
+/**
+ * Terminate a LIVE interactive run's persistent REPL as part of close-out
+ * (IDEA-030 / TASK-818). Routes through the RelayDeps `endSession` seam (backed
+ * by SubstrateDispatchFacade.endSession), which writes EOF/`/exit` into the live
+ * PTY so the run's spawn promise resolves and teardown fires. Strict NO-OP for
+ * the SDK substrate (the facade resolves the substrate per-run). Called BEFORE
+ * worktree removal in merge / createPr / dismiss.
+ *
+ * Fail-soft + opt-in: when `relayDeps` is not wired (legacy close-out / tests
+ * that don't inject the relay bag) this is a complete no-op — close-out still
+ * proceeds. A throwing endSession is logged-then-swallowed so a flaky live-PTY
+ * write never fails an otherwise-successful merge / PR / dismiss; the guarded
+ * UPDATE below marks the run terminal regardless.
+ */
+async function endLiveInteractiveSession(runId: string): Promise<void> {
+  if (!relayDeps) return;
+  try {
+    await relayDeps.endSession(runId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] endSession failed (run ${runId}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * HARD-terminate a LIVE interactive run's persistent REPL as part of the DISMISS
+ * close-out (IDEA-030). Routes through the RelayDeps `killSession` seam (backed
+ * by SubstrateDispatchFacade.killSession → manager.killProcess), which kills the
+ * process tree + tears the run down — NOT the graceful EOF/`/exit` of
+ * `endSession`, which a RUNNING (busy) claude never reads, leaving the process
+ * orphaned. Dismiss discards the run, so a hard kill is correct. Strict NO-OP for
+ * the SDK substrate. Same fail-soft + opt-in contract as endLiveInteractiveSession:
+ * a missing relay bag or a throwing kill is swallowed so close-out still proceeds
+ * (the guarded UPDATE marks the run terminal regardless).
+ */
+async function killLiveInteractiveSession(runId: string): Promise<void> {
+  if (!relayDeps) return;
+  try {
+    await relayDeps.killSession(runId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] killSession failed (run ${runId}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 export const runsRouter = router({
   /** List workflow runs for a project, ordered newest-first. */
   list: protectedProcedure
@@ -478,6 +587,79 @@ export const runsRouter = router({
     }),
 
   /**
+   * Relay a complete REPL turn into a LIVE interactive run (IDEA-030 / TASK-817).
+   *
+   * The `runId === panelId === sessionId` orchestrator invariant means the runId
+   * IS the panelId, so this forwards straight to facade.relayInput(panelId=runId,
+   * text) with no lookup. The composer appends '\n' to make the text a complete
+   * REPL turn the user submitted; the raw-keystroke path (InteractiveTerminalView)
+   * sends bytes verbatim. The relay writes into the SAME running process (never a
+   * kill+respawn) and is a strict NO-OP for the SDK substrate (no PTY) — so the
+   * structured Workflow panel + SDK path stay byte-identical (Q3).
+   *
+   * Standalone-typecheck invariant: the facade is injected as a function ref via
+   * setRelayDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  relayInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(({ input }): { success: true } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      relayDeps.relayInput(input.runId, input.text);
+      return { success: true };
+    }),
+
+  /**
+   * Relay a PTY geometry change into a LIVE interactive run (IDEA-030 / TASK-817).
+   *
+   * runId IS the panelId per the orchestrator invariant, so this forwards to
+   * facade.relayResize(panelId=runId, cols, rows). Safe to call regardless of the
+   * first-interaction guardrail (resize never mutates session state). NO-OP for
+   * the SDK substrate and a NO-OP on the interactive manager until its resize seam
+   * lands (TASK-818). Throws METHOD_NOT_SUPPORTED until setRelayDeps() is wired.
+   */
+  relayResize: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }))
+    .mutation(({ input }): { success: true } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      relayDeps.relayResize(input.runId, input.cols, input.rows);
+      return { success: true };
+    }),
+
+  /**
+   * Return the retained interactive-PTY backlog for a run (IDEA-030 blank-xterm
+   * fix). InteractiveTerminalView calls this once on mount and replays the bytes
+   * into the xterm BEFORE live `cyboflow:pty:<runId>` chunks, so claude's startup
+   * TUI paint (emitted before the renderer subscribed) is reconstructed instead of
+   * lost. A read-only query; returns '' for the SDK substrate / unknown run.
+   * Throws METHOD_NOT_SUPPORTED until setRelayDeps() is wired.
+   */
+  getPtyBacklog: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ input }): { backlog: string } => {
+      if (!relayDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'relay dependencies not wired yet (IDEA-030). Call setRelayDeps() at boot.',
+        });
+      }
+      return { backlog: relayDeps.getPtyBacklog(input.runId) };
+    }),
+
+  /**
    * Merge a workflow run's worktree into the project's main branch (GAP-B).
    *
    * strategy='squash'   → squash all commits into one with `commitMessage`.
@@ -502,6 +684,11 @@ export const runsRouter = router({
       const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
+
+      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE the
+      // worktree mutation so its spawn promise resolves as part of close-out.
+      // NO-OP for the SDK substrate and when the relay bag is unwired.
+      await endLiveInteractiveSession(input.runId);
 
       const mainBranch = await wm.getProjectMainBranch(projectPath);
       // Commit-less runs (e.g. Planner) persist their output to the DB via MCP
@@ -587,6 +774,11 @@ export const runsRouter = router({
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
+      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE pushing
+      // so its spawn promise resolves as part of close-out. NO-OP for SDK /
+      // unwired relay bag.
+      await endLiveInteractiveSession(input.runId);
+
       await wm.gitPush(worktreePath);
       const { remoteUrl, branchName } = await wm.getRemoteUrlAndBranch(worktreePath);
 
@@ -627,6 +819,14 @@ export const runsRouter = router({
       }
       const deps = runCloseoutDeps;
       const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      // HARD-kill the live interactive REPL (IDEA-030) BEFORE removing the
+      // worktree. Dismiss can target a RUNNING flow whose claude is busy and never
+      // reads a graceful EOF/`/exit`, so endSession would leave the process alive
+      // (orphaned in the Claude app) and holding the worktree open during removal.
+      // killSession routes to killProcess (teardown + process-tree kill); the
+      // spawn-promise settle on kill is the designed RunExecutor close path. NO-OP
+      // for the SDK substrate and when the relay bag is unwired.
+      await killLiveInteractiveSession(input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
       // Dismiss discards the run — force-delete its branch too (its commits go
       // with it), so close-out doesn't leave an orphaned ref. No-op when the run

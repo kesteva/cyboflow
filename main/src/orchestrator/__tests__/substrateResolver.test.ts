@@ -31,6 +31,28 @@ describe('resolveSubstrate — override ladder', () => {
     expect(resolveSubstrate({ env: {} })).toBe('sdk');
   });
 
+  it('requestedSubstrate (explicit per-run UI choice) wins over every lower level', () => {
+    const result = resolveSubstrate({
+      requestedSubstrate: 'interactive',
+      frontmatterSubstrate: 'sdk',
+      projectConfigSubstrate: 'sdk',
+      globalDefaultSubstrate: 'sdk',
+      env: { [SUBSTRATE_ENV_VAR]: 'sdk' },
+    });
+    expect(result).toBe('interactive');
+  });
+
+  it('an absent/invalid requestedSubstrate falls through to the next level (fail-soft)', () => {
+    // Picker not consulted (undefined) → frontmatter wins.
+    expect(
+      resolveSubstrate({ requestedSubstrate: undefined, frontmatterSubstrate: 'interactive', env: {} }),
+    ).toBe('interactive');
+    // Garbage requested value is ignored → falls through to env.
+    expect(
+      resolveSubstrate({ requestedSubstrate: 'garbage', env: { [SUBSTRATE_ENV_VAR]: 'interactive' } }),
+    ).toBe('interactive');
+  });
+
   it('frontmatter wins when set, even with all lower levels present', () => {
     const result = resolveSubstrate({
       frontmatterSubstrate: 'interactive',

@@ -144,11 +144,11 @@ export class RunLauncher {
   async launch(
     workflowId: string,
     projectPath: string,
-    // Forward-compat (IDEA-013): the per-run substrate is currently resolved from
-    // env inside WorkflowRegistry.createRun (S4/S7 will thread it through). Accepted
-    // (unused) here only to stay positionally aligned with RunLauncherLike's
-    // (substrate?, taskId?) shape so taskId lands in the 4th argument slot.
-    _substrate?: CliSubstrate,
+    // The user's explicit per-run CLI substrate choice (IDEA-013 / TASK-812),
+    // threaded down to the S1 resolver/stamp in WorkflowRegistry.createRun as the
+    // highest-precedence override. OPTIONAL — when omitted the resolver ladder
+    // falls through to env + the 'sdk' floor.
+    substrate?: CliSubstrate,
     taskId?: string,
     // Planner pre-launch seed idea (migration 017). Written DIRECTLY to
     // workflow_runs.seed_idea_id — NOT routed through linkRunToTaskAndDerive
@@ -161,7 +161,7 @@ export class RunLauncher {
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
 
-    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId);
+    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate);
 
     try {
       const { worktreePath, branchName } = await this.worktreeManager.createDeterministicWorktree(

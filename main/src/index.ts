@@ -34,7 +34,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -105,6 +105,11 @@ let runLauncher: RunLauncher;
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
 let orchestratorHealth: OrchestratorHealth;
+// Promoted to module scope (IDEA-030 / TASK-817) so the run dep-bag wiring in
+// the app.whenReady() block can reach it for the live-input relay. Assigned in
+// initializeServices(); the in-function usages (RunExecutor source/spawner +
+// pty-output fan-in) read the same instance.
+let substrateFacade: SubstrateDispatchFacade;
 
 // Service instances
 let configManager: ConfigManager;
@@ -559,6 +564,26 @@ async function initializeServices() {
     },
   };
 
+  // ptyPublisher — the raw-PTY byte path (TASK-814 / IDEA-030). Mirrors
+  // cyboflowPublisher but sends VERBATIM interactive-substrate PTY chunks on a
+  // DEDICATED cyboflow:pty:<runId> channel for a future live xterm terminal
+  // (TASK-815). These ephemeral bytes BYPASS runEventBridge entirely — there is
+  // no raw_events persistence and no cyboflow:stream coupling (Q3
+  // panel-preservation). The facade subscription that drives this is wired below
+  // where substrateFacade + mainWindow are both in scope (near the RunExecutor ctor).
+  const ptyPublisher = (runId: string, data: string): void => {
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return;
+    // Send the VERBATIM chunk as a bare string — the renderer contract
+    // (`subscribeToPtyBytes` / InteractiveTerminalView, and its tests) treats the
+    // preload-bridged `args[0]` as the raw PTY ANSI string and writes it directly
+    // to `xterm.write`. Wrapping it in an object made `term.write` receive
+    // `{runId,data,timestamp}` and render NOTHING — the blank live terminal seen
+    // on the first IDEA-030 live smoke. The channel is already runId-scoped, so no
+    // envelope is needed.
+    win.webContents.send(`cyboflow:pty:${runId}`, data);
+  };
+
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
   // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
   // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
@@ -635,7 +660,10 @@ async function initializeServices() {
   // as RunExecutor's single `source` EventEmitter (which is bound once at
   // construction and cannot be swapped per run). One object satisfies both seams.
   // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
-  const substrateFacade = new SubstrateDispatchFacade(
+  // Assign the module-level binding (declared near the other shared services) so
+  // the run dep-bag wiring in app.whenReady() can reach the SAME facade instance
+  // for the live-input relay (IDEA-030 / TASK-817).
+  substrateFacade = new SubstrateDispatchFacade(
     defaultCliManager,
     interactiveCliManager,
     workflowRegistry,
@@ -738,6 +766,17 @@ async function initializeServices() {
     ideaBodyReader,
   );
 
+  // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
+  // fan-in (interactive substrate only) to the ptyPublisher, forwarding VERBATIM
+  // chunks to the renderer on cyboflow:pty:<runId>. The payload is opaque
+  // `unknown` on the facade EventEmitter, so narrow it through a typed local
+  // shape (NO `any`). This deliberately bypasses runEventBridge — the bytes are
+  // ephemeral live-view only and are never persisted to raw_events.
+  substrateFacade.on('pty-output', (payload) => {
+    const evt = payload as { runId: string; data: string };
+    ptyPublisher(evt.runId, evt.data);
+  });
+
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
   // and ApprovalRouter (for permission-decision dispatch). RunLauncher needs it
   // so `runLauncher.launch()` can enqueue `runExecutor.execute(runId)` — without
@@ -785,6 +824,15 @@ async function initializeServices() {
   }
   if (interactiveCliManager instanceof InteractiveClaudeManager) {
     interactiveCliManager.setOrchSocketPath(socketPath);
+    // Wire the deny-on-teardown shell-approval canceller (IDEA-030 / TASK-819):
+    // the interactive teardown seam denies/closes any in-flight PreToolUse shell-
+    // approval sockets for the run BEFORE the PTY is killed, delegating to the
+    // OrchSocketServer's public twin (which forwards to the handler's shipped
+    // cancelInFlightShellApprovals). Without this the manager-side canceller is
+    // null and the deny ships as a production no-op.
+    interactiveCliManager.setShellApprovalCanceller((runId) =>
+      orchSocketServer.cancelInFlightShellApprovals(runId),
+    );
   }
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
@@ -958,6 +1006,25 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.nudge deps wired');
+
+    // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
+    // path into a running interactive REPL). Both methods route through the
+    // SubstrateDispatchFacade, which dispatches to the interactive manager's live
+    // PTY and NO-OPs for the SDK substrate (Q3 byte-identical). runId === panelId
+    // per the orchestrator invariant, so the facade maps directly.
+    // IDEA-030 / TASK-818: endSession is the explicit-termination seam for a
+    // persistent interactive REPL — the close-out mutations (merge / createPr /
+    // dismiss) call it BEFORE worktree removal so the live PTY's spawn promise
+    // resolves. It rides the SAME RelayDeps bag (the single bag for live-session
+    // collaborators) and routes through the facade, which NO-OPs for SDK.
+    setRelayDeps({
+      relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
+      relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),
+      endSession: (runId) => substrateFacade.endSession(runId),
+      killSession: (runId) => substrateFacade.killSession(runId),
+      getPtyBacklog: (runId) => substrateFacade.getPtyBacklog(runId),
+    });
+    console.log('[Main] runs.relayInput/relayResize/endSession/killSession/getPtyBacklog deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested

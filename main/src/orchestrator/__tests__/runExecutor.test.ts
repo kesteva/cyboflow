@@ -1776,3 +1776,200 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
     expect(stepEmitterWarn).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// IDEA-030 / TASK-818: event-driven rest for the persistent interactive
+// substrate.
+//
+// For an interactive run the spawnCliProcess promise stays PENDING across turns
+// (it resolves only on explicit end-session / kill). Each assistant turn-end
+// emits a 'turn-end' event on the `source` EventEmitter (interactive manager ->
+// SubstrateDispatchFacade -> RunExecutor) that rests the run in awaiting_review
+// via restAwaitingReview WITHOUT resolving the spawn promise. An SDK run never
+// receives the event (the facade only fans in the interactive manager) and
+// drains via the iterator -> the unchanged 'drained' arm.
+// ---------------------------------------------------------------------------
+
+/** A spawner whose spawnCliProcess promise can be resolved externally (mimics a
+ *  persistent interactive REPL that settles only on explicit termination). */
+function makeControllableSpawner(): {
+  spawner: ClaudeSpawnerLike;
+  resolveSpawn: () => void;
+  spawnStarted: Promise<void>;
+} {
+  let resolveSpawn!: () => void;
+  let markStarted!: () => void;
+  const spawnStarted = new Promise<void>((r) => {
+    markStarted = r;
+  });
+  const spawner: ClaudeSpawnerLike = {
+    spawnCliProcess: vi.fn<(options: ClaudeSpawnerOptions) => Promise<void>>().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSpawn = resolve;
+          markStarted();
+        }),
+    ),
+    abort: vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined),
+  };
+  return { spawner, resolveSpawn: () => resolveSpawn(), spawnStarted };
+}
+
+describe('RunExecutor — event-driven rest (persistent interactive substrate)', () => {
+  it('turn-end event rests the run in awaiting_review while the spawn promise stays pending; a second event re-rests', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running', substrate: 'interactive' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    const source = new EventEmitter();
+    const { spawner, resolveSpawn, spawnStarted } = makeControllableSpawner();
+
+    const executor = new TestableRunExecutor(
+      spawner,
+      registry,
+      makeSpyLogger(),
+      undefined,
+      lt,
+      undefined,
+      undefined,
+      source, // 8th arg: source EventEmitter (the facade in production)
+    );
+
+    // Kick off execute() — it will register the turn-end listener, spawn, and
+    // then BLOCK on the still-pending spawn promise (REPL alive). Track whether
+    // execute() has returned so we can assert it stays pending across turns.
+    let executeSettled = false;
+    const executePromise = executor.execute(run.id).then(() => {
+      executeSettled = true;
+    });
+    await spawnStarted;
+
+    // No rest yet — the run is running with no turn-end.
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+
+    // Fire a turn-end event: the run rests in awaiting_review WITHOUT resolving
+    // the spawn promise.
+    source.emit('turn-end', { panelId: run.id, sessionId: run.id, runId: run.id });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(restAwaitingReview).toHaveBeenCalledTimes(1);
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
+
+    // The spawn promise is STILL pending — execute() has not returned.
+    expect(executeSettled).toBe(false);
+
+    // A SECOND turn-end re-rests (re-armable, not one-shot).
+    source.emit('turn-end', { panelId: run.id, sessionId: run.id, runId: run.id });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(restAwaitingReview).toHaveBeenCalledTimes(2);
+    expect(executeSettled).toBe(false);
+
+    // Explicit termination: resolve the spawn promise so execute() unblocks.
+    resolveSpawn();
+    await executePromise;
+    expect(executeSettled).toBe(true);
+  });
+
+  it('ignores a turn-end event whose runId does not match', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
+
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running', substrate: 'interactive' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    const source = new EventEmitter();
+    const { spawner, resolveSpawn, spawnStarted } = makeControllableSpawner();
+
+    const executor = new TestableRunExecutor(
+      spawner, registry, makeSpyLogger(), undefined, lt, undefined, undefined, source,
+    );
+
+    const executePromise = executor.execute(run.id);
+    await spawnStarted;
+
+    // A turn-end for a DIFFERENT run must not rest this run.
+    source.emit('turn-end', { panelId: 'other-run', sessionId: 'other-run', runId: 'other-run' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+
+    resolveSpawn();
+    await executePromise;
+  });
+
+  it('SDK run: no event-driven rest — drains at spawn resolution via the unchanged drained arm', async () => {
+    const { mock: lt, restAwaitingReview } = makeLifecycleTransitions();
+
+    // substrate omitted/undefined -> SDK (the floor).
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    const source = new EventEmitter();
+    const spawner = makeSpawner(); // resolves immediately at iterator drain
+
+    const executor = new TestableRunExecutor(
+      spawner, registry, makeSpyLogger(), undefined, lt, undefined, undefined, source,
+    );
+
+    await executor.execute(run.id);
+
+    // An SDK run never registers a turn-end listener; emitting one is a no-op.
+    source.emit('turn-end', { panelId: run.id, sessionId: run.id, runId: run.id });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // restAwaitingReview fired EXACTLY once — via the 'drained' arm at spawn
+    // resolution, NOT via an event-driven rest (the SDK never receives one).
+    expect(restAwaitingReview).toHaveBeenCalledTimes(1);
+    expect(restAwaitingReview).toHaveBeenCalledWith(run.id);
+  });
+
+  it('teardownRun (bridge dispose) does NOT fire while the interactive REPL is alive; fires only on explicit termination', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', status: 'running', substrate: 'interactive' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    const source = new EventEmitter();
+    const { spawner, resolveSpawn, spawnStarted } = makeControllableSpawner();
+
+    // A bridge handle whose dispose() we can observe.
+    const dispose = vi.fn();
+    class BridgeExecutor extends TestableRunExecutor {
+      protected override async bridgeEvents(_runId: string, _panelId: string): Promise<RunEventBridge> {
+        return { dispose } as unknown as RunEventBridge;
+      }
+    }
+
+    const executor = new BridgeExecutor(
+      spawner, registry, makeSpyLogger(), undefined, undefined, undefined, undefined, source,
+    );
+
+    const executePromise = executor.execute(run.id);
+    await spawnStarted;
+
+    // Several turn-ends fire while the REPL is alive — the bridge must NOT be
+    // disposed (teardownRun is deferred until the spawn promise settles).
+    source.emit('turn-end', { panelId: run.id, sessionId: run.id, runId: run.id });
+    source.emit('turn-end', { panelId: run.id, sessionId: run.id, runId: run.id });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(dispose).not.toHaveBeenCalled();
+
+    // Explicit termination: the spawn promise resolves, execute() returns, and
+    // the finally block disposes the bridge exactly once.
+    resolveSpawn();
+    await executePromise;
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});

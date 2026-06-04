@@ -38,6 +38,22 @@ export interface CreateTestDbOptions {
    */
   includeStuckDetectedAt?: boolean;
   /**
+   * If true, layer migration 013's `substrate` column (NOT NULL DEFAULT 'sdk')
+   * onto workflow_runs as an additive ALTER (NOT a GATE_SCHEMA mutation).
+   * Defaults to false.
+   *
+   * `listRunsHandler`'s SELECT projects `substrate` (IDEA-013 / IDEA-030 data
+   * plumb), so every test that exercises that handler — listRunsHandler.test.ts
+   * and `cyboflow.runs.list` in runs.test.ts — opts in via this flag. Orthogonal
+   * to the other flags (it composes with includeStuckDetectedAt — they add
+   * distinct columns), and never widens GATE_SCHEMA, so the parity test
+   * (no-options createTestDb()) is unaffected.
+   *
+   * NOTE: SQLite ALTER has no IF NOT EXISTS — do not pass this option twice on
+   * the same DB.
+   */
+  includeSubstrate?: boolean;
+  /**
    * If true, additionally apply migration 010 (questions table + workflow_runs
    * status='awaiting_input'). Implemented as additive SQL on top of
    * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test
@@ -79,6 +95,14 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
   db.exec(GATE_SCHEMA);
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
+  }
+  if (options?.includeSubstrate) {
+    // Migration 013: surfaced by listRunsHandler's SELECT (substrate projection).
+    // Additive — never widens GATE_SCHEMA, so the parity test (no-options call)
+    // is unaffected. Orthogonal to includeStuckDetectedAt (distinct column).
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
+    );
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the

@@ -157,6 +157,8 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   readonly fakeSources: FakeTranscriptSource[] = [];
   nextSessionUuid: string | undefined;
   capturedEnv: { [key: string]: string } | undefined;
+  /** Captured argv — the initial prompt now rides claude's positional arg, not a PTY write. */
+  capturedArgs: string[] | undefined;
 
   protected override async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
     return { available: true, version: '1.0.0', path: '/fake/bin/claude' };
@@ -172,11 +174,12 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
 
   protected override async spawnPtyProcess(
     _command: string,
-    _args: string[],
+    args: string[],
     _cwd: string,
     env: { [key: string]: string },
   ): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
     this.capturedEnv = env;
+    this.capturedArgs = args;
     const fake = new FakePty();
     this.ptys.push(fake);
     return fake as unknown as import('@homebridge/node-pty-prebuilt-multiarch').IPty;
@@ -330,25 +333,25 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
         worktreePath: '/tmp/wt-track',
         prompt,
       });
-      await waitFor(() => mgr.ptys.length > 0 && mgr.ptys[0].writes.length > 0);
+      await waitFor(() => mgr.ptys.length > 0 && mgr.capturedArgs !== undefined);
 
       // Env carries the real run id, distinct from the discovered session UUID.
       expect(mgr.capturedEnv?.CYBOFLOW_RUN_ID).toBe(runId);
       expect(mgr.capturedEnv?.CYBOFLOW_RUN_ID).not.toBe(sessionUuid);
       expect(mgr.capturedEnv?.CYBOFLOW_ORCH_SOCKET).toBe('/tmp/orch.sock');
 
-      // The first PTY stdin write begins with the step-reporting append followed
-      // by a blank line and then the prompt body. The expected append is built
-      // from the run's RESOLVED definition (dynamic step-id model).
+      // The initial prompt rides claude's POSITIONAL argv (last arg): the
+      // step-reporting append, a blank line, then the prompt body. The expected
+      // append is built from the run's RESOLVED definition (dynamic step-id model).
       const expectedAppend = buildStepReportingAppend(resolveWorkflowDefinition('sprint', '{}'));
       expect(expectedAppend.length).toBeGreaterThan(0);
 
-      const firstWrite = mgr.ptys[0].writes[0];
-      expect(firstWrite.startsWith(expectedAppend)).toBe(true);
-      expect(firstWrite).toBe(`${expectedAppend}\n\n${prompt}\n`);
+      const promptArg = mgr.capturedArgs?.[mgr.capturedArgs.length - 1] ?? '';
+      expect(promptArg.startsWith(expectedAppend)).toBe(true);
+      expect(promptArg).toBe(`${expectedAppend}\n\n${prompt}`);
       // The instruction names cyboflow_report_step and lists the run's step ids.
-      expect(firstWrite).toContain('cyboflow_report_step');
-      expect(firstWrite).toContain('`implement`');
+      expect(promptArg).toContain('cyboflow_report_step');
+      expect(promptArg).toContain('`implement`');
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
@@ -379,12 +382,12 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
         worktreePath: '/tmp/wt-custom',
         prompt,
       });
-      await waitFor(() => mgr.ptys.length > 0 && mgr.ptys[0].writes.length > 0);
+      await waitFor(() => mgr.ptys.length > 0 && mgr.capturedArgs !== undefined);
 
-      // No step-reporting text — the prompt is written verbatim (plus newline).
-      const firstWrite = mgr.ptys[0].writes[0];
-      expect(firstWrite).toBe(`${prompt}\n`);
-      expect(firstWrite).not.toContain('cyboflow_report_step');
+      // No step-reporting text — the prompt rides argv verbatim (no append).
+      const promptArg = mgr.capturedArgs?.[mgr.capturedArgs.length - 1] ?? '';
+      expect(promptArg).toBe(prompt);
+      expect(promptArg).not.toContain('cyboflow_report_step');
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

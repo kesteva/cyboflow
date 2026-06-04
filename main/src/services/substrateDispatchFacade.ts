@@ -46,6 +46,49 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
  */
 type ForwardHandler = (payload: unknown) => void;
 
+/**
+ * Bytes of interactive-PTY output retained per run for replay-on-attach
+ * (IDEA-030 blank-xterm fix). Capped to the last N bytes so a long session does
+ * not grow unbounded; sized to comfortably hold claude's full-screen TUI repaint
+ * (cursor/colour state) so a late-mounting InteractiveTerminalView reconstructs
+ * the current screen rather than rendering blank.
+ */
+const PTY_BACKLOG_CAP_BYTES = 256 * 1024;
+
+/**
+ * Narrow capability interface for the interactive manager's PTY resize seam.
+ * `AbstractCliManager` does NOT expose a resize method today (PTY geometry is
+ * pinned 80×30 at AbstractCliManager.ts:577-578,614-615); the seam ON the
+ * manager lands in TASK-818. Until then `relayResize` feature-detects this shape
+ * (a `typeof mgr.resizePanel === 'function'` guard, no `any`) and no-ops when it
+ * is absent — so resize is wired end-to-end on the renderer side and becomes
+ * live the moment the manager seam exists.
+ */
+interface ResizeCapable {
+  resizePanel(panelId: string, cols: number, rows: number): void;
+}
+
+/** Type guard: does this manager expose a `resizePanel(panelId, cols, rows)` seam? */
+function isResizeCapable(mgr: AbstractCliManager): mgr is AbstractCliManager & ResizeCapable {
+  return typeof (mgr as Partial<ResizeCapable>).resizePanel === 'function';
+}
+
+/**
+ * Narrow capability interface for the interactive manager's explicit
+ * end-session seam (TASK-818). `AbstractCliManager` does NOT expose `endSession`
+ * (it is an InteractiveClaudeManager-only seam — the SDK manager has no PTY to
+ * write EOF/`/exit` into). The facade feature-detects this shape (no `any`) so
+ * the close-out path is harmless if the seam is ever absent.
+ */
+interface EndSessionCapable {
+  endSession(panelId: string): Promise<void>;
+}
+
+/** Type guard: does this manager expose an `endSession(panelId)` seam? */
+function isEndSessionCapable(mgr: AbstractCliManager): mgr is AbstractCliManager & EndSessionCapable {
+  return typeof (mgr as Partial<EndSessionCapable>).endSession === 'function';
+}
+
 export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawnerLike {
   /**
    * Records which manager spawned each panel, keyed by panelId. abort() looks up
@@ -59,6 +102,28 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   private readonly sdkExitHandler: ForwardHandler;
   private readonly interactiveOutputHandler: ForwardHandler;
   private readonly interactiveExitHandler: ForwardHandler;
+  // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
+  // manager has no PTY and never emits 'pty-output', so it is deliberately NOT
+  // subscribed here (the path is interactive-only by construction).
+  private readonly interactivePtyHandler: ForwardHandler;
+  // Turn-end fan-in (TASK-818 / IDEA-030) — interactive manager ONLY. Each
+  // persistent-REPL assistant turn boundary emits 'turn-end'; the facade re-emits
+  // it by reference to RunExecutor's event-driven rest handler. The SDK manager
+  // NEVER emits 'turn-end' (it drains via the query() iterator), so it is
+  // deliberately NOT subscribed — the SDK path is structurally untouched.
+  private readonly interactiveTurnEndHandler: ForwardHandler;
+
+  /**
+   * Per-run rolling backlog of the interactive PTY's VERBATIM output bytes
+   * (IDEA-030 blank-xterm fix). The raw `cyboflow:pty:<runId>` channel is
+   * fire-and-forget — Electron drops any webContents.send with no listener, so
+   * claude's startup TUI paint is lost before InteractiveTerminalView mounts and
+   * subscribes. We retain a bounded tail (PTY_BACKLOG_CAP_BYTES) here so the
+   * renderer can REPLAY it on attach (getPtyBacklog), reconstructing the current
+   * screen. Cleared per run on 'exit'. Interactive-only by construction (only the
+   * interactive manager emits 'pty-output').
+   */
+  private readonly ptyBacklog = new Map<string, string>();
 
   constructor(
     private readonly sdkManager: AbstractCliManager,
@@ -74,12 +139,28 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkOutputHandler = (payload) => this.emit('output', payload);
     this.sdkExitHandler = (payload) => this.emit('exit', payload);
     this.interactiveOutputHandler = (payload) => this.emit('output', payload);
-    this.interactiveExitHandler = (payload) => this.emit('exit', payload);
+    this.interactiveExitHandler = (payload) => {
+      // Drop the run's PTY backlog when its REPL exits (panelId === runId).
+      this.clearPtyBacklog(payload);
+      this.emit('exit', payload);
+    };
+    // Raw-PTY fan-in — accumulate a bounded per-run backlog for replay-on-attach
+    // (blank-xterm fix), then re-emit 'pty-output' by reference (live channel
+    // unchanged). Interactive manager ONLY (the SDK manager is never subscribed).
+    this.interactivePtyHandler = (payload) => {
+      this.recordPtyBacklog(payload);
+      this.emit('pty-output', payload);
+    };
+    // Turn-end fan-in — re-emit 'turn-end' by reference (TASK-818). Interactive
+    // manager ONLY; the SDK manager never emits it.
+    this.interactiveTurnEndHandler = (payload) => this.emit('turn-end', payload);
 
     this.sdkManager.on('output', this.sdkOutputHandler);
     this.sdkManager.on('exit', this.sdkExitHandler);
     this.interactiveManager.on('output', this.interactiveOutputHandler);
     this.interactiveManager.on('exit', this.interactiveExitHandler);
+    this.interactiveManager.on('pty-output', this.interactivePtyHandler);
+    this.interactiveManager.on('turn-end', this.interactiveTurnEndHandler);
 
     this.logger.debug('[SubstrateDispatchFacade] subscribed to both substrate managers', {
       defaultSubstrate: DEFAULT_SUBSTRATE,
@@ -139,6 +220,135 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
+   * Relay a live-input turn into the SAME running process (IDEA-030 / TASK-817).
+   *
+   * panelId === runId per the orchestrator invariant. Resolves the manager via
+   * the existing resolveManager() seam so substrate dispatch stays in ONE place.
+   * For the interactive manager this writes raw to the live node-pty via
+   * `sendInput` (AbstractCliManager.ts:205-218 — NO kill, NO respawn; this is
+   * NEVER continuePanel/restartPanelWithHistory, which would destroy the
+   * persistent session). For the SDK manager it is a strict NO-OP: the SDK has
+   * no PTY (`process: undefined as never`), so the structured Workflow panel +
+   * SDK iterator path stay byte-identical (Q3 panel-preservation).
+   */
+  relayInput(panelId: string, text: string): void {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      // SDK substrate has no PTY — relaying input is a no-op (Q3 byte-identical).
+      this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { panelId });
+      return;
+    }
+    mgr.sendInput(panelId, text);
+  }
+
+  /**
+   * Relay a PTY geometry change into the live node-pty (IDEA-030 / TASK-817).
+   *
+   * panelId === runId per the orchestrator invariant. Resolves the manager via
+   * resolveManager(). For the interactive manager it feature-detects a
+   * `resizePanel(panelId, cols, rows)` seam (the seam ON the manager lands in
+   * TASK-818) and calls it when present; otherwise NO-OP. The SDK manager is a
+   * strict NO-OP (no PTY). No `any` — the narrow ResizeCapable interface +
+   * `isResizeCapable` guard own the feature detection.
+   */
+  relayResize(panelId: string, cols: number, rows: number): void {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { panelId });
+      return;
+    }
+    if (isResizeCapable(mgr)) {
+      mgr.resizePanel(panelId, cols, rows);
+      return;
+    }
+    // The manager resize seam (TASK-818) is not yet present — no-op so the
+    // renderer ResizeObserver wiring is harmless until it lands.
+    this.logger.debug('[SubstrateDispatchFacade] relayResize no-op — interactive manager has no resize seam yet', {
+      panelId,
+      cols,
+      rows,
+    });
+  }
+
+  /**
+   * Explicitly end a LIVE interactive run's persistent REPL (IDEA-030 / TASK-818).
+   *
+   * The ONLY non-kill spawn-promise resolver for a persistent interactive run:
+   * routes to the interactive manager's `endSession`, which writes the EOF/`/exit`
+   * control sequence so the inherited onExit settles the run's spawn promise and
+   * teardownRun fires. Wired from the run close-out mutations (Merge / Dismiss /
+   * Create-PR) via the RelayDeps bag. Strict NO-OP for the SDK substrate (no PTY,
+   * the SDK iterator owns its own drain) — Q3 byte-identity holds. panelId ===
+   * runId per the orchestrator invariant, so close-out passes runId straight
+   * through. Feature-detected via the narrow EndSessionCapable interface (no
+   * `any`) so it is harmless if the manager ever lacks the seam.
+   */
+  async endSession(panelId: string): Promise<void> {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      this.logger.debug('[SubstrateDispatchFacade] endSession no-op for SDK substrate', { panelId });
+      return;
+    }
+    if (isEndSessionCapable(mgr)) {
+      await mgr.endSession(panelId);
+      return;
+    }
+    this.logger.warn('[SubstrateDispatchFacade] endSession no-op — interactive manager has no endSession seam', {
+      panelId,
+    });
+  }
+
+  /**
+   * HARD-terminate a LIVE interactive run's persistent REPL (IDEA-030).
+   *
+   * The discard twin of `endSession`: where `endSession` writes a GRACEFUL
+   * EOF/`/exit` (which a RUNNING claude — busy, not reading PTY stdin — never
+   * reads, so the process would linger orphaned in the Claude app), this routes
+   * to the manager's inherited `killProcess`, which runs cleanupCliResources/
+   * teardownRun AND kills the process tree. Idempotent (no-op when the process is
+   * already gone). Used by the Dismiss close-out, where the run is being discarded
+   * and a polite request is the wrong tool. Strict NO-OP for the SDK substrate
+   * (no PTY; the SDK iterator owns its own drain) — Q3 byte-identity holds.
+   * panelId === runId per the orchestrator invariant. `killProcess` is on
+   * `AbstractCliManager` so no feature-detection is needed.
+   */
+  async killSession(panelId: string): Promise<void> {
+    const mgr = this.resolveManager(panelId);
+    if (mgr !== this.interactiveManager) {
+      this.logger.debug('[SubstrateDispatchFacade] killSession no-op for SDK substrate', { panelId });
+      return;
+    }
+    await mgr.killProcess(panelId);
+  }
+
+  /**
+   * Return the retained interactive-PTY backlog for a run so a newly-mounted
+   * InteractiveTerminalView can REPLAY it and reconstruct claude's current screen
+   * (IDEA-030 blank-xterm fix). Empty string for an unknown/SDK run (the SDK
+   * substrate never emits 'pty-output', so it never has a backlog entry).
+   */
+  getPtyBacklog(runId: string): string {
+    return this.ptyBacklog.get(runId) ?? '';
+  }
+
+  /** Append a 'pty-output' chunk to the run's bounded backlog (last N bytes kept). */
+  private recordPtyBacklog(payload: unknown): void {
+    const evt = payload as { runId?: unknown; data?: unknown };
+    if (typeof evt.runId !== 'string' || typeof evt.data !== 'string') return;
+    const next = (this.ptyBacklog.get(evt.runId) ?? '') + evt.data;
+    this.ptyBacklog.set(
+      evt.runId,
+      next.length > PTY_BACKLOG_CAP_BYTES ? next.slice(-PTY_BACKLOG_CAP_BYTES) : next,
+    );
+  }
+
+  /** Drop a run's backlog on REPL exit (CliExitEvent.panelId === runId). */
+  private clearPtyBacklog(payload: unknown): void {
+    const evt = payload as { panelId?: unknown };
+    if (typeof evt.panelId === 'string') this.ptyBacklog.delete(evt.panelId);
+  }
+
+  /**
    * Tear down the fan-in subscriptions so a re-init does not leak listeners. Off()s
    * the exact bound handlers stored at construction and clears the facade's own
    * listeners + the panelOwners map. Idempotent.
@@ -148,8 +358,11 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkManager.off('exit', this.sdkExitHandler);
     this.interactiveManager.off('output', this.interactiveOutputHandler);
     this.interactiveManager.off('exit', this.interactiveExitHandler);
+    this.interactiveManager.off('pty-output', this.interactivePtyHandler);
+    this.interactiveManager.off('turn-end', this.interactiveTurnEndHandler);
     this.removeAllListeners();
     this.panelOwners.clear();
+    this.ptyBacklog.clear();
     this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');
   }
 }

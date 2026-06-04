@@ -32,7 +32,9 @@
 import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
 import { History } from 'lucide-react';
 import { ChatInput } from './ChatInput';
+import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
@@ -67,6 +69,25 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
   const questionQueue = useQuestionStore((s) => s.queue);
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+
+  // -------------------------------------------------------------------------
+  // Substrate gate (IDEA-013 / IDEA-030). Resolve the run row the same way
+  // ChatInput does — scan `runsByProject` for the row whose id === runId (run
+  // ids are unique across projects). `ActiveRunRow.substrate` is the
+  // AppRouter-inferred field (populated by the list SELECT in TASK-813); do NOT
+  // re-declare the substrate union here. When the substrate is 'interactive',
+  // the transcript region is swapped for a live xterm (InteractiveTerminalView).
+  // -------------------------------------------------------------------------
+  const run = useMemo(() => {
+    if (runId === null) return null;
+    for (const rows of Object.values(runsByProject)) {
+      const found = rows.find((r) => r.id === runId);
+      if (found) return found;
+    }
+    return null;
+  }, [runId, runsByProject]);
+  const isInteractive = run?.substrate === 'interactive';
 
   // -------------------------------------------------------------------------
   // Messages + load state
@@ -332,6 +353,9 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // -------------------------------------------------------------------------
 
   const promptMarkers = useMemo<PromptMarker[]>(() => {
+    // The live terminal owns the transcript in interactive mode; the rail (and
+    // therefore these markers) is not rendered, so skip the derivation entirely.
+    if (isInteractive) return [];
     const markers: PromptMarker[] = [];
     let userIdx = 0;
     for (const msg of filteredMessages) {
@@ -350,7 +374,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       userIdx += 1;
     }
     return markers;
-  }, [filteredMessages]);
+  }, [filteredMessages, isInteractive]);
 
   const handleNavigateToPrompt = useCallback((_marker: PromptMarker, index: number): void => {
     const el = userMessageRefs.current.get(index);
@@ -385,19 +409,28 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     <div className="flex h-full">
       {/* Main column: transcript + approvals + input. */}
       <div className="relative flex flex-1 min-w-0 flex-col">
-        <button
-          type="button"
-          onClick={() => setSidebarCollapsed((v) => !v)}
-          title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
-          aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
-          data-testid="run-chat-prompt-rail-toggle"
-          className="absolute right-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
-        >
-          <History className="h-4 w-4" />
-        </button>
+        {/* Prompt-rail toggle — only meaningful for the structured transcript;
+            dropped in interactive mode (live terminal has no prompt history). */}
+        {!isInteractive && (
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+            aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+            data-testid="run-chat-prompt-rail-toggle"
+            className="absolute right-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
+          >
+            <History className="h-4 w-4" />
+          </button>
+        )}
 
         <div className="flex-1 overflow-hidden">
-          {loadError !== null ? (
+          {isInteractive ? (
+            /* Interactive substrate: the live PTY xterm IS the transcript
+               surface. The structured ChatTranscript stays dormant (not
+               rendered) so the conversation is never double-rendered. */
+            <InteractiveTerminalView runId={runId} />
+          ) : loadError !== null ? (
             <div className="p-4 text-xs text-status-error">Error loading history: {loadError}</div>
           ) : (
             <ChatTranscript
@@ -426,8 +459,9 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
         <ChatInput runId={runId} />
       </div>
 
-      {/* Right prompt-history rail (collapsible) — controlled by promptMarkers. */}
-      {!sidebarCollapsed && (
+      {/* Right prompt-history rail (collapsible) — controlled by promptMarkers.
+          Dropped in interactive mode (no parsed-message markers there). */}
+      {!isInteractive && !sidebarCollapsed && (
         <div className="w-[230px] shrink-0 h-full overflow-hidden">
           <PromptNavigation
             panelId={runId}

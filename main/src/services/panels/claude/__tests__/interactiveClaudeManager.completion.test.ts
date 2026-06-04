@@ -41,6 +41,8 @@ class FakePty {
   readonly rows = 30;
   readonly handleFlowControl = false;
   readonly writes: string[] = [];
+  /** Records every resize(cols, rows) call so the resize-seam test can assert it. */
+  readonly resizes: Array<{ cols: number; rows: number }> = [];
   private exitListeners: ExitListener[] = [];
 
   onData = (): { dispose(): void } => ({ dispose: () => undefined });
@@ -51,7 +53,9 @@ class FakePty {
   write(data: string): void {
     this.writes.push(data);
   }
-  resize(): void {}
+  resize(cols: number, rows: number): void {
+    this.resizes.push({ cols, rows });
+  }
   clear(): void {}
   kill(): void {}
   pause(): void {}
@@ -95,6 +99,8 @@ class FakeTranscriptSource implements TranscriptSource {
 class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   readonly ptys: FakePty[] = [];
   readonly fakeSources: FakeTranscriptSource[] = [];
+  /** Captured argv per spawn — the initial prompt now rides claude's positional arg. */
+  readonly spawnArgs: string[][] = [];
 
   protected override async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
     return { available: true, version: '1.0.0', path: '/fake/bin/claude' };
@@ -105,7 +111,8 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   protected override async getSystemEnvironment(): Promise<{ [key: string]: string }> {
     return { PATH: '/usr/bin' };
   }
-  protected override async spawnPtyProcess(): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
+  protected override async spawnPtyProcess(_command: string, args: string[]): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
+    this.spawnArgs.push(args);
     const fake = new FakePty();
     this.ptys.push(fake);
     return fake as unknown as import('@homebridge/node-pty-prebuilt-multiarch').IPty;
@@ -195,35 +202,91 @@ describe('InteractiveClaudeManager — completion (turn-end driven)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a) onTurnEnd -> EOF/exit written; onExit 0 resolves only after settle.
+  // (a) PERSISTENT (production default): turn-end emits a 'turn-end' event and
+  // writes NO EOF/exit (the REPL stays alive); explicit endSession writes
+  // EOF/exit and onExit 0 resolves only after the settle window.
   // -------------------------------------------------------------------------
-  it('writes EOF/exit on turn-end and resolves only after the settle window on exit code 0', async () => {
+  it('persistent: turn-end emits a turn-end event with NO EOF; endSession writes EOF and resolves only after settle on exit 0', async () => {
     const panelId = 'panel-c1';
+
+    // Capture the 'turn-end' event emitted by the persistent REPL.
+    const turnEndEvents: Array<{ panelId: string; sessionId: string; runId: string }> = [];
+    mgr.on('turn-end', (payload: unknown) => {
+      turnEndEvents.push(payload as { panelId: string; sessionId: string; runId: string });
+    });
+
     const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-c1', worktreePath: '/tmp/c1', prompt: 'go' });
     await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0);
 
     const pty = mgr.ptys[0];
     const src = mgr.fakeSources[0];
 
-    // The initial prompt was written.
-    expect(pty.writes.some((w) => w.includes('go'))).toBe(true);
+    // The initial prompt rides claude's POSITIONAL argv (not a PTY byte-injection).
+    expect(mgr.spawnArgs[0]?.some((a) => a.includes('go'))).toBe(true);
+    const writesAfterPrompt = pty.writes.length;
 
-    // Fire the turn-end signal: EOF (Ctrl-D) + /exit must be written.
+    // Fire the turn-end signal: a persistent run must NOT write EOF/exit; it must
+    // EMIT a 'turn-end' event with { panelId, sessionId, runId } and keep alive.
     src.fireTurnEnd();
+    expect(turnEndEvents).toHaveLength(1);
+    expect(turnEndEvents[0]).toEqual({ panelId, sessionId: 'sess-c1', runId: panelId });
+    expect(pty.writes).not.toContain('\x04');
+    expect(pty.writes.some((w) => w.includes('/exit'))).toBe(false);
+    // No new bytes written to the PTY on turn-end (REPL untouched).
+    expect(pty.writes.length).toBe(writesAfterPrompt);
+
+    // The turn-end alone must NOT resolve the spawn promise — the REPL is alive.
+    expect(await settledOrPending(spawn, 50)).toBe('pending');
+
+    // Explicit end-session: NOW EOF (Ctrl-D) + /exit is written.
+    await mgr.endSession(panelId);
     expect(pty.writes).toContain('\x04');
     expect(pty.writes.some((w) => w.includes('/exit'))).toBe(true);
 
-    // The turn-end alone must NOT resolve the spawn promise.
+    // Still pending until the PTY actually exits.
     expect(await settledOrPending(spawn, 50)).toBe('pending');
 
-    // Now the PTY exits cleanly. The spawn promise must resolve ONLY after the
-    // settle window — immediately after onExit it is still pending.
+    // PTY exits cleanly. The spawn promise resolves ONLY after the settle window —
+    // immediately after onExit it is still pending.
     pty.fireExit(0);
     expect(await settledOrPending(spawn, 50)).toBe('pending');
 
     // After the settle window elapses it resolves (awaiting_review path).
     expect(await settledOrPending(spawn, 700)).toBe('resolved');
     await spawn;
+  });
+
+  // -------------------------------------------------------------------------
+  // (a2) PERSISTENT re-arm: a SECOND turn-end ALSO emits (per-turn re-armable,
+  // not one-shot) and still writes no EOF.
+  // -------------------------------------------------------------------------
+  it('persistent: a second turn-end re-emits (re-armable) and still writes no EOF', async () => {
+    const panelId = 'panel-rearm';
+
+    const turnEndEvents: Array<{ panelId: string; sessionId: string; runId: string }> = [];
+    mgr.on('turn-end', (payload: unknown) => {
+      turnEndEvents.push(payload as { panelId: string; sessionId: string; runId: string });
+    });
+
+    const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-rearm', worktreePath: '/tmp/rearm', prompt: 'go' });
+    await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0);
+
+    const pty = mgr.ptys[0];
+    const src = mgr.fakeSources[0];
+
+    src.fireTurnEnd();
+    src.fireTurnEnd();
+
+    // Both turn-ends re-emit; the flag is per-turn re-armable, not one-shot.
+    expect(turnEndEvents).toHaveLength(2);
+    expect(turnEndEvents[0].runId).toBe(panelId);
+    expect(turnEndEvents[1].runId).toBe(panelId);
+    // No EOF written across either turn — the REPL stayed alive.
+    expect(pty.writes).not.toContain('\x04');
+
+    // Clean up the still-pending spawn promise.
+    await mgr.killProcess(panelId);
+    void spawn;
   });
 
   // -------------------------------------------------------------------------
@@ -256,5 +319,98 @@ describe('InteractiveClaudeManager — completion (turn-end driven)', () => {
     // Clean up so vitest does not flag a leaked pending promise / open handles.
     await mgr.killProcess(panelId);
     void spawn;
+  });
+
+  // -------------------------------------------------------------------------
+  // (d) RESIZE SEAM (TASK-818, delivers TASK-817's deferred relayResize):
+  // resizePanel(panelId, cols, rows) calls resize(cols, rows) on the live IPty;
+  // no-op (no throw, no resize call) when no live process exists for the panel.
+  // -------------------------------------------------------------------------
+  it('resizePanel resizes the live IPty and no-ops when no live process exists', async () => {
+    const panelId = 'panel-resize';
+    const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-resize', worktreePath: '/tmp/resize', prompt: 'go' });
+    await waitFor(() => mgr.ptys.length > 0);
+
+    const pty = mgr.ptys[0];
+
+    // A live process exists → resize is forwarded to the IPty.
+    mgr.resizePanel(panelId, 120, 40);
+    expect(pty.resizes).toEqual([{ cols: 120, rows: 40 }]);
+
+    // No live process for an unknown panel → no-op: no throw, no resize recorded.
+    expect(() => mgr.resizePanel('panel-no-such', 80, 24)).not.toThrow();
+    expect(pty.resizes).toEqual([{ cols: 120, rows: 40 }]);
+
+    // Clean up the still-pending spawn promise.
+    await mgr.killProcess(panelId);
+    void spawn;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy single-turn (non-persistent) path — preserved for defensive / future
+// non-interactive use. A subclass forces isPersistentRun() => false so the
+// turn-end writes EOF/exit (the TASK-808 one-shot behavior), gated OFF for the
+// production persistent default.
+// ---------------------------------------------------------------------------
+
+class NonPersistentTestableManager extends TestableInteractiveClaudeManager {
+  protected override isPersistentRun(): boolean {
+    return false;
+  }
+}
+
+describe('InteractiveClaudeManager — completion (legacy non-persistent turn-end)', () => {
+  let db: Database.Database;
+  let mgr: NonPersistentTestableManager;
+
+  beforeEach(() => {
+    db = createTestDb();
+    ApprovalRouter.initialize(dbAdapter(db));
+    QuestionRouter.initialize(dbAdapter(db));
+    mgr = new NonPersistentTestableManager(
+      createMockSessionManager(),
+      createLogger(),
+      createMockConfigManager(),
+      db,
+    );
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  it('non-persistent: turn-end writes EOF/exit (one-shot) and emits NO turn-end event', async () => {
+    const panelId = 'panel-legacy';
+
+    const turnEndEvents: unknown[] = [];
+    mgr.on('turn-end', (payload: unknown) => {
+      turnEndEvents.push(payload);
+    });
+
+    const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-legacy', worktreePath: '/tmp/legacy', prompt: 'go' });
+    await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0);
+
+    const pty = mgr.ptys[0];
+    const src = mgr.fakeSources[0];
+
+    // Legacy path: turn-end writes EOF (Ctrl-D) + /exit and emits NO event.
+    src.fireTurnEnd();
+    expect(pty.writes).toContain('\x04');
+    expect(pty.writes.some((w) => w.includes('/exit'))).toBe(true);
+    expect(turnEndEvents).toHaveLength(0);
+
+    // One-shot: a second turn-end does not write EOF again.
+    const eofCountAfterFirst = pty.writes.filter((w) => w === '\x04').length;
+    src.fireTurnEnd();
+    expect(pty.writes.filter((w) => w === '\x04').length).toBe(eofCountAfterFirst);
+
+    // onExit(0) resolves after the settle window (legacy awaiting_review path).
+    pty.fireExit(0);
+    expect(await settledOrPending(spawn, 700)).toBe('resolved');
+    await spawn;
   });
 });

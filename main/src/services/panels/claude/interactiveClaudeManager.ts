@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { execSync } from 'child_process';
 import type Database from 'better-sqlite3';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
@@ -6,12 +7,17 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
+import { InteractiveSettingsWriter } from './interactiveSettingsWriter';
+import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
+import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 
@@ -54,20 +60,29 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
  *   permissionMode   : 'ignore' (dontAsk / auto-allow) SKIPS writing the gating
  *                      shell hook — matching the SDK's permissionMode==='ignore'
  *                      branch that omits the PreToolUse hook
- *                      (claudeCodeManager.ts:446). The hook WRITE body itself is
- *                      owned by S5/TASK-810 (interactiveSettingsWriter); here we
- *                      only gate the seam call so 'ignore' produces no hook-write.
+ *                      (claudeCodeManager.ts:446). The hook WRITE body is owned by
+ *                      S5/TASK-810 (interactiveSettingsWriter); TASK-819 calls
+ *                      `settingsWriter.write(worktreePath, { permissionMode })` on
+ *                      spawn and the gating is the WRITER's own opt-out branch —
+ *                      'ignore'/'dontAsk' makes write() return null (no hook). The
+ *                      manager adds NO second gate (single source of truth).
  *   strictMcpConfig  : threads `--strict-mcp-config` iff strictMcpConfig===true,
  *                      so only the per-run `.mcp.json` servers load and user
  *                      globals cannot interfere with the permission bridge.
  *                      Mirrors claudeCodeManager.ts:188.
- *   settingSources   : EXPLICIT decision — interactive ISOLATES from user/global
- *                      settings via the generated `--settings <path>` file (NOT
- *                      a silent flip of the SDK's settingSources:['user','project']).
- *                      The SDK reads ['user','project']; the interactive REPL has
- *                      no settingSources option, so isolation is achieved with
- *                      `--settings` pointing at the per-run file S5 owns. This is
- *                      a deliberate read-vs-isolate divergence, documented here.
+ *   settings/hooks   : EXPLICIT decision (TASK-819) — the PreToolUse `'*'` shell-
+ *                      approval hook is installed by InteractiveSettingsWriter into
+ *                      the worktree's DEFAULT `<worktree>/.claude/settings.json`
+ *                      that `claude` reads at launch; NO `--settings` flag is
+ *                      emitted. The old `--settings <.cyboflow/interactive-
+ *                      settings.json>` flag was dangling (nothing wrote that file →
+ *                      NO hook → NO gating) and is dropped. The SDK reads
+ *                      settingSources ['user','project'] via its own option; the
+ *                      interactive REPL has no settingSources option, so the gate is
+ *                      delivered through the on-disk settings file `claude` already
+ *                      reads. A future explicit `--settings` MUST target the
+ *                      writer's `.claude/settings.json` path, not the empty
+ *                      `.cyboflow` file.
  *   resume/isResume  : v1 is FRESH-SESSION-ONLY. Interactive `--resume` /
  *                      `--session-id` continuity is NOT implemented (#44607 is
  *                      ignored interactively). isResume is accepted but no
@@ -124,7 +139,22 @@ interface InteractiveRun {
   sessionId: string;
   runId: string;
   worktreePath: string;
-  /** True once an EOF/`/exit` has been written in response to a turn-end. */
+  /**
+   * True for a TRUE persistent multi-turn REPL session (IDEA-030 / TASK-818).
+   * Every run this manager spawns IS interactive, so this is set `true` at spawn.
+   * When persistent, a turn-end emits a 'turn-end' EVENT and leaves the REPL
+   * ALIVE (no EOF/`/exit`) — the REPL is torn down ONLY on explicit termination
+   * (endSession / killProcess). When false (defensive / future non-interactive
+   * use) the legacy TASK-808 single-turn behavior is preserved: the first
+   * turn-end writes EOF/`/exit`.
+   */
+  persistent: boolean;
+  /**
+   * Per-turn re-armable guard. In the LEGACY non-persistent path it gates the
+   * one-shot EOF write (true once an EOF/`/exit` has been written). In the
+   * persistent path it is NOT used as a one-shot latch — each turn-end re-emits
+   * the 'turn-end' event and re-arms (the REPL stays alive across turns).
+   */
   turnEnded: boolean;
   /** Resolves the spawn promise on clean exit. */
   resolve: () => void;
@@ -144,6 +174,30 @@ const SETTLE_MS = 500;
 
 /** EOF control byte (Ctrl-D) written to PTY stdin to end the REPL turn. */
 const EOF_BYTE = '\x04';
+
+/**
+ * Delay (ms) between writing a prompt body and the separate '\r' that submits it.
+ * claude 2.1.x enables bracketed-paste mode, so a single input burst is captured
+ * as a PASTE — a '\r' appended to the body rides inside that paste as a literal
+ * newline (never Enter) and the prompt sits unsubmitted in the composer. Sending
+ * '\r' as its OWN keystroke after the paste-coalescing window closes is what
+ * commits the turn. 250ms is empirically sufficient (PTY harness, claude 2.1.161);
+ * 300ms adds margin for a busy event loop. See submitToRepl.
+ */
+const SUBMIT_DELAY_MS = 300;
+
+/**
+ * Payload of the 'turn-end' event emitted on each assistant turn boundary of a
+ * persistent interactive REPL (IDEA-030 / TASK-818). The SubstrateDispatchFacade
+ * fans this in and re-emits it by reference; RunExecutor's event-driven rest
+ * handler reads `runId` to drive running -> awaiting_review WITHOUT resolving the
+ * spawn promise. The SDK manager NEVER emits this event.
+ */
+export interface InteractiveTurnEndPayload {
+  panelId: string;
+  sessionId: string;
+  runId: string;
+}
 
 export class InteractiveClaudeManager extends AbstractCliManager {
   /** Per-run pipeline (router -> sink), keyed by panelId. */
@@ -178,6 +232,36 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    */
   private readonly narrowing: TypedEventNarrowing;
 
+  /**
+   * Merge-safe `.claude/settings.json` writer/remover (TASK-810). Installs the
+   * PreToolUse `'*'` shell-approval hook on spawn (gated by the writer's own
+   * permissionMode opt-out) and strips it on teardown. Constructed in the
+   * constructor after super() so this.logger is available — the logger is
+   * PASSED (adapted to LoggerLike) per the CLAUDE.md optional-logger rule
+   * (omitting it silently no-ops the writer's write/skip/remove diagnostics).
+   */
+  private readonly settingsWriter: InteractiveSettingsWriter;
+
+  /**
+   * Pre-enables the worktree's project `.mcp.json` MCP servers in
+   * `.claude/settings.local.json` so the interactive `claude` REPL launches
+   * without the blocking "N new MCP servers found — enable?" modal (which has no
+   * human to answer it in an app-driven run). Restores parity with the SDK
+   * substrate's unconditional `getBaseProjectMcpServers` injection. Runs on
+   * EVERY spawn (NOT gated by permissionMode — the modal blocks even in ignore
+   * mode). Logger PASSED (CLAUDE.md optional-logger rule).
+   */
+  private readonly mcpEnabler: InteractiveMcpEnabler;
+
+  /**
+   * Injected deny-on-teardown shell-approval canceller (TASK-819). Wired at boot
+   * via setShellApprovalCanceller to OrchSocketServer.cancelInFlightShellApprovals
+   * (which delegates to the handler's shipped twin). Null until wired — quick
+   * sessions and a boot before wiring no-op cleanly. Typed `(runId) => number`
+   * to match the handler's return (count of sockets denied/closed).
+   */
+  private shellApprovalCanceller: ((runId: string) => number) | null = null;
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
@@ -189,6 +273,29 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       throw new TypeError('[InteractiveClaudeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
     this.narrowing = new TypedEventNarrowing(this.logger);
+    // PASS the logger to the writer (CLAUDE.md optional-logger rule). The
+    // manager's Logger surface exposes verbose/info/warn/error but NOT `debug`,
+    // so adapt it to LoggerLike at the call site (debug -> verbose) rather than
+    // omitting it, which would silently no-op the writer's diagnostics. The shim
+    // is undefined when no logger was supplied so the writer's own opt-out holds.
+    this.settingsWriter = new InteractiveSettingsWriter(this.toLoggerLike(this.logger));
+    this.mcpEnabler = new InteractiveMcpEnabler(this.toLoggerLike(this.logger));
+  }
+
+  /**
+   * Adapt the manager's `Logger` (verbose/info/warn/error) to the writer's
+   * `LoggerLike` (info/warn/error/debug). Routes `debug` -> `verbose`. Returns
+   * `undefined` when no logger is present so the writer falls back to its own
+   * no-op branch — never fabricates a logger that swallows diagnostics.
+   */
+  private toLoggerLike(logger: Logger | undefined): LoggerLike | undefined {
+    if (logger === undefined) return undefined;
+    return {
+      info: (message: string) => logger.info(message),
+      warn: (message: string) => logger.warn(message),
+      error: (message: string) => logger.error(message),
+      debug: (message: string) => logger.verbose(message),
+    };
   }
 
   /**
@@ -198,6 +305,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    */
   setOrchSocketPath(socketPath: string): void {
     this.orchSocketPath = socketPath;
+  }
+
+  /**
+   * Inject the deny-on-teardown shell-approval canceller (TASK-819). Wired at
+   * boot to OrchSocketServer.cancelInFlightShellApprovals so teardownRun can
+   * deny/close any in-flight PreToolUse shell-approval socket for a run BEFORE
+   * the PTY is killed. Mirrors the setOrchSocketPath injection seam. Null-safe:
+   * unset until wired (quick sessions / pre-boot) and the deny no-ops cleanly.
+   */
+  setShellApprovalCanceller(fn: (runId: string) => number): void {
+    this.shellApprovalCanceller = fn;
   }
 
   // ---------------------------------------------------------------------------
@@ -220,7 +338,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Ensure the enhanced shell PATH is loaded before probing.
     getShellPath();
 
-    const configuredPath = customPath ?? this.configManager?.getConfig()?.claudeExecutablePath;
+    // Treat an empty/whitespace customPath or config claudeExecutablePath as
+    // "not configured". config.json seeds `claudeExecutablePath` as "" by
+    // default, and `"" ?? x` keeps the empty string (?? only falls through on
+    // null/undefined), which made `resolvedPath` an empty (falsy) string and
+    // short-circuited straight to "not found" WITHOUT ever probing the PATH via
+    // findExecutableInPath. Use `||` so an empty configured value falls through
+    // to the PATH probe.
+    const configuredPath =
+      customPath?.trim() ||
+      this.configManager?.getConfig()?.claudeExecutablePath?.trim() ||
+      undefined;
     const resolvedPath = configuredPath ?? findExecutableInPath('claude');
 
     if (!resolvedPath) {
@@ -285,17 +413,81 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--strict-mcp-config');
     }
 
-    // Inject the cyboflow MCP stdio entry and isolate from user settings. The
-    // actual `.mcp.json` / settings+hook file is GENERATED by S5/TASK-810; here
-    // we only emit the flags pointed at the path that writer will own.
-    const settingsPath = path.join(options.worktreePath, '.cyboflow', 'interactive-settings.json');
+    // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
+    // disk. writeInteractiveMcpConfig (called by spawnCliProcess just before args
+    // are built) writes `<worktree>/.cyboflow/interactive-mcp.json` whenever an
+    // orchestrator socket is injected. Emitting `--mcp-config` at a MISSING path
+    // makes claude exit 1 ("Invalid MCP configuration: MCP config file not found")
+    // and the run never advances past 'running' — the S5/TASK-810 gap this guard
+    // closes. When no socket is present (quick sessions) the file is absent and
+    // the flag is omitted so the REPL still launches.
     const mcpConfigPath = path.join(options.worktreePath, '.cyboflow', 'interactive-mcp.json');
-    args.push('--mcp-config', mcpConfigPath);
-    // settingSources read-vs-isolate decision: ISOLATE via `--settings` (see
-    // parity table). NOT a silent flip of the SDK's ['user','project'].
-    args.push('--settings', settingsPath);
+    if (fs.existsSync(mcpConfigPath)) {
+      args.push('--mcp-config', mcpConfigPath);
+    }
+
+    // No `--settings` flag is emitted (TASK-819 reconciliation): the PreToolUse
+    // shell-approval hook is installed by InteractiveSettingsWriter into the
+    // worktree's DEFAULT `<worktree>/.claude/settings.json` that `claude` reads
+    // at launch — a DIFFERENT path from the dangling `.cyboflow/interactive-
+    // settings.json` this manager used to point `--settings` at (nothing ever
+    // wrote that file, so the hook never loaded → NO gating). Dropping the
+    // dangling flag and letting `claude` pick up the writer-installed hook from
+    // its default settings path is what makes the interactive gate actually
+    // fire. A future explicit `--settings` MUST target the writer's path; do NOT
+    // re-point it at the empty `.cyboflow` file.
 
     return args;
+  }
+
+  /**
+   * Write the per-run interactive MCP config that `--mcp-config` points at.
+   *
+   * Mirrors ClaudeCodeManager.composeMcpServers: a single `cyboflow` MCP server
+   * entry (`node <cyboflowMcpServer.js>`) carrying CYBOFLOW_RUN_ID +
+   * CYBOFLOW_ORCH_SOCKET so the live REPL can call `cyboflow_report_step` et al.
+   * over the orchestrator socket. The SDK path injects this server in-process;
+   * the interactive REPL needs it as an on-disk file because `claude
+   * --mcp-config` reads a path.
+   *
+   * Writes ONLY when an orchestrator socket has been injected (a workflow run).
+   * For quick sessions with no socket there is no server to declare, so the file
+   * is not written and buildCommandArgs omits the `--mcp-config` flag — claude
+   * would otherwise exit 1 on the missing file. If the node executable cannot be
+   * resolved we warn and skip the entry rather than ship a broken `command`
+   * (same fail-soft as composeMcpServers).
+   */
+  protected async writeInteractiveMcpConfig(worktreePath: string, runId: string): Promise<void> {
+    if (!this.orchSocketPath) return;
+
+    let nodeCmd: string;
+    try {
+      nodeCmd = await findNodeExecutable();
+    } catch (nodeErr) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] Could not resolve node executable; omitting cyboflow MCP entry: ${nodeErr instanceof Error ? nodeErr.message : String(nodeErr)}`,
+      );
+      return;
+    }
+
+    const config = {
+      mcpServers: {
+        cyboflow: {
+          command: nodeCmd,
+          args: [resolveMcpServerScriptPath()],
+          env: {
+            CYBOFLOW_RUN_ID: runId,
+            CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
+          },
+        },
+      },
+    };
+
+    const dir = path.join(worktreePath, '.cyboflow');
+    const configPath = path.join(dir, 'interactive-mcp.json');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    this.logger?.info(`[InteractiveClaudeManager] wrote interactive MCP config: ${configPath}`);
   }
 
   /**
@@ -389,8 +581,68 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     sink.attachToRouter(router, runId);
     this.pipelines.set(panelId, { router, sink, runId });
 
+    // Install the PreToolUse `'*'` shell-approval hook into the worktree's
+    // default `.claude/settings.json` BEFORE `claude` launches (TASK-819), so the
+    // live interactive REPL gates tool calls for human review. The writer is
+    // idempotent (drops any stale cyboflow entry before re-adding) so a respawn
+    // is safe, and SKIPS internally when permissionMode is 'ignore'/'dontAsk'
+    // (interactiveSettingsWriter.ts) — returning null — so NO second gate is
+    // added here (the writer's opt-out branch is the single source of truth).
+    // Synchronous fs; no await needed.
+    this.settingsWriter.write(worktreePath, { permissionMode: options.permissionMode });
+
+    // Pre-enable the worktree's project `.mcp.json` MCP servers (TASK-IDEA-030
+    // launch fix). The committed project `.mcp.json` (e.g. playwright/maestro)
+    // makes the interactive `claude` REPL render a BLOCKING "N new MCP servers
+    // found — enable?" modal at launch for any server not yet in
+    // `enabledMcpjsonServers`; an app-driven run has no human to answer it and
+    // the REPL hangs (the second of the two IDEA-030 launch defects, alongside
+    // the `--mcp-config` variadic eating the positional prompt below). The
+    // enabler unions the project server names into `.claude/settings.local.json`
+    // so the modal is skipped and the run loads exactly the project servers the
+    // SDK substrate injects unconditionally (parity). Runs REGARDLESS of
+    // permissionMode (the modal blocks even in ignore mode). Synchronous fs.
+    this.mcpEnabler.enable(worktreePath);
+
+    // Write the per-run interactive MCP config (the path buildCommandArgs points
+    // `--mcp-config` at) BEFORE building args, so the existence-guarded flag is
+    // emitted. Closes the S5/TASK-810 gap that left `claude` exiting 1 on a
+    // missing `--mcp-config` file (the interactive REPL needs an on-disk config;
+    // the SDK path injects the same `cyboflow` server in-process).
+    await this.writeInteractiveMcpConfig(worktreePath, runId);
+
     // Build args + env via the abstract hooks.
     const args = this.buildCommandArgs({ ...options, runId });
+
+    // Pass the initial prompt as claude's POSITIONAL argument so claude processes
+    // it as the first REPL turn NATIVELY — replacing the former post-spawn PTY
+    // byte-injection that silently LOST the prompt whenever claude's Ink TUI was
+    // not reading stdin at inject time (startup repaints / "Remote Control
+    // connecting" lull). The injection was
+    // proven NONDETERMINISTIC (~1/3 engaged) via a node-pty harness, while the
+    // positional arg engaged DETERMINISTICALLY (4/4) and claude STAYS interactive
+    // afterward (persistent REPL — what IDEA-030 needs). node-pty's args ARRAY
+    // (no shell) passes the multi-line composed prompt verbatim (newlines/quotes
+    // literal), and claude writes its transcript to encodeCwd(worktree) — exactly
+    // where TranscriptTailSource discovers it (validated). Guarded so a prompt-less
+    // quick session still opens a bare REPL.
+    //
+    // CRITICAL: the prompt MUST be preceded by a `--` end-of-options separator.
+    // claude's `--mcp-config <configs...>` is a VARIADIC option (commander
+    // `<configs...>`): bare `claude --mcp-config <file> "<prompt>"` makes the
+    // variadic greedily SWALLOW the trailing prompt as a SECOND config path,
+    // resolve it relative to cwd, fail to find that "file", and exit 1
+    // ("Invalid MCP configuration: MCP config file not found: <cwd>/<prompt>") —
+    // the run dies before the first turn. `--` terminates option parsing so the
+    // prompt is parsed as the lone positional operand regardless of which
+    // variadic flags (--mcp-config, --add-dir, …) precede it. Verified against a
+    // real worktree spawn: the `--` form removes the Invalid-MCP-config error
+    // while keeping the prompt as the operand claude engages.
+    const composedPrompt = this.composePromptBody(runId, options.prompt);
+    if (composedPrompt.length > 0) {
+      args.push('--', composedPrompt);
+    }
+
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
     const extraEnv = await this.getCliEnvironment({ ...options, runId });
     const systemEnv = await this.getSystemEnvironment();
@@ -431,6 +683,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       panelId,
       sessionId,
       runId,
+      // Every run this manager spawns IS a persistent interactive REPL session
+      // (IDEA-030 / TASK-818). The persistent flag gates the turn-end-kill: a
+      // persistent run emits a 'turn-end' event instead of writing EOF/`/exit`,
+      // so the REPL survives every in-session checkpoint and only terminates on
+      // explicit end-session / killProcess. Resolved via an overridable seam so a
+      // test can exercise the legacy single-turn (non-persistent) path.
+      persistent: this.isPersistentRun(),
       worktreePath,
       turnEnded: false,
       resolve: resolveSpawn,
@@ -453,6 +712,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // onExit listener.
     this.setupProcessHandlers(ptyProcess, panelId, sessionId);
     this.wireCompletionExit(ptyProcess, interactiveRun);
+
+    // Raw-PTY byte path (TASK-814 / IDEA-030): register a SECOND, additive
+    // ptyProcess.onData listener (the same multi-listener precedent as
+    // wireCompletionExit's extra onExit) that emits the VERBATIM chunk on a NEW
+    // 'pty-output' event for the live xterm terminal (TASK-815). The chunk is
+    // forwarded UNMODIFIED — NO line-split, NO `\n` re-join — because the base
+    // setupProcessHandlers.onData line-splits/re-joins for the structured
+    // parseCliOutput per-line path, which would mangle xterm ANSI cursor/control
+    // sequences. node-pty's onData is multi-listener, so this does NOT disturb
+    // the inherited handler. The raw bytes ride 'pty-output' ONLY — they never
+    // touch the 'output'/type:'json' channel and never reach runEventBridge
+    // (Q3 panel-preservation; additive-isolation by construction).
+    ptyProcess.onData((data: string) =>
+      this.emit('pty-output', { panelId, sessionId, runId, type: 'pty', data, timestamp: new Date() }),
+    );
 
     this.emit('spawned', { panelId, sessionId });
 
@@ -484,8 +758,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
-    // Wait for the transcript file to be discovered (loud diagnostic on timeout),
-    // then write the initial prompt into PTY stdin.
+    // The initial prompt is NOT injected into the PTY here — it rides claude's
+    // POSITIONAL argument (set in spawnCliProcess above), so claude is ALREADY
+    // engaging the prompt as its first turn by the time we reach this point. This
+    // also moots the former EAGAIN freeze (no >1KB PTY write happens at all) and
+    // the bracketed-paste submit problem. We still await discovery here because
+    // claude writes the transcript `.jsonl` only after it starts processing the
+    // argv prompt: ORDER matters — a waitForFirstLine timeout calls
+    // clearDiscovery() which IRREVERSIBLY stops the 50ms poller, so discovery must
+    // be awaited on the same path that spawned claude.
+    //
+    // Now await transcript discovery (claude is engaging the argv prompt) — loud on timeout.
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
@@ -499,14 +782,6 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // belongs to the SDK substrate — the two NEVER both run for one run, so this
     // does not race/clobber the SDK path.
     this.persistDiscoveredSessionId(sessionId, tailSource);
-
-    // Write the initial prompt once the REPL is ready. The step-reporting
-    // instruction (TASK-803) is PREPENDED to the prompt head here — the
-    // interactive analogue of the SDK manager's composeSystemPromptAppend
-    // (claudeCodeManager.ts:478), which interactive `claude` cannot use because
-    // the REPL has no SDK `systemPrompt.append` channel. See composePromptBody.
-    const promptToSend = this.composePromptBody(runId, options.prompt);
-    this.sendInput(panelId, promptToSend + '\n');
 
     return spawnPromise;
   }
@@ -586,25 +861,148 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Handle a turn-end signal (Probe C). On the FIRST turn-end, write EOF/`/exit`
-   * to PTY stdin to end the REPL turn. Does NOT resolve the spawn promise — that
-   * happens only from the inherited onExit path after the settle window.
+   * Whether a freshly-spawned run runs as a TRUE persistent multi-turn REPL
+   * (IDEA-030 / TASK-818). Production is ALWAYS persistent — every run the
+   * interactive manager spawns is a live interactive session. Overridable so a
+   * test can exercise the legacy single-turn (non-persistent) EOF-on-turn-end
+   * path that remains for defensive / future non-interactive use.
+   */
+  protected isPersistentRun(): boolean {
+    return true;
+  }
+
+  /**
+   * Handle a turn-end signal (Probe C).
+   *
+   * PERSISTENT path (IDEA-030 / TASK-818 — the live interactive REPL): do NOT
+   * write EOF/`/exit`. The turn-end marker fires at the end of EVERY assistant
+   * turn (transcriptNormalizer `stop_hook_summary` / `turn_duration`), including
+   * every in-session human checkpoint — writing EOF here is exactly what TASK-808
+   * did and what broke persistence (the REPL died at the first checkpoint).
+   * Instead emit a 'turn-end' EVENT (consumed by SubstrateDispatchFacade ->
+   * RunExecutor's event-driven rest, which transitions running -> awaiting_review
+   * WITHOUT resolving the spawn promise) and leave the REPL ALIVE. The guard is
+   * per-turn RE-ARMABLE: it is reset after each emit so the NEXT turn-end re-emits.
+   *
+   * LEGACY non-persistent path (defensive / future non-interactive use): preserve
+   * the TASK-808 one-shot behavior — the first turn-end writes EOF/`/exit` so the
+   * inherited onExit fires and (after the settle window) resolves the spawn promise.
+   * Does NOT resolve the spawn promise directly — that happens only from the
+   * inherited onExit path after the settle window.
    */
   private handleTurnEnd(panelId: string): void {
     const run = this.interactiveRuns.get(panelId);
-    if (!run || run.turnEnded) return;
+    if (!run) return;
+
+    if (run.persistent) {
+      // Re-armable: emit the turn-end event and keep the REPL alive. `turnEnded`
+      // is flipped per-turn purely for observability — it is NOT a one-shot latch
+      // here (the next turn-end re-emits).
+      run.turnEnded = true;
+      this.logger?.verbose(
+        `[InteractiveClaudeManager] turn-end for panel ${panelId} (persistent) — emitting 'turn-end', REPL stays alive`,
+      );
+      const payload: InteractiveTurnEndPayload = {
+        panelId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+      };
+      this.emit('turn-end', payload);
+      // Re-arm for the NEXT turn so each subsequent stop_hook_summary re-emits.
+      run.turnEnded = false;
+      return;
+    }
+
+    // Legacy single-turn (non-persistent) path: one-shot EOF write.
+    if (run.turnEnded) return;
     run.turnEnded = true;
+    this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
+    this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Submit a line to the live REPL the way a human paste+Enter does: write the
+   * BODY, then send '\r' (Enter) as a SEPARATE keystroke after the bracketed-paste
+   * window closes (SUBMIT_DELAY_MS). Writing `body + '\r'` in one PTY write fails
+   * on claude 2.1.x — the whole burst is captured as a bracketed paste and the
+   * trailing '\r' rides inside it as a literal newline (never Enter), so the text
+   * lands in the composer and never submits (verified: no transcript, run stuck
+   * on 'running'). No-op when no live process exists; the deferred '\r' write is
+   * guarded because the panel can be torn down within the delay window. The
+   * raw-keystroke path (xterm -> relayInput, where Enter is already its own '\r')
+   * must NOT route through here.
+   */
+  private submitToRepl(panelId: string, body: string): void {
     const cliProcess = this.processes.get(panelId);
     if (!cliProcess) return;
-    this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
+    this.sendInput(panelId, body);
+    setTimeout(() => {
+      if (!this.processes.has(panelId)) return;
+      try {
+        this.sendInput(panelId, '\r');
+      } catch (err) {
+        this.logger?.warn(
+          `[InteractiveClaudeManager] deferred submit '\\r' failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, SUBMIT_DELAY_MS);
+  }
+
+  /**
+   * Write the EOF (Ctrl-D) + `/exit` control sequence into the live PTY stdin to
+   * end the REPL turn / session. Shared by the legacy single-turn turn-end path
+   * and the explicit-termination seam (endSession) so BOTH route through the same
+   * conditional write. No-op when no live process exists for the panel. Does NOT
+   * resolve the spawn promise — the inherited onExit path (wireCompletionExit)
+   * does that after the settle window.
+   */
+  private writeExitToRepl(panelId: string): void {
+    const cliProcess = this.processes.get(panelId);
+    if (!cliProcess) return;
     try {
       // EOF (Ctrl-D) then `/exit` — either ends the REPL turn so the inherited
       // onExit fires and (after the settle window) resolves the spawn promise.
+      // `/exit` is submitted via submitToRepl (body then a SEPARATE '\r'): a
+      // one-shot `'/exit\r'` would be swallowed by bracketed-paste as a literal
+      // newline and never execute (same paste rule as the initial prompt send).
+      // The preceding EOF usually terminates first; the submitted `/exit` is the
+      // fallback when input remains buffered.
       cliProcess.process.write(EOF_BYTE);
-      cliProcess.process.write('/exit\n');
+      this.submitToRepl(panelId, '/exit');
     } catch (err) {
       this.logger?.warn(`[InteractiveClaudeManager] failed to write EOF/exit for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Explicit end-session seam (IDEA-030 / TASK-818). The ONLY non-kill path that
+   * terminates a persistent interactive REPL: writes the EOF/`/exit` control
+   * sequence so the inherited onExit (wireCompletionExit) settles the spawn
+   * promise (resolve on clean exit / reject on non-zero) and teardownRun fires.
+   * Wired from the run close-out mutations (Merge / Dismiss / Create-PR) via the
+   * RelayDeps bag. No-op when no live process exists for the run/panel.
+   *
+   * panelId === runId per the orchestrator invariant, so the run close-out passes
+   * the runId straight through. Returns a resolved promise once the exit write is
+   * issued — the spawn-promise settle happens asynchronously on the PTY onExit.
+   */
+  public async endSession(panelId: string): Promise<void> {
+    this.logger?.verbose(`[InteractiveClaudeManager] endSession for panel ${panelId} — writing EOF/exit to terminate REPL`);
+    this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Resize the live node-pty for a panel (IDEA-030 / TASK-818 — delivers
+   * TASK-817's deferred manager-side resize seam that SubstrateDispatchFacade.
+   * relayResize feature-detects via its narrow ResizeCapable interface). Looks up
+   * the live process via the SAME per-panel `processes` map `sendInput` /
+   * `writeExitToRepl` use; no-op when no live PTY exists for the panel. The SDK
+   * manager gets no such method (no PTY) — Q3 / SDK byte-identity holds.
+   */
+  public resizePanel(panelId: string, cols: number, rows: number): void {
+    const cliProcess = this.processes.get(panelId);
+    if (!cliProcess?.process) return;
+    cliProcess.process.resize(cols, rows);
   }
 
   /**
@@ -681,18 +1079,28 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       this.tailSources.delete(panelId);
     }
 
+    const runId = run?.runId ?? panelId;
+
+    // Proactively deny + close any in-flight shell-approval sockets for the run
+    // FIRST (TASK-819), so the held-open socket gets a real DENY verdict and the
+    // blocked PreToolUse hook subprocess (and thus the blocked PTY) unblocks. This
+    // MUST precede clearPendingForRun: ApprovalRouter.clearPendingForRun
+    // deliberately does NOT touch the socket (correct for the in-process SDK
+    // transport, WRONG for the shell transport), so the deny ships the verdict and
+    // clearPendingForRun then settles the router's DB rows
+    // (mcpQueryHandler.ts:505-511). Reordering deny -> clear (vs clear -> deny) is
+    // the only structural change to this method.
+    this.denyInFlightShellApprovals(runId);
+
     // Clear router pending under the runId (same id passed to requestApproval /
     // requestQuestion). Falls back to panelId when no run record exists.
-    const runId = run?.runId ?? panelId;
     ApprovalRouter.getInstance().clearPendingForRun(runId);
     QuestionRouter.getInstance().clearPendingForRun(runId);
 
-    // Proactively deny + close any in-flight shell-approval sockets for the run.
-    // Extensible seam — the socket-deny body lands in S5/TASK-810. No-op here.
-    this.denyInFlightShellApprovals(runId);
-
-    // Remove the generated settings.json hook entry. Removal call is a seam; the
-    // writer body lands in S5/TASK-810.
+    // Remove the generated `.claude/settings.json` PreToolUse hook entry, leaving
+    // user keys intact (the writer's merge-safe remove). Resolved from the run's
+    // worktree (the run record is still present here — interactiveRuns.delete runs
+    // last below).
     this.removeGeneratedSettings(panelId);
 
     // Dispose the pipeline (router + sink) for the run.
@@ -707,20 +1115,42 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Deny + close any in-flight shell-approval sockets for the run. Extensible
-   * teardown seam consumed by S5/TASK-810 — the socket-deny body lands there.
-   * No-op in v1.
+   * Deny + close any in-flight shell-approval sockets for the run (TASK-819).
+   * Delegates to the injected canceller (wired at boot to
+   * OrchSocketServer.cancelInFlightShellApprovals, which forwards to the handler's
+   * shipped twin at mcpQueryHandler.ts:519). The deny-and-close logic is NOT
+   * re-implemented here — only invoked. No-op safe when no canceller is wired
+   * (quick sessions / boot order) and when nothing is in flight.
    */
-  private denyInFlightShellApprovals(_runId: string): void {
-    // S5/TASK-810 wires the shell-hook socket handler; this is the cancel seam.
+  private denyInFlightShellApprovals(runId: string): void {
+    try {
+      this.shellApprovalCanceller?.(runId);
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] cancel in-flight shell approvals failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
-   * Remove the generated interactive settings.json hook entry. The writer body
-   * is owned by S5/TASK-810; this is the removal seam. No-op in v1.
+   * Remove the generated `.claude/settings.json` PreToolUse hook entry on teardown
+   * (TASK-819) by delegating to the writer's merge-safe remove for the run's
+   * worktree. The writer strips ONLY the cyboflow `'*'` entry and preserves all
+   * user keys; it is a no-op when the file is absent or carries no cyboflow entry.
+   * Resolves the worktree from the still-present interactiveRuns record (the run
+   * is deleted last in teardownRun). No-op when no worktree is resolvable.
    */
-  private removeGeneratedSettings(_panelId: string): void {
-    // S5/TASK-810 owns interactiveSettingsWriter; this is the teardown seam.
+  private removeGeneratedSettings(panelId: string): void {
+    const run = this.interactiveRuns.get(panelId);
+    const worktreePath = run?.worktreePath;
+    if (!worktreePath) return;
+    try {
+      this.settingsWriter.remove(worktreePath);
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] remove generated settings failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Map a sessionId back to its active panelId via the run/process records. */
