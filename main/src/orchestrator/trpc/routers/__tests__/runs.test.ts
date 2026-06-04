@@ -518,6 +518,93 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(getStatus('run-merge-2')).toBe('completed');
   });
 
+  it('merge(preserve) treats a commit-less run (WorktreeManager "No commits to merge") as benign success', async () => {
+    // A Planner run persists its output to the DB via MCP and makes ZERO git
+    // commits, so WorktreeManager throws its wrapped "No commits to merge"
+    // sentinel. The merge mutation must swallow that specific case and still
+    // close the run out cleanly (worktree removed, run completed) instead of
+    // surfacing a failure.
+    seedRun(db, {
+      id: 'run-nocommits-1',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-nocommits-1',
+      branchName: 'cyboflow/planner/nocommits',
+    });
+    const wm = makeWmStub();
+    // Mirror WorktreeManager's real re-wrap: generic message + preserved original.
+    const wrapped = new Error('Failed to merge worktree to main') as Error & {
+      originalError?: Error;
+      gitOutput?: string;
+    };
+    wrapped.originalError = new Error('No commits to merge. The branch is already up to date with main.');
+    wrapped.gitOutput = 'No commits to merge. The branch is already up to date with main.';
+    wm.mergeWorktreeToMain.mockRejectedValue(wrapped);
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-nocommits-1', strategy: 'preserve' });
+
+    expect(result).toEqual({ success: true });
+    // Close-out still runs even though the merge was a no-op.
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-nocommits-1');
+    expect(wm.deleteBranch).toHaveBeenCalledWith('/projects/p', 'cyboflow/planner/nocommits', { force: true });
+    expect(clearApprovals).toHaveBeenCalledWith('run-nocommits-1');
+    expect(getStatus('run-nocommits-1')).toBe('completed');
+  });
+
+  it('merge(squash) treats a commit-less run ("No commits to squash") as benign success', async () => {
+    seedRun(db, {
+      id: 'run-nocommits-2',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-nocommits-2',
+    });
+    const wm = makeWmStub();
+    wm.squashAndMergeWorktreeToMain.mockRejectedValue(
+      new Error('No commits to squash. The branch is already up to date with main.'),
+    );
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({
+      runId: 'run-nocommits-2',
+      strategy: 'squash',
+      commitMessage: 'planner output (no commits)',
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-nocommits-2');
+    expect(getStatus('run-nocommits-2')).toBe('completed');
+  });
+
+  it('merge still propagates a REAL merge failure (rebase conflict) — run NOT closed out', async () => {
+    // A Sprint run with real commits must still merge normally; a genuine git
+    // failure (not the no-commits sentinel) must surface, not be swallowed, and
+    // the run must NOT be marked completed.
+    seedRun(db, {
+      id: 'run-realfail-1',
+      status: 'awaiting_review',
+      worktreePath: '/tmp/wt/run-realfail-1',
+    });
+    const wm = makeWmStub();
+    const conflict = new Error('Failed to merge worktree to main') as Error & {
+      originalError?: Error;
+      gitOutput?: string;
+    };
+    conflict.originalError = new Error('Failed to rebase worktree onto main. Conflicts must be resolved first.');
+    conflict.gitOutput = 'CONFLICT (content): Merge conflict in foo.ts';
+    wm.mergeWorktreeToMain.mockRejectedValue(conflict);
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.merge({ runId: 'run-realfail-1', strategy: 'preserve' }),
+    ).rejects.toThrow('Failed to merge worktree to main');
+
+    // Real failure → close-out must NOT run; the run stays in its pre-merge state.
+    expect(wm.removeWorktreeByPath).not.toHaveBeenCalled();
+    expect(getStatus('run-realfail-1')).toBe('awaiting_review');
+  });
+
   it('merge(squash) without a commit message → BAD_REQUEST and no worktree mutation', async () => {
     seedRun(db, { id: 'run-merge-3', status: 'completed', worktreePath: '/tmp/wt/run-merge-3' });
     const wm = makeWmStub();

@@ -251,6 +251,41 @@ function resolveRunForCloseout(
 }
 
 /**
+ * Detect the WorktreeManager's specific "nothing to merge" outcome.
+ *
+ * A Planner run writes entities to the DB via MCP and makes ZERO git commits, so
+ * its worktree branch has no commits ahead of base. WorktreeManager's merge
+ * helpers throw a hard error in that case:
+ *   squash:   "No commits to squash. The branch is already up to date with <main>."
+ *   preserve: "No commits to merge. The branch is already up to date with <main>."
+ * which it then re-wraps as a generic `Failed to merge worktree to <main>` /
+ * `Failed to squash and merge worktree to <main>` Error carrying the original on
+ * an `originalError` field (and the original text on `gitOutput`).
+ *
+ * The run's output is ALREADY persisted (DB-canonical), so there is genuinely
+ * nothing to merge — this is a benign success, NOT a failure. We match on the
+ * stable "No commits to" prefix across the wrapped message, the preserved
+ * `originalError.message`, and the `gitOutput` snapshot so a re-wrap can't hide
+ * it. We deliberately do NOT broaden this to "already up to date" alone — only
+ * the WorktreeManager's own no-commits sentinel is swallowed; every other git
+ * failure (rebase conflict, non-ff divergence, etc.) still propagates.
+ */
+function isNoCommitsToMergeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const wrapped = err as Error & { originalError?: unknown; gitOutput?: unknown };
+  const candidates: string[] = [err.message];
+  if (wrapped.originalError instanceof Error) {
+    candidates.push(wrapped.originalError.message);
+  }
+  if (typeof wrapped.gitOutput === 'string') {
+    candidates.push(wrapped.gitOutput);
+  }
+  return candidates.some(
+    (m) => m.includes('No commits to merge') || m.includes('No commits to squash'),
+  );
+}
+
+/**
  * Stamp the DB-canonical close-out signal on workflow_runs.outcome and recompute
  * the linked task's derived execution stage through the chokepoint (migration 014).
  *
@@ -469,17 +504,31 @@ export const runsRouter = router({
       const wm = deps!.worktreeManager;
 
       const mainBranch = await wm.getProjectMainBranch(projectPath);
-      if (input.strategy === 'squash') {
-        const message = input.commitMessage?.trim();
-        if (!message) {
-          throw new TRPCError({
-            code: 'BAD_REQUEST',
-            message: 'commitMessage is required for a squash merge',
-          });
+      // Commit-less runs (e.g. Planner) persist their output to the DB via MCP
+      // and make ZERO git commits, so there is genuinely nothing to merge. Treat
+      // WorktreeManager's specific "no commits" error as a BENIGN SUCCESS and fall
+      // through to the normal close-out (worktree removal + mark completed +
+      // outcome='merged') so the run still leaves the rail cleanly. Any OTHER
+      // merge failure (rebase conflict, non-ff divergence, …) re-throws — a Sprint
+      // run with real commits MUST still merge normally and surface real errors.
+      try {
+        if (input.strategy === 'squash') {
+          const message = input.commitMessage?.trim();
+          if (!message) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: 'commitMessage is required for a squash merge',
+            });
+          }
+          await wm.squashAndMergeWorktreeToMain(projectPath, worktreePath, mainBranch, message);
+        } else {
+          await wm.mergeWorktreeToMain(projectPath, worktreePath, mainBranch);
         }
-        await wm.squashAndMergeWorktreeToMain(projectPath, worktreePath, mainBranch, message);
-      } else {
-        await wm.mergeWorktreeToMain(projectPath, worktreePath, mainBranch);
+      } catch (err) {
+        // A missing commit message is a real BAD_REQUEST — never swallow it.
+        if (err instanceof TRPCError) throw err;
+        if (!isNoCommitsToMergeError(err)) throw err;
+        // benign: nothing to merge (output already in DB) → continue close-out.
       }
 
       // Remove the worktree and mark the run terminal. The worktree removal is
