@@ -8,7 +8,8 @@
  * Behaviors verified:
  *   1. Renders three tabs (Workflow Progress / File Explorer / Diff);
  *      Workflow Progress is default selected; shows empty-state when activeRunId is null.
- *   2. Clicking File Explorer shows its placeholder and hides the Workflow Progress panel.
+ *   2. Clicking File Explorer with no activeRunId shows its empty state and hides
+ *      the Workflow Progress panel.
  *   3. Clicking Diff with no active quick session shows the neutral "select a session"
  *      message (the working <CombinedDiffView> mounts only when a sessionId is resolved).
  *   4. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
@@ -108,14 +109,16 @@ describe('RunRightRail', () => {
     expect(root).toHaveClass('border-l');
   });
 
-  it('clicking File Explorer tab shows its placeholder and hides the Workflow Progress panel', () => {
+  it('clicking File Explorer tab with no active run shows its empty state and hides the Workflow Progress panel', () => {
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
 
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
 
-    expect(screen.getByTestId('run-right-rail-file-explorer-placeholder')).toBeInTheDocument();
+    // With activeRunId === null the rail renders a neutral empty state rather
+    // than mounting RunFileExplorer (which would fire tRPC).
+    expect(screen.getByTestId('run-right-rail-file-explorer-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
 
     expect(screen.getByRole('tab', { name: 'File Explorer' }).getAttribute('aria-selected')).toBe('true');
@@ -135,7 +138,7 @@ describe('RunRightRail', () => {
 
     expect(screen.getByTestId('run-right-rail-diff-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('run-right-rail-file-explorer-placeholder')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-right-rail-file-explorer-empty')).not.toBeInTheDocument();
 
     expect(screen.getByRole('tab', { name: 'Diff' }).getAttribute('aria-selected')).toBe('true');
   });

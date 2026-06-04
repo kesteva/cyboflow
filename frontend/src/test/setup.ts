@@ -23,6 +23,10 @@ vi.mock('../trpc/client', () => ({
     cyboflow: {
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        listFiles: { query: vi.fn().mockResolvedValue([]) },
+        readFile: {
+          query: vi.fn().mockResolvedValue({ path: '', content: '', size: 0, unviewableReason: null }),
+        },
       },
       workflows: {
         list: {

@@ -4,39 +4,25 @@
  * Contains three tabs:
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
  *     is non-null; neutral empty state otherwise.
- *   - File Explorer — placeholder
+ *   - File Explorer — live RunFileExplorer (run worktree tree + read-only viewer) when
+ *     activeRunId is non-null; neutral empty state otherwise.
  *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
  *     message when no session is active.
  */
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
+import { RunFileExplorer } from './RunFileExplorer';
 import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff';
 
-interface WorkflowProgressTab {
-  id: 'workflow-progress';
+interface Tab {
+  id: TabId;
   label: string;
   testid: string;
 }
-
-interface PlaceholderTab {
-  id: 'file-explorer';
-  label: string;
-  testid: string;
-  panelTestid: string;
-  placeholder: string;
-}
-
-interface DiffTab {
-  id: 'diff';
-  label: string;
-  testid: string;
-}
-
-type Tab = WorkflowProgressTab | PlaceholderTab | DiffTab;
 
 const TABS: Tab[] = [
   {
@@ -48,8 +34,6 @@ const TABS: Tab[] = [
     id: 'file-explorer',
     label: 'File Explorer',
     testid: 'run-right-rail-tab-file-explorer',
-    panelTestid: 'run-right-rail-file-explorer-placeholder',
-    placeholder: 'File Explorer — coming soon',
   },
   {
     id: 'diff',
@@ -143,7 +127,18 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               No active run
             </div>
           )
-        ) : currentTab.id === 'diff' ? (
+        ) : currentTab.id === 'file-explorer' ? (
+          activeRunId !== null ? (
+            <RunFileExplorer runId={activeRunId} />
+          ) : (
+            <div
+              data-testid="run-right-rail-file-explorer-empty"
+              className="p-4 text-sm text-text-secondary"
+            >
+              No active run
+            </div>
+          )
+        ) : (
           activeQuickSessionId ? (
             <RunRightRailDiff sessionId={activeQuickSessionId} isActive />
           ) : (
@@ -154,13 +149,6 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               Select a session to view its diff.
             </div>
           )
-        ) : (
-          <div
-            data-testid={currentTab.panelTestid}
-            className="p-4 text-sm text-text-secondary"
-          >
-            {currentTab.placeholder}
-          </div>
         )}
       </div>
     </aside>
