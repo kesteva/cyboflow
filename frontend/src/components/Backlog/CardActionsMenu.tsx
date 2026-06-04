@@ -29,7 +29,9 @@ export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Eleme
   const [stageOpen, setStageOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
 
-  const board = pickDefaultBoard(boards);
+  // Prefer the task's own board; fall back to the project default (v1 ships a
+  // single default board, so these coincide — the by-id lookup just future-proofs).
+  const board = boards.find((b) => b.id === task.board_id) ?? pickDefaultBoard(boards);
   if (board === null) return null;
 
   const currentStage = findStageById(board, task.stage_id);
