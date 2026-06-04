@@ -227,6 +227,19 @@ const DECOMPOSED_POSITION = 12;
 /** The board stage position considered "done" (merged & archived). */
 const DONE_POSITION = 9;
 
+/**
+ * CREATE TYPE-DEFAULT (hybrid model, FIX-STAGE-MODEL A): when a create carries
+ * NO explicit stage (initialStageId/stageId both undefined), the entity lands at
+ * its type's natural starting stage. An explicit stage STILL wins (the agent can
+ * override). Positions are verified against database.ts seedDefaultBoard:
+ *   idea -> 1 (Idea), epic -> 4 (Epics extracted), task -> 5 (Tasks extracted).
+ */
+const CREATE_DEFAULT_POSITION: Record<TaskType, number> = {
+  idea: 1,
+  epic: 4,
+  task: 5,
+};
+
 // ---------------------------------------------------------------------------
 // TaskChangeRouter
 // ---------------------------------------------------------------------------
@@ -298,11 +311,60 @@ export class TaskChangeRouter {
     projectId: number,
     change: TaskChange,
   ): Promise<{ taskId: string; event: { id: number; seq: number } }> {
-    return this.getProjectQueue(projectId).add(() => {
+    const result = (await this.getProjectQueue(projectId).add(() => {
       return change.taskId === undefined
         ? this.runCreate(projectId, change)
         : this.runUpdate(projectId, change);
-    }) as Promise<{ taskId: string; event: { id: number; seq: number } }>;
+    })) as { taskId: string; event: { id: number; seq: number } };
+
+    // FIX-STAGE-MODEL (B): when a CREATE introduces the FIRST child of an idea
+    // (an epic OR task carrying originatingIdeaId), the originating idea retires
+    // to the Decomposed terminal stage — the children carry the flow forward.
+    // Done as a FOLLOW-ON orchestrator applyChange AFTER the child create commits
+    // (NOT a re-entrant nested applyChange inside the create txn, which would
+    // self-deadlock the per-project PQueue). Idempotent: a no-op when the idea is
+    // already terminal/Decomposed. Failures are swallowed (the child create has
+    // already committed; retiring the idea is best-effort housekeeping).
+    if (change.taskId === undefined && change.originatingIdeaId) {
+      const isChildType = (change.entityType ?? change.type ?? 'idea') !== 'idea';
+      if (isChildType) {
+        await this.decomposeOriginatingIdea(projectId, change.originatingIdeaId).catch(() => {
+          // Best-effort: the child already exists; a failure here must not bubble
+          // up and fail the create the caller already observed as successful.
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Retire an originating idea to the Decomposed terminal stage (FIX-STAGE-MODEL
+   * B). Idempotent: reads the idea's current stage position and no-ops when it is
+   * already at the Decomposed position (or the idea / Decomposed stage cannot be
+   * resolved). Routes through applyChange with actor='orchestrator' so the move
+   * mints an entity_event and emits the 'decomposed' action like any other
+   * idea->Decomposed transition. Called as a FOLLOW-ON (post-commit), never
+   * nested inside another applyChange transaction.
+   */
+  private async decomposeOriginatingIdea(projectId: number, ideaId: string): Promise<void> {
+    const idea = this.db
+      .prepare('SELECT board_id, stage_id FROM ideas WHERE id = ? AND project_id = ?')
+      .get(ideaId, projectId) as { board_id: string; stage_id: string } | undefined;
+    if (!idea) return; // idea vanished or wrong project — nothing to retire
+
+    const decomposedStageId = this.stageIdForPosition(idea.board_id, DECOMPOSED_POSITION);
+    if (!decomposedStageId || decomposedStageId === idea.stage_id) {
+      return; // Decomposed stage missing, or idea already retired — idempotent no-op
+    }
+
+    await this.applyChange(projectId, {
+      actor: 'orchestrator',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: decomposedStageId,
+      kind: 'decomposed',
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -322,7 +384,7 @@ export class TaskChangeRouter {
     let eventSeq = 0;
 
     const txn = this.db.transaction(() => {
-      // Resolve board (default) + stage (position 1, or provided).
+      // Resolve board (default) + stage (type-default position, or provided).
       const boardId = change.boardId ?? `board-${projectId}-default`;
       const board = this.db
         .prepare('SELECT id FROM boards WHERE id = ? AND project_id = ?')
@@ -331,7 +393,14 @@ export class TaskChangeRouter {
         throw new TaskChangeError('not_found', `board ${boardId} not found for project ${projectId}`);
       }
 
-      const stageId = change.initialStageId ?? change.stageId ?? `stage-${boardId}-1`;
+      // FIX-STAGE-MODEL (A): an explicit initialStageId/stageId wins (hybrid —
+      // the agent may override); otherwise default BY ENTITY TYPE via
+      // stageIdForPosition so a created entity lands at its natural starting
+      // stage (idea->Idea, epic->Epics extracted, task->Tasks extracted) instead
+      // of every entity piling up at position 1.
+      const typeDefaultStageId =
+        this.stageIdForPosition(boardId, CREATE_DEFAULT_POSITION[type]) ?? `stage-${boardId}-1`;
+      const stageId = change.initialStageId ?? change.stageId ?? typeDefaultStageId;
       const stage = this.lookupStage(stageId);
       if (!stage || stage.board_id !== boardId) {
         throw new TaskChangeError('not_found', `stage ${stageId} not found on board ${boardId}`);

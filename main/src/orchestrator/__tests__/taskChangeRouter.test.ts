@@ -383,28 +383,10 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
 
+      // An idea with NO children — an explicit move to Decomposed must surface
+      // 'decomposed'. (Created children would auto-decompose the idea via FIX
+      // (B); this case isolates the explicit-move emit semantics.)
       const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
-      // The idea spawned an epic + task that carry the flow.
-      const epic = await router.applyChange(1, {
-        actor: 'user',
-        entityType: 'epic',
-        title: 'E',
-        originatingIdeaId: idea.taskId,
-      });
-      const task = await router.applyChange(1, {
-        actor: 'user',
-        entityType: 'task',
-        title: 'T',
-        parentEpicId: epic.taskId,
-        originatingIdeaId: idea.taskId,
-      });
-
-      const epicStageBefore = (db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epic.taskId) as {
-        stage_id: string;
-      }).stage_id;
-      const taskStageBefore = (db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(task.taskId) as {
-        stage_id: string;
-      }).stage_id;
 
       const actions: string[] = [];
       taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => actions.push(e.action));
@@ -414,14 +396,6 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const idea2 = db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string };
       expect(idea2.stage_id).toBe(stageId(12));
       expect(actions).toContain('decomposed');
-
-      // Children are UNCHANGED — they carry the flow.
-      expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epic.taskId) as { stage_id: string }).stage_id).toBe(
-        epicStageBefore,
-      );
-      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(task.taskId) as { stage_id: string }).stage_id).toBe(
-        taskStageBefore,
-      );
     });
 
     it('an ordinary stage move (idea to a non-Decomposed stage) emits stageMoved, not decomposed', async () => {
@@ -433,6 +407,149 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => actions.push(e.action));
       await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: idea.taskId, stageId: stageId(3) });
       expect(actions).toEqual(['stageMoved']);
+    });
+
+    // FIX-STAGE-MODEL (B): creating the FIRST child (epic OR task) of an idea
+    // retires the originating idea to Decomposed automatically; children keep
+    // their own create stages (they carry the flow).
+    it('creating an epic with originatingIdeaId auto-retires the idea to Decomposed (children unchanged)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
+      // Idea starts at Idea (position 1) per the type-default.
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(1),
+      );
+
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'E',
+        originatingIdeaId: idea.taskId,
+      });
+      // Let the follow-on decomposition settle on the project queue.
+      await router._queueForProject(1).onIdle();
+
+      // The idea retired to Decomposed (position 12)...
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+      // ...via an orchestrator-attributed 'decomposed' entity_event.
+      const ev = db
+        .prepare(
+          "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(idea.taskId) as { actor: string; kind: string };
+      expect(ev.actor).toBe('orchestrator');
+      expect(ev.kind).toBe('decomposed');
+
+      // The epic child keeps its create stage (Epics extracted, position 4).
+      expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epic.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(4),
+      );
+    });
+
+    it('creating a task with originatingIdeaId auto-retires the idea to Decomposed', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Small idea' });
+      const task = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T',
+        originatingIdeaId: idea.taskId,
+      });
+      await router._queueForProject(1).onIdle();
+
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+      // Task child keeps its create stage (Tasks extracted, position 5).
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(task.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(5),
+      );
+    });
+
+    it('auto-decompose is idempotent: a SECOND child does not double-write the idea decomposition', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'E',
+        originatingIdeaId: idea.taskId,
+      });
+      await router._queueForProject(1).onIdle();
+      const eventsAfterFirst = eventCount(db, 'idea', idea.taskId);
+
+      // A second child (task under the epic, same originating idea) must NOT
+      // re-write the decomposition — the idea is already terminal.
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T',
+        parentEpicId: epic.taskId,
+        originatingIdeaId: idea.taskId,
+      });
+      await router._queueForProject(1).onIdle();
+
+      expect(eventCount(db, 'idea', idea.taskId)).toBe(eventsAfterFirst);
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // FIX-STAGE-MODEL (A): create type-default stage
+  // -------------------------------------------------------------------------
+
+  describe('create type-default stage', () => {
+    it('idea defaults to Idea (position 1) when no explicit stage is given', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(1),
+      );
+    });
+
+    it('epic defaults to Epics extracted (position 4) when no explicit stage is given', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(4),
+      );
+    });
+
+    it('task defaults to Tasks extracted (position 5) when no explicit stage is given', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(5),
+      );
+    });
+
+    it('an explicit initialStageId STILL wins over the type-default (hybrid override)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // A task explicitly created at Research (position 2) lands there, not the
+      // type-default Tasks-extracted (position 5).
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T',
+        initialStageId: stageId(2),
+      });
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(2),
+      );
     });
   });
 
@@ -480,7 +597,9 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(1));
+      // The task's create stage (Tasks extracted, position 5 per the FIX-STAGE
+      // type-default) is left untouched when there are no runs to aggregate.
+      expect(task.stage_id).toBe(stageId(5));
     });
 
     it('any running run -> indev (position 7)', async () => {
