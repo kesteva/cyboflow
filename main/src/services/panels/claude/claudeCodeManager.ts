@@ -17,6 +17,8 @@ import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preT
 import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
 import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
+import { WorkflowBundleWriter } from './workflowBundleWriter';
+import { installWorkflowBundle } from './workflowBundleInstall';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
@@ -153,6 +155,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   private readonly narrowing: TypedEventNarrowing;
 
+  /**
+   * Installs/removes the run's co-located `/cyboflow-<phase>` command bundle (and
+   * any subagents) into the worktree's `.claude/commands` + `.claude/agents`
+   * before spawn (IDEA-013 rung-(ii)). The SDK substrate auto-discovers these
+   * files via `settingSources: ['user','project']`, so writing them is the SAME
+   * substrate-shared mechanism the interactive REPL uses — the slim shared
+   * planner/sprint prose depends on these commands existing on BOTH paths.
+   * Merge-safe + namespaced (`cyboflow-*`). Logger PASSED (optional-logger rule).
+   */
+  private readonly bundleWriter: WorkflowBundleWriter;
+
+  /**
+   * Per-session worktree paths captured at spawn so `cleanupCliResources`
+   * (sessionId-keyed) can remove the run's `cyboflow-*` bundle. Quick sessions
+   * with no bundle still record harmlessly (remove is a no-op when nothing was
+   * written).
+   */
+  private readonly bundleWorktrees = new Map<string, string>();
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
@@ -164,6 +185,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       throw new TypeError('[ClaudeCodeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
     this.narrowing = new TypedEventNarrowing(this.logger);
+    this.bundleWriter = new WorkflowBundleWriter(makeLoggerLike(this.logger));
   }
 
   // ---------------------------------------------------------------------------
@@ -224,11 +246,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return {};
   }
 
-  protected async cleanupCliResources(_sessionId: string): Promise<void> {
+  protected async cleanupCliResources(sessionId: string): Promise<void> {
     // Approval cleanup is done in runSdkQuery's finally block via
     // ApprovalRouter.getInstance().clearPendingForRun(panelId) — using panelId
     // (the id under which requestApproval() was called) rather than sessionId.
-    // This override satisfies the abstract contract; future cleanup hooks go here.
+
+    // Remove the run's cyboflow-* command/agent bundle from the worktree (IDEA-013
+    // rung-(ii); strips ONLY cyboflow files, leaves user agents/commands intact).
+    // worktreePath was captured by sessionId at spawn; no-op when nothing was
+    // written (quick sessions / custom flows).
+    const worktreePath = this.bundleWorktrees.get(sessionId);
+    if (worktreePath !== undefined) {
+      this.bundleWriter.remove(worktreePath);
+      this.bundleWorktrees.delete(sessionId);
+    }
   }
 
   protected async getCliEnvironment(_options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
@@ -280,6 +311,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // (sessions:create-quick) and differs from panelId.
       const sessionRow = this.sessionManager.getDbSession(sessionId);
       const runId = (sessionRow?.run_id as string | null) ?? panelId;
+
+      // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
+      // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
+      // the query() runs. The SDK auto-discovers them via settingSources
+      // ['user','project'], so the slim shared planner/sprint prose finds its
+      // phase commands on the SDK path too (IDEA-013 rung-(ii)). Keyed off the
+      // run's workflow_path → quick sessions / custom flows write nothing.
+      // worktreePath is recorded by sessionId so cleanupCliResources can remove it.
+      installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
+      this.bundleWorktrees.set(sessionId, options.worktreePath);
 
       // Build SDK options (uses runId for the approval-router hook).
       const sdkOptions = await this.buildSdkOptions({ ...options, runId });

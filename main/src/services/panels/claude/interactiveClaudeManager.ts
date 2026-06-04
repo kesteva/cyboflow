@@ -20,6 +20,8 @@ import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
+import { WorkflowBundleWriter } from './workflowBundleWriter';
+import { installWorkflowBundle } from './workflowBundleInstall';
 
 /**
  * InteractiveClaudeManager — the interactive (subscription-billed) Claude
@@ -254,6 +256,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private readonly mcpEnabler: InteractiveMcpEnabler;
 
   /**
+   * Installs/removes the run's co-located `/cyboflow-<phase>` command bundle (and
+   * any subagents) into the worktree's `.claude/commands` + `.claude/agents`
+   * before spawn, so the REAL `claude` REPL auto-loads each workflow phase as an
+   * invokable unit (IDEA-013 rung-(ii)). Merge-safe + namespaced (`cyboflow-*`):
+   * write clears the prior cyboflow set, remove strips ONLY cyboflow files. The
+   * SDK manager constructs its own twin so the bundle reaches both substrates.
+   * Logger PASSED via toLoggerLike (CLAUDE.md optional-logger rule).
+   */
+  private readonly bundleWriter: WorkflowBundleWriter;
+
+  /**
    * Injected deny-on-teardown shell-approval canceller (TASK-819). Wired at boot
    * via setShellApprovalCanceller to OrchSocketServer.cancelInFlightShellApprovals
    * (which delegates to the handler's shipped twin). Null until wired — quick
@@ -280,6 +293,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // is undefined when no logger was supplied so the writer's own opt-out holds.
     this.settingsWriter = new InteractiveSettingsWriter(this.toLoggerLike(this.logger));
     this.mcpEnabler = new InteractiveMcpEnabler(this.toLoggerLike(this.logger));
+    this.bundleWriter = new WorkflowBundleWriter(this.toLoggerLike(this.logger));
   }
 
   /**
@@ -603,6 +617,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // SDK substrate injects unconditionally (parity). Runs REGARDLESS of
     // permissionMode (the modal blocks even in ignore mode). Synchronous fs.
     this.mcpEnabler.enable(worktreePath);
+
+    // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
+    // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
+    // spawn, so the interactive REPL auto-loads each workflow phase as an
+    // invokable unit instead of a paragraph of prose (IDEA-013 rung-(ii)). Keyed
+    // off the run's workflow_path, so a quick session / custom flow with no
+    // sibling bundle writes nothing (fail-soft). Removed on teardown.
+    installWorkflowBundle(this.db, this.bundleWriter, runId, worktreePath, this.toLoggerLike(this.logger));
 
     // Write the per-run interactive MCP config (the path buildCommandArgs points
     // `--mcp-config` at) BEFORE building args, so the existence-guarded flag is
@@ -1102,6 +1124,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // worktree (the run record is still present here — interactiveRuns.delete runs
     // last below).
     this.removeGeneratedSettings(panelId);
+
+    // Remove the run's cyboflow-* command/agent bundle from the worktree's
+    // `.claude/commands` | `.claude/agents` (IDEA-013 rung-(ii); mirrors
+    // removeGeneratedSettings — strips ONLY cyboflow files, leaves the user's own
+    // agents/commands intact). Resolved from the still-present run record.
+    if (run?.worktreePath) this.bundleWriter.remove(run.worktreePath);
 
     // Dispose the pipeline (router + sink) for the run.
     const pipeline = this.pipelines.get(panelId);
