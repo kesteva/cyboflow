@@ -11,7 +11,7 @@
  *   Cancel              — close without saving.
  *   Reset to default    — built-in flows only; `resetSpec` then close + onSaved.
  *   Save                — edit mode: `updateSpec`; disabled when not dirty.
- *   Save as new flow    — prompt for a name; `createCustom` then onSaved(newId).
+ *   Save as new flow    — ask for a name (FlowNameDialog); `createCustom` then onSaved(newId).
  *   Run with modifications — persist (updateSpec OR createCustom) then
  *                            `runs.start`, set the active run, close.
  *
@@ -29,6 +29,7 @@ import type { WorkflowDefinition, PermissionMode } from '../../../../shared/type
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
 import { WorkflowStepInspector } from './WorkflowStepInspector';
+import { FlowNameDialog } from './FlowNameDialog';
 import { PHASE_COLORS } from './workflowEditorOptions';
 
 export interface WorkflowEditorModalProps {
@@ -96,6 +97,14 @@ export function WorkflowEditorModal({
    * runs.start / createCustom. (Prevents the duplicate-run bug.)
    */
   const actionInFlightRef = useRef(false);
+
+  /**
+   * In-app name-entry dialog state. Replaces window.prompt() (unsupported in
+   * Electron's renderer). `pendingAction` records which flow opened the dialog
+   * so its onConfirm runs the matching downstream logic with the entered name.
+   */
+  const [nameDialogOpen, setNameDialogOpen] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'save-as-new' | 'run-with-modifications' | null>(null);
 
   const isBuiltIn = isCyboflowWorkflowName(state.name);
 
@@ -207,29 +216,16 @@ export function WorkflowEditorModal({
     }
   }, [canSave, saveEdit, state.definition, state.name, onSaved]);
 
-  const handleSaveAsNew = useCallback(async () => {
-    const name = window.prompt('Name for the new workflow:', state.name ? `${state.name}-copy` : '');
-    if (name === null) return; // cancelled
-    const trimmed = name.trim();
-    if (trimmed.length === 0) {
-      setError('A workflow name is required.');
-      return;
-    }
+  // Opening the name dialog is non-mutating, so it does NOT take the in-flight
+  // latch — the latch is acquired only once the user confirms a name (in the
+  // dialog's onConfirm), and released in finally there. This keeps a cancelled
+  // dialog from permanently blocking future actions.
+  const handleSaveAsNew = useCallback(() => {
     if (actionInFlightRef.current) return;
-    actionInFlightRef.current = true;
     setError(null);
-    setIsBusy(true);
-    try {
-      const newId = await saveCustom(trimmed);
-      onSaved?.(newId);
-      onClose();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Could not create the workflow');
-    } finally {
-      setIsBusy(false);
-      actionInFlightRef.current = false;
-    }
-  }, [state.name, saveCustom, onSaved, onClose]);
+    setPendingAction('save-as-new');
+    setNameDialogOpen(true);
+  }, []);
 
   const handleReset = useCallback(async () => {
     if (!isBuiltIn || actionInFlightRef.current) return;
@@ -248,34 +244,19 @@ export function WorkflowEditorModal({
     }
   }, [isBuiltIn, workflowId, onSaved, onClose]);
 
-  const handleRunWithModifications = useCallback(async () => {
+  /**
+   * Persist (via `persist`, which resolves the target workflow id) then start a
+   * run against it. Acquires the in-flight latch synchronously and releases it
+   * in finally, so both the edit-mode inline path and the create-mode dialog
+   * confirm share one latch lifecycle.
+   */
+  const persistAndRun = useCallback(async (persist: () => Promise<string>) => {
     if (actionInFlightRef.current) return;
     actionInFlightRef.current = true;
     setError(null);
     setIsBusy(true);
     try {
-      // Persist first. Edit mode updates the existing row ONLY when the graph was
-      // actually modified — running an untouched built-in must not pin its
-      // spec_json (which would freeze it from future WORKFLOW_DEFINITIONS updates).
-      // Create mode requires a name via "save as new".
-      let targetWorkflowId: string;
-      if (mode === 'edit') {
-        targetWorkflowId = isDirty ? await saveEdit() : workflowId;
-      } else {
-        const name = window.prompt('Name for the new workflow:', state.name ? `${state.name}-copy` : '');
-        if (name === null) {
-          setIsBusy(false);
-          return;
-        }
-        const trimmed = name.trim();
-        if (trimmed.length === 0) {
-          setError('A workflow name is required.');
-          setIsBusy(false);
-          return;
-        }
-        targetWorkflowId = await saveCustom(trimmed);
-      }
-
+      const targetWorkflowId = await persist();
       const result = await trpc.cyboflow.runs.start.mutate({
         workflowId: targetWorkflowId,
         projectId,
@@ -289,7 +270,61 @@ export function WorkflowEditorModal({
       setIsBusy(false);
       actionInFlightRef.current = false;
     }
-  }, [mode, isDirty, workflowId, saveEdit, saveCustom, state.name, projectId, onSaved, onClose]);
+  }, [projectId, onSaved, onClose]);
+
+  const handleRunWithModifications = useCallback(() => {
+    if (actionInFlightRef.current) return;
+    // Persist first. Edit mode updates the existing row ONLY when the graph was
+    // actually modified — running an untouched built-in must not pin its
+    // spec_json (which would freeze it from future WORKFLOW_DEFINITIONS updates).
+    // Create mode requires a name, gathered via the in-app FlowNameDialog (the
+    // latch is taken only on confirm, in persistAndRun).
+    if (mode === 'edit') {
+      void persistAndRun(async () => (isDirty ? await saveEdit() : workflowId));
+    } else {
+      setError(null);
+      setPendingAction('run-with-modifications');
+      setNameDialogOpen(true);
+    }
+  }, [mode, isDirty, workflowId, saveEdit, persistAndRun]);
+
+  /**
+   * Resolve of the FlowNameDialog: run the same downstream logic the
+   * window.prompt() blocks used to, keyed by which action opened the dialog.
+   * Each branch owns its own latch/busy lifecycle (save-as-new inline here;
+   * run-with-modifications via persistAndRun).
+   */
+  const handleNameConfirm = useCallback(async (name: string) => {
+    setNameDialogOpen(false);
+    const action = pendingAction;
+    setPendingAction(null);
+
+    if (action === 'save-as-new') {
+      if (actionInFlightRef.current) return;
+      actionInFlightRef.current = true;
+      setError(null);
+      setIsBusy(true);
+      try {
+        const newId = await saveCustom(name);
+        onSaved?.(newId);
+        onClose();
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Could not create the workflow');
+      } finally {
+        setIsBusy(false);
+        actionInFlightRef.current = false;
+      }
+    } else if (action === 'run-with-modifications') {
+      await persistAndRun(async () => await saveCustom(name));
+    }
+  }, [pendingAction, saveCustom, onSaved, onClose, persistAndRun]);
+
+  // Cancelling the dialog must leave NO latch held and NO pending action, so the
+  // next action can open cleanly. (The latch is never taken on open.)
+  const handleNameDialogClose = useCallback(() => {
+    setNameDialogOpen(false);
+    setPendingAction(null);
+  }, []);
 
   // ── Header title ─────────────────────────────────────────────────────────────
   const title = useMemo(() => {
@@ -341,7 +376,7 @@ export function WorkflowEditorModal({
 
           <button
             type="button"
-            onClick={() => void handleSaveAsNew()}
+            onClick={handleSaveAsNew}
             disabled={isBusy || isLoading}
             className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="editor-save-as-new-button"
@@ -363,7 +398,7 @@ export function WorkflowEditorModal({
 
           <button
             type="button"
-            onClick={() => void handleRunWithModifications()}
+            onClick={handleRunWithModifications}
             disabled={isBusy || isLoading}
             className="rounded-button bg-interactive px-3 py-1.5 text-xs font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="editor-run-button"
@@ -416,6 +451,15 @@ export function WorkflowEditorModal({
           )}
         </div>
       </div>
+
+      <FlowNameDialog
+        isOpen={nameDialogOpen}
+        title="Name for the new workflow"
+        defaultValue={state.name ? `${state.name}-copy` : ''}
+        confirmLabel={pendingAction === 'run-with-modifications' ? 'Run' : 'Create'}
+        onConfirm={(name) => void handleNameConfirm(name)}
+        onClose={handleNameDialogClose}
+      />
     </Modal>
   );
 }

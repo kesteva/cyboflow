@@ -5,7 +5,7 @@
  *   1. Edit mode seeds the editor from workflows.getDefinition + workflows.get.
  *   2. Editing a step field marks the editor dirty (Save enabled) and clicking
  *      Save calls workflows.updateSpec.mutate with the EDITED definition.
- *   3. "Save as new flow" prompts for a name and calls workflows.createCustom.mutate.
+ *   3. "Save as new flow" opens an in-app name dialog and calls workflows.createCustom.mutate.
  *   4. "Reset to default" (built-in flow) calls workflows.resetSpec.mutate.
  *   5. "Run with modifications" persists via updateSpec then calls runs.start.mutate
  *      and sets the active run on the store.
@@ -199,16 +199,20 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
   });
 
-  it('"Save as new flow" prompts for a name and calls createCustom', async () => {
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('my-flow');
+  it('"Save as new flow" opens the name dialog and calls createCustom', async () => {
     const { onSaved, onClose } = await renderEditMode();
 
-    const saveAsNewBtn = screen.getByTestId('editor-save-as-new-button');
     await act(async () => {
-      fireEvent.click(saveAsNewBtn);
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
     });
 
-    expect(promptSpy).toHaveBeenCalled();
+    // No window.prompt — an in-app dialog collects the name.
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     const arg = mockCreateCustom.mock.calls[0][0];
     expect(arg.projectId).toBe(1);
@@ -222,12 +226,17 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(mockUpdateSpec).not.toHaveBeenCalled();
   });
 
-  it('cancelling the "Save as new flow" prompt does not call createCustom', async () => {
-    vi.spyOn(window, 'prompt').mockReturnValue(null);
+  it('cancelling the "Save as new flow" dialog does not call createCustom', async () => {
     await renderEditMode();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    // Dismiss the name dialog via Cancel — createCustom must not fire.
+    await screen.findByTestId('flow-name-input');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-cancel'));
     });
 
     expect(mockCreateCustom).not.toHaveBeenCalled();
@@ -322,7 +331,6 @@ describe('WorkflowEditorModal — edit mode', () => {
 
 describe('WorkflowEditorModal — create mode', () => {
   it('seeds a hardcoded skeleton (no clone) and offers "Save as new flow"', async () => {
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('new-flow');
     const onSaved = vi.fn();
 
     render(
@@ -352,7 +360,13 @@ describe('WorkflowEditorModal — create mode', () => {
       fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
     });
 
-    expect(promptSpy).toHaveBeenCalled();
+    // The in-app name dialog collects the new flow name.
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'new-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     expect(mockCreateCustom.mock.calls[0][0].name).toBe('new-flow');
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
