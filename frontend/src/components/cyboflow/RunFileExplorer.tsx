@@ -71,6 +71,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   const [childrenByDir, setChildrenByDir] = useState<Record<string, RunFileEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
+  const [errorByDir, setErrorByDir] = useState<Record<string, string>>({});
   const [rootLoading, setRootLoading] = useState(false);
   const [rootError, setRootError] = useState<string | null>(null);
 
@@ -92,11 +93,22 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   const runIdRef = useRef(runId);
   const fileReqIdRef = useRef(0);
 
+  const clearDirError = useCallback((dirPath: string): void => {
+    setErrorByDir((prev) => {
+      if (prev[dirPath] === undefined) return prev;
+      const next = { ...prev };
+      delete next[dirPath];
+      return next;
+    });
+  }, []);
+
   // Fetch one directory level into childrenByDir.
   const loadDir = useCallback(
     async (dirPath: string): Promise<void> => {
       const reqRunId = runId;
       setLoadingDirs((prev) => new Set(prev).add(dirPath));
+      // ROOT is re-read by Refresh; reflect that in the header spinner.
+      if (dirPath === ROOT) setRootLoading(true);
       try {
         const entries = await trpc.cyboflow.runs.listFiles.query({
           runId: reqRunId,
@@ -105,10 +117,22 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
         if (runIdRef.current !== reqRunId) return; // run switched mid-flight — drop
         setChildrenByDir((prev) => ({ ...prev, [dirPath]: entries }));
         if (dirPath === ROOT) setRootError(null);
+        else clearDirError(dirPath);
       } catch (err) {
         if (runIdRef.current !== reqRunId) return;
         const msg = err instanceof Error ? err.message : 'Failed to list files';
         if (dirPath === ROOT) setRootError(msg);
+        // A sub-directory failure is surfaced inline on its row (not swallowed),
+        // and its stale children are dropped so the row offers a clean retry.
+        else {
+          setErrorByDir((prev) => ({ ...prev, [dirPath]: msg }));
+          setChildrenByDir((prev) => {
+            if (prev[dirPath] === undefined) return prev;
+            const next = { ...prev };
+            delete next[dirPath];
+            return next;
+          });
+        }
       } finally {
         if (runIdRef.current === reqRunId) {
           setLoadingDirs((prev) => {
@@ -116,10 +140,11 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             next.delete(dirPath);
             return next;
           });
+          if (dirPath === ROOT) setRootLoading(false);
         }
       }
     },
-    [runId],
+    [runId, clearDirError],
   );
 
   // Load the root whenever the run changes; reset all per-run state first.
@@ -131,6 +156,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
     setChildrenByDir({});
     setExpanded(new Set());
     setLoadingDirs(new Set());
+    setErrorByDir({});
     setOpenFile(null);
     setFileContent(null);
     setFileError(null);
@@ -327,27 +353,48 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
       if (entry.isDirectory && isOpen) {
         const childLoading = loadingDirs.has(entry.path) && childrenByDir[entry.path] === undefined;
         const loadedChildren = childrenByDir[entry.path];
-        const subRows: React.JSX.Element[] = childLoading
-          ? [
-              <div
-                key={`${entry.path}__loading`}
-                style={{ paddingLeft: (depth + 1) * 12 + 8 }}
-                className="flex items-center gap-1.5 py-1 text-[11px] text-text-tertiary"
-              >
-                <Loader2 className="w-3 h-3 animate-spin" /> Loading…
-              </div>,
-            ]
-          : loadedChildren !== undefined && loadedChildren.length === 0
-            ? [
-                <div
-                  key={`${entry.path}__empty`}
-                  style={{ paddingLeft: (depth + 1) * 12 + 8 }}
-                  className="py-1 text-[11px] text-text-tertiary italic"
-                >
-                  empty
-                </div>,
-              ]
-            : renderRows(entry.path, depth + 1);
+        const dirError = errorByDir[entry.path];
+        const childIndent = (depth + 1) * 12 + 8;
+        let subRows: React.JSX.Element[];
+        if (childLoading) {
+          subRows = [
+            <div
+              key={`${entry.path}__loading`}
+              style={{ paddingLeft: childIndent }}
+              className="flex items-center gap-1.5 py-1 text-[11px] text-text-tertiary"
+            >
+              <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+            </div>,
+          ];
+        } else if (dirError !== undefined) {
+          // Inline, retryable error — a failed expand must not silently show blank.
+          subRows = [
+            <button
+              key={`${entry.path}__error`}
+              type="button"
+              data-testid={`run-file-explorer-node-error-${entry.path}`}
+              style={{ paddingLeft: childIndent }}
+              onClick={() => void loadDir(entry.path)}
+              className="w-full flex items-start gap-1.5 pr-2 py-1 text-left text-[11px] text-status-error hover:bg-bg-hover transition-colors"
+              title={`${dirError} — click to retry`}
+            >
+              <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+              <span className="min-w-0 break-words">{dirError} — retry</span>
+            </button>,
+          ];
+        } else if (loadedChildren !== undefined && loadedChildren.length === 0) {
+          subRows = [
+            <div
+              key={`${entry.path}__empty`}
+              style={{ paddingLeft: childIndent }}
+              className="py-1 text-[11px] text-text-tertiary italic"
+            >
+              empty
+            </div>,
+          ];
+        } else {
+          subRows = renderRows(entry.path, depth + 1);
+        }
         return [row, ...subRows];
       }
       return [row];
