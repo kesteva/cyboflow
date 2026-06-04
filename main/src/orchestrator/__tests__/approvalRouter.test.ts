@@ -146,55 +146,139 @@ describe('ApprovalRouter', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Case 3: Two concurrent requestApproval calls for the same runId are
-  //         serialized by the per-run p-queue — ordering preserved
+  // Case 3 (FIX #1 — storm fix): a sibling requestApproval for the same runId
+  //   that arrives while one approval is in flight does NOT throw immediately;
+  //   it WAITS, and after respond() settles the first it RETRIES and grabs a
+  //   fresh pending approval. This is the single-pending-with-wait contract
+  //   that replaces the old "second throws RunNotRunningError" deny-storm path.
   // -------------------------------------------------------------------------
-  it('two concurrent requestApproval calls for the same runId are serialized by the queue', async () => {
+  it('a sibling requestApproval waits (does NOT throw) while one is in flight, then grabs after respond settles', async () => {
     const db = createTestDb();
     const adapter = dbAdapter(db);
 
-    // Track call order inside the transaction to confirm serialization.
-    const transactionOrder: number[] = [];
-
-    // Wrap the prepare so we can spy on UPDATE workflow_runs calls.
-    // We do this by creating two separate runs and confirming each finishes
-    // before the next starts (via queue ordering).
     const router = ApprovalRouter.initialize(adapter);
 
     const runId = 'run-003'; // Same runId for both requests.
     seedRun(db, { id: runId, status: 'running' });
 
-    // Collect socket reply calls to track call order.
-    const replyOrder: number[] = [];
-    const socketReply1 = vi.fn<(decision: ApprovalDecision) => void>(() => { replyOrder.push(1); });
-    const socketReply2 = vi.fn<(decision: ApprovalDecision) => void>(() => { replyOrder.push(2); });
+    const socketReply1 = vi.fn<(decision: ApprovalDecision) => void>();
+    const socketReply2 = vi.fn<(decision: ApprovalDecision) => void>();
 
-    // Fire both requestApprovals concurrently (don't await).
-    // The first call will transition run-003 to 'awaiting_review'.
-    // The second call should fail with RunNotRunningError (since the first already
-    // moved it out of 'running') — this is the correct serialized behavior.
+    // First call grabs the gate (running → awaiting_review) and blocks on its
+    // decisionPromise. The second (sibling) call finds the run already in
+    // 'awaiting_review' and must WAIT — not throw.
     const promise1 = router.requestApproval(runId, 'tool_a', {}, socketReply1);
     const promise2 = router.requestApproval(runId, 'tool_b', {}, socketReply2);
 
-    // Wait for both queue tasks to drain.
+    // Let the queue drain the first txn (it grabs) and the second txn attempt
+    // (changes=0 → wait). The second is now parked in waitForApprovalSlot,
+    // OUTSIDE the queue, so the queue is idle.
     await router['getApprovalQueue'](runId).onIdle();
 
-    // promise1 is waiting for respond(); promise2 should have thrown.
-    // Retrieve approval ID for the first (successful) request.
-    const approvalRows = db
-      .prepare("SELECT id, tool_name FROM approvals WHERE run_id = ?")
+    // Only ONE approval row exists so far — the sibling has not INSERTed (it is
+    // waiting, single-pending preserved).
+    const afterFirst = db
+      .prepare("SELECT id, tool_name FROM approvals WHERE run_id = ? ORDER BY created_at")
       .all(runId) as { id: string; tool_name: string }[];
+    expect(afterFirst).toHaveLength(1);
+    expect(afterFirst[0].tool_name).toBe('tool_a');
 
-    // Only one approval row should have been inserted (the second was blocked).
-    expect(approvalRows).toHaveLength(1);
-    expect(approvalRows[0].tool_name).toBe('tool_a');
+    // The sibling must NOT have rejected — assert it is still pending by racing
+    // it against a microtask flush. (If it had thrown, Promise.race would settle
+    // to the rejection.)
+    const sentinel = Symbol('still-waiting');
+    const raced = await Promise.race([
+      promise2.then(() => 'resolved').catch(() => 'rejected'),
+      Promise.resolve(sentinel),
+    ]);
+    expect(raced).toBe(sentinel);
 
-    // Resolve the first approval.
-    await router.respond(approvalRows[0].id, { behavior: 'allow' });
-    await promise1;
+    // Now settle the first approval. respond(allow) transitions the run back to
+    // 'running' and emits 'approvalDecided', which wakes the waiting sibling.
+    await router.respond(afterFirst[0].id, { behavior: 'allow' });
+    const decision1 = await promise1;
+    expect(decision1.behavior).toBe('allow');
 
-    // promise2 should have rejected with RunNotRunningError.
+    // The sibling wakes, retries, grabs the gate, and INSERTs its own pending
+    // approval. Wait for that retry txn to land on the queue.
+    await router['getApprovalQueue'](runId).onIdle();
+
+    const afterRetry = db
+      .prepare("SELECT id, tool_name, status FROM approvals WHERE run_id = ? ORDER BY created_at")
+      .all(runId) as { id: string; tool_name: string; status: string }[];
+    expect(afterRetry).toHaveLength(2);
+    const second = afterRetry.find((r) => r.tool_name === 'tool_b');
+    expect(second).toBeDefined();
+    expect(second?.status).toBe('pending');
+
+    // The run is back in 'awaiting_review' for the sibling's now-pending gate.
+    const runNow = db
+      .prepare("SELECT status FROM workflow_runs WHERE id = ?")
+      .get(runId) as { status: string };
+    expect(runNow.status).toBe('awaiting_review');
+
+    // Clean up the sibling so the test does not leak a pending promise.
+    await router.respond(second!.id, { behavior: 'deny' });
+    const decision2 = await promise2;
+    expect(decision2.behavior).toBe('deny');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 3b (FIX #1): a sibling that is waiting throws RunNotRunningError once
+  //   the run goes terminal (e.g. canceled) — the self-heal timer re-reads
+  //   status and a non-awaiting_review state is a real error, so the hook
+  //   denies (correct) rather than waiting forever.
+  // -------------------------------------------------------------------------
+  it('a waiting sibling throws RunNotRunningError when the run goes terminal', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const router = ApprovalRouter.initialize(adapter);
+
+    const runId = 'run-003b';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const promise1 = router.requestApproval(runId, 'tool_a', {}, vi.fn());
+    const promise2 = router.requestApproval(runId, 'tool_b', {}, vi.fn());
+
+    await router['getApprovalQueue'](runId).onIdle();
+
+    // Cancel the run out-of-band (no 'approvalDecided' event). The waiting
+    // sibling self-heals via the ~500ms poll timer, re-reads status='canceled',
+    // and throws.
+    db.prepare(
+      `UPDATE workflow_runs SET status = 'canceled' WHERE id = ?`,
+    ).run(runId);
+
     await expect(promise2).rejects.toBeInstanceOf(RunNotRunningError);
+
+    // Clean up the still-in-flight first approval.
+    const approvalId = (db
+      .prepare("SELECT id FROM approvals WHERE run_id = ? AND tool_name = 'tool_a'")
+      .get(runId) as { id: string }).id;
+    await router.respond(approvalId, { behavior: 'deny' });
+    await promise1;
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 3c (FIX #1): a requestApproval on a run that is ALREADY terminal
+  //   (never 'running') throws RunNotRunningError without waiting — the first
+  //   txn attempt sees changes=0 and a non-awaiting_review status.
+  // -------------------------------------------------------------------------
+  it('requestApproval on an already-terminal run throws RunNotRunningError immediately', async () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const router = ApprovalRouter.initialize(adapter);
+
+    const runId = 'run-003c';
+    seedRun(db, { id: runId, status: 'completed' });
+
+    await expect(
+      router.requestApproval(runId, 'tool_a', {}, vi.fn()),
+    ).rejects.toBeInstanceOf(RunNotRunningError);
+
+    // No approval row should have been INSERTed.
+    const rows = db.prepare("SELECT id FROM approvals WHERE run_id = ?").all(runId);
+    expect(rows).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

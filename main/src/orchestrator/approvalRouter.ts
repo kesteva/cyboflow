@@ -5,8 +5,15 @@
  *
  * 1. requestApproval co-writes the approvals INSERT and workflow_runs UPDATE
  *    inside a single db.transaction() guarded by `AND status='running'` on
- *    the UPDATE.  If the run is not in 'running' state, the transaction rolls
- *    back and requestApproval throws RunNotRunningError. P4: that SAME
+ *    the UPDATE.  If the guarded UPDATE matches 0 rows, the transaction rolls
+ *    back (no INSERT, no fold) and the caller re-reads workflow_runs.status to
+ *    decide: a run still in 'awaiting_review' means a SIBLING approval is in
+ *    flight, so requestApproval WAITS for the next 'approvalDecided' (raced
+ *    with a short self-heal timer) and RETRIES — it does NOT throw, which is
+ *    what previously caused a deny-storm when the SDK fired parallel tool calls
+ *    in one turn. Only a terminal/invalid status (canceled / completed /
+ *    failed / missing) throws RunNotRunningError. The single-pending model is
+ *    preserved: a sibling never INSERTs until it grabs 'running'. P4: that SAME
  *    transaction also co-writes a blocking permission review_items row (the
  *    unified-inbox fold), so the approval row and the inbox row commit or roll
  *    back together; respond() resolves the folded item idempotently. The fold is
@@ -56,6 +63,21 @@ import {
 // as its import path; that path remains backward-compatible by design.
 import type { ApprovalRequest, ApprovalDecision } from '../../../shared/types/approval';
 export type { ApprovalRequest, ApprovalDecision };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Self-heal poll interval (ms) for a sibling approval that is waiting for the
+ * in-flight gate to clear. The waiter wakes on the next `approvalDecided`
+ * event OR after this timer, whichever comes first, then re-reads
+ * workflow_runs.status. The timer exists ONLY so a cancel/terminal transition
+ * that emits no `approvalDecided` event still self-heals on the next re-check;
+ * it does NOT cap the total wait time (the caller loops while the run stays in
+ * 'awaiting_review' — the hook is meant to block until the user acts).
+ */
+const APPROVAL_WAIT_POLL_MS = 500;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -172,16 +194,22 @@ export class ApprovalRouter extends EventEmitter {
   /**
    * Register an approval request for `runId`.
    *
-   * Atomically:
+   * Atomically (per attempt, inside the per-run p-queue):
    *  1. UPDATEs workflow_runs.status → 'awaiting_review' (guarded: only if
-   *     current status = 'running').  Throws RunNotRunningError if changes = 0.
-   *  2. INSERTs a row into approvals (status = 'pending').
+   *     current status = 'running').
+   *  2. INSERTs a row into approvals (status = 'pending') + folds a blocking
+   *     permission review_item — but ONLY if step 1 grabbed the gate.
    *
-   * Both writes share a single db.transaction() so they are
-   * either both committed or both rolled back.
+   * All writes share a single db.transaction() so they are either both
+   * committed or both rolled back.
    *
-   * The mutation is submitted via the per-run p-queue so it is serialized
-   * with any concurrent status changes for the same run.
+   * Concurrency: if step 1 matches 0 rows the txn rolls back and we re-read
+   * the run's status OUTSIDE the txn. If it is 'awaiting_review' a sibling
+   * approval is in flight, so this call WAITS (off the queue, so respond() is
+   * never blocked) for the next 'approvalDecided' event — raced with a short
+   * self-heal timer — and RETRIES. Only a terminal/invalid status throws
+   * RunNotRunningError. There is no wait cap: the hook blocks until the user
+   * acts. This is the storm fix — a sibling no longer denies + re-requests.
    *
    * Returns a Promise<ApprovalDecision> that resolves when respond() is called.
    *
@@ -210,15 +238,13 @@ export class ApprovalRouter extends EventEmitter {
     if (!this.db) throw new Error('ApprovalRouter db handle undefined');
 
     const approvalId = randomUUID();
-    const nowMs = Date.now();
-    const now = new Date(nowMs).toISOString();
 
     const request: ApprovalRequest = {
       id: approvalId,
       runId,
       toolName,
       input,
-      timestamp: nowMs,
+      timestamp: Date.now(),
     };
 
     // Wire up the decision Promise before enqueueing — the resolve/reject refs
@@ -230,59 +256,155 @@ export class ApprovalRouter extends EventEmitter {
       rejectDecision = rej;
     });
 
-    await this.getApprovalQueue(runId).add(async () => {
-      // Atomic: UPDATE workflow_runs + INSERT approvals in one transaction.
-      const txn = this.db.transaction(() => {
-        const updateStmt = this.db.prepare(
-          `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
-           WHERE id = ? AND status = 'running'`,
-        );
-        const updateResult = updateStmt.run(now, runId) as { changes: number };
+    // CONCURRENCY / STORM FIX (FIX #1): a sibling tool call (or an SDK that
+    // fires several tool calls in one turn) must NOT throw when an approval is
+    // already in flight. The FIRST call grabs 'running'→'awaiting_review' and
+    // blocks on its decisionPromise; a sibling that finds the run already in
+    // 'awaiting_review' WAITS for that in-flight approval to resolve, then
+    // retries — instead of throwing RunNotRunningError, which made the
+    // PreToolUse hook deny and the agent re-request in a storm.
+    //
+    // The txn (running→awaiting_review + INSERT approvals + fold review_item)
+    // is the ONLY thing held on the per-run PQueue. The WAIT happens OUTSIDE
+    // the queue: keeping it inside would block respond() (it shares this queue)
+    // and deadlock. Each retry re-enters the queue for a fresh txn attempt.
+    //
+    // Grab outcomes:
+    //   'grabbed'  — we won the gate; pending entry set, event emitted, done.
+    //   'wait'     — a sibling approval is in flight (run is awaiting_review);
+    //                release the queue, wait for the next 'approvalDecided'
+    //                (raced with a short timer so a no-event cancel self-heals),
+    //                then retry.
+    //   (throws)   — the run is in a terminal/invalid state (not 'running' and
+    //                not 'awaiting_review'); a real RunNotRunningError.
+    for (;;) {
+      // PQueue.add resolves to `T | void` (the `void` arm is only reachable via
+      // queue.clear(), which this router never calls). Type the task return and
+      // narrow defensively below so the union is sound for TypeScript.
+      const outcome = await this.getApprovalQueue(runId).add<'grabbed' | 'wait'>(async () => {
+        const now = new Date().toISOString();
 
-        if (updateResult.changes === 0) {
-          throw new RunNotRunningError(runId);
+        // Atomic: UPDATE workflow_runs + INSERT approvals in one transaction.
+        // The txn returns true if it grabbed the gate, false if changes=0 (in
+        // which case it leaves the DB untouched — INSERT/fold never run).
+        const txn = this.db.transaction(() => {
+          const updateStmt = this.db.prepare(
+            `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
+             WHERE id = ? AND status = 'running'`,
+          );
+          const updateResult = updateStmt.run(now, runId) as { changes: number };
+
+          if (updateResult.changes === 0) {
+            // Did not grab the gate. Do NOT throw here — the txn rolls back
+            // cleanly (no INSERT, no fold) and the caller decides wait vs throw
+            // based on the run's current status, read outside the txn.
+            return false;
+          }
+
+          const insertStmt = this.db.prepare(
+            `INSERT INTO approvals
+               (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+          );
+          // tool_use_id is NOT NULL in the schema; we use the approvalId as the
+          // canonical tool-use identifier until TASK-304 threads the real Claude
+          // tool_use_id through the pipeline.
+          insertStmt.run(approvalId, runId, toolName, JSON.stringify(input), approvalId, now);
+
+          // P4 fold: co-write a blocking permission review_item in the SAME
+          // transaction so the unified inbox row and the approvals row commit (or
+          // roll back) together. No-op on a pre-migration-016 DB. The folded item
+          // links back to this approval via payload.approvalId so respond() can
+          // resolve it idempotently.
+          coWritePermissionReviewItem(this.db, {
+            approvalId,
+            runId,
+            toolName,
+            input,
+            source,
+            now,
+          });
+          return true;
+        });
+
+        const grabbed = (txn as () => boolean)();
+
+        if (grabbed) {
+          this.pending.set(approvalId, {
+            request,
+            socketReply,
+            resolve: resolveDecision,
+            reject: rejectDecision,
+          });
+          // Notify renderer subscribers (e.g. the review queue UI).
+          this.emit('approvalCreated', request);
+          return 'grabbed';
         }
 
-        const insertStmt = this.db.prepare(
-          `INSERT INTO approvals
-             (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-        );
-        // tool_use_id is NOT NULL in the schema; we use the approvalId as the
-        // canonical tool-use identifier until TASK-304 threads the real Claude
-        // tool_use_id through the pipeline.
-        insertStmt.run(approvalId, runId, toolName, JSON.stringify(input), approvalId, now);
+        // changes=0: the run is not 'running'. Read its current status to
+        // decide wait vs throw. A sibling approval in flight leaves it in
+        // 'awaiting_review' → WAIT. Any other status is terminal/invalid →
+        // throw a real RunNotRunningError (the hook should deny).
+        const statusRow = this.db
+          .prepare(`SELECT status FROM workflow_runs WHERE id = ?`)
+          .get(runId) as { status: string } | undefined;
 
-        // P4 fold: co-write a blocking permission review_item in the SAME
-        // transaction so the unified inbox row and the approvals row commit (or
-        // roll back) together. No-op on a pre-migration-016 DB. The folded item
-        // links back to this approval via payload.approvalId so respond() can
-        // resolve it idempotently.
-        coWritePermissionReviewItem(this.db, {
-          approvalId,
-          runId,
-          toolName,
-          input,
-          source,
-          now,
-        });
+        if (statusRow?.status === 'awaiting_review') {
+          return 'wait';
+        }
+
+        // Terminal/invalid (canceled, completed, failed, missing, …). Real error.
+        throw new RunNotRunningError(runId);
       });
 
-      // Execute the transaction — throws RunNotRunningError on guard failure.
-      (txn as () => void)();
+      if (outcome === 'grabbed') {
+        return decisionPromise;
+      }
 
-      this.pending.set(approvalId, {
-        request,
-        socketReply,
-        resolve: resolveDecision,
-        reject: rejectDecision,
-      });
+      // Defensive: `void` is only reachable if the queue were cleared (it never
+      // is). Treat anything other than 'wait' as nothing-to-retry and stop.
+      if (outcome !== 'wait') {
+        throw new RunNotRunningError(runId);
+      }
 
-      // Notify renderer subscribers (e.g. the review queue UI).
-      this.emit('approvalCreated', request);
+      // outcome === 'wait': a sibling approval is in flight. Block (OUTSIDE the
+      // queue) until the next approval is decided, then retry. No cap on wait
+      // time — the hook SHOULD block until the user acts (that is the whole
+      // point: "waiting" is the opposite of the storm). The short timer races
+      // the event so a cancel that fires no 'approvalDecided' still self-heals
+      // via the re-check on the next loop turn.
+      await this.waitForApprovalSlot();
+    }
+  }
+
+  /**
+   * Block until either the next `approvalDecided` event fires (a sibling
+   * approval was resolved → the gate may be free) OR a short timer elapses
+   * (a cancel / terminal transition that emits no event still self-heals,
+   * because the next loop turn re-reads workflow_runs.status). Resolves on
+   * whichever happens first; the listener is always cleaned up.
+   *
+   * Intentionally has NO cap on the number of waits — the caller loops and
+   * re-checks status each time, so a run that stays 'awaiting_review' keeps
+   * waiting (the hook blocks until the user acts), and a run that goes
+   * terminal is detected on the next retry and throws.
+   */
+  private waitForApprovalSlot(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        this.off('approvalDecided', onDecided);
+        clearTimeout(timer);
+        resolve();
+      };
+      const onDecided = (): void => done();
+      // Short self-heal timer (~500ms) raced with the event so a no-event
+      // cancel does not hang forever before the status re-check.
+      const timer = setTimeout(done, APPROVAL_WAIT_POLL_MS);
+      this.once('approvalDecided', onDecided);
     });
-
-    return decisionPromise;
   }
 
   /**
