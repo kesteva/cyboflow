@@ -9,7 +9,7 @@
  *   (d) clicking a runId-backed session → setActiveQuickSession(id, runId) + setActiveProjectId
  *       (panel surface, NOT setActiveRun — avoids the __quick__ workflow-pane bug)
  *   (e) status indicator dot class differs across session statuses
- *   (f) empty session list renders "No open sessions. Start one with Quick Session."
+ *   (f) empty session list renders the per-project "Start new session" CTA
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
@@ -369,13 +369,16 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(runningDot!.className).not.toEqual(readyDot!.className);
   });
 
-  it('(f) empty session list renders the empty state', async () => {
+  it('(f) empty session list renders the "Start new session" CTA', async () => {
     mockSessions = [];
 
     await renderExpanded();
 
     await waitFor(() => {
-      expect(screen.getByText('No open sessions. Start one with Quick Session.')).toBeInTheDocument();
+      expect(screen.getByText('Start new session')).toBeInTheDocument();
     });
+    expect(
+      screen.queryByText('No open sessions. Start one with Quick Session.'),
+    ).toBeNull();
   });
 });

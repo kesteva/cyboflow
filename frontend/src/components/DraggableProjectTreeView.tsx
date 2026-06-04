@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, Archive, GitBranch, RefreshCw, Workflow as WorkflowIcon } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon } from 'lucide-react';
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
@@ -21,6 +21,8 @@ import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
 import { Card } from './ui/Card';
 import { formatDistanceToNow } from '../utils/timestampUtils';
+import { migrateLocalStorageKey } from '../utils/migrateLocalStorageKey';
+import { panelApi } from '../services/panelApi';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,13 +81,18 @@ function statusDotClass(status: string): string {
 
 export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) {
   const [projectsWithRuns, setProjectsWithRuns] = useState<ProjectWithRuns[]>([]);
-  const [archivedProjectsWithSessions] = useState<ProjectWithRuns[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<number>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const [expandedArchivedProjects, setExpandedArchivedProjects] = useState<Set<number>>(new Set());
-  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
+  // Per-project "AGENTS" disclosure — collapses ONLY that project's session rows
+  // (distinct from expandedProjects, which collapses the whole subtree). Default
+  // is expanded for every project; we persist only the COLLAPSED set so a brand-new
+  // project is expanded by default. `null` = collapsed-set not yet loaded from storage.
+  const [collapsedProjectSessions, setCollapsedProjectSessions] = useState<Set<number> | null>(null);
+  // Project whose "Start new session" CTA is currently in flight (shows a spinner
+  // + disables the button). Single hook-free handler keeps the rules of hooks intact
+  // across the project list — see startSessionForProject below.
+  const [startingSessionProjectId, setStartingSessionProjectId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingArchived, setIsLoadingArchived] = useState(false);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [selectedProjectForSettings, setSelectedProjectForSettings] = useState<Project | null>(null);
   const [showAddProjectDialog, setShowAddProjectDialog] = useState(false);
@@ -158,6 +165,37 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     const folderIds = Array.from(expandedFolders);
     saveUIState(projectIds, folderIds);
   }, [expandedProjects, expandedFolders, saveUIState]);
+
+  // Load the persisted COLLAPSED per-project AGENTS set on mount. Stored as a JSON
+  // array of project ids; default (nothing stored) = all expanded (empty set).
+  useEffect(() => {
+    const raw = migrateLocalStorageKey('cyboflow-collapsed-project-agents', 'cyboflow-collapsed-project-agents');
+    if (!raw) {
+      setCollapsedProjectSessions(new Set());
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const ids = Array.isArray(parsed) ? parsed.filter((v): v is number => typeof v === 'number') : [];
+      setCollapsedProjectSessions(new Set(ids));
+    } catch {
+      setCollapsedProjectSessions(new Set());
+    }
+  }, []);
+
+  // Persist the COLLAPSED per-project AGENTS set whenever it changes (skip the
+  // pre-load `null` sentinel so we never clobber stored state before it loads).
+  useEffect(() => {
+    if (collapsedProjectSessions === null) return;
+    try {
+      localStorage.setItem(
+        'cyboflow-collapsed-project-agents',
+        JSON.stringify(Array.from(collapsedProjectSessions)),
+      );
+    } catch {
+      // localStorage may be unavailable (e.g. private mode) — non-fatal.
+    }
+  }, [collapsedProjectSessions]);
 
   const handleFolderCreated = (folder: Folder) => {
     setProjectsWithRuns(prevProjects => {
@@ -448,13 +486,15 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     });
   }, []);
 
-  const toggleArchivedProject = useCallback((projectId: number, event?: React.MouseEvent) => {
+  // Toggle the per-project "AGENTS" disclosure. We track the COLLAPSED set (default
+  // = all expanded), so adding a projectId here collapses that project's session rows.
+  const toggleProjectSessions = useCallback((projectId: number, event?: React.MouseEvent) => {
     if (event) {
       event.stopPropagation();
       event.preventDefault();
     }
-    setExpandedArchivedProjects(prev => {
-      const newSet = new Set(prev);
+    setCollapsedProjectSessions(prev => {
+      const newSet = new Set(prev ?? []);
       if (newSet.has(projectId)) {
         newSet.delete(projectId);
       } else {
@@ -463,20 +503,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       return newSet;
     });
   }, []);
-
-  const toggleArchivedSessions = useCallback(
-    debounce(() => {
-      setShowArchivedSessions(prev => {
-        const newShowArchived = !prev;
-        if (newShowArchived && archivedProjectsWithSessions.length === 0 && !isLoadingArchived) {
-          // stub — archived sessions are a session concept; skipped in run-centric view
-          setIsLoadingArchived(false);
-        }
-        return newShowArchived;
-      });
-    }, 300),
-    [archivedProjectsWithSessions.length, isLoadingArchived],
-  );
 
   // ---------------------------------------------------------------------------
   // Folder helpers
@@ -884,6 +910,43 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     useNavigationStore.getState().setActiveProjectId(projectId);
   };
 
+  // Start a quick session for a SPECIFIC project from its empty-state CTA. The
+  // useQuickSession hook binds a single projectId per instance, so it can't be
+  // called inside the project .map() (rules of hooks). Instead we replicate its
+  // effect at the call site — createQuick + the same Claude+Terminal panel
+  // creation + setActiveQuickSession — keyed off startingSessionProjectId for the
+  // in-flight spinner.
+  const startSessionForProject = useCallback(async (projectId: number) => {
+    if (startingSessionProjectId !== null) return;
+    setStartingSessionProjectId(projectId);
+    try {
+      const result = await API.sessions.createQuick({ prompt: '', projectId });
+      if (!result.success || !result.data) {
+        throw new Error(result.error ?? 'Failed to create quick session');
+      }
+      const { sessionId, worktreePath, runId } = result.data;
+      // Always create both panels: Claude first, then Terminal.
+      await panelApi.createPanel({ sessionId, type: 'claude' });
+      await panelApi.createPanel({
+        sessionId,
+        type: 'terminal',
+        title: 'Terminal',
+        initialState: { cwd: worktreePath },
+      });
+      useNavigationStore.getState().closeHumanReview();
+      useNavigationStore.getState().closeBacklog();
+      useCyboflowStore.getState().setActiveQuickSession(sessionId, runId);
+      useNavigationStore.getState().setActiveProjectId(projectId);
+    } catch (error: unknown) {
+      showError({
+        title: 'Failed to start session',
+        error: error instanceof Error ? error.message : 'Failed to create quick session',
+      });
+    } finally {
+      setStartingSessionProjectId(null);
+    }
+  }, [startingSessionProjectId, showError]);
+
   // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
@@ -1047,6 +1110,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
+              // AGENTS disclosure — expanded unless the project id is in the collapsed
+              // set. While the set is loading (null) treat everything as expanded.
+              const agentsExpanded = !(collapsedProjectSessions?.has(project.id) ?? false);
+              const isStartingSession = startingSessionProjectId === project.id;
 
               return (
                 <div key={project.id} className="mb-1">
@@ -1155,8 +1222,31 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
-                      {/* Active session rows */}
-                      {projectSessions.map((session, index) => {
+                      {/* AGENTS disclosure — collapses ONLY this project's session
+                          rows (distinct from the project-row chevron above). */}
+                      {sessionCount > 0 && (
+                        <div className="relative" style={{ marginLeft: '16px' }}>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProjectSessions(project.id, e); }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="relative flex items-center gap-1 px-2 py-1 rounded hover:bg-surface-hover transition-colors w-full text-left"
+                            style={{ paddingLeft: '24px' }}
+                            title={agentsExpanded ? 'Hide agents' : 'Show agents'}
+                          >
+                            {agentsExpanded ? (
+                              <ChevronDown className="w-3 h-3 text-text-tertiary flex-shrink-0" />
+                            ) : (
+                              <ChevronRight className="w-3 h-3 text-text-tertiary flex-shrink-0" />
+                            )}
+                            <span className="text-[10px] font-semibold tracking-wider text-text-tertiary uppercase">
+                              Agents ({sessionCount})
+                            </span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Active session rows — hidden when the AGENTS disclosure is collapsed */}
+                      {agentsExpanded && projectSessions.map((session, index) => {
                         // A session is "last" only when no run rows follow it — keeps
                         // the vertical connector line continuous down to the runs.
                         const isLastSession = index === projectSessions.length - 1 && runCount === 0;
@@ -1265,8 +1355,20 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         );
                       })}
 
-                      {/* Add folder button */}
-                      <div className="ml-6 mt-2 border-t border-border-primary pt-2">
+                      {/* Start-session + Add-folder buttons */}
+                      <div className="ml-6 mt-2 border-t border-border-primary pt-2 space-y-1">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); startSessionForProject(project.id); }}
+                          disabled={isStartingSession}
+                          className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
+                        >
+                          {isStartingSession ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Plus className="w-3 h-3" />
+                          )}
+                          <span>{isStartingSession ? 'Starting…' : 'Start new session'}</span>
+                        </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1283,10 +1385,21 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                     </div>
                   )}
 
-                  {/* Empty state for expanded project with zero children */}
+                  {/* Empty state for expanded project with zero children — Start new session CTA */}
                   {isExpanded && !hasChildren && (
-                    <div className="px-4 py-2 text-xs text-text-tertiary">
-                      No open sessions. Start one with Quick Session.
+                    <div className="px-4 py-2">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); startSessionForProject(project.id); }}
+                        disabled={isStartingSession}
+                        className="w-full px-2 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center justify-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
+                      >
+                        {isStartingSession ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Plus className="w-3 h-3" />
+                        )}
+                        <span>{isStartingSession ? 'Starting…' : 'Start new session'}</span>
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1304,65 +1417,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
             </div>
           </>
         )}
-
-        {/* Archived Sessions Section — kept for structure; stub data */}
-        <div className="mt-4 pt-4 border-t border-border-primary">
-          <button
-            onClick={toggleArchivedSessions}
-            className="w-full flex items-center space-x-2 px-2 py-1.5 text-sm font-medium text-text-primary hover:bg-surface-hover rounded transition-colors"
-          >
-            {showArchivedSessions ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Archive className="w-4 h-4" />
-            <span>Archived Sessions</span>
-          </button>
-
-          {showArchivedSessions && (
-            <div className="mt-2 space-y-1">
-              {isLoadingArchived ? (
-                <div className="flex items-center justify-center py-4">
-                  <LoadingSpinner text="Loading archived sessions..." size="small" />
-                </div>
-              ) : archivedProjectsWithSessions.length === 0 ? (
-                <div className="px-4 py-4 text-center text-sm text-text-tertiary">
-                  No archived sessions
-                </div>
-              ) : (
-                archivedProjectsWithSessions.map((project) => {
-                  const isExpanded = expandedArchivedProjects.has(project.id);
-                  return (
-                    <div key={`archived-${project.id}`} className="ml-2">
-                      <div className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-surface-hover">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleArchivedProject(project.id, e); }}
-                          className="p-0.5 hover:bg-surface-hover rounded transition-colors z-10"
-                        >
-                          {isExpanded ? (
-                            <ChevronDown className="w-3 h-3 text-text-tertiary" />
-                          ) : (
-                            <ChevronRight className="w-3 h-3 text-text-tertiary" />
-                          )}
-                        </button>
-                        <FolderIcon className="w-4 h-4 text-text-tertiary" />
-                        <span className="text-sm text-text-tertiary flex-1 text-left">
-                          {project.name}
-                        </span>
-                      </div>
-                      {isExpanded && (
-                        <div className="ml-6 mt-1 space-y-1 px-4 py-2 text-xs text-text-tertiary">
-                          No archived runs
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
-        </div>
       </div>
 
       {selectedProjectForSettings && (
