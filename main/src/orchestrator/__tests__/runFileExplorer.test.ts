@@ -231,6 +231,56 @@ describe('runFileExplorer', () => {
     expect(linkdir).toMatchObject({ isDirectory: true });
   });
 
+  it('lists a broken (dangling) symlink as a leaf rather than dropping or throwing', async () => {
+    fs.symlinkSync(path.join(worktree, 'does-not-exist'), path.join(worktree, 'dangling'));
+    fs.writeFileSync(path.join(worktree, 'keep.txt'), 'x');
+    const entries = await listRunFiles(dbAdapter(db), RUN_ID);
+    const dangling = entries.find((e) => e.name === 'dangling');
+    expect(dangling).toMatchObject({ name: 'dangling', isDirectory: false });
+    expect(dangling?.size).toBeUndefined();
+    // The valid sibling is unaffected — one broken link doesn't break the listing.
+    expect(entries.find((e) => e.name === 'keep.txt')).toBeDefined();
+  });
+
+  it('excludes only the exact ".git" name (keeps .gitignore / .github) at any level', async () => {
+    fs.mkdirSync(path.join(worktree, '.git'));
+    fs.writeFileSync(path.join(worktree, '.gitignore'), 'node_modules');
+    fs.mkdirSync(path.join(worktree, '.github'));
+    fs.mkdirSync(path.join(worktree, 'sub'));
+    fs.mkdirSync(path.join(worktree, 'sub', '.git')); // nested .git too
+
+    const root = await listRunFiles(dbAdapter(db), RUN_ID);
+    const rootNames = root.map((e) => e.name);
+    expect(rootNames).not.toContain('.git');
+    expect(rootNames).toContain('.gitignore'); // exact-match filter, not startsWith
+    expect(rootNames).toContain('.github');
+
+    // The exact-name filter applies at every level — a nested .git is also hidden.
+    const sub = await listRunFiles(dbAdapter(db), RUN_ID, 'sub');
+    expect(sub.map((e) => e.name)).not.toContain('.git');
+  });
+
+  it('rejects a symlink to a SIBLING dir that shares the worktree path prefix (prefix-safety)', async () => {
+    // base/wt is the worktree; base/wt-evil is a sibling whose path starts with
+    // base/wt. Without the `realRoot + path.sep` guard, startsWith('base/wt')
+    // would wrongly ALLOW base/wt-evil/secret.txt.
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-prefix-'));
+    const wt = path.join(base, 'wt');
+    const sibling = path.join(base, 'wt-evil');
+    fs.mkdirSync(wt);
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(path.join(sibling, 'secret.txt'), 'sibling secret');
+    seedRun(db, { id: 'run-prefix', projectId: 1, worktreePath: wt });
+    try {
+      fs.symlinkSync(path.join(sibling, 'secret.txt'), path.join(wt, 'link'));
+      await expect(readRunFile(dbAdapter(db), 'run-prefix', 'link')).rejects.toMatchObject({
+        reason: 'invalid-path',
+      });
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Run resolution failures
   // -------------------------------------------------------------------------
