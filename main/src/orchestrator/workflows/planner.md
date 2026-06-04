@@ -75,3 +75,8 @@ user answers Approve — on approval the tasks become ready for a Sprint run.
 - Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-plan`,
   and any clarifying question); never silently proceed past a gate.
   `cyboflow_report_step` is observational only and never substitutes for a gate.
+- Board stages advance automatically as the run progresses — reporting steps moves
+  the idea through Idea / Research / Idea spec, decomposing it retires the idea, and
+  approving the plan flips its tasks to Ready for development. You MAY still call
+  `cyboflow_set_task_stage` to assert a finer planning stage (e.g. Research or Idea
+  spec) when it helps, but you do not need to drive these stage moves by hand.

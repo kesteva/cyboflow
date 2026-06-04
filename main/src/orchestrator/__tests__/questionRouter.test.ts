@@ -26,9 +26,14 @@
  * up Electron or the MCP bridge.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { QuestionRouter, RunNotRunningError, type QuestionAnswer } from '../questionRouter';
+import { TaskChangeRouter, taskChangeEvents } from '../taskChangeRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
+import type { QuestionPayload } from '../../../../shared/types/questions';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -603,5 +608,200 @@ describe('QuestionRouter', () => {
       .prepare("SELECT status FROM workflow_runs WHERE id = ?")
       .get('qrun-R3') as { status: string };
     expect(r3.status).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX-STAGE-MODEL (D): answering the approve-plan gate with Approve flips the
+// run's tasks (originating_idea_id === seed_idea_id) to Ready for development
+// (position 6). Backend-deterministic + idempotent; Revise/Reject is a no-op.
+// ---------------------------------------------------------------------------
+
+describe('QuestionRouter approve-plan promotes tasks to Ready for development (FIX-STAGE-MODEL D)', () => {
+  // Full migration chain (006/007/010/011/014/015/016/017) so QuestionRouter can
+  // reach awaiting_input AND the entity tables + seed_idea_id exist.
+  function buildDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '007_add_stuck_reason.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '010_questions.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
+    return db;
+  }
+
+  function stageId(position: number): string {
+    return `stage-board-1-default-${position}`;
+  }
+
+  function seedPlannerRun(
+    db: Database.Database,
+    opts: { runId: string; currentStepId: string; seedIdeaId: string | null },
+  ): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-p', 1, 'planner', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, seed_idea_id)
+       VALUES (?, 'wf-p', 1, 'running', ?, ?)`,
+    ).run(opts.runId, opts.currentStepId, opts.seedIdeaId);
+  }
+
+  const PLAN_QUESTIONS: QuestionPayload[] = [
+    {
+      question: 'Approve the plan?',
+      header: 'Approve plan',
+      multiSelect: false,
+      options: [{ label: 'Approve' }, { label: 'Revise' }],
+    },
+  ];
+
+  afterEach(() => {
+    QuestionRouter._resetForTesting();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  /**
+   * Seed an idea + N tasks originating from it through the chokepoint, then
+   * settle the auto-decompose follow-on. Returns the idea id + task ids.
+   */
+  async function seedIdeaWithTasks(taskRouter: TaskChangeRouter, count: number): Promise<{ ideaId: string; taskIds: string[] }> {
+    const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+    const taskIds: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const t = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: `Task ${i}`,
+        originatingIdeaId: idea.taskId,
+      });
+      taskIds.push(t.taskId);
+    }
+    await taskRouter._queueForProject(1).onIdle();
+    return { ideaId: idea.taskId, taskIds };
+  }
+
+  async function answerPlanGate(
+    db: Database.Database,
+    router: QuestionRouter,
+    runId: string,
+    chosen: string,
+  ): Promise<void> {
+    const questionPromise = router.requestQuestion(runId, `tu-${runId}-${Math.random().toString(36).slice(2)}`, PLAN_QUESTIONS, vi.fn());
+    await router['getQuestionQueue'](runId).onIdle();
+    // Select the NEWEST pending question (a re-answer leaves the prior, already
+    // 'answered' row behind, so a bare WHERE run_id could pick the stale one).
+    const questionId = (
+      db
+        .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(runId) as { id: string }
+    ).id;
+    await router.respond(questionId, { answers: { 'Approve the plan?': chosen } });
+    await questionPromise;
+    // Settle the TaskChangeRouter follow-on promotions.
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+  }
+
+  it('Approve on approve-plan moves all originating tasks to Ready for development (position 6)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 2);
+    // Tasks created at Tasks extracted (position 5).
+    for (const id of taskIds) {
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
+        stageId(5),
+      );
+    }
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
+    await answerPlanGate(db, router, 'run-p', 'Approve');
+
+    for (const id of taskIds) {
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
+        stageId(6),
+      );
+    }
+    // The promotion is orchestrator-attributed.
+    const ev = db
+      .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(taskIds[0]) as { actor: string; kind: string };
+    expect(ev.actor).toBe('orchestrator');
+    expect(ev.kind).toBe('plan-approved');
+  });
+
+  it('Revise on approve-plan does NOT promote the tasks', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 2);
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
+    await answerPlanGate(db, router, 'run-p', 'Revise');
+
+    for (const id of taskIds) {
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
+        stageId(5),
+      );
+    }
+  });
+
+  it('Approve on a NON-approve-plan step does NOT promote the tasks', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 1);
+    // current_step_id is the EARLIER approve-idea gate, not approve-plan.
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-idea', seedIdeaId: ideaId });
+    await answerPlanGate(db, router, 'run-p', 'Approve');
+
+    expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
+      stageId(5),
+    );
+  });
+
+  it('is idempotent: a re-answer at approve-plan does not double-bump already-promoted tasks', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 1);
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
+    await answerPlanGate(db, router, 'run-p', 'Approve');
+
+    const versionAfterFirst = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskIds[0]) as { version: number })
+      .version;
+
+    // The run is back to 'running'; answer a second approve-plan gate. The task is
+    // already at position 6, so the chokepoint no-op delta leaves version unchanged.
+    await answerPlanGate(db, router, 'run-p', 'Approve');
+    const versionAfterSecond = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskIds[0]) as { version: number })
+      .version;
+    expect(versionAfterSecond).toBe(versionAfterFirst);
+    expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
+      stageId(6),
+    );
   });
 });

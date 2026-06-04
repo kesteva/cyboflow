@@ -50,8 +50,17 @@ import {
   resolveReviewItemById,
   hasReviewItemsTable,
 } from './reviewItemListing';
+import { TaskChangeRouter } from './taskChangeRouter';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
+
+/**
+ * FIX-STAGE-MODEL (D): the planner step id whose Approve answer flips the run's
+ * tasks to Ready-for-development, and the board position they land on. Verified
+ * against database.ts seedDefaultBoard (position 6 = 'Ready for development').
+ */
+const APPROVE_PLAN_STEP_ID = 'approve-plan';
+const READY_FOR_DEVELOPMENT_POSITION = 6;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -410,7 +419,92 @@ export class QuestionRouter extends EventEmitter {
       resolve(effectiveAnswer);
       socketReply(effectiveAnswer);
       this.emit('questionAnswered', { questionId, status: 'answered' });
+
+      // FIX-STAGE-MODEL (D): if this answered gate is the planner's final
+      // approve-plan gate AND the user chose the Approve option, deterministically
+      // flip the run's tasks to Ready for development — backend-driven (does NOT
+      // rely on the agent calling cyboflow_set_task_stage). Fail-soft + idempotent;
+      // runs AFTER the resume so a stage hiccup never delays the agent.
+      await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
     });
+  }
+
+  /**
+   * FIX-STAGE-MODEL (D): move ALL tasks originating from the run's seed idea to
+   * Ready for development (position 6) when the just-answered gate is the
+   * planner's `approve-plan` step and the chosen answer is the Approve option.
+   *
+   * "Approve vs Revise/Reject" rule: case-insensitively, the chosen answer value
+   * must START WITH 'approve' (matches the planner.md `Approve` option label and
+   * tolerates trailing chips/attachment text), and must NOT contain 'revise' or
+   * 'reject'. Any other answer (Revise / Reject / unrecognized) is a no-op.
+   *
+   * Backend-deterministic + fail-soft: reads current_step_id + seed_idea_id
+   * defensively (older test DBs lack these columns → the SELECT throws → caught →
+   * no-op). The task moves route through TaskChangeRouter.applyChange with
+   * actor='orchestrator'; the chokepoint is idempotent (a task already at
+   * position 6 is a no-op delta). NEVER throws — respond() is unaffected.
+   */
+  private async promoteTasksOnPlanApproval(runId: string, answer: QuestionAnswer): Promise<void> {
+    try {
+      // Defensive read — current_step_id (mig 011) + seed_idea_id (mig 017) may be
+      // absent on a minimal test DB. A throw here means "not applicable" → no-op.
+      const run = this.db
+        .prepare(
+          'SELECT project_id AS projectId, current_step_id AS currentStepId, seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?',
+        )
+        .get(runId) as { projectId?: unknown; currentStepId?: unknown; seedIdeaId?: unknown } | undefined;
+      if (!run) return;
+      if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
+
+      const seedIdeaId = typeof run.seedIdeaId === 'string' ? run.seedIdeaId : null;
+      if (!seedIdeaId) return;
+      if (!this.isApproveAnswer(answer)) return;
+
+      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+
+      // All tasks originating from the seed idea (read-only; writes go through the
+      // chokepoint). Resolve the target stage id from each task's own board.
+      const tasks = this.db
+        .prepare('SELECT id, board_id AS boardId, stage_id AS stageId FROM tasks WHERE originating_idea_id = ?')
+        .all(seedIdeaId) as Array<{ id: string; boardId: string; stageId: string }>;
+      if (tasks.length === 0) return;
+
+      const router = TaskChangeRouter.getInstance();
+      for (const task of tasks) {
+        const stageRow = this.db
+          .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+          .get(task.boardId, READY_FOR_DEVELOPMENT_POSITION) as { id?: unknown } | undefined;
+        const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
+        if (!targetStageId || targetStageId === task.stageId) continue; // unresolved or already there
+
+        await router.applyChange(projectId, {
+          actor: 'orchestrator',
+          entityType: 'task',
+          taskId: task.id,
+          stageId: targetStageId,
+          runId,
+          kind: 'plan-approved',
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] promoteTasksOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Decide whether a gate answer is the Approve option (vs Revise / Reject).
+   * Case-insensitive: at least one answer value starts with 'approve', and NO
+   * answer value contains 'revise' or 'reject'. Conservative — an ambiguous or
+   * unrecognized answer returns false (no promotion).
+   */
+  private isApproveAnswer(answer: QuestionAnswer): boolean {
+    const values = Object.values(answer.answers).map((v) => v.trim().toLowerCase());
+    if (values.length === 0) return false;
+    if (values.some((v) => v.includes('revise') || v.includes('reject'))) return false;
+    return values.some((v) => v.startsWith('approve'));
   }
 
   /**
