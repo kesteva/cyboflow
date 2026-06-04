@@ -5,10 +5,12 @@
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
  *     is non-null; neutral empty state otherwise.
  *   - File Explorer — placeholder
- *   - Diff — placeholder
+ *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
+ *     message when no session is active.
  */
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
+import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
@@ -21,14 +23,20 @@ interface WorkflowProgressTab {
 }
 
 interface PlaceholderTab {
-  id: 'file-explorer' | 'diff';
+  id: 'file-explorer';
   label: string;
   testid: string;
   panelTestid: string;
   placeholder: string;
 }
 
-type Tab = WorkflowProgressTab | PlaceholderTab;
+interface DiffTab {
+  id: 'diff';
+  label: string;
+  testid: string;
+}
+
+type Tab = WorkflowProgressTab | PlaceholderTab | DiffTab;
 
 const TABS: Tab[] = [
   {
@@ -47,14 +55,41 @@ const TABS: Tab[] = [
     id: 'diff',
     label: 'Diff',
     testid: 'run-right-rail-tab-diff',
-    panelTestid: 'run-right-rail-diff-placeholder',
-    placeholder: 'Diff — coming soon',
   },
 ];
+
+/**
+ * RunRightRailDiff — compact wrapper around the working CombinedDiffView, mirroring the
+ * minimal state DiffPanel owns (selectedExecutions defaulting to [] == all uncommitted
+ * changes, isGitOperationRunning false). Rendered only when the DIFF tab is active and a
+ * sessionId is resolved, so it remounts (and reloads git data) whenever the tab is
+ * reopened. CombinedDiffView also exposes its own header refresh control.
+ */
+function RunRightRailDiff({ sessionId, isActive }: { sessionId: string; isActive: boolean }) {
+  // [] == all uncommitted changes (same default DiffPanel uses).
+  const [selectedExecutions] = useState<number[]>([]);
+
+  return (
+    <div
+      data-testid="run-right-rail-diff"
+      className="h-full flex flex-col bg-surface-primary"
+    >
+      <div className="flex-1 overflow-hidden">
+        <CombinedDiffView
+          sessionId={sessionId}
+          selectedExecutions={selectedExecutions}
+          isGitOperationRunning={false}
+          isVisible={isActive}
+        />
+      </div>
+    </div>
+  );
+}
 
 export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
+  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
@@ -93,17 +128,30 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
       {/* Tab content */}
       <div
         role="tabpanel"
-        className="flex-1 overflow-y-auto"
+        className="flex-1 overflow-hidden"
       >
         {currentTab.id === 'workflow-progress' ? (
           activeRunId !== null ? (
-            <WorkflowProgressTimeline runId={activeRunId} phaseState={phaseState} />
+            <div className="h-full overflow-y-auto">
+              <WorkflowProgressTimeline runId={activeRunId} phaseState={phaseState} />
+            </div>
           ) : (
             <div
               data-testid="run-right-rail-workflow-progress-empty"
               className="p-4 text-sm text-text-secondary"
             >
               No active run
+            </div>
+          )
+        ) : currentTab.id === 'diff' ? (
+          activeQuickSessionId ? (
+            <RunRightRailDiff sessionId={activeQuickSessionId} isActive />
+          ) : (
+            <div
+              data-testid="run-right-rail-diff-empty"
+              className="p-4 text-sm text-text-secondary"
+            >
+              Select a session to view its diff.
             </div>
           )
         ) : (

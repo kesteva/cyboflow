@@ -9,7 +9,8 @@
  *   1. Renders three tabs (Workflow Progress / File Explorer / Diff);
  *      Workflow Progress is default selected; shows empty-state when activeRunId is null.
  *   2. Clicking File Explorer shows its placeholder and hides the Workflow Progress panel.
- *   3. Clicking Diff shows its placeholder and hides the other two.
+ *   3. Clicking Diff with no active quick session shows the neutral "select a session"
+ *      message (the working <CombinedDiffView> mounts only when a sessionId is resolved).
  *   4. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
  *      (timeline renders phase sections from the phaseState prop).
  *   5. Shows empty state in workflow-progress tab when activeRunId is null.
@@ -121,12 +122,18 @@ describe('RunRightRail', () => {
     expect(screen.getByRole('tab', { name: 'Workflow Progress' }).getAttribute('aria-selected')).toBe('false');
   });
 
-  it('clicking Diff tab shows its placeholder and hides the other two placeholders', () => {
+  it('clicking Diff tab with no active session shows the neutral empty message and hides the other two', () => {
+    // No quick session is active in this test, so the working CombinedDiffView is not
+    // mounted; the DIFF tab renders the neutral "select a session" message instead.
+    act(() => {
+      useCyboflowStore.setState({ activeQuickSessionId: null });
+    });
+
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
 
     fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
 
-    expect(screen.getByTestId('run-right-rail-diff-placeholder')).toBeInTheDocument();
+    expect(screen.getByTestId('run-right-rail-diff-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-right-rail-file-explorer-placeholder')).not.toBeInTheDocument();
 

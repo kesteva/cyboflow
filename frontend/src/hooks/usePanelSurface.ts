@@ -125,7 +125,8 @@ export function usePanelSurface(
       // CyboflowRoot mode: just load, no auto-creation.
       panelApi
         .loadPanelsForSession(id)
-        .then((loaded) => setPanels(id, loaded))
+        // Diff lives in the right rail now — never surface a central 'diff' panel.
+        .then((loaded) => setPanels(id, loaded.filter((p) => p.type !== 'diff')))
         .catch((err) => console.error('[usePanelSurface] Failed to load panels:', err));
       return;
     }
@@ -133,7 +134,10 @@ export function usePanelSurface(
     // ProjectView mode: load, ensure permanent panels, reload, set initial active panel.
     (async () => {
       try {
-        const loadedPanels = await panelApi.loadPanelsForSession(id);
+        // Diff lives in the right rail now — never surface a central 'diff' panel.
+        const loadedPanels = (await panelApi.loadPanelsForSession(id)).filter(
+          (p) => p.type !== 'diff',
+        );
 
         const dashboardPanel = loadedPanels.find((p) => p.type === 'dashboard');
         const setupTasksPanel = loadedPanels.find((p) => p.type === 'setup-tasks');
@@ -161,7 +165,7 @@ export function usePanelSurface(
         }
 
         const finalPanels = panelsCreated
-          ? await panelApi.loadPanelsForSession(id)
+          ? (await panelApi.loadPanelsForSession(id)).filter((p) => p.type !== 'diff')
           : loadedPanels;
 
         setPanels(id, finalPanels);
@@ -170,15 +174,20 @@ export function usePanelSurface(
         const setupPanel = finalPanels.find((p) => p.type === 'setup-tasks');
         const dashPanel = finalPanels.find((p) => p.type === 'dashboard');
 
-        if (!activePanel) {
-          // No active panel — prioritize setup-tasks over dashboard.
+        // The diff panel is filtered out of finalPanels (it lives in the right rail now),
+        // so an active diff panel is no longer a valid central selection — treat it as "none".
+        const activeInSurface =
+          activePanel && finalPanels.some((p) => p.id === activePanel.id) ? activePanel : null;
+
+        if (!activeInSurface) {
+          // No (valid) active panel — prioritize setup-tasks over dashboard.
           const panelToActivate = setupPanel ?? dashPanel;
           if (panelToActivate) {
             setActivePanelInStore(id, panelToActivate.id);
             await panelApi.setActivePanel(id, panelToActivate.id);
           }
         } else {
-          setActivePanelInStore(id, activePanel.id);
+          setActivePanelInStore(id, activeInSurface.id);
         }
       } catch (err) {
         console.error('[usePanelSurface] Failed to load/create panels:', err);
@@ -192,8 +201,10 @@ export function usePanelSurface(
     panelApi
       .loadPanelsForSession(activeQuickSessionId)
       .then((loaded) => {
-        setPanels(activeQuickSessionId, loaded);
-        const firstPanel = loaded[0];
+        // Diff lives in the right rail now — never surface a central 'diff' panel.
+        const surfacePanels = loaded.filter((p) => p.type !== 'diff');
+        setPanels(activeQuickSessionId, surfacePanels);
+        const firstPanel = surfacePanels[0];
         if (firstPanel) {
           setActivePanelInStore(activeQuickSessionId, firstPanel.id);
         }
@@ -222,6 +233,8 @@ export function usePanelSurface(
   useEffect(() => {
     if (!effectiveSessionId) return;
     const handler = (panel: ToolPanel) => {
+      // Diff lives in the right rail now — never surface a central 'diff' panel.
+      if (panel.type === 'diff') return;
       if (panel.sessionId === effectiveSessionId) addPanel(panel);
     };
     const unsubscribe = window.electronAPI?.events?.onPanelCreated?.(handler);
