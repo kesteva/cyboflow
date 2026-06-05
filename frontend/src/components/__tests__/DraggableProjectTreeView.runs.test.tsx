@@ -306,6 +306,22 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(screen.queryByText('main-repo-session')).not.toBeInTheDocument();
   });
 
+  it('(b2) excludes archived sessions from the rail', async () => {
+    // The store is hydrated from getAllSessions() (which includes archived rows),
+    // so the rail must filter them — otherwise a dismissed (archived) session lingers.
+    mockSessions = [
+      makeSession({ name: 'active-session' }),
+      makeSession({ name: 'archived-session', archived: true }),
+    ];
+
+    await renderExpanded();
+
+    await waitFor(() => {
+      expect(screen.getByText('active-session')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('archived-session')).not.toBeInTheDocument();
+  });
+
   it('(c) clicking a quick session (no runId) triggers setActiveQuickSession + setActiveProjectId', async () => {
     mockSessions = [makeSession({ id: 'sess-quick', name: 'quick-CLICK', projectId: 1, runId: null })];
 

@@ -13,8 +13,18 @@ interface SessionDismissDialogProps {
 
 export function SessionDismissDialog({ isOpen, onClose, sessionId, onSuccess }: SessionDismissDialogProps) {
   const handleConfirm = useCallback(() => {
-    void API.sessions.delete(sessionId).then(() => {
-      onSuccess?.();
+    void API.sessions.delete(sessionId).then((result) => {
+      // Honor the IPC result: a failed delete (e.g. "Session is already archived")
+      // must NOT fire the success toast — otherwise the caller shows "Session
+      // dismissed" while nothing changed.
+      if (result.success) {
+        onSuccess?.();
+      } else {
+        useErrorStore.getState().showError({
+          title: 'Dismiss failed',
+          error: result.error ?? 'Unknown error',
+        });
+      }
     }).catch((err: unknown) => {
       useErrorStore.getState().showError({
         title: 'Dismiss failed',

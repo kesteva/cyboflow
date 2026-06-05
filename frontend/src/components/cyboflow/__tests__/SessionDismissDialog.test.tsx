@@ -80,4 +80,36 @@ describe('SessionDismissDialog', () => {
     }));
     expect(defaultProps.onSuccess).not.toHaveBeenCalled();
   });
+
+  it('on result.success === false (e.g. already archived) calls showError and does NOT call onSuccess', async () => {
+    // The handler RESOLVES with an unsuccessful IPCResponse — the dialog must
+    // NOT fire the success toast (the bug: it ignored result.success and showed
+    // "Session dismissed" while nothing changed).
+    vi.mocked(API.sessions.delete).mockResolvedValue({ success: false, error: 'Session is already archived' });
+
+    render(<SessionDismissDialog {...defaultProps} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Dismiss'));
+    });
+
+    expect(mockShowError).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Dismiss failed',
+      error: 'Session is already archived',
+    }));
+    expect(defaultProps.onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('on result.success === true calls onSuccess and not showError', async () => {
+    vi.mocked(API.sessions.delete).mockResolvedValue({ success: true });
+
+    render(<SessionDismissDialog {...defaultProps} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Dismiss'));
+    });
+
+    expect(defaultProps.onSuccess).toHaveBeenCalled();
+    expect(mockShowError).not.toHaveBeenCalled();
+  });
 });

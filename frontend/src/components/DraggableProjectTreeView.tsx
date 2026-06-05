@@ -1057,10 +1057,20 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
           <>
             {projectsWithRuns.map((project) => {
               const isExpanded = expandedProjects.has(project.id);
+              // Exclude archived sessions: the store is hydrated from getAllSessions()
+              // (which includes archived rows) and a sessions-loaded reload re-adds them,
+              // so a dismissed (archived) session would otherwise linger in the rail. The
+              // left rail lists ACTIVE/open sessions only.
               const projectSessions = allSessions.filter(
-                (s) => s.projectId === project.id && !s.isMainRepo,
+                (s) => s.projectId === project.id && !s.isMainRepo && !s.archived,
               );
-              const projectActiveRuns = runsByProject[project.id] ?? [];
+              // Also drop run rows whose parent session was dismissed (archived):
+              // the run's worktree is the session's, which is now gone, so the run
+              // should not linger in the rail after a session dismiss. Runs with no
+              // session (legacy parentless) are unaffected.
+              const projectActiveRuns = (runsByProject[project.id] ?? []).filter(
+                (r) => r.session_id == null || !allSessions.some((s) => s.id === r.session_id && s.archived),
+              );
               const sessionCount = projectSessions.length;
               const runCount = projectActiveRuns.length;
               const folderCount = project.folders?.length ?? 0;
