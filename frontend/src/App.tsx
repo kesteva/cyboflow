@@ -22,13 +22,16 @@ import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import ReviewQueueView from './components/ReviewQueueView';
+import LandingHome from './components/landing/LandingHome';
+import SessionStartWizard from './components/cyboflow/wizard/SessionStartWizard';
 import BacklogPane from './components/BacklogPane';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
 import { useBacklogStore } from './stores/backlogStore';
+import { useActiveRunsStore } from './stores/activeRunsStore';
+import { useLandingStore } from './stores/landingStore';
 import type { PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -50,6 +53,7 @@ function App() {
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const view = useNavigationStore((s) => s.view);
   const showHumanReview = useNavigationStore((s) => s.humanReviewOpen);
   const toggleHumanReview = useNavigationStore((s) => s.toggleHumanReview);
   const showBacklog = useNavigationStore((s) => s.backlogOpen);
@@ -98,6 +102,16 @@ function App() {
   // (and the macOS dock badge) stays live even when the human-review pane is
   // not mounted (it now mounts only when the rail item is active).
   useEffect(() => useReviewQueueStore.getState().init(), []);
+
+  // Init the active-runs store at the app-shell level so the landing home's
+  // cross-project run aggregation stays live across center-surface switches
+  // (init returns an unsubscribe used as the cleanup).
+  useEffect(() => useActiveRunsStore.getState().init(), []);
+
+  // Init the landing aggregation (projects + review_items fan-out across
+  // projects) so the home surface has data the moment it mounts (idempotent;
+  // returns an unsubscribe used as the cleanup).
+  useEffect(() => useLandingStore.getState().init(), []);
 
   // Load config on app startup
   useEffect(() => {
@@ -280,13 +294,30 @@ function App() {
             backlogActive={showBacklog}
             onToggleBacklog={toggleBacklog}
           />
-          {/* Center: full-width task-backlog pane OR human-review queue OR the
-              active-project surface (CyboflowRoot, the only mount point for the
-              run surface — the legacy SessionView branch was retired in TASK-690).
-              Backlog takes precedence; both center panes are mutually exclusive
-              (navigationStore opening one closes the other). */}
+          {/* Center-surface state machine, keyed off navigationStore.view:
+                • 'session' → CyboflowRoot (the active run/session workspace, the
+                  only mount point for the run surface; legacy SessionView retired
+                  in TASK-690).
+                • 'wizard'  → SessionStartWizard (the new-flow launcher).
+                • 'home'    → the rail-driven overlays: BacklogPane when the
+                  backlog rail item is active, else LandingHome (the cross-project
+                  home). focusQueue scrolls LandingHome to its review queue when
+                  the user arrived from the human-review rail affordance. */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            {showBacklog ? (
+            {view === 'session' ? (
+              <CyboflowRoot projectId={activeProjectId} />
+            ) : view === 'wizard' ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">New-flow wizard error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <SessionStartWizard />
+              </ErrorBoundary>
+            ) : showBacklog ? (
               <ErrorBoundary fallback={(error) => (
                 <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
                   <div className="text-center">
@@ -297,19 +328,17 @@ function App() {
               )}>
                 <BacklogPane projectId={activeProjectId} />
               </ErrorBoundary>
-            ) : showHumanReview ? (
+            ) : (
               <ErrorBoundary fallback={(error) => (
                 <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
                   <div className="text-center">
-                    <p className="text-sm text-status-error font-semibold mb-2">Review queue error — restart app</p>
+                    <p className="text-sm text-status-error font-semibold mb-2">Home surface error — restart app</p>
                     <p className="text-xs text-text-muted">{error.message}</p>
                   </div>
                 </div>
               )}>
-                <ReviewQueueView projectId={activeProjectId} />
+                <LandingHome focusQueue={showHumanReview} />
               </ErrorBoundary>
-            ) : (
-              <CyboflowRoot projectId={activeProjectId} />
             )}
           </div>
         </div>

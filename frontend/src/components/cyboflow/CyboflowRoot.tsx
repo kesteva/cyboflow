@@ -21,6 +21,7 @@ import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useWorkflowPhaseState } from '../../hooks/useWorkflowPhaseState';
@@ -146,6 +147,16 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     <div className="flex h-full flex-col">
       {/* Thin top header row */}
       <div className="flex items-center gap-2 border-b border-border-primary px-4 py-2">
+        {/* Back-to-home pill — returns the center surface to the cross-project
+            landing home (ghost styled, square, uppercase tiny). */}
+        <button
+          onClick={() => useNavigationStore.getState().goHome()}
+          className="border border-border-primary px-2 py-1 text-[10px] uppercase tracking-wider text-text-secondary hover:text-text-primary hover:border-border-emphasized"
+          data-testid="back-to-home"
+        >
+          ← Cyboflow home
+        </button>
+
         <button
           onClick={() => setIsPickerOpen(true)}
           className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
