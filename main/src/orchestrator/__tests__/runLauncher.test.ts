@@ -264,7 +264,8 @@ describe('RunLauncher.launch', () => {
 
       // The explicit per-run substrate choice must be forwarded to createRun as
       // its 2nd argument (the bug: it was previously dropped as `_substrate`).
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive');
+      // The 3rd arg (sessionId) is undefined on the legacy no-session launch.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined);
     });
   });
 
@@ -1041,6 +1042,279 @@ describe('RunLauncher.launch ideaId seed', () => {
         .get(cannedRunId) as { seed_idea_id: string | null };
 
       expect(row.seed_idea_id).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunLauncher.launch — session-hosted runs (session<->run restructure, Phase 1)
+//
+// When a sessionId is supplied, the run executes inside that session's EXISTING
+// worktree instead of creating its own: createDeterministicWorktree is NOT called,
+// worktree_path/branch_name come from the session, base_sha is snapshotted from
+// the session worktree HEAD, session_id is stamped, and sessions.run_id is
+// dual-written. A one-running-at-a-time guard rejects a 2nd concurrent run.
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch session-hosted (Phase 1)', () => {
+  /**
+   * Build a test DB that carries the columns + sessions table the session-hosted
+   * path reads/writes: workflow_runs.session_id + base_sha (via the task-column
+   * option) and a minimal sessions table (worktree_path / base_branch / run_id).
+   */
+  function makeSessionDb(): Database.Database {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        worktree_path TEXT,
+        base_branch TEXT,
+        run_id TEXT
+      )
+    `);
+    return db;
+  }
+
+  /**
+   * Seed a workflow row and return a registry whose createRun mirrors the real
+   * one: it inserts a queued workflow_runs row stamping the supplied session_id.
+   */
+  function makeSessionRegistry(db: Database.Database, workflowName: string, cannedRunId: string): {
+    registry: WorkflowRegistry;
+    workflowId: string;
+    createRunSpy: ReturnType<typeof vi.fn>;
+  } {
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/path.md', 'default')",
+    ).run(seedWorkflowId, workflowName);
+    interface IdRow { id: string }
+    const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get(workflowName) as IdRow;
+
+    const createRunSpy = vi.fn((_id: string, _substrate?: CliSubstrate, sessionId?: string) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+      ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+      return { runId: cannedRunId, permissionMode: 'default' as const };
+    });
+    const registry = {
+      getById: (id: string) =>
+        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+
+    return { registry, workflowId, createRunSpy };
+  }
+
+  it('reuses the session worktree, stamps session_id + base_sha, dual-writes sessions.run_id, and does NOT create a worktree', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-1', ?, 'main', NULL)",
+      ).run(sessionWorktree);
+
+      const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'sprint', cannedRunId);
+
+      const createDeterministicWorktree = vi.fn();
+      const fakeWorktree = {
+        createDeterministicWorktree,
+        // The session path resolves the branch from the worktree's current branch
+        // and snapshots HEAD via getHeadCommit.
+        getProjectMainBranch: vi.fn().mockResolvedValue('feature/session-branch'),
+        getHeadCommit: vi.fn().mockResolvedValue('deadbeefcafef00d'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
+
+      // createRun received the sessionId as its 3rd argument.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1');
+
+      // NO dedicated worktree was created — the run reuses the session tree.
+      expect(createDeterministicWorktree).not.toHaveBeenCalled();
+
+      // Returned + persisted worktree_path is the session tree; branch resolved
+      // from the session worktree's current branch.
+      expect(result.worktreePath).toBe(sessionWorktree);
+      expect(result.branchName).toBe('feature/session-branch');
+
+      interface RunRow { worktree_path: string; branch_name: string; base_sha: string | null; session_id: string | null; status: string }
+      const row = db
+        .prepare('SELECT worktree_path, branch_name, base_sha, session_id, status FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as RunRow;
+      expect(row.worktree_path).toBe(sessionWorktree);
+      expect(row.branch_name).toBe('feature/session-branch');
+      expect(row.base_sha).toBe('deadbeefcafef00d');
+      expect(row.session_id).toBe('sess-1');
+      expect(row.status).toBe('starting');
+
+      // Legacy back-link dual-write: sessions.run_id now points at this run.
+      const sessRow = db.prepare("SELECT run_id FROM sessions WHERE id = 'sess-1'").get() as { run_id: string | null };
+      expect(sessRow.run_id).toBe(cannedRunId);
+    });
+  });
+
+  it('falls back to the session base_branch when the worktree branch cannot be read', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-fb', ?, 'develop', NULL)",
+      ).run(sessionWorktree);
+
+      const { registry, workflowId } = makeSessionRegistry(db, 'sprint', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockRejectedValue(new Error('detached HEAD')),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-fb');
+
+      // The live ref read failed → branch falls back to the session's base_branch.
+      expect(result.branchName).toBe('develop');
+    });
+  });
+
+  it('throws and does NOT create a run when the session worktree_path is missing', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      // A session row with a NULL worktree_path — must fail loudly.
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-nowt', NULL, 'main', NULL)",
+      ).run();
+
+      const { registry, workflowId } = makeSessionRegistry(db, 'sprint', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn(),
+        getHeadCommit: vi.fn(),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-nowt'),
+      ).rejects.toThrow(/no worktree_path/);
+
+      // The just-created run is marked failed (not left half-created in 'queued').
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(cannedRunId) as { status: string };
+      expect(row.status).toBe('failed');
+    });
+  });
+
+  it('one-running-at-a-time guard: rejects a 2nd concurrent run for the same session BEFORE creating it', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-busy', ?, 'main', NULL)",
+      ).run(sessionWorktree);
+
+      // An existing in-flight run already owns this session (status='running').
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES ('wf-existing', 1, 'sprint', '/fake/path.md', 'default')",
+      ).run();
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES ('run-existing', 'wf-existing', 1, 'running', 'default', 'sess-busy')",
+      ).run();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'planner', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn(),
+        getHeadCommit: vi.fn(),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-busy'),
+      ).rejects.toThrow(/already has a running workflow/);
+
+      // The guard fires BEFORE createRun, so no half-created run is left behind.
+      expect(createRunSpy).not.toHaveBeenCalled();
+      const count = db
+        .prepare("SELECT COUNT(*) AS n FROM workflow_runs WHERE session_id = 'sess-busy'")
+        .get() as { n: number };
+      expect(count.n).toBe(1); // only the pre-existing run
+    });
+  });
+
+  it('allows a new session-hosted run when the session has only terminal prior runs', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-free', ?, 'main', NULL)",
+      ).run(sessionWorktree);
+
+      // A prior run for this session that already completed — must NOT block a new run.
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES ('wf-done', 1, 'sprint', '/fake/path.md', 'default')",
+      ).run();
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES ('run-done', 'wf-done', 1, 'completed', 'default', 'sess-free')",
+      ).run();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'planner', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue('main'),
+        getHeadCommit: vi.fn().mockResolvedValue('cafe1234'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-free');
+
+      expect(createRunSpy).toHaveBeenCalledOnce();
+      expect(result.runId).toBe(cannedRunId);
+      expect(result.worktreePath).toBe(sessionWorktree);
     });
   });
 });

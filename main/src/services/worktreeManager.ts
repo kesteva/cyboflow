@@ -384,6 +384,26 @@ export class WorktreeManager {
     }
   }
 
+  /**
+   * Return the current HEAD commit sha of a worktree.
+   *
+   * Used by RunLauncher to snapshot `base_sha` when a workflow run is hosted
+   * inside an existing session's worktree (session<->run restructure, Phase 1):
+   * the run reuses the session tree rather than creating its own, so there is
+   * no createDeterministicWorktree return to read the base commit from — we
+   * snapshot the session worktree's HEAD here instead.
+   */
+  async getHeadCommit(worktreePath: string): Promise<string> {
+    try {
+      const { stdout } = await execWithShellPath('git rev-parse HEAD', { cwd: worktreePath });
+      return stdout.trim();
+    } catch (error) {
+      throw new Error(
+        `Failed to get HEAD commit for worktree at ${worktreePath}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  }
+
   // Deprecated: Use getProjectMainBranch instead
   async detectMainBranch(projectPath: string): Promise<string> {
     console.warn('[WorktreeManager] detectMainBranch is deprecated, use getProjectMainBranch instead');

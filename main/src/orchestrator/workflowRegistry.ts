@@ -366,6 +366,11 @@ export class WorkflowRegistry {
    * The substrate is resolved ONCE here and is immutable for the run lifetime —
    * there is intentionally no UPDATE path. IDEA-013 / TASK-806.
    *
+   * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL:
+   * when supplied it links the run to the owning chat session at INSERT time so a
+   * session can own many runs over its lifetime. When omitted the column stays
+   * NULL — the legacy parentless-run path, byte-identical to before.
+   *
    * Returns the generated runId, the snapshotted permissionMode, and the
    * stamped substrate.
    * Throws if the workflow does not exist.
@@ -373,6 +378,7 @@ export class WorkflowRegistry {
   createRun(
     workflowId: string,
     requestedSubstrate?: CliSubstrate,
+    sessionId?: string,
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -394,12 +400,12 @@ export class WorkflowRegistry {
     const substrate = resolveSubstrate({ requestedSubstrate, env: process.env });
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate)
-      VALUES (?, ?, ?, 'queued', ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, session_id)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate);
+      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate, sessionId ?? null);
     });
 
     createTx();

@@ -98,12 +98,14 @@ export interface RunLauncherLike {
    * (IDEA-013) down to the S1 resolver/stamp in WorkflowRegistry.createRun;
    * `taskId` links the run to a native backlog task (migration 014); `ideaId`
    * is the planner's pre-launch seed idea (migration 017), written DIRECTLY to
-   * workflow_runs.seed_idea_id (NOT routed through the task-stage deriver). All
-   * are OPTIONAL — when substrate is omitted the run falls through the resolver
-   * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no
-   * link is recorded.
+   * workflow_runs.seed_idea_id (NOT routed through the task-stage deriver);
+   * `sessionId` hosts the run inside an existing session's worktree (session<->run
+   * restructure, Phase 1 / migration 019). All are OPTIONAL — when substrate is
+   * omitted the run falls through the resolver ladder to DEFAULT_SUBSTRATE ('sdk');
+   * when taskId / ideaId are omitted no link is recorded; when sessionId is omitted
+   * the run creates its own dedicated worktree (legacy path).
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -287,7 +289,7 @@ export function setRunCloseoutDeps(deps: RunCloseoutDeps): void {
 function resolveRunForCloseout(
   db: DatabaseLike,
   runId: string,
-): { worktreePath: string; branchName: string | null; projectPath: string } {
+): { worktreePath: string; branchName: string | null; projectPath: string; sessionId: string | null } {
   if (!runCloseoutDeps) {
     throw new TRPCError({
       code: 'METHOD_NOT_SUPPORTED',
@@ -295,8 +297,10 @@ function resolveRunForCloseout(
     });
   }
   const row = db
-    .prepare('SELECT worktree_path, branch_name, project_id FROM workflow_runs WHERE id = ?')
-    .get(runId) as { worktree_path: string | null; branch_name: string | null; project_id: number } | undefined;
+    .prepare('SELECT worktree_path, branch_name, project_id, session_id FROM workflow_runs WHERE id = ?')
+    .get(runId) as
+    | { worktree_path: string | null; branch_name: string | null; project_id: number; session_id: string | null }
+    | undefined;
   if (!row) {
     throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${runId} not found` });
   }
@@ -310,7 +314,34 @@ function resolveRunForCloseout(
   if (!project) {
     throw new TRPCError({ code: 'NOT_FOUND', message: `Project ${row.project_id} not found for run ${runId}` });
   }
-  return { worktreePath: row.worktree_path, branchName: row.branch_name, projectPath: project.path };
+  return {
+    worktreePath: row.worktree_path,
+    branchName: row.branch_name,
+    projectPath: project.path,
+    sessionId: row.session_id,
+  };
+}
+
+/**
+ * Close-out safety guard (session<->run restructure, Phase 1).
+ *
+ * A SESSION-HOSTED run (session_id != null) executes inside the SHARED session
+ * worktree, so the run-level close-out path MUST NEVER touch git — removing the
+ * worktree or deleting the branch would destroy work that belongs to the session,
+ * not the run. Merging is likewise the session's job (wired in Phase 3). For such
+ * runs every run-level close-out mutation (merge / createPr / dismiss) throws
+ * PRECONDITION_FAILED; the frontend routes those actions to the owning session in
+ * Phase 3, and run-level cancel/pause arrive in Phase 4.
+ *
+ * Legacy runs (session_id == null) are unaffected — this is a no-op for them.
+ */
+function assertNotSessionHosted(runId: string, sessionId: string | null): void {
+  if (sessionId !== null) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `Run ${runId} is session-hosted; close it out via its session.`,
+    });
+  }
 }
 
 /**
@@ -520,6 +551,11 @@ export const runsRouter = router({
       // launcher writes workflow_runs.seed_idea_id DIRECTLY (no stage derivation);
       // RunExecutor.getPrompt injects the idea body as a `# Selected idea` block.
       ideaId: z.string().min(1).optional(),
+      // Optional session host (session<->run restructure, Phase 1 / migration 019).
+      // When supplied, the run executes inside that session's existing worktree
+      // instead of creating its own. DORMANT in Phase 1 — no caller passes it yet
+      // (the frontend wires it in Phase 3).
+      sessionId: z.string().min(1).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -536,15 +572,16 @@ export const runsRouter = router({
         });
       }
       // Forward the per-run substrate choice (IDEA-013), native-task link
-      // (migration 014), and planner seed idea (migration 017). When ALL are
-      // omitted, call the legacy 2-arg shape so the resolver ladder owns the
-      // substrate decision and the SDK-default call site stays byte-identical
-      // (zero-behavior-change floor); otherwise pass all (any may be undefined,
-      // which the launcher treats as "no link / resolver default").
+      // (migration 014), planner seed idea (migration 017), and session host
+      // (Phase 1 / migration 019). When ALL are omitted, call the legacy 2-arg
+      // shape so the resolver ladder owns the substrate decision and the
+      // SDK-default call site stays byte-identical (zero-behavior-change floor);
+      // otherwise pass all (any may be undefined, which the launcher treats as
+      // "no link / no host / resolver default").
       const { runId, worktreePath, branchName } =
-        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined
+        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined
           ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
-          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId);
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId);
       return { runId, worktreePath, branchName };
     }),
 
@@ -720,7 +757,10 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
+      // Close-out safety guard (Phase 1): a session-hosted run must NEVER merge or
+      // remove the shared session worktree — that is the session's job (Phase 3).
+      assertNotSessionHosted(input.runId, sessionId);
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -809,7 +849,10 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, projectPath, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
+      // Close-out safety guard (Phase 1): a session-hosted run must NEVER push or
+      // remove the shared session worktree — that is the session's job (Phase 3).
+      assertNotSessionHosted(input.runId, sessionId);
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -857,7 +900,11 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, branchName, projectPath } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
+      // Close-out safety guard (Phase 1): a session-hosted dismiss must NOT remove
+      // the shared session worktree or delete its branch — abandon the run via the
+      // session (Phase 3). Throw before any git/kill work.
+      assertNotSessionHosted(input.runId, sessionId);
       // HARD-kill the live interactive REPL (IDEA-030) BEFORE removing the
       // worktree. Dismiss can target a RUNNING flow whose claude is busy and never
       // reads a graceful EOF/`/exit`, so endSession would leave the process alive

@@ -348,10 +348,43 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, ideaId: 'IDEA-7' });
 
       // With an ideaId present, start calls the full-form launch — substrate +
-      // taskId undefined, ideaId in the 5th slot — so the launcher writes
-      // workflow_runs.seed_idea_id directly (no stage derivation).
+      // taskId undefined, ideaId in the 5th slot, sessionId (6th) undefined — so
+      // the launcher writes workflow_runs.seed_idea_id directly (no stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7');
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined);
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a3) sessionId supplied (Phase 1 / migration 019) → full-form launch hosting
+  // the run inside the session worktree.
+  // -------------------------------------------------------------------------
+  it('(a3) sessionId supplied → forwards the full-form launch with the session host', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-sess',
+      worktreePath: '/projects/my-project/.worktrees/sess',
+      branchName: 'feature/sess',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-7' });
+
+      // With a sessionId present, start calls the full-form launch — substrate +
+      // taskId + ideaId undefined, sessionId in the 6th slot — so the launcher
+      // hosts the run inside the session's existing worktree.
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7');
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -598,6 +631,9 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
   beforeEach(() => {
     db = createTestDb({ includeStuckDetectedAt: true });
+    // resolveRunForCloseout now SELECTs session_id (Phase 1 / migration 019);
+    // GATE_SCHEMA omits it, so layer the additive ALTER on top.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
     clearApprovals = vi.fn();
   });
 
@@ -867,6 +903,97 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
     expect(wm.gitPush).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // Close-out safety guard (session<->run restructure, Phase 1).
+  //
+  // A SESSION-HOSTED run (session_id != null) executes inside the SHARED session
+  // worktree. The run-level close-out path must NEVER touch git: merge / createPr
+  // / dismiss MUST throw PRECONDITION_FAILED and NEVER call removeWorktreeByPath,
+  // deleteBranch, or any merge/push helper — that work belongs to the session
+  // (wired in Phase 3). Legacy runs (session_id == null) keep today's behavior.
+  // -------------------------------------------------------------------------
+
+  /** Seed a run, then stamp its session_id so it is treated as session-hosted. */
+  function seedSessionHostedRun(id: string, worktreePath: string, branchName?: string): void {
+    seedRun(db, { id, status: 'awaiting_review', worktreePath, branchName });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-host', id);
+  }
+
+  it('merge on a session-hosted run → PRECONDITION_FAILED and NEVER touches the worktree/branch', async () => {
+    seedSessionHostedRun('run-sh-merge', '/tmp/wt/run-sh-merge', 'feature/sh');
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.merge({ runId: 'run-sh-merge', strategy: 'preserve' }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof TRPCError &&
+        err.code === 'PRECONDITION_FAILED' &&
+        err.message.includes('session-hosted'),
+    );
+
+    // The shared session worktree/branch must be untouched.
+    expect(wm.mergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(wm.squashAndMergeWorktreeToMain).not.toHaveBeenCalled();
+    expect(wm.removeWorktreeByPath).not.toHaveBeenCalled();
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(clearApprovals).not.toHaveBeenCalled();
+    // The run is NOT marked terminal by a rejected close-out.
+    expect(getStatus('run-sh-merge')).toBe('awaiting_review');
+  });
+
+  it('createPr on a session-hosted run → PRECONDITION_FAILED and NEVER pushes or removes the worktree', async () => {
+    seedSessionHostedRun('run-sh-pr', '/tmp/wt/run-sh-pr', 'feature/sh');
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.createPr({ runId: 'run-sh-pr' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+
+    expect(wm.gitPush).not.toHaveBeenCalled();
+    expect(wm.removeWorktreeByPath).not.toHaveBeenCalled();
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(getStatus('run-sh-pr')).toBe('awaiting_review');
+  });
+
+  it('dismiss on a session-hosted run → PRECONDITION_FAILED and NEVER removes the worktree/branch', async () => {
+    seedSessionHostedRun('run-sh-dismiss', '/tmp/wt/run-sh-dismiss', 'feature/sh');
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.dismiss({ runId: 'run-sh-dismiss' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+
+    expect(wm.removeWorktreeByPath).not.toHaveBeenCalled();
+    expect(wm.deleteBranch).not.toHaveBeenCalled();
+    expect(getStatus('run-sh-dismiss')).toBe('awaiting_review');
+  });
+
+  it('legacy run (session_id NULL) still removes its worktree on dismiss (guard is a no-op)', async () => {
+    // Contrast with the session-hosted cases above: a legacy run keeps EXACTLY
+    // today's close-out behavior — the guard must not regress it.
+    seedRun(db, { id: 'run-legacy-dismiss', status: 'stuck', worktreePath: '/tmp/wt/run-legacy-dismiss' });
+    const wm = makeWmStub();
+    wire(wm);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.dismiss({ runId: 'run-legacy-dismiss' });
+
+    expect(result).toEqual({ success: true });
+    expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-legacy-dismiss');
+    expect(getStatus('run-legacy-dismiss')).toBe('canceled');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1032,8 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
 
   beforeEach(() => {
     db = createTestDb({ includeStuckDetectedAt: true });
+    // resolveRunForCloseout now SELECTs session_id (Phase 1 / migration 019).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
     setRunCloseoutDeps({
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },

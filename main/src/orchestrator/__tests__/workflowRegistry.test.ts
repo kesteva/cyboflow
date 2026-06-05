@@ -92,6 +92,9 @@ describe('WorkflowRegistry', () => {
     db.exec(
       "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
     );
+    // createRun now also writes workflow_runs.session_id (session<->run
+    // restructure, Phase 1 / migration 019); layer the additive ALTER on top.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
     logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });
@@ -535,6 +538,39 @@ describe('WorkflowRegistry', () => {
           process.env.CYBOFLOW_SUBSTRATE = prev;
         }
       }
+    });
+
+    // ───── session_id link (session<->run restructure, Phase 1 / migration 019) ─────
+
+    it('writes session_id when a sessionId is supplied (session-hosted run)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'session-link.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // The 3rd arg (sessionId) links the run to the owning chat session at INSERT.
+        const { runId } = registry.createRun(workflowId, undefined, 'sess-123');
+
+        interface SessionRow { session_id: string | null }
+        const row = db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get(runId) as SessionRow;
+        expect(row.session_id).toBe('sess-123');
+      });
+    });
+
+    it('leaves session_id NULL when no sessionId is supplied (legacy parentless run)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'no-session-link.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId } = registry.createRun(workflowId);
+
+        interface SessionRow { session_id: string | null }
+        const row = db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get(runId) as SessionRow;
+        expect(row.session_id).toBeNull();
+      });
     });
   });
 

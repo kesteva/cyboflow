@@ -128,7 +128,13 @@ export class RunLauncher {
    * Launch a workflow run:
    *   1. ensureGitignoreEntry — idempotent; adds `.cyboflow/worktrees/` if absent
    *   2. createRun — inserts workflow_runs row (status='queued')
-   *   3. createDeterministicWorktree — creates the git worktree + branch
+   *   3. Worktree resolution (one of):
+   *      a. LEGACY (no sessionId): createDeterministicWorktree — creates a
+   *         dedicated git worktree + branch for the run.
+   *      b. SESSION-HOSTED (sessionId supplied): reuse the EXISTING session's
+   *         worktree. No new worktree/branch is created; base_sha is snapshotted
+   *         from the session worktree's HEAD and the session's run_id back-link is
+   *         dual-written for legacy readers (session<->run restructure, Phase 1).
    *   4. UPDATE workflow_runs — sets worktree_path, branch_name, status='starting'
    *   5. (When a `taskId` is supplied AND a taskStageDeriver is injected)
    *      link the run to the task, capture base_branch/base_sha/steps_snapshot_json,
@@ -138,6 +144,13 @@ export class RunLauncher {
    * `taskId` (migration 014) is OPTIONAL: runs may be launched with no task
    * (ad-hoc workflow runs predate native tasks). The task-derivation block is a
    * complete no-op when `taskId` is omitted or no deriver is wired.
+   *
+   * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL
+   * and DORMANT in Phase 1 — no caller passes it yet (the frontend wires it in
+   * Phase 3). When supplied, the run executes inside that session's worktree
+   * instead of creating its own; a one-running-at-a-time guard rejects a second
+   * concurrent run for the same session. When omitted the launch is byte-identical
+   * to before (session_id stays NULL).
    *
    * Returns the runId, worktreePath, branchName, and snapshotted permissionMode.
    */
@@ -155,20 +168,44 @@ export class RunLauncher {
     // (no entry-stage capture, no recomputeTaskExecutionStage, so no not_found
     // throw for an id absent from the tasks table). task_id stays task-only.
     ideaId?: string,
+    // Session<->run restructure, Phase 1 (migration 019). When supplied, the run
+    // is hosted inside this session's existing worktree instead of creating its
+    // own. OPTIONAL + DORMANT in Phase 1 (no caller passes it yet).
+    sessionId?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
 
-    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate);
+    // One-running-at-a-time guard for SESSION-HOSTED runs: a session may own many
+    // runs over its lifetime but only ONE may be in flight at a time. Checked
+    // BEFORE createRun so we never leave a half-created run behind on rejection.
+    if (sessionId) {
+      const activeRow = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM workflow_runs
+            WHERE session_id = ?
+              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input')`,
+        )
+        .get(sessionId) as { n: number };
+      if (activeRow.n > 0) {
+        throw new Error(
+          `RunLauncher.launch: session ${sessionId} already has a running workflow`,
+        );
+      }
+    }
+
+    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate, sessionId);
 
     try {
-      const { worktreePath, branchName } = await this.worktreeManager.createDeterministicWorktree(
-        projectPath,
-        workflow.name,
-        runId,
-      );
+      const { worktreePath, branchName } = sessionId
+        ? await this.resolveSessionHostedWorktree(runId, sessionId)
+        : await this.worktreeManager.createDeterministicWorktree(
+            projectPath,
+            workflow.name,
+            runId,
+          );
 
       // Write the per-run .mcp.json into the worktree so Claude can discover
       // the cyboflow-permissions bridge.
@@ -191,6 +228,19 @@ export class RunLauncher {
           'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         )
         .run(worktreePath, branchName, 'starting', runId);
+
+      // Session-hosted finalization (session<->run restructure, Phase 1).
+      // Snapshot the session worktree's HEAD as base_sha and dual-write the
+      // legacy sessions.run_id back-link so readers that still consult
+      // sessions.run_id (e.g. useLifecycleSession.ts until Phase 3) keep working.
+      // The forward link (workflow_runs.session_id) was stamped at createRun.
+      if (sessionId) {
+        const baseSha = await this.worktreeManager.getHeadCommit(worktreePath);
+        this.db
+          .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(baseSha, runId);
+        this.db.prepare('UPDATE sessions SET run_id = ? WHERE id = ?').run(runId, sessionId);
+      }
 
       // Planner pre-launch seed idea (migration 017). A direct workflow_runs
       // write — NOT a tasks write, and NOT routed through the stage deriver
@@ -272,6 +322,59 @@ export class RunLauncher {
       this.logger.error('RunLauncher: launch failed', { runId, workflowId, error: errMsg });
       throw err;
     }
+  }
+
+  /**
+   * Resolve the worktree a SESSION-HOSTED run executes inside (session<->run
+   * restructure, Phase 1). Instead of creating a dedicated worktree the run
+   * reuses the owning session's existing tree, read from the `sessions` row.
+   *
+   * The run's branch_name is resolved from the session worktree's CURRENT branch
+   * (the live HEAD ref the session is checked out on); if that cannot be read it
+   * falls back to the session's recorded base_branch. (The `sessions` table has
+   * no branch_name column — see migration history — so we derive it here.)
+   *
+   * Throws a clear Error when the session row or its worktree_path is missing so
+   * the launch fails loudly rather than silently creating a stray worktree.
+   */
+  private async resolveSessionHostedWorktree(
+    runId: string,
+    sessionId: string,
+  ): Promise<{ worktreePath: string; branchName: string }> {
+    const sessionRow = this.db
+      .prepare('SELECT worktree_path, base_branch FROM sessions WHERE id = ?')
+      .get(sessionId) as { worktree_path: string | null; base_branch: string | null } | undefined;
+
+    if (!sessionRow) {
+      throw new Error(`RunLauncher.launch: session ${sessionId} not found (cannot host run ${runId})`);
+    }
+    if (!sessionRow.worktree_path) {
+      throw new Error(
+        `RunLauncher.launch: session ${sessionId} has no worktree_path (cannot host run ${runId})`,
+      );
+    }
+    const worktreePath = sessionRow.worktree_path;
+
+    // Resolve the run's branch from the session worktree's current branch; fall
+    // back to the session's recorded base_branch when the live ref is unreadable.
+    let branchName: string | null = sessionRow.base_branch ?? null;
+    try {
+      branchName = await this.worktreeManager.getProjectMainBranch(worktreePath);
+    } catch (err) {
+      this.logger.warn('RunLauncher: could not read session worktree branch; falling back to base_branch', {
+        runId,
+        sessionId,
+        worktreePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!branchName) {
+      throw new Error(
+        `RunLauncher.launch: could not resolve a branch for session ${sessionId} worktree ${worktreePath}`,
+      );
+    }
+
+    return { worktreePath, branchName };
   }
 
   /**

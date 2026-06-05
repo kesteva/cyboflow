@@ -218,3 +218,48 @@ describe('WorktreeManager.deleteBranch (integration)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// getHeadCommit (session<->run restructure, Phase 1) — real temp git repo.
+//
+// RunLauncher uses this to snapshot base_sha when a run is hosted inside an
+// existing session's worktree. It returns the worktree's current HEAD sha.
+// ---------------------------------------------------------------------------
+
+describe('WorktreeManager.getHeadCommit (integration)', () => {
+  it('returns the trimmed HEAD sha of the worktree', async () => {
+    await withTempDir('worktree-headcommit-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const expected = execSync('git rev-parse HEAD', { cwd: tmpDir }).toString().trim();
+
+      const manager = new WorktreeManager();
+      const head = await manager.getHeadCommit(tmpDir);
+
+      expect(head).toBe(expected);
+      // A full 40-char (or longer) sha with no surrounding whitespace.
+      expect(head).toMatch(/^[0-9a-f]{40}$/);
+      expect(head).toBe(head.trim());
+    });
+  });
+
+  it('tracks HEAD forward after a new commit', async () => {
+    await withTempDir('worktree-headcommit-advance-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const manager = new WorktreeManager();
+      const first = await manager.getHeadCommit(tmpDir);
+
+      execSync('git commit --allow-empty -m "second"', { cwd: tmpDir, stdio: 'pipe' });
+      const second = await manager.getHeadCommit(tmpDir);
+
+      expect(second).not.toBe(first);
+      expect(second).toBe(execSync('git rev-parse HEAD', { cwd: tmpDir }).toString().trim());
+    });
+  });
+
+  it('throws a clear error for a non-git path', async () => {
+    await withTempDir('worktree-headcommit-nogit-', async (tmpDir) => {
+      const manager = new WorktreeManager();
+      await expect(manager.getHeadCommit(tmpDir)).rejects.toThrow(/Failed to get HEAD commit/);
+    });
+  });
+});
