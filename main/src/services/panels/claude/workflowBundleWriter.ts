@@ -1,15 +1,15 @@
 /**
  * workflowBundleWriter — installs/removes a workflow's invokable bundle (phase
- * slash-commands + optional subagents) into a worktree's `.claude/` directory for
+ * subagents + optional slash-commands) into a worktree's `.claude/` directory for
  * BOTH CLI substrates (IDEA-013 rung-(ii): structure-as-invokable-units).
  *
  * The real `claude` REPL (interactive substrate) natively auto-loads
- * `.claude/commands/*.md` and `.claude/agents/*.md` at session start, and the SDK
+ * `.claude/agents/*.md` and `.claude/commands/*.md` at session start, and the SDK
  * substrate auto-discovers the same files via `settingSources: ['user','project']`
  * (claudeCodeManager.ts buildSdkOptions). So writing these files pre-spawn is the
- * SINGLE substrate-shared mechanism that turns each workflow phase into an
- * invokable `/cyboflow-<phase>` command instead of a paragraph of prompt prose —
- * no CLI flag and no SDK `agents` option required.
+ * SINGLE substrate-shared mechanism that turns each heavy workflow phase into a
+ * delegable `cyboflow-<phase>` subagent (its own context window) instead of a
+ * paragraph of prompt prose — no CLI flag and no SDK `agents` option required.
  *
  * Namespacing + merge-safety is the load-bearing property (the worktree IS the
  * user's project, so their own `.claude/commands` / `.claude/agents` may be

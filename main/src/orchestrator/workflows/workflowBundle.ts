@@ -5,9 +5,9 @@
  * A built-in flow's prose `.md` (e.g. `planner.md`) is paired with a sibling
  * directory of the SAME basename holding its invokable phase units:
  *
- *   workflows/planner.md                 ← the (slim) orchestrator prose
- *   workflows/planner/commands/*.md      ← one slash-command per phase
- *   workflows/planner/agents/*.md        ← optional subagents for isolated side-work
+ *   workflows/planner.md                 ← the orchestrator prose (delegates phases)
+ *   workflows/planner/agents/*.md        ← one subagent per heavy phase (own context)
+ *   workflows/planner/commands/*.md      ← optional slash-commands (built-ins ship none)
  *
  * Resolving the bundle from the run's `workflow_path` (the SAME `.md` the prompt
  * body is read from) — rather than keying it by workflow NAME — means any flow
@@ -39,7 +39,7 @@ export interface WorkflowBundleFile {
   content: string;
 }
 
-/** A workflow's resolved invokable bundle: phase slash-commands + optional subagents. */
+/** A workflow's resolved invokable bundle: phase subagents + optional slash-commands. */
 export interface WorkflowBundle {
   commands: WorkflowBundleFile[];
   agents: WorkflowBundleFile[];

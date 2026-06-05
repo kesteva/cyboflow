@@ -85,10 +85,10 @@ export function buildStepReportingAppend(def: WorkflowDefinition | null): string
     '',
     idList,
     '',
-    'v1 limitation: only THIS main session can report. Agent-tool sub-sessions you',
-    'spawn do not inherit the cyboflow `mcpServers` config, so they cannot call',
-    '`cyboflow_report_step`. Report each step from the main session yourself, even',
-    'when the actual work is delegated to a subagent.',
+    'You are the single writer of cyboflow state. The Agent-tool subagents you',
+    'delegate heavy phases to are deliberately scoped WITHOUT the cyboflow tools, so',
+    'they never report steps or write entities — report each step from THIS main',
+    'session yourself, even when the actual work is delegated to a subagent.',
   ].join('\n');
 }
 
