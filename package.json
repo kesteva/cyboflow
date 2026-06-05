@@ -2,7 +2,7 @@
   "name": "cyboflow",
   "version": "0.1.2",
   "private": true,
-  "description": "Cyboflow - Multi-session AI code assistant manager built on Crystal",
+  "description": "Cyboflow - Multi-session AI code assistant manager",
   "author": {
     "name": "Cyboflow",
     "email": "hello@cyboflow.com"
