@@ -41,12 +41,14 @@ The pattern for every phase:
    queue).
 3. **human-review** → **human gate, inline.** Use **AskUserQuestion** for the final
    taste-level sign-off on the whole sprint; all functional checks have already
-   passed. Use the header `Approve sprint`. Do **not** self-approve and never
-   silently proceed past a gate. On **approve**, report done — the scheduler merges
-   the integration branch into main (ff-only), stamps every task done, and deletes
-   the integration branch. On **reject**, report the rejection — the scheduler marks
-   the batch failed and leaves the integration branch for inspection. The destructive
-   merge to main is owned by the scheduler, not this prompt.
+   passed. Use the header `Approve sprint` with the options **Approve** / **Reject**
+   (these exact labels — the scheduler reads the chosen label to decide whether to
+   merge to main). Do **not** self-approve and never silently proceed past a gate.
+   On **Approve**, report done — the scheduler merges the integration branch into
+   main (ff-only), stamps every task done, and deletes the integration branch. On
+   **Reject**, report the rejection — the scheduler marks the batch failed and
+   leaves the integration branch for inspection. The destructive merge to main is
+   owned by the scheduler, not this prompt.
 
 ## Hard rules
 

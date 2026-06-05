@@ -3,8 +3,7 @@
  * executed with bounded concurrency over ONE shared integration branch, with a
  * single human review at finalize (feat/parallel-sprint).
  *
- * Lifecycle (P4 — covers planning + drain + per-task integration merge; finalize
- * is P5, still TODO-stubbed):
+ * Lifecycle (P5 — full: planning + drain + per-task integration merge + finalize):
  *   1. createBatch  — insert sprint_batches (planning) + one sprint_batch_tasks
  *                     per task (queued); create the integration branch off the
  *                     project main branch; launch the single `sprint-init` run
@@ -16,12 +15,19 @@
  *                     run (outcome='integrated'), mark its batch_task integrated,
  *                     derive the task to stage 8, unblock dependents, drain(). A
  *                     merge CONFLICT fails just that task (batch survives). When
- *                     all tasks integrated → finalizing (TODO(P5): launch finalize).
- *   3. drain        — compute READY batch tasks from the in-batch blocking DAG
+ *                     all tasks integrated → finalizing + launch the single
+ *                     `sprint-finalize` run over the integration branch.
+ *   3. handleFinalizeStatus — the finalize run runs Phase 2 (sprint-verify →
+ *                     sprint-review → the ONE human-review gate). On the human
+ *                     APPROVE, merge integration→main (ff-only), stamp every task
+ *                     outcome='merged' → stage 9 (Done), delete the integration
+ *                     branch, batch → completed. On REJECT / verify failure, batch
+ *                     → failed and the integration branch is LEFT for inspection.
+ *   4. drain        — compute READY batch tasks from the in-batch blocking DAG
  *                     (task_dependencies), launch up to `concurrency` ready
  *                     tasks as standalone `task` runs.
- *   4. start        — boot rehydration: re-attach non-terminal batches and
- *                     resume draining (mirrors runRecovery.ts).
+ *   5. start        — boot rehydration: re-attach non-terminal batches and
+ *                     resume draining / re-launch finalize (mirrors runRecovery.ts).
  *
  * Standalone-typecheck invariant: NO 'electron' / 'better-sqlite3' / services/*
  * import. All collaborators are injected as narrow interfaces. State writes to
@@ -94,6 +100,19 @@ export interface BatchWorktreeManagerLike {
     projectPath: string,
     worktreePath: string,
     targetBranch: string,
+  ): Promise<void>;
+  /**
+   * Rebase + ff-only merge the finalize run's worktree branch INTO the project
+   * `mainBranch` (P5 finalize close-out). The finalize worktree was cut off the
+   * integration tip and made no commits during verify/review, so its branch holds
+   * the full integration content — merging it lands the whole sprint on main. On
+   * conflict (main moved underneath) it throws; the scheduler fails the batch and
+   * LEAVES the integration branch for inspection.
+   */
+  mergeWorktreeToMain(
+    projectPath: string,
+    worktreePath: string,
+    mainBranch: string,
   ): Promise<void>;
   removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
   deleteBranch(projectPath: string, branchName: string, opts?: { force?: boolean }): Promise<void>;
@@ -589,12 +608,260 @@ export class SprintBatchScheduler {
       .run(reason, batchId, runId);
   }
 
+  /**
+   * Finalize lifecycle (P5). The sprint-finalize run drives Phase 2 over the
+   * integration branch: sprint-verify (full suite) → sprint-review → the single
+   * human-review AskUserQuestion gate — the ONE awaiting_input gate of the whole
+   * sprint.
+   *
+   *  - awaiting_input  → parked at the human gate; nothing to do (the user drives
+   *                      the answer through QuestionRouter).
+   *  - awaiting_review → the run drained clean AFTER the human answered. Read the
+   *                      human's decision from the answered question:
+   *                        • APPROVE → completeBatch(): merge integration→main
+   *                          (ff-only), stamp every task merged → Done, delete the
+   *                          integration branch, batch → completed.
+   *                        • REJECT  → batch failed; LEAVE the integration branch.
+   *                      A drain with NO answered question means sprint-verify
+   *                      FAILED (the orchestrator stops before the gate and reports
+   *                      done) → batch failed; integration branch kept.
+   *  - terminal        → finalize run failed/canceled → batch failed; branch kept.
+   */
   private async handleFinalizeStatus(batchId: string, status: WorkflowRunStatus): Promise<void> {
-    // TODO(P5): finalize lifecycle (sprint-verify → sprint-review → human gate →
-    // merge integration→main → batch 'completed'). For now, a failed finalize run
-    // fails the batch; awaiting_input/awaiting_review are no-ops handled by P5.
+    const batch = this.getBatch(batchId);
+    if (!batch || batch.status !== 'finalizing') return; // status-guarded idempotency
+
+    if (status === 'awaiting_input') {
+      // Parked at the human gate — user-driven. No-op.
+      return;
+    }
+
+    if (status === 'awaiting_review') {
+      const decision = this.readFinalizeDecision(batch);
+      if (decision === 'approved') {
+        await this.completeBatch(batch);
+      } else if (decision === 'rejected') {
+        this.markBatchFailed(batchId, 'sprint rejected at the human review gate');
+        this.logger.info('[SprintBatchScheduler] sprint rejected → batch failed (integration branch kept)', {
+          batchId,
+          integrationBranch: batch.integration_branch,
+        });
+      } else {
+        // No answered human-review question → sprint-verify failed and the
+        // orchestrator stopped before the gate (or the gate never ran). Do NOT
+        // merge a broken sprint to main.
+        this.markBatchFailed(batchId, 'sprint-finalize reached rest without human approval (verify failure)');
+      }
+      return;
+    }
+
     if (this.isTerminalRunStatus(status)) {
       this.markBatchFailed(batchId, 'sprint-finalize run failed');
+    }
+  }
+
+  /**
+   * Launch the single sprint-finalize run over the integration branch and record
+   * its id on the batch. The finalize worktree is cut off the integration tip
+   * (baseBranch = integration_branch) so it carries the full aggregate diff. Guard
+   * against a double-launch: a finalize run already recorded is a no-op (idempotent
+   * under a redelivered all-integrated drain).
+   */
+  private async launchFinalize(batchId: string): Promise<void> {
+    const batch = this.getBatch(batchId);
+    if (!batch || batch.status !== 'finalizing') return;
+    if (batch.finalize_run_id) return; // already launched
+
+    const project = this.projectResolver.getProjectById(batch.project_id);
+    if (!project) {
+      this.markBatchFailed(batchId, 'project gone before finalize launch');
+      return;
+    }
+
+    const workflowId = this.workflowIdFor(batch.project_id, 'sprint-finalize');
+    try {
+      const { runId } = await this.runLauncher.launch(
+        workflowId,
+        project.path,
+        batch.substrate,
+        undefined, // taskId — the finalize run spans the whole sprint, no single task
+        undefined, // ideaId
+        undefined, // sessionId — batch runs are session-less
+        batch.integration_branch ?? undefined, // baseBranch = integration tip
+        batchId,
+      );
+      this.db
+        .prepare(
+          'UPDATE sprint_batches SET finalize_run_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND finalize_run_id IS NULL',
+        )
+        .run(runId, batchId);
+      this.logger.info('[SprintBatchScheduler] sprint-finalize run launched', {
+        batchId,
+        runId,
+        integrationBranch: batch.integration_branch,
+      });
+    } catch (err) {
+      this.markBatchFailed(
+        batchId,
+        `finalize launch failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Read the human's decision from the finalize run's answered human-review
+   * question. Returns 'approved' / 'rejected', or null when no answered question
+   * exists (verify-failure path — the orchestrator never reached the gate).
+   *
+   * The destructive merge-to-main stays in TS (scheduler-driven, design §8.6 ii):
+   * the answer is matched with the SAME approve/reject heuristic QuestionRouter
+   * uses for the planner gate (a value starting with 'approve', with no 'revise'/
+   * 'reject') so the convention stays single-sourced.
+   */
+  private readFinalizeDecision(batch: SprintBatchRow): 'approved' | 'rejected' | null {
+    if (!batch.finalize_run_id) return null;
+    const row = this.db
+      .prepare(
+        `SELECT answer_json FROM questions
+          WHERE run_id = ? AND status = 'answered' AND answer_json IS NOT NULL
+          ORDER BY answered_at DESC, created_at DESC
+          LIMIT 1`,
+      )
+      .get(batch.finalize_run_id) as { answer_json: string | null } | undefined;
+    if (!row?.answer_json) return null;
+
+    let values: string[];
+    try {
+      const parsed = JSON.parse(row.answer_json) as { answers?: Record<string, unknown> };
+      values = Object.values(parsed.answers ?? {})
+        .filter((v): v is string => typeof v === 'string')
+        .map((v) => v.trim().toLowerCase());
+    } catch {
+      return null;
+    }
+    if (values.length === 0) return null;
+    // Conservative, single-sourced with QuestionRouter.isApproveAnswer.
+    if (values.some((v) => v.includes('revise') || v.includes('reject'))) return 'rejected';
+    if (values.some((v) => v.startsWith('approve'))) return 'approved';
+    return 'rejected'; // unrecognized answer is NOT an approval — never merge to main
+  }
+
+  /**
+   * Finalize close-out on human approval (P5). Mirrors the runs.ts merge mutation
+   * but at the batch level:
+   *   1. mergeWorktreeToMain(finalize worktree → project main)  — ff-only; the
+   *      finalize worktree branch holds the whole integration content.
+   *   2. for every batch task: stamp its run outcome='merged' and derive the task
+   *      to stage 9 (Done) via the chokepoint.
+   *   3. close the finalize run (completed) + clean up its worktree/branch.
+   *   4. delete the integration branch (success path only).
+   *   5. batch → completed + completed_at.
+   * On a main-merge conflict (main moved underneath) the batch is marked failed
+   * and the integration branch is LEFT for inspection.
+   */
+  private async completeBatch(batch: SprintBatchRow): Promise<void> {
+    const project = this.projectResolver.getProjectById(batch.project_id);
+    const finalizeRunId = batch.finalize_run_id;
+    if (!project || !finalizeRunId) {
+      this.markBatchFailed(batch.id, 'cannot finalize: missing project / finalize run');
+      return;
+    }
+
+    const finalizeRun = this.db
+      .prepare('SELECT worktree_path, branch_name FROM workflow_runs WHERE id = ?')
+      .get(finalizeRunId) as { worktree_path: string | null; branch_name: string | null } | undefined;
+    if (!finalizeRun?.worktree_path) {
+      this.markBatchFailed(batch.id, 'cannot finalize: finalize run has no worktree');
+      return;
+    }
+
+    // 1. Merge the integration content into main (ff-only). On conflict / failure,
+    //    leave the integration branch and fail the batch.
+    try {
+      const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
+      await this.worktreeManager.mergeWorktreeToMain(project.path, finalizeRun.worktree_path, mainBranch);
+    } catch (err) {
+      this.markBatchFailed(
+        batch.id,
+        `integration→main merge failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.logger.error('[SprintBatchScheduler] integration→main merge failed (branch kept)', {
+        batchId: batch.id,
+        integrationBranch: batch.integration_branch,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
+      return;
+    }
+
+    // 2. Stamp every batch task's run merged → derive each task to Done (stage 9).
+    //    Each task already integrated (its per-task run was closed outcome='integrated'
+    //    in P4); the finalize merge promotes the underlying task from stage 8 → 9.
+    const batchTasks = this.getBatchTasks(batch.id);
+    for (const bt of batchTasks) {
+      if (bt.status !== 'integrated' || !bt.run_id) continue;
+      this.db
+        .prepare(
+          `UPDATE workflow_runs SET outcome = 'merged', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        )
+        .run(bt.run_id);
+      try {
+        await this.taskStageDeriver.recomputeTaskExecutionStage(bt.task_id);
+      } catch (err) {
+        this.logger.warn('[SprintBatchScheduler] stage derivation failed during finalize', {
+          batchId: batch.id,
+          taskId: bt.task_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // 3. Close the finalize run + clean up its worktree/branch (best-effort).
+    this.db
+      .prepare(
+        `UPDATE workflow_runs
+            SET status = 'completed', outcome = 'merged', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status NOT IN ${TERMINAL_RUN_SQL_IN}`,
+      )
+      .run(finalizeRunId);
+    try {
+      await this.worktreeManager.removeWorktreeByPath(project.path, finalizeRun.worktree_path);
+      if (finalizeRun.branch_name) {
+        await this.worktreeManager.deleteBranch(project.path, finalizeRun.branch_name, { force: true });
+      }
+    } catch (cleanupErr) {
+      this.logger.warn('[SprintBatchScheduler] finalize worktree cleanup failed', {
+        batchId: batch.id,
+        error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+      });
+    }
+
+    // 4. Delete the integration branch (success only). Best-effort.
+    if (batch.integration_branch) {
+      try {
+        await this.worktreeManager.deleteBranch(project.path, batch.integration_branch, { force: true });
+      } catch (delErr) {
+        this.logger.warn('[SprintBatchScheduler] integration branch delete failed after completion', {
+          batchId: batch.id,
+          integrationBranch: batch.integration_branch,
+          error: delErr instanceof Error ? delErr.message : String(delErr),
+        });
+      }
+    }
+
+    // 5. Mark the batch completed.
+    const completed = this.db
+      .prepare(
+        `UPDATE sprint_batches
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'finalizing'`,
+      )
+      .run(batch.id) as { changes: number };
+    if (completed.changes > 0) {
+      this.logger.info('[SprintBatchScheduler] sprint completed → merged to main', {
+        batchId: batch.id,
+        integrationBranch: batch.integration_branch,
+        tasks: batchTasks.length,
+      });
     }
   }
 
@@ -616,8 +883,8 @@ export class SprintBatchScheduler {
     if (tasks.length === 0) return;
 
     if (tasks.every((t) => t.status === 'integrated')) {
-      // All integrated → finalize. P5 launches the sprint-finalize run; here we
-      // only flip the state so the batch leaves `running`.
+      // Every task integrated cleanly → finalize. Flip running → finalizing and
+      // launch the single sprint-finalize run over the integration branch.
       const flipped = this.db
         .prepare(
           `UPDATE sprint_batches SET status = 'finalizing', updated_at = CURRENT_TIMESTAMP
@@ -626,8 +893,24 @@ export class SprintBatchScheduler {
         .run(batchId) as { changes: number };
       if (flipped.changes > 0) {
         this.logger.info('[SprintBatchScheduler] all tasks integrated → batch finalizing', { batchId });
-        // TODO(P5): launch the single sprint-finalize run over the integration branch.
+        await this.launchFinalize(batchId);
       }
+      return;
+    }
+
+    // Needs-attention terminal: no task is still in flight (none `running`, none
+    // `queued` that could still launch) yet not all reached `integrated`. At least
+    // one task `failed` (P4 merge conflict / run fail) and nothing else can make
+    // progress — finalizing over a partial integration would silently drop work,
+    // so the batch reaches a clearly-reported `failed`/needs-attention terminal
+    // (the integration branch is LEFT for inspection).
+    const anyInFlight = tasks.some((t) => t.status === 'running' || t.status === 'queued');
+    if (!anyInFlight && tasks.some((t) => t.status === 'failed')) {
+      const failedCount = tasks.filter((t) => t.status === 'failed').length;
+      this.markBatchFailed(
+        batchId,
+        `sprint cannot finalize: ${failedCount} of ${tasks.length} task(s) failed and no task remains in flight`,
+      );
       return;
     }
 
@@ -741,8 +1024,25 @@ export class SprintBatchScheduler {
           if (this.initRunTerminal(batch)) {
             this.markBatchFailed(id, 'sprint-init run did not survive restart');
           }
+        } else if (batch.status === 'finalizing') {
+          // The finalize run cannot survive a crash (recoverActiveStateOrphans
+          // failed any in-flight run; an awaiting_input gate was recovered to
+          // failed by QuestionRouter.recoverStaleAwaitingInput). The integration
+          // branch is intact + every task already integrated, so re-launch the
+          // finalize run from scratch. Clear the dead run id first so launchFinalize
+          // is not short-circuited by the double-launch guard.
+          if (this.finalizeRunTerminal(batch)) {
+            this.db
+              .prepare(
+                'UPDATE sprint_batches SET finalize_run_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = \'finalizing\'',
+              )
+              .run(id);
+            const fresh = this.getBatch(id);
+            if (fresh && fresh.status === 'finalizing') {
+              await this.launchFinalize(id);
+            }
+          }
         }
-        // 'finalizing' rehydration is P5 (re-launch finalize idempotently).
       });
     }
     if (batches.length > 0) {
@@ -783,6 +1083,20 @@ export class SprintBatchScheduler {
     const row = this.db
       .prepare('SELECT status FROM workflow_runs WHERE id = ?')
       .get(batch.init_run_id) as { status: WorkflowRunStatus } | undefined;
+    if (!row) return true;
+    return this.isTerminalRunStatus(row.status);
+  }
+
+  /**
+   * True when the recorded finalize run no longer exists or has gone terminal —
+   * i.e. it cannot still drive the human gate and the scheduler must re-launch a
+   * fresh finalize run on rehydrate. (No recorded run → treat as gone.)
+   */
+  private finalizeRunTerminal(batch: SprintBatchRow): boolean {
+    if (!batch.finalize_run_id) return true;
+    const row = this.db
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get(batch.finalize_run_id) as { status: WorkflowRunStatus } | undefined;
     if (!row) return true;
     return this.isTerminalRunStatus(row.status);
   }

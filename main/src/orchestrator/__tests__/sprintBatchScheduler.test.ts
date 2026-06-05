@@ -78,16 +78,22 @@ function makeFakeLauncher(db: Database.Database): {
  * MergeConflictError (matched structurally by name) for specific worktree paths,
  * so the conflict-handling path is exercised without a real git repo.
  */
-function makeFakeWorktree(conflictPaths: Set<string> = new Set()): BatchWorktreeManagerLike & {
+function makeFakeWorktree(
+  conflictPaths: Set<string> = new Set(),
+  mainConflictPaths: Set<string> = new Set(),
+): BatchWorktreeManagerLike & {
   merges: Array<{ worktreePath: string; targetBranch: string }>;
+  mainMerges: Array<{ worktreePath: string; mainBranch: string }>;
   removed: string[];
   deletedBranches: string[];
 } {
   const merges: Array<{ worktreePath: string; targetBranch: string }> = [];
+  const mainMerges: Array<{ worktreePath: string; mainBranch: string }> = [];
   const removed: string[] = [];
   const deletedBranches: string[] = [];
   return {
     merges,
+    mainMerges,
     removed,
     deletedBranches,
     async getProjectMainBranch() {
@@ -106,6 +112,15 @@ function makeFakeWorktree(conflictPaths: Set<string> = new Set()): BatchWorktree
         throw err;
       }
       merges.push({ worktreePath, targetBranch });
+    },
+    async mergeWorktreeToMain(_projectPath, worktreePath, mainBranch) {
+      if (mainConflictPaths.has(worktreePath)) {
+        const err = new Error(`Failed to fast-forward ${mainBranch}`) as Error & { gitOutput?: string };
+        err.name = 'MergeConflictError';
+        err.gitOutput = 'main moved underneath';
+        throw err;
+      }
+      mainMerges.push({ worktreePath, mainBranch });
     },
     async removeWorktreeByPath(_projectPath, worktreePath) {
       removed.push(worktreePath);
@@ -164,6 +179,11 @@ function makeDb(): Database.Database {
       integrated_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(batch_id, task_id)
     );
+    CREATE TABLE questions (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_use_id TEXT NOT NULL DEFAULT 'tu',
+      questions_json TEXT NOT NULL DEFAULT '[]', answer_json TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP, answered_at DATETIME
+    );
   `);
   // Seed the internal-flow workflow rows the scheduler launches by name.
   const insertWf = db.prepare('INSERT INTO workflows (id, project_id, name) VALUES (?, ?, ?)');
@@ -184,11 +204,11 @@ interface Harness {
   emit(runId: string, status: WorkflowRunStatus): Promise<void>;
 }
 
-function makeHarness(opts?: { conflictPaths?: Set<string> }): Harness {
+function makeHarness(opts?: { conflictPaths?: Set<string>; mainConflictPaths?: Set<string> }): Harness {
   const db = makeDb();
   const { launcher, calls, runIdFor } = makeFakeLauncher(db);
   const deriver = makeFakeDeriver();
-  const worktree = makeFakeWorktree(opts?.conflictPaths);
+  const worktree = makeFakeWorktree(opts?.conflictPaths, opts?.mainConflictPaths);
   const emitter = new EventEmitter();
   const scheduler = new SprintBatchScheduler({
     db: dbAdapter(db),
@@ -231,6 +251,23 @@ function runningCount(db: Database.Database, batchId: string): number {
       .prepare("SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ? AND status = 'running'")
       .get(batchId) as { n: number }
   ).n;
+}
+
+/** The recorded sprint-finalize run id for a batch (null until launchFinalize). */
+function finalizeRunId(db: Database.Database, batchId: string): string | null {
+  return (
+    db.prepare('SELECT finalize_run_id FROM sprint_batches WHERE id = ?').get(batchId) as {
+      finalize_run_id: string | null;
+    }
+  ).finalize_run_id;
+}
+
+/** Simulate the human answering the finalize gate by inserting an answered question. */
+function answerFinalizeGate(db: Database.Database, runId: string, label: 'Approve' | 'Reject'): void {
+  db.prepare(
+    `INSERT INTO questions (id, run_id, tool_use_id, questions_json, answer_json, status, answered_at)
+     VALUES (?, ?, 'tu', '[]', ?, 'answered', CURRENT_TIMESTAMP)`,
+  ).run(`q-${runId}`, runId, JSON.stringify({ answers: { 'Approve the whole sprint?': label } }));
 }
 
 const SUB: CliSubstrate = 'sdk';
@@ -381,7 +418,7 @@ describe('SprintBatchScheduler drain + lifecycle', () => {
     expect(taskStatus(h.db, batchId, 't2')).toBe('integrated');
   });
 
-  it('marks all-integrated batch as finalizing', async () => {
+  it('marks all-integrated batch as finalizing and launches the finalize run', async () => {
     const { batchId } = await h.scheduler.createBatch({ projectId: PROJECT_ID, substrate: SUB, taskIds: ['t1'] });
     await h.emit('run01', 'awaiting_review'); // init → running, t1 launched
     const t1Run = h.runIdFor('t1') as string;
@@ -389,6 +426,14 @@ describe('SprintBatchScheduler drain + lifecycle', () => {
 
     expect(taskStatus(h.db, batchId, 't1')).toBe('integrated');
     expect(batchStatus(h.db, batchId)).toBe('finalizing');
+
+    // The single sprint-finalize run launched over the integration branch + tagged.
+    const finalizeRun = finalizeRunId(h.db, batchId);
+    expect(finalizeRun).not.toBeNull();
+    const integ = (h.db.prepare('SELECT integration_branch FROM sprint_batches WHERE id = ?').get(batchId) as { integration_branch: string }).integration_branch;
+    const finalizeCall = h.launchCalls.find((c) => c.workflowId === `wf-${PROJECT_ID}-sprint-finalize`);
+    expect(finalizeCall?.baseBranch).toBe(integ);
+    expect(finalizeCall?.batchId).toBe(batchId);
   });
 
   it('a failed per-task run marks the batch_task failed without crashing the batch', async () => {
@@ -407,6 +452,26 @@ describe('SprintBatchScheduler drain + lifecycle', () => {
     await h.emit('run01', 'failed');
     expect(batchStatus(h.db, batchId)).toBe('failed');
   });
+
+  it('does NOT finalize when a task failed and nothing is in flight — batch reaches a failed terminal', async () => {
+    const { batchId } = await h.scheduler.createBatch({ projectId: PROJECT_ID, substrate: SUB, taskIds: ['t1', 't2'] });
+    await h.emit('run01', 'awaiting_review'); // init → running, both launched
+    const t1Run = h.runIdFor('t1') as string;
+    const t2Run = h.runIdFor('t2') as string;
+
+    // t1 fails outright; t2 integrates. With t1 failed + nothing else in flight and
+    // not all integrated, the batch must NOT finalize — it fails (needs attention).
+    await h.emit(t1Run, 'failed');
+    await h.emit(t2Run, 'awaiting_review');
+
+    expect(taskStatus(h.db, batchId, 't1')).toBe('failed');
+    expect(taskStatus(h.db, batchId, 't2')).toBe('integrated');
+    expect(batchStatus(h.db, batchId)).toBe('failed');
+    // No finalize run launched over a partial integration.
+    expect(finalizeRunId(h.db, batchId)).toBeNull();
+    const err = (h.db.prepare('SELECT error_message FROM sprint_batches WHERE id = ?').get(batchId) as { error_message: string | null }).error_message;
+    expect(err).toMatch(/cannot finalize/i);
+  });
 });
 
 describe('SprintBatchScheduler.batchProgress', () => {
@@ -418,6 +483,122 @@ describe('SprintBatchScheduler.batchProgress', () => {
 
     const progress = h.scheduler.batchProgress(batchId);
     expect(progress).toEqual({ status: 'running', total: 3, queued: 0, running: 3, integrated: 0, failed: 0 });
+  });
+});
+
+describe('SprintBatchScheduler finalize + human-review gate (P5)', () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = makeHarness();
+    h.scheduler.start(h.emitter);
+  });
+
+  /** Drive a single-task batch through init + integrate so it reaches finalizing. */
+  async function driveToFinalizing(): Promise<{ batchId: string; finalizeRun: string; integ: string }> {
+    const { batchId } = await h.scheduler.createBatch({ projectId: PROJECT_ID, substrate: SUB, taskIds: ['t1', 't2'] });
+    await h.emit('run01', 'awaiting_review'); // init → running, both launched
+    await h.emit(h.runIdFor('t1') as string, 'awaiting_review');
+    await h.emit(h.runIdFor('t2') as string, 'awaiting_review'); // all integrated → finalizing + finalize launched
+    expect(batchStatus(h.db, batchId)).toBe('finalizing');
+    const finalizeRun = finalizeRunId(h.db, batchId) as string;
+    expect(finalizeRun).not.toBeNull();
+    const integ = (h.db.prepare('SELECT integration_branch FROM sprint_batches WHERE id = ?').get(batchId) as { integration_branch: string }).integration_branch;
+    return { batchId, finalizeRun, integ };
+  }
+
+  it('on Approve: merges integration→main ONCE, marks every task merged → Done, completes the batch + deletes the integration branch', async () => {
+    const { batchId, finalizeRun, integ } = await driveToFinalizing();
+
+    // Human approves the gate, then the finalize run drains clean → awaiting_review.
+    answerFinalizeGate(h.db, finalizeRun, 'Approve');
+    await h.emit(finalizeRun, 'awaiting_review');
+
+    // Integration → main merged exactly once (the finalize run's worktree).
+    expect(h.worktree.mainMerges).toHaveLength(1);
+    expect(h.worktree.mainMerges[0]).toEqual({ worktreePath: `/wt/${finalizeRun}`, mainBranch: 'main' });
+
+    // Every per-task run stamped outcome='merged' + its task re-derived (→ Done).
+    for (const taskId of ['t1', 't2']) {
+      const runId = h.runIdFor(taskId) as string;
+      const outcome = (h.db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(runId) as { outcome: string | null }).outcome;
+      expect(outcome).toBe('merged');
+    }
+    // Each task derived again at finalize (P4 integrate + P5 finalize ⇒ ≥2 derives).
+    expect(h.deriver.derived.filter((t) => t === 't1').length).toBeGreaterThanOrEqual(2);
+    expect(h.deriver.derived.filter((t) => t === 't2').length).toBeGreaterThanOrEqual(2);
+
+    // Batch completed + completed_at stamped; integration branch deleted.
+    expect(batchStatus(h.db, batchId)).toBe('completed');
+    const completedAt = (h.db.prepare('SELECT completed_at FROM sprint_batches WHERE id = ?').get(batchId) as { completed_at: string | null }).completed_at;
+    expect(completedAt).not.toBeNull();
+    expect(h.worktree.deletedBranches).toContain(integ);
+
+    // Finalize run closed out + its worktree removed.
+    const finalizeRow = h.db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get(finalizeRun) as { status: string; outcome: string | null };
+    expect(finalizeRow.status).toBe('completed');
+    expect(h.worktree.removed).toContain(`/wt/${finalizeRun}`);
+  });
+
+  it('on Reject: does NOT merge to main, fails the batch, and keeps the integration branch', async () => {
+    const { batchId, finalizeRun, integ } = await driveToFinalizing();
+
+    answerFinalizeGate(h.db, finalizeRun, 'Reject');
+    await h.emit(finalizeRun, 'awaiting_review');
+
+    expect(h.worktree.mainMerges).toHaveLength(0); // never merged to main
+    expect(batchStatus(h.db, batchId)).toBe('failed');
+    expect(h.worktree.deletedBranches).not.toContain(integ); // branch kept for inspection
+    // Tasks NOT promoted to merged.
+    const t1Outcome = (h.db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(h.runIdFor('t1') as string) as { outcome: string | null }).outcome;
+    expect(t1Outcome).toBe('integrated');
+  });
+
+  it('on sprint-verify failure (no answered gate): fails the batch without merging to main', async () => {
+    const { batchId, integ } = await driveToFinalizing();
+
+    // No answered question is inserted (sprint-verify failed → orchestrator stopped
+    // before the gate and reported done), then the run drains to awaiting_review.
+    const finalizeRun = finalizeRunId(h.db, batchId) as string;
+    await h.emit(finalizeRun, 'awaiting_review');
+
+    expect(h.worktree.mainMerges).toHaveLength(0);
+    expect(batchStatus(h.db, batchId)).toBe('failed');
+    expect(h.worktree.deletedBranches).not.toContain(integ);
+  });
+
+  it('on a terminal finalize run (failed): fails the batch, no main merge, branch kept', async () => {
+    const { batchId, finalizeRun, integ } = await driveToFinalizing();
+
+    await h.emit(finalizeRun, 'failed');
+
+    expect(h.worktree.mainMerges).toHaveLength(0);
+    expect(batchStatus(h.db, batchId)).toBe('failed');
+    expect(h.worktree.deletedBranches).not.toContain(integ);
+  });
+
+  it('on an integration→main merge conflict at finalize: fails the batch and keeps the branch', async () => {
+    // Run-id numbering for a single-task batch: run01=init, run02=t1's task run,
+    // run03=finalize. Arm the main-merge conflict for the finalize worktree
+    // (/wt/run03) up front (the conflict set is captured by reference in the fake).
+    const mainConflictPaths = new Set<string>(['/wt/run03']);
+    h = makeHarness({ mainConflictPaths });
+    h.scheduler.start(h.emitter);
+
+    const { batchId } = await h.scheduler.createBatch({ projectId: PROJECT_ID, substrate: SUB, taskIds: ['t1'] });
+    await h.emit('run01', 'awaiting_review');
+    await h.emit(h.runIdFor('t1') as string, 'awaiting_review'); // → finalizing + finalize launched
+    const finalizeRun = finalizeRunId(h.db, batchId) as string;
+    expect(finalizeRun).toBe('run03'); // numbering invariant the conflict arming relies on
+    const integ = (h.db.prepare('SELECT integration_branch FROM sprint_batches WHERE id = ?').get(batchId) as { integration_branch: string }).integration_branch;
+
+    // Human approves, finalize drains → awaiting_review, the main merge conflicts.
+    answerFinalizeGate(h.db, finalizeRun, 'Approve');
+    await h.emit(finalizeRun, 'awaiting_review');
+
+    expect(batchStatus(h.db, batchId)).toBe('failed');
+    expect(h.worktree.deletedBranches).not.toContain(integ); // branch LEFT for inspection
+    const err = (h.db.prepare('SELECT error_message FROM sprint_batches WHERE id = ?').get(batchId) as { error_message: string | null }).error_message;
+    expect(err).toMatch(/integration→main merge failed/i);
   });
 });
 
@@ -452,5 +633,37 @@ describe('SprintBatchScheduler.rehydrate (boot recovery)', () => {
     expect(taskStatus(h.db, batchId, 't1')).toBe('failed');
     expect(taskStatus(h.db, batchId, 't2')).toBe('running');
     expect(batchStatus(h.db, batchId)).toBe('running');
+  });
+
+  it('re-launches the finalize run for a finalizing batch whose finalize run died at boot', async () => {
+    const h = makeHarness();
+
+    // A 'finalizing' batch whose finalize run was failed at boot (app_restart),
+    // with every task already integrated. rehydrate must re-launch a fresh finalize
+    // run idempotently (the integration branch is intact).
+    const batchId = 'batchF';
+    h.db
+      .prepare(
+        `INSERT INTO sprint_batches (id, project_id, substrate, status, integration_branch, concurrency, finalize_run_id)
+         VALUES (?, ?, 'sdk', 'finalizing', 'sprint/batchF', 5, 'deadFinalize')`,
+      )
+      .run(batchId, PROJECT_ID);
+    h.db
+      .prepare("INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES ('deadFinalize', ?, ?, 'failed', ?)")
+      .run(`wf-${PROJECT_ID}-sprint-finalize`, PROJECT_ID, batchId);
+    h.db
+      .prepare("INSERT INTO sprint_batch_tasks (batch_id, task_id, status, run_id) VALUES (?, 't1', 'integrated', 'oldTaskRun')")
+      .run(batchId);
+
+    h.scheduler.start(h.emitter);
+    await h.scheduler.whenSettled();
+
+    // Stays finalizing; a NEW finalize run was launched over the integration branch.
+    expect(batchStatus(h.db, batchId)).toBe('finalizing');
+    const newFinalize = finalizeRunId(h.db, batchId);
+    expect(newFinalize).not.toBeNull();
+    expect(newFinalize).not.toBe('deadFinalize');
+    const finalizeCall = h.launchCalls.find((c) => c.workflowId === `wf-${PROJECT_ID}-sprint-finalize`);
+    expect(finalizeCall?.baseBranch).toBe('sprint/batchF');
   });
 });

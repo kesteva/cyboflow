@@ -806,13 +806,13 @@ async function initializeServices() {
     taskChangeRouter,
   );
 
-  // Parallel-sprint batch scheduler (feat/parallel-sprint, P4). Constructed here
+  // Parallel-sprint batch scheduler (feat/parallel-sprint, P5). Constructed here
   // where every collaborator is in scope; subscribed to runStatusEvents +
   // rehydrated in the app.whenReady() block (after recoverActiveStateOrphans).
   // The launcher adapter forwards baseBranch (per-task runs branch off the CURRENT
   // integration tip) + batchId (stamps workflow_runs.batch_id); the worktree
-  // adapter exposes mergeWorktreeToBranch + worktree/branch cleanup for the
-  // per-task integration merge.
+  // adapter exposes mergeWorktreeToBranch (per-task integration merge) +
+  // mergeWorktreeToMain (finalize integration→main merge) + worktree/branch cleanup.
   sprintBatchScheduler = new SprintBatchScheduler({
     db: cyboflowDb,
     logger: cyboflowLogger,
@@ -831,6 +831,8 @@ async function initializeServices() {
         worktreeManager.createBranchRef(projectPath, branchName, baseBranch),
       mergeWorktreeToBranch: (projectPath, worktreePath, targetBranch) =>
         worktreeManager.mergeWorktreeToBranch(projectPath, worktreePath, targetBranch),
+      mergeWorktreeToMain: (projectPath, worktreePath, mainBranch) =>
+        worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
       removeWorktreeByPath: (projectPath, worktreePath) =>
         worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
       deleteBranch: (projectPath, branchName, opts) =>
