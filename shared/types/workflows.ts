@@ -131,17 +131,47 @@ export interface WorkflowRunListRow {
 }
 
 /**
- * The two user-facing built-in flows in cyboflow v1.
+ * All built-in flow names in cyboflow v1 — the two user-facing flows
+ * (`planner` / `sprint`) PLUS the three scheduler-internal parallel-sprint flows
+ * (`task` / `sprint-init` / `sprint-finalize`, the `feat/parallel-sprint` epic).
  *
  * Narrowed from the historical SoloFlow set of five (the dropped
  * `soloflow` / `compound` / `prune` flows have their prose preserved under
  * `docs/workflows-future/` for a future cyboflow-native rebuild). The internal
  * `__quick__` sentinel is NOT a member here — it is filtered out of the picker
  * and handled separately by the quick-session pipeline.
+ *
+ * The three parallel-sprint flows are kept in this set (so `WORKFLOW_DEFINITIONS`
+ * typing stays honest and the registry seeds DB rows the scheduler can launch by
+ * `wf-<projectId>-<name>`), but are marked `internal: true` on their definition
+ * and filtered out of the user-facing picker via `isInternalWorkflowName` (see
+ * `WorkflowRegistry.listByProject`). They are launched by the
+ * `SprintBatchScheduler`, never selected by hand. See
+ * `docs/parallel-sprint-design.md` §5.
  */
-export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint'] as const;
+export const CYBOFLOW_WORKFLOW_NAMES = [
+  'planner',
+  'sprint',
+  'task',
+  'sprint-init',
+  'sprint-finalize',
+] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
+
+/**
+ * The user-facing subset of `CYBOFLOW_WORKFLOW_NAMES` — the flows a human may
+ * launch by hand from the `WorkflowPicker`. The remaining names are
+ * scheduler-internal (`internal: true`) and never appear in the picker.
+ *
+ * This is the AUTHORITATIVE allowlist of pickable flows; the runtime filter
+ * (`isInternalWorkflowName`) is derived from `WORKFLOW_DEFINITIONS[*].internal`
+ * so the two can never drift — adding a flow with `internal: true` removes it
+ * from the picker automatically.
+ */
+export const CYBOFLOW_USER_WORKFLOW_NAMES = ['planner', 'sprint'] as const;
+
+export type CyboflowUserWorkflowName = (typeof CYBOFLOW_USER_WORKFLOW_NAMES)[number];
 
 // ─── Phase / Step data model ─────────────────────────────────────────────────
 
@@ -218,6 +248,16 @@ export interface WorkflowPhase {
 export interface WorkflowDefinition {
   id: string;
   phases: WorkflowPhase[];
+  /**
+   * When true this flow is scheduler-internal and MUST NOT appear in the
+   * user-facing workflow picker — it is launched programmatically (e.g. by the
+   * `SprintBatchScheduler` for the parallel-sprint `task` / `sprint-init` /
+   * `sprint-finalize` flows), never selected by hand. Defaults to `false`
+   * (omitted) for the user-facing built-ins and all custom flows. The picker
+   * filter (`WorkflowRegistry.listByProject`) is derived from this flag via
+   * `isInternalWorkflowName` so the two never drift.
+   */
+  internal?: boolean;
 }
 
 /**
@@ -415,6 +455,138 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
       },
     ],
   },
+
+  // ── Parallel-sprint internal flows (feat/parallel-sprint, internal: true) ──
+  // Launched programmatically by the SprintBatchScheduler — never shown in the
+  // user-facing picker. See docs/parallel-sprint-design.md §5.
+
+  // task — a single batch task's Phase-1 execution (no verify phase, no human
+  // gate, no session). A trimmed copy of sprint's `execute` phase: same five
+  // step ids/agents. Clean drain → awaiting_review, which the scheduler treats
+  // as "ready to integrate".
+  task: {
+    id: 'task',
+    internal: true,
+    phases: [
+      {
+        id: 'execute',
+        label: 'Execute',
+        color: '#c96442',
+        steps: [
+          {
+            id: 'implement',
+            name: 'Implement task',
+            agent: 'executor',
+            mcps: ['filesystem', 'bash', 'git'],
+            retries: 3,
+            desc: 'Implements one task. Reads CODE-PATTERNS.md, writes diff, runs checks.',
+          },
+          {
+            id: 'write-tests',
+            name: 'Write tests',
+            agent: 'test-writer',
+            mcps: ['filesystem', 'bash'],
+            retries: 1,
+            desc: 'Adds unit / integration tests for the diff before verification.',
+          },
+          {
+            id: 'code-review',
+            name: 'Code review',
+            agent: 'code-reviewer',
+            mcps: ['filesystem', 'git'],
+            retries: 0,
+            desc: 'Inline review of the diff — naming, layering, pattern compliance.',
+          },
+          {
+            id: 'task-verify',
+            name: 'Task verification',
+            agent: 'verifier',
+            mcps: ['filesystem', 'bash'],
+            retries: 3,
+            loopback: 'implement',
+            desc: 'Checks acceptance criteria. Loops back to executor up to 3×.',
+          },
+          {
+            id: 'visual-verify',
+            name: 'Visual verification',
+            agent: 'visual-verifier',
+            mcps: ['maestro', 'playwright'],
+            retries: 1,
+            optional: true,
+            desc: 'Snapshot diff via Maestro or Playwright.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // sprint-init — batch planning. A single-step flow whose orchestrator delegates
+  // to cyboflow-dependency-analyzer and writes the returned blocking edges via
+  // cyboflow_add_task_dependency. Clean drain → awaiting_review flips the batch
+  // planning → running.
+  'sprint-init': {
+    id: 'sprint-init',
+    internal: true,
+    phases: [
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#5a4ad6',
+        steps: [
+          {
+            id: 'analyze-dependencies',
+            name: 'Analyze dependencies',
+            agent: 'dependency-analyzer',
+            mcps: ['filesystem'],
+            retries: 1,
+            desc: 'Proposes task→task blocking edges across the batch; orchestrator writes them via cyboflow_add_task_dependency.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // sprint-finalize — batch Phase-2: the single human gate for the whole sprint.
+  // The `verify` phase lifted out of sprint, operating over the integration
+  // branch's aggregate diff. human-review parks the run at awaiting_input.
+  'sprint-finalize': {
+    id: 'sprint-finalize',
+    internal: true,
+    phases: [
+      {
+        id: 'verify',
+        label: 'Sprint review',
+        color: '#a87a2c',
+        steps: [
+          {
+            id: 'sprint-verify',
+            name: 'Sprint verification',
+            agent: 'verifier',
+            mcps: ['filesystem', 'bash', 'playwright'],
+            retries: 1,
+            desc: 'Runs the full suite over the integration branch after every task is integrated.',
+          },
+          {
+            id: 'sprint-review',
+            name: 'Code review',
+            agent: 'code-reviewer',
+            mcps: ['filesystem', 'git'],
+            retries: 0,
+            desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',
+          },
+          {
+            id: 'human-review',
+            name: 'Human review',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'The single human gate for the whole sprint before merge to main.',
+          },
+        ],
+      },
+    ],
+  },
 };
 
 // ─── Effective-definition resolution helpers ─────────────────────────────────
@@ -428,6 +600,19 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
  */
 export function isCyboflowWorkflowName(name: string): name is CyboflowWorkflowName {
   return (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name);
+}
+
+/**
+ * Is `name` a scheduler-INTERNAL built-in flow (`internal: true` on its
+ * `WORKFLOW_DEFINITIONS` entry)?
+ *
+ * Derived from the definition flag rather than a hand-maintained list, so the
+ * picker filter (`WorkflowRegistry.listByProject`) can never drift from the
+ * definitions. A non-built-in name (custom flow) is never internal — custom
+ * flows are always user-launchable. Returns `false` for unknown names.
+ */
+export function isInternalWorkflowName(name: string): boolean {
+  return isCyboflowWorkflowName(name) && WORKFLOW_DEFINITIONS[name].internal === true;
 }
 
 /**

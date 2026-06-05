@@ -16,7 +16,7 @@ import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { isCyboflowWorkflowName, isInternalWorkflowName, resolveWorkflowDefinition, CYBOFLOW_WORKFLOW_NAMES } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
@@ -349,11 +349,15 @@ export class WorkflowRegistry {
    * flows leaked via the shared dev DB — so the picker never shows dead cards.
    */
   listByProject(projectId: number): WorkflowRow[] {
-    // Exclude the __quick__ sentinel AND any dropped legacy built-ins
-    // (soloflow/compound/prune) that linger in a pre-refactor project DB — they
-    // must never appear in the user-facing picker. Filtered, not deleted, to
-    // preserve the workflow_runs FK for historical runs.
-    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
+    // Exclude the __quick__ sentinel, any dropped legacy built-ins
+    // (soloflow/compound/prune) that linger in a pre-refactor project DB, AND the
+    // scheduler-internal parallel-sprint flows (task/sprint-init/sprint-finalize,
+    // `internal: true`). All must never appear in the user-facing picker.
+    // Filtered, not deleted, to preserve the workflow_runs FK for historical runs.
+    // The internal set is derived from WORKFLOW_DEFINITIONS via
+    // isInternalWorkflowName so it can never drift from the definitions.
+    const internalNames = CYBOFLOW_WORKFLOW_NAMES.filter(isInternalWorkflowName);
+    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES, ...internalNames];
     const placeholders = excluded.map(() => '?').join(', ');
     const stmt = this.db.prepare(
       `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at

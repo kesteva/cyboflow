@@ -3,8 +3,9 @@
  * descriptors that severed the SoloFlow plugin-cache dependency (P0).
  *
  * Coverage:
- *  1. Maps EXACTLY the two cyboflow built-in names (planner + sprint), keyed by
- *     CYBOFLOW_WORKFLOW_NAMES.
+ *  1. Maps EXACTLY the five cyboflow built-in names (the two user-facing flows
+ *     planner + sprint PLUS the three internal parallel-sprint flows
+ *     task / sprint-init / sprint-finalize), keyed by CYBOFLOW_WORKFLOW_NAMES.
  *  2. Each descriptor path points at an existing, readable, non-empty `.md`
  *     prompt body alongside the module.
  *  3. The prompt bodies are self-contained: no `.soloflow` / `IDEA-NNN.md` /
@@ -16,10 +17,10 @@ import { buildBuiltInWorkflows } from '../builtInWorkflows';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 
 describe('buildBuiltInWorkflows', () => {
-  it('maps exactly the cyboflow built-in names (planner + sprint)', () => {
+  it('maps exactly the cyboflow built-in names (user-facing + internal)', () => {
     const descriptors = buildBuiltInWorkflows();
     const names = descriptors.map((d) => d.name).sort();
-    expect(names).toEqual(['planner', 'sprint']);
+    expect(names).toEqual(['planner', 'sprint', 'sprint-finalize', 'sprint-init', 'task']);
     // Keyed by CYBOFLOW_WORKFLOW_NAMES — same set, no extras, no omissions.
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
   });
