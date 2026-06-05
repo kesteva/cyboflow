@@ -14,17 +14,18 @@ import { resolveWorkflowBundle } from '../workflowBundle';
 const workflowsDir = path.join(__dirname, '..');
 
 describe('built-in workflow bundles', () => {
-  it('planner ships its 6 phase commands in order', () => {
+  it('planner ships its 4 heavy-phase subagents in order (gates stay inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'planner.md'));
-    expect(bundle.commands.map((c) => c.name)).toEqual([
-      'approve-idea',
-      'approve-plan',
+    // Human gates (approve-idea / approve-plan) run inline in the orchestrator —
+    // they are NOT delegated, so the bundle ships no commands, only subagents.
+    expect(bundle.commands).toEqual([]);
+    expect(bundle.agents.map((a) => a.name)).toEqual([
       'context',
       'epics',
       'research',
       'tasks',
     ]);
-    assertCommandShape(bundle.commands);
+    assertAgentShape(bundle.agents);
   });
 
   it('sprint ships its 8 phase commands in order', () => {
@@ -48,5 +49,23 @@ function assertCommandShape(commands: { name: string; content: string }[]): void
   for (const cmd of commands) {
     expect(cmd.content).toMatch(/^---[\s\S]*description:/);
     expect(cmd.content).toContain('cyboflow_report_step');
+  }
+}
+
+/**
+ * Every phase subagent carries name + description + tools frontmatter, returns a
+ * `## Result` block, and NEVER touches a `cyboflow_*` MCP tool — the orchestrator
+ * is the single writer of workflow state (subagents only do isolated side-work and
+ * return a compact result). The `cyboflow_` (underscore) match is precise: agent
+ * prose freely says "cyboflow Planner" / "cyboflow state" / `cyboflow-context`,
+ * none of which contain the tool-name underscore.
+ */
+function assertAgentShape(agents: { name: string; content: string }[]): void {
+  for (const agent of agents) {
+    expect(agent.content, `${agent.name} frontmatter`).toMatch(
+      /^---[\s\S]*name:[\s\S]*description:[\s\S]*tools:/,
+    );
+    expect(agent.content, `${agent.name} returns a Result block`).toContain('## Result');
+    expect(agent.content, `${agent.name} must not call any cyboflow_* tool`).not.toMatch(/cyboflow_/);
   }
 }

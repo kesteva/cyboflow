@@ -13,7 +13,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { buildBuiltInWorkflows } from '../builtInWorkflows';
-import { resolveWorkflowBundle } from '../workflowBundle';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 
 describe('buildBuiltInWorkflows', () => {
@@ -51,30 +50,23 @@ describe('buildBuiltInWorkflows', () => {
     }
   });
 
-  it('planner surfaces human gates via AskUserQuestion and forbids silently passing a gate', () => {
+  it('planner surfaces human gates inline via AskUserQuestion and forbids silently passing a gate', () => {
     const planner = buildBuiltInWorkflows().find((d) => d.name === 'planner');
     expect(planner, 'planner descriptor present').toBeDefined();
     const body = readFileSync(planner!.path, 'utf-8');
 
-    // The slim orchestrator names AskUserQuestion as the gate mechanism and
-    // forbids silently proceeding past a gate.
+    // The orchestrator names AskUserQuestion as the gate mechanism and forbids
+    // silently proceeding past a gate.
     expect(body, 'planner must name AskUserQuestion').toMatch(/AskUserQuestion/);
     expect(body, 'Hard rules must forbid silently passing a gate').toMatch(
       /never silently proceed past a gate/,
     );
 
-    // The per-phase gate detail now lives in the invokable command bundle
-    // (IDEA-013 rung-(ii)): the `Approve idea` / `Approve plan` headers (≤12 char
-    // wire limit) are carried by the approve-idea / approve-plan slash-commands.
-    const commands = resolveWorkflowBundle(planner!.path).commands;
-    const byName = new Map(commands.map((c) => [c.name, c.content]));
-    expect(byName.get('approve-idea'), 'approve-idea command names AskUserQuestion').toMatch(/AskUserQuestion/);
-    // \s allows the soft line-break between "header" and the backtick'd header.
-    expect(byName.get('approve-idea'), 'approve-idea uses the `Approve idea` header').toMatch(
-      /header\s+`Approve idea`/,
-    );
-    expect(byName.get('approve-plan'), 'approve-plan uses the `Approve plan` header').toMatch(
-      /header\s+`Approve plan`/,
-    );
+    // Human gates run INLINE in the orchestrator (IDEA-013 subagent rework):
+    // subagents have no AskUserQuestion, so the `Approve idea` / `Approve plan`
+    // headers (≤12 char wire limit) live in the planner prose itself, not in a
+    // delegated unit. \s allows the soft line-break before the backtick'd header.
+    expect(body, 'planner uses the `Approve idea` gate header').toMatch(/header\s+`Approve idea`/);
+    expect(body, 'planner uses the `Approve plan` gate header').toMatch(/header\s+`Approve plan`/);
   });
 });
