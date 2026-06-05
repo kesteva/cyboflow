@@ -3,6 +3,7 @@ import { NotificationSettings } from './NotificationSettings';
 import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import type { AppConfig } from '../types/config';
+import type { PermissionMode } from '../../../shared/types/workflows';
 import { useConfigStore } from '../stores/configStore';
 import {
   Sun,
@@ -11,7 +12,8 @@ import {
   Palette,
   Zap,
   FileText,
-  Eye
+  Eye,
+  ShieldCheck
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -33,6 +35,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [devMode, setDevMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
+  const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -64,6 +67,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       setDevMode(data.devMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
+      setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -98,6 +102,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         claudeExecutablePath,
         devMode,
         enableCyboflowFooter,
+        defaultAgentPermissionMode,
         additionalPaths: parsedPaths,
         notifications: notificationSettings
       });
@@ -231,6 +236,39 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 />
                 <p className="text-xs text-text-tertiary mt-1">
                   When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Agent Permission Mode"
+                description="How workflow agents handle tool use that touches your files"
+                icon={<ShieldCheck className="w-4 h-4" />}
+              >
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
+                    { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
+                    { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
+                    { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
+                  ] as const).map(({ id, label, hint }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setDefaultAgentPermissionMode(id)}
+                      aria-pressed={defaultAgentPermissionMode === id}
+                      className={`flex flex-col items-start gap-1 px-3 py-3 rounded-button border transition-colors text-left ${
+                        defaultAgentPermissionMode === id
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  Applies to workflow runs on both CLI substrates. "Auto" uses Claude's native permission classifier; "Don't ask" skips all permission prompts.
                 </p>
               </SettingsSection>
             </CollapsibleCard>

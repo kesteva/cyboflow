@@ -1,3 +1,6 @@
+import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { PermissionMode } from '../../../shared/types/workflows';
+
 export interface AppConfig {
   gitRepoPath: string;
   verbose?: boolean;
@@ -5,6 +8,10 @@ export interface AppConfig {
   runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
+  // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
+  defaultSubstrate?: CliSubstrate;
+  // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
+  defaultAgentPermissionMode?: PermissionMode;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
