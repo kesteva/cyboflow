@@ -1,52 +1,29 @@
-import { useCyboflowStore } from '../stores/cyboflowStore';
-import { useActiveRunsStore } from '../stores/activeRunsStore';
 import { useLifecycleSession } from './useLifecycleSession';
 import type { Session } from '../types/session';
 
 /**
- * The target of the SessionLifecycleActionBar + its merge / dismiss dialogs.
+ * The target of the SessionLifecycleActionBar + its merge / PR / dismiss dialogs.
  *
- * Two close-out surfaces exist:
- *   - a worktree-backed SESSION (an active quick session, resolved by
- *     useLifecycleSession via sessions.run_id === activeRunId). Quick sessions
- *     own a `sessions` row, so the existing session merge/dismiss machinery
- *     applies unchanged.
- *   - a planner / workflow RUN (GAP-B). Workflow runs have NO `sessions` row
- *     (that would double-list them in the rail and their nested worktree path
- *     does not match the session worktree layout), so the close-out operates on
- *     the workflow_runs row via the `cyboflow.runs.merge` / `cyboflow.runs.dismiss`
- *     procedures instead.
+ * The close-out (Merge / Create-PR / Dismiss) is ALWAYS session-scoped: it owns
+ * the worktree + git lifecycle, and every workflow run is now session-hosted
+ * (nested inside its parent session's worktree). The run-level close-out path was
+ * removed in Phase 4a — a session-hosted run's Merge / PR / Dismiss MUST route to
+ * the owning SESSION (the run-scoped equivalents threw PRECONDITION_FAILED on the
+ * shared session worktree). The only RUN-level lifecycle action is the
+ * git-neutral Cancel (RunActionBar), which is intentionally NOT part of this
+ * close-out target.
  *
- * Exactly one kind is returned (sessions take precedence — a quick session and a
- * workflow run are never both active per cyboflowStore's invariant). Returns
- * null when neither resolves to a closable target.
+ * Resolves the worktree-backed session (an active quick session OR an opened
+ * workflow run, both mapped to one `sessions` row by useLifecycleSession via
+ * sessions.run_id). Returns null when no closable session resolves (e.g. the
+ * main-repo session, or a run with no matching session row).
  */
-export type LifecycleTarget =
-  | { kind: 'session'; session: Session }
-  | { kind: 'run'; runId: string; status: string };
+export type LifecycleTarget = { kind: 'session'; session: Session };
 
 export function useLifecycleTarget(): LifecycleTarget | null {
   const session = useLifecycleSession();
-  const activeRunId = useCyboflowStore((s) => s.activeRunId);
-  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-
-  // A worktree-backed quick session wins (it owns the existing close-out path).
   if (session) {
     return { kind: 'session', session };
   }
-
-  // Otherwise, resolve a workflow run from the active-runs store. A run only
-  // appears here when it is a real workflow run (the `__quick__` sentinel runs
-  // are excluded by activeRunsStore), so this never collides with the session
-  // branch above.
-  if (activeRunId) {
-    for (const runs of Object.values(runsByProject)) {
-      const run = runs.find((r) => r.id === activeRunId);
-      if (run) {
-        return { kind: 'run', runId: run.id, status: run.status };
-      }
-    }
-  }
-
   return null;
 }

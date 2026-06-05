@@ -11,7 +11,10 @@
  *   Modal overlay  — WorkflowPicker mounted inside Modal
  *   Lifecycle      — SessionLifecycleActionBar (header) drives the merge / create-PR /
  *                    dismiss dialogs + success toast, targeting the session resolved
- *                    by useLifecycleSession (active quick session OR opened workflow run)
+ *                    by useLifecycleSession (active quick session OR opened workflow run).
+ *   Run controls   — RunActionBar (header, when a run is active) drives the
+ *                    git-neutral run Cancel (RunCancelDialog) — SEPARATE from the
+ *                    session close-out; it stops the agent without touching git.
  */
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
@@ -41,9 +44,8 @@ import { SessionLifecycleActionBar } from './SessionLifecycleActionBar';
 import { SessionMergeDialog } from './SessionMergeDialog';
 import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
-import { RunMergeDialog } from './RunMergeDialog';
-import { RunCreatePrDialog } from './RunCreatePrDialog';
-import { RunDismissDialog } from './RunDismissDialog';
+import { RunActionBar } from './RunActionBar';
+import { RunCancelDialog } from './RunCancelDialog';
 import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
@@ -117,12 +119,18 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     }
   }, [activeRunId]);
 
-  // Lifecycle dialogs (TASK-796 / GAP-B) — target either the worktree-backed
-  // quick session OR the planner/workflow run resolved from the active selection.
+  // Session close-out dialogs (TASK-796) — Merge / Create-PR / Dismiss always
+  // target the worktree-backed SESSION (an active quick session OR an opened
+  // workflow run mapped to its parent session by useLifecycleSession). The
+  // run-scoped close-out was removed in Phase 4a: every workflow run is now
+  // session-hosted, so its git lifecycle is the session's job.
   const lifecycleTarget = useLifecycleTarget();
   const [isMergeOpen, setIsMergeOpen] = useState(false);
   const [isCreatePrOpen, setIsCreatePrOpen] = useState(false);
   const [isDismissOpen, setIsDismissOpen] = useState(false);
+  // Run-scoped git-neutral Cancel (Phase 4a) — separate from the session
+  // close-out above. Opened from RunActionBar; mounts RunCancelDialog.
+  const [isCancelOpen, setIsCancelOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const handleActionSuccess = useCallback((message: string) => {
@@ -188,6 +196,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </button>
 
         <div className="flex-1" />
+
+        {/* Run-scoped controls (Phase 4a) — git-neutral Cancel only, a distinct
+            RUN grouping (with its own trailing divider) clearly separated from
+            the SESSION close-out (Merge / PR / Dismiss). RunActionBar self-hides
+            when there is no active, non-terminal run selected. */}
+        <RunActionBar onCancel={() => setIsCancelOpen(true)} />
 
         <SessionLifecycleActionBar
           onMerge={() => setIsMergeOpen(true)}
@@ -294,8 +308,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         />
       )}
 
-      {/* Lifecycle dialogs — session-scoped for quick sessions, run-scoped for
-          planner/workflow runs (GAP-B). Only mounted when a target resolves. */}
+      {/* Session close-out dialogs — always session-scoped (Phase 4a removed the
+          run close-out). Only mounted when a closable session resolves. */}
       {lifecycleTarget?.kind === 'session' && (
         <>
           <SessionMergeDialog
@@ -329,36 +343,18 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </>
       )}
 
-      {lifecycleTarget?.kind === 'run' && (
-        <>
-          <RunMergeDialog
-            isOpen={isMergeOpen}
-            onClose={() => setIsMergeOpen(false)}
-            runId={lifecycleTarget.runId}
-            onSuccess={() => {
-              setIsMergeOpen(false);
-              handleActionSuccess('Run merged');
-            }}
-          />
-          <RunCreatePrDialog
-            isOpen={isCreatePrOpen}
-            onClose={() => setIsCreatePrOpen(false)}
-            runId={lifecycleTarget.runId}
-            onSuccess={() => {
-              setIsCreatePrOpen(false);
-              handleActionSuccess('Pull request created');
-            }}
-          />
-          <RunDismissDialog
-            isOpen={isDismissOpen}
-            onClose={() => setIsDismissOpen(false)}
-            runId={lifecycleTarget.runId}
-            onSuccess={() => {
-              setIsDismissOpen(false);
-              handleActionSuccess('Run dismissed');
-            }}
-          />
-        </>
+      {/* Run-scoped git-neutral Cancel (Phase 4a). Mounted whenever a run is
+          active — the dialog itself self-gates on isCancelOpen. onSuccess closes
+          the dialog ONLY: Cancel is git-neutral, so the run goes terminal and
+          activeRunsStore reacts via onRunStatusChanged (the RunActionBar
+          self-hides). The session is NOT cleared — it persists. */}
+      {activeRunId !== null && (
+        <RunCancelDialog
+          isOpen={isCancelOpen}
+          onClose={() => setIsCancelOpen(false)}
+          runId={activeRunId}
+          onSuccess={() => setIsCancelOpen(false)}
+        />
       )}
 
       {/* Success toast — rendered outside the lifecycleSession gate so it

@@ -11,21 +11,11 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   const target = useLifecycleTarget();
   if (!target) return null;
 
-  // Merge / Create-PR accept the run's artifact. They are offered only once the
-  // work is finished and awaiting the user's decision:
-  //   - session: status === 'running' is still in flight → disabled while running.
-  //   - run: only a finished/awaiting-decision run (awaiting_review or stuck) may
-  //     be accepted. The executor never auto-completes; a clean drain rests the
-  //     run in awaiting_review. running / starting / queued / awaiting_input are
-  //     still executing, so accept is disabled.
-  const acceptDisabled =
-    target.kind === 'session'
-      ? target.session.status === 'running'
-      : !(target.status === 'awaiting_review' || target.status === 'stuck');
-
-  // Create-PR is now available for runs too (cyboflow.runs.createPr — GAP-B
-  // un-defer). Both surfaces offer Merge + Create-PR + Dismiss.
-  const showCreatePr = true;
+  // Merge / Create-PR accept the session's artifact. They are offered only once
+  // the work is finished and awaiting the user's decision — a session still
+  // `running` is in flight, so accept is disabled while running. (The run-scoped
+  // close-out was removed in Phase 4a; the target is always a session now.)
+  const acceptDisabled = target.session.status === 'running';
 
   return (
     <div className="flex items-center gap-1.5" data-testid="session-lifecycle-action-bar">
@@ -42,18 +32,16 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
         Merge
       </button>
 
-      {showCreatePr && (
-        <button
-          data-testid="session-action-create-pr"
-          disabled={acceptDisabled}
-          onClick={onCreatePR}
-          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          title={acceptDisabled ? 'Wait for the work to finish before creating a PR' : 'Create a pull request'}
-        >
-          <ExternalLink size={14} />
-          Create PR
-        </button>
-      )}
+      <button
+        data-testid="session-action-create-pr"
+        disabled={acceptDisabled}
+        onClick={onCreatePR}
+        className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+        title={acceptDisabled ? 'Wait for the work to finish before creating a PR' : 'Create a pull request'}
+      >
+        <ExternalLink size={14} />
+        Create PR
+      </button>
 
       <button
         data-testid="session-action-dismiss"

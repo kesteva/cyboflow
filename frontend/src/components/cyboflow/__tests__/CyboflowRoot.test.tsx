@@ -77,6 +77,8 @@ vi.mock('../../../trpc/client', () => ({
             branchName: 'cyboflow/planner/run-plan',
           }),
         },
+        // Phase 4a — git-neutral run Cancel.
+        cancel: { mutate: vi.fn().mockResolvedValue({ success: true }) },
       },
       workflows: {
         list: {
@@ -607,8 +609,10 @@ describe('CyboflowRoot — lifecycle dialog wiring (TASK-796)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GAP-B: workflow-run close-out (action bar + run dialogs resolved from
-// activeRunsStore, no `sessions` row)
+// Phase 4a: run-scoped git-neutral Cancel (RunActionBar + RunCancelDialog),
+// resolved from activeRunsStore. The run close-out (Merge / PR / Dismiss) is
+// now SESSION-only — an active run with no `sessions` row shows ONLY the
+// run-scoped Cancel control, NOT the session-lifecycle-action-bar.
 // ---------------------------------------------------------------------------
 
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
@@ -617,9 +621,9 @@ const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
   id: 'run-planner-1',
   workflow_id: 'wf-2',
   project_id: 1,
-  // Default to the rest state: a finished run awaiting the user's Merge / PR /
-  // Dismiss decision. The executor never auto-completes, so awaiting_review is
-  // the normal "ready to accept" status (not 'completed', which is terminal).
+  // Default to the rest state: a finished run awaiting the user's decision. The
+  // executor never auto-completes, so awaiting_review is the normal non-terminal
+  // "ready" status (not 'completed', which is terminal).
   status: 'awaiting_review' as const,
   worktree_path: '/tmp/wt/planner/run-plan',
   branch_name: 'cyboflow/planner/run-plan',
@@ -632,7 +636,7 @@ const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
+describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
   afterEach(() => {
     act(() => {
       useCyboflowStore.getState().clearActiveRun();
@@ -652,87 +656,60 @@ describe('CyboflowRoot — workflow-run close-out (GAP-B)', () => {
     return run;
   };
 
-  it('renders the action bar (Merge + Create PR + Dismiss) for an active workflow run with no session', () => {
+  it('renders the RunActionBar Cancel control for an active non-terminal run with no session', () => {
     activateRun();
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.getByTestId('session-lifecycle-action-bar')).toBeInTheDocument();
-    expect(screen.getByTestId('session-action-merge')).toBeInTheDocument();
-    expect(screen.getByTestId('session-action-dismiss')).toBeInTheDocument();
-    // Create-PR is now offered for runs too (GAP-B un-defer).
-    expect(screen.getByTestId('session-action-create-pr')).toBeInTheDocument();
+    expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('run-action-cancel')).toBeInTheDocument();
   });
 
-  it('enables Merge + Create PR when the run is awaiting_review (finished, ready to accept)', () => {
-    activateRun({ status: 'awaiting_review' });
+  it('does NOT render the session close-out bar for a run with no matching session (close-out is session-only now)', () => {
+    activateRun();
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
-    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
-    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+    // The run close-out was removed in Phase 4a; a session-less run shows only
+    // the run-scoped Cancel, never the session Merge / PR / Dismiss bar.
+    expect(screen.queryByTestId('session-lifecycle-action-bar')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-action-merge')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-action-create-pr')).not.toBeInTheDocument();
   });
 
-  it('enables Merge + Create PR when the run is stuck', () => {
-    activateRun({ status: 'stuck' });
+  it('hides the RunActionBar when the run is terminal (canceled)', () => {
+    activateRun({ status: 'canceled' });
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.getByTestId('session-action-merge')).not.toBeDisabled();
-    expect(screen.getByTestId('session-action-create-pr')).not.toBeDisabled();
+    expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
   });
 
-  it('disables Merge + Create PR while the run is still running; Dismiss stays enabled', () => {
+  it('clicking Cancel run opens the RunCancelDialog (git-neutral confirm)', () => {
     activateRun({ status: 'running' });
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.getByTestId('session-action-merge')).toBeDisabled();
-    expect(screen.getByTestId('session-action-create-pr')).toBeDisabled();
-    expect(screen.getByTestId('session-action-dismiss')).not.toBeDisabled();
+    expect(screen.queryByText('Cancel this run?')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('run-action-cancel'));
+    expect(screen.getByText('Cancel this run?')).toBeInTheDocument();
+    // Copy makes the git-neutral guarantee explicit.
+    expect(screen.getByText(/nothing is merged or deleted/)).toBeInTheDocument();
   });
 
-  it('clicking Merge opens the RunMergeDialog', () => {
-    activateRun({ status: 'awaiting_review' });
+  it('confirming Cancel calls cyboflow.runs.cancel.mutate with the runId', async () => {
+    const run = activateRun({ status: 'running' });
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.queryByText('Merge run changes')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('session-action-merge'));
-    expect(screen.getByText('Merge run changes')).toBeInTheDocument();
-  });
-
-  it('clicking Create PR opens the RunCreatePrDialog', () => {
-    activateRun({ status: 'awaiting_review' });
-    render(<CyboflowRoot projectId={1} />);
-
-    expect(screen.queryByText('Create pull request')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('session-action-create-pr'));
-    expect(screen.getByText('Create pull request')).toBeInTheDocument();
-  });
-
-  it('clicking Dismiss opens the RunDismissDialog', () => {
-    activateRun({ status: 'awaiting_review' });
-    render(<CyboflowRoot projectId={1} />);
-
-    expect(screen.queryByText('Dismiss run?')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('session-action-dismiss'));
-    expect(screen.getByText('Dismiss run?')).toBeInTheDocument();
-  });
-
-  it('confirming Dismiss calls cyboflow.runs.dismiss.mutate with the runId', async () => {
-    const run = activateRun({ status: 'awaiting_review' });
-    render(<CyboflowRoot projectId={1} />);
-
-    fireEvent.click(screen.getByTestId('session-action-dismiss'));
-    // Two buttons are now labelled 'Dismiss' (the action-bar trigger and the
-    // ConfirmDialog confirm). Click the confirm one — the trigger carries the
-    // session-action-dismiss testid, so exclude it.
-    const actionBarBtn = screen.getByTestId('session-action-dismiss');
+    fireEvent.click(screen.getByTestId('run-action-cancel'));
+    // Two buttons read 'Cancel run' now (the action-bar trigger and the
+    // ConfirmDialog confirm). The trigger carries the run-action-cancel testid,
+    // so exclude it and click the confirm one.
+    const triggerBtn = screen.getByTestId('run-action-cancel');
     const confirmBtn = screen
-      .getAllByRole('button', { name: 'Dismiss' })
-      .find((b) => b !== actionBarBtn);
+      .getAllByRole('button', { name: 'Cancel run' })
+      .find((b) => b !== triggerBtn);
     await act(async () => {
       fireEvent.click(confirmBtn!);
     });
 
-    const dismissMock = (trpc.cyboflow.runs as unknown as { dismiss: { mutate: ReturnType<typeof vi.fn> } }).dismiss.mutate;
-    expect(dismissMock).toHaveBeenCalledWith({ runId: run.id });
+    const cancelMock = (trpc.cyboflow.runs as unknown as { cancel: { mutate: ReturnType<typeof vi.fn> } }).cancel.mutate;
+    expect(cancelMock).toHaveBeenCalledWith({ runId: run.id });
   });
 });
