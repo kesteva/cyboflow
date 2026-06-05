@@ -63,6 +63,8 @@ export interface WorkflowRunRow {
   seed_idea_id?: string | null;
   /** SDK conversation id captured from the run's first system/init event (migration 018). Used by nudgeRunHandler to re-spawn with `--resume` so an idle-chat nudge continues the same conversation. NULL until the first init event / for runs that never spawned. */
   claude_session_id?: string | null;
+  /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. */
+  session_id?: string | null;
   /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 014). */
   outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
@@ -100,6 +102,8 @@ export interface WorkflowRunListRow {
    * IDEA-013 / TASK-806.
    */
   substrate?: CliSubstrate;
+  /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
+  session_id?: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
