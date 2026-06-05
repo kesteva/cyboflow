@@ -35,6 +35,8 @@ The pattern for every phase:
 1. **implement** → delegate to `cyboflow-implement` with the task body + acceptance
    criteria. It returns an `## Implementation` summary.
 2. **write-tests** → delegate to `cyboflow-write-tests` with the task + diff summary.
+   If its `## Tests` outcome reports a failing test, loop back to `cyboflow-implement`
+   to fix the cause before continuing.
 3. **code-review** → delegate to `cyboflow-code-review`. For each entry in its
    `## Findings`, record a finding via `cyboflow_report_finding` (non-blocking; lands
    in the review queue for human triage). If it returns a `## Blocking` defect, loop
@@ -43,7 +45,9 @@ The pattern for every phase:
    `FAIL`, re-delegate to `cyboflow-implement` with its `## Fix guidance`, then
    re-verify — up to 3× before escalating to the user.
 5. **visual-verify** (optional) → when visual verification is enabled, delegate to
-   `cyboflow-visual-verify`; otherwise skip.
+   `cyboflow-visual-verify`; otherwise skip. On `VERDICT: FAIL`, loop back to
+   `cyboflow-implement` with its `## Visual check` notes, or record a finding via
+   `cyboflow_report_finding` when the regression is out of scope.
 
 ### Phase 2 — Sprint review
 
