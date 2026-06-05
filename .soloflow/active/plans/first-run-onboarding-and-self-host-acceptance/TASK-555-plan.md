@@ -60,7 +60,7 @@ Cut v0.1.2 of Cyboflow: bump `package.json` to 0.1.2, finalize the appId/product
 2. Modify `package.json` (single PR, atomic):
    - `"name": "cyboflow"` (replaces `"crystal"`).
    - `"version": "0.1.2"` (already set — inherited Crystal `"0.3.5"` was reset to `0.1.2` in a prior chore commit; confirm it is still `0.1.2`).
-   - `"description": "Cyboflow - Cross-workflow review queue for Claude Code"`.
+   - `"description": "Cyboflow - Multi-session AI code assistant manager"` (already set; no "built on Crystal" suffix).
    - `"author": { "name": "Cyboflow", "email": "<author email>" }`.
    - `"build.appId": "com.cyboflow.app"` (replaces `"com.stravu.crystal"`).
    - `"build.productName": "Cyboflow"` (replaces `"Crystal"`).
