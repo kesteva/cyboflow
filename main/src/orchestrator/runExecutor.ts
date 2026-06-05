@@ -16,11 +16,9 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import { buildPreToolUseHook } from './permissionModeMapper';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
@@ -70,7 +68,14 @@ export interface ClaudeSpawnerOptions {
   sessionId: string;
   worktreePath: string;
   prompt: string;
-  preToolUseHook?: HookCallback;
+  /**
+   * Workflow 4-mode agent permission value resolved from the run snapshot
+   * (`workflow_runs.permission_mode_snapshot`). Threaded to the spawning
+   * manager so each substrate can apply native auto / accept-edits / ask /
+   * skip behavior. Behavior branching lands in a later step; here the field is
+   * only carried. DISTINCT from the legacy session `permissionMode`.
+   */
+  agentPermissionMode?: PermissionMode;
   systemPromptAppend?: string;
   /**
    * The real workflow_runs.id. For workflow runs this equals panelId/sessionId
@@ -658,28 +663,27 @@ export class RunExecutor {
   }
 
   /**
-   * Returns optional overrides for ClaudeSpawnerOptions (e.g. preToolUseHook).
-   * Default returns preToolUseHook from buildPreToolUseHook when permission_mode
-   * is set on the workflow; otherwise returns an empty object.
+   * Returns optional overrides for ClaudeSpawnerOptions.
+   * Threads the run's resolved 4-mode agentPermissionMode (read from the
+   * IMMUTABLE snapshot `run.permission_mode_snapshot`, NOT the live
+   * `workflow.permission_mode`) to the spawning manager, plus any pending
+   * system-prompt append. Substrate behavior branching off this value lands in
+   * a later step.
    *
    * @param runId     The workflow run ID.
-   * @param _run      The workflow_runs row.
-   * @param workflow  The workflow row.
+   * @param run       The workflow_runs row (source of the permission snapshot).
+   * @param _workflow The workflow row.
    */
   protected async buildOptionsOverrides(
     runId: string,
-    _run: WorkflowRunRow,
-    workflow: WorkflowRow,
+    run: WorkflowRunRow,
+    _workflow: WorkflowRow,
   ): Promise<Partial<ClaudeSpawnerOptions>> {
     const systemPromptAppend = this.pendingSystemPromptAppend.get(runId) || undefined;
-    const overrides: Partial<ClaudeSpawnerOptions> = { systemPromptAppend };
-
-    if (workflow.permission_mode) {
-      const hook = buildPreToolUseHook(workflow.permission_mode as PermissionMode, runId, this.logger);
-      if (hook !== undefined) {
-        overrides.preToolUseHook = hook;
-      }
-    }
+    const overrides: Partial<ClaudeSpawnerOptions> = {
+      systemPromptAppend,
+      agentPermissionMode: run.permission_mode_snapshot,
+    };
 
     return overrides;
   }

@@ -251,7 +251,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
 
 // ---------------------------------------------------------------------------
 // TASK-650: New tests for cancel surface, bridge handle, ExecutionPhase,
-// and preToolUseHook threading.
+// and agentPermissionMode threading.
 // ---------------------------------------------------------------------------
 
 import type { RunEventBridge } from '../runEventBridge';
@@ -455,34 +455,11 @@ describe('RunExecutor.execute — terminal phase triggers teardownRun via finall
   });
 });
 
-describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () => {
-  it('(iv) returns { preToolUseHook } when workflow.permission_mode is "default"', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
-    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'default' });
-    const registry: WorkflowRegistryLike = {
-      getRunById: vi.fn().mockReturnValue(run),
-      getById: vi.fn().mockReturnValue(workflow),
-    };
-
-    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
-    const spawner = makeSpawner();
-    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
-      async (opts: ClaudeSpawnerOptions) => {
-        capturedOverrides = opts;
-      },
-    );
-
-    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
-    await executor.execute(run.id);
-
-    // The spawner should have been called with a preToolUseHook function.
-    expect(capturedOverrides).not.toBeNull();
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(typeof capturedOverrides!.preToolUseHook).toBe('function');
-  });
-
-  it('(iv-b) returns {} (no preToolUseHook) when permission_mode is "dontAsk"', async () => {
-    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+describe('RunExecutor.buildOptionsOverrides — agentPermissionMode threading', () => {
+  it('(iv) threads agentPermissionMode from run.permission_mode_snapshot ("default")', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'default' });
+    // Live workflow.permission_mode intentionally DIFFERS from the snapshot to
+    // prove buildOptionsOverrides reads the immutable snapshot, not the live row.
     const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'dontAsk' });
     const registry: WorkflowRegistryLike = {
       getRunById: vi.fn().mockReturnValue(run),
@@ -500,10 +477,61 @@ describe('RunExecutor.buildOptionsOverrides — preToolUseHook threading', () =>
     const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
     await executor.execute(run.id);
 
-    // For 'dontAsk', buildPreToolUseHook returns undefined so no hook is set.
+    expect(capturedOverrides).not.toBeNull();
+    // The snapshot value wins, NOT the live workflow.permission_mode.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.agentPermissionMode).toBe('default');
+    // The dead preToolUseHook wire is gone — no hook is threaded.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect('preToolUseHook' in capturedOverrides!).toBe(false);
+  });
+
+  it('(iv-b) threads agentPermissionMode "dontAsk" straight from the snapshot', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'dontAsk' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, permission_mode: 'default' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+    await executor.execute(run.id);
+
     expect(capturedOverrides).not.toBeNull();
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    expect(capturedOverrides!.preToolUseHook).toBeUndefined();
+    expect(capturedOverrides!.agentPermissionMode).toBe('dontAsk');
+  });
+
+  it('(iv-c) threads agentPermissionMode "auto" from the snapshot (native auto)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', permission_mode_snapshot: 'auto' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+    await executor.execute(run.id);
+
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.agentPermissionMode).toBe('auto');
   });
 });
 

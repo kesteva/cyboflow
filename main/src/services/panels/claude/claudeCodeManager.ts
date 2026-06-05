@@ -16,6 +16,10 @@ import type { QuestionPayload } from '../../../orchestrator/questionRouter';
 import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
 import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
 import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
+import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../../../orchestrator/permissionModeMapper';
+import { ReviewItemRouter, ReviewItemError } from '../../../orchestrator/reviewItemRouter';
+import type { ReviewItemCreate } from '../../../orchestrator/reviewItemRouter';
+import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
@@ -25,6 +29,54 @@ import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamPar
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
+import type { PermissionMode } from '../../../../../shared/types/workflows';
+
+/**
+ * MODEL-ELIGIBILITY GUARD for native auto-mode.
+ *
+ * Native Claude auto-mode (`--permission-mode auto` / `sdkOptions.permissionMode
+ * = 'auto'`) relies on a recent classifier-capable model. Per the LOCKED design,
+ * auto requires Opus 4.6+ / Sonnet 4.6+. This is a CONSERVATIVE guard: it returns
+ * `true` for the common "let the SDK pick / use an alias family" cases
+ * (undefined, 'auto', and any id whose family is 'sonnet'/'opus') and `false`
+ * only for clearly-older pinned ids (Claude 3.x / 4.0–4.5 date-stamped or
+ * version-tagged Sonnet/Opus, and Haiku which has no auto-classifier). When this
+ * returns false for a requested 'auto' spawn, the caller FALLS BACK to default
+ * approval behavior (installs the normal hook) and logs a warning — auto never
+ * silently degrades to approve on an unsupported model.
+ *
+ * Kept module-level (pure, no `this`) so it is trivially unit-testable.
+ */
+export function modelSupportsAutoMode(model?: string): boolean {
+  // Undefined / 'auto' → SDK default model (current, classifier-capable). Allow.
+  if (!model || model === 'auto') return true;
+
+  const id = model.toLowerCase();
+
+  // Bare alias families ('sonnet' / 'opus' with no pinned version) resolve to
+  // the current model the SDK ships, which is classifier-capable. Allow.
+  if (id === 'sonnet' || id === 'opus') return true;
+
+  // Haiku has no auto-mode classifier in any released line. Deny.
+  if (id.includes('haiku')) return false;
+
+  // Clearly-older pinned families: Claude 3 / 3.5 / 3.7 and the 4.0–4.5 line
+  // predate the 4.6 auto-mode classifier. Deny so auto falls back to default.
+  // Matches both date-stamped ids (e.g. 'claude-opus-4-1-20250805') and the
+  // dotted marketing form (e.g. 'claude-3-5-sonnet').
+  const OLDER_PINNED = [
+    'claude-3', 'claude-3-5', 'claude-3-7',
+    'claude-sonnet-3', 'claude-opus-3',
+    'sonnet-3', 'opus-3',
+    'claude-4-0', 'claude-4-1', 'claude-4-2', 'claude-4-3', 'claude-4-4', 'claude-4-5',
+    'sonnet-4-0', 'sonnet-4-1', 'sonnet-4-2', 'sonnet-4-3', 'sonnet-4-4', 'sonnet-4-5',
+    'opus-4-0', 'opus-4-1', 'opus-4-2', 'opus-4-3', 'opus-4-4', 'opus-4-5',
+  ];
+  if (OLDER_PINNED.some((older) => id.includes(older))) return false;
+
+  // Unknown / newer pinned id (e.g. a 4.6+ stamp) — assume classifier-capable.
+  return true;
+}
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -34,6 +86,16 @@ interface ClaudeSpawnOptions {
   conversationHistory?: string[];
   isResume?: boolean;
   permissionMode?: 'approve' | 'ignore';
+  /**
+   * Workflow 4-mode agent permission value resolved from the run snapshot
+   * (`workflow_runs.permission_mode_snapshot`) and threaded by RunExecutor.
+   * This is the NEW 4-mode field ('default' | 'acceptEdits' | 'auto' | 'dontAsk')
+   * governing workflow runs — DISTINCT from the legacy session `permissionMode`
+   * above ('approve' | 'ignore'), which stays for quick/legacy sessions.
+   * Behavior branching off this value lands in a later step; here it is only
+   * carried so the field threads through and compiles.
+   */
+  agentPermissionMode?: PermissionMode;
   model?: string;
   /**
    * The workflow_runs row ID for ApprovalRouter. For workflow runs this equals
@@ -442,6 +504,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
           if (captured) runClaudeSessionCaptured = true;
         }
 
+        // Step G — native auto-mode visibility. When the auto classifier (or any
+        // non-interactive deny) short-circuits a tool call, the SDK emits a
+        // system/permission_denied message. Fold it into the review inbox as a
+        // NON-BLOCKING row so the user can SEE what auto denied. The run is never
+        // paused on this — fire-and-forget, errors are swallowed.
+        this.maybeFoldAutoDenyVisibility(runId, event);
+
         try {
           router.emitForRun(runId, typed);
         } catch (routerErr) {
@@ -528,11 +597,109 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return true;
   }
 
+  /**
+   * Step G — fold a native-auto / non-interactive tool deny into the review
+   * inbox as a NON-BLOCKING `permission` row (visibility only).
+   *
+   * The SDK emits `SDKPermissionDeniedMessage` ({ type: 'system', subtype:
+   * 'permission_denied', tool_name, tool_use_id, tool_input?, decision_reason?,
+   * ... }) when a tool call is auto-denied WITHOUT an interactive prompt — e.g.
+   * the auto-mode classifier, dontAsk mode, or a deny rule. We surface these so
+   * the user can see what auto rejected. Per the LOCKED design these rows are
+   * NON-BLOCKING (blocking=0) and the run is NEVER paused.
+   *
+   * Structurally narrowed (no `any`); fail-soft: a malformed event, an
+   * uninitialized ReviewItemRouter, or a missing project_id is logged at warn
+   * and swallowed — visibility folding must never crash the SDK iterator.
+   *
+   * Fire-and-forget: applyReviewItem is queued per-project; we do not await it
+   * (the iterator must keep draining). A late chokepoint rejection is logged.
+   */
+  private maybeFoldAutoDenyVisibility(runId: string, event: unknown): void {
+    if (typeof event !== 'object' || event === null) return;
+    const e = event as {
+      type?: unknown;
+      subtype?: unknown;
+      tool_name?: unknown;
+      tool_input?: unknown;
+      tool_use_id?: unknown;
+      decision_reason?: unknown;
+      decision_reason_type?: unknown;
+    };
+    if (e.type !== 'system' || e.subtype !== 'permission_denied') return;
+    const toolName = typeof e.tool_name === 'string' ? e.tool_name : 'unknown';
+
+    let router: ReviewItemRouter;
+    try {
+      router = ReviewItemRouter.getInstance();
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] auto-deny visibility skipped (ReviewItemRouter not initialized): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    // Resolve the project_id for the run; review items are project-scoped.
+    let projectId: number | undefined;
+    try {
+      const row = this.db
+        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { projectId?: unknown } | undefined;
+      if (row && typeof row.projectId === 'number') projectId = row.projectId;
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] auto-deny visibility skipped (project_id lookup failed for run ${runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    if (projectId === undefined) {
+      // No workflow_runs row (e.g. quick session) — nothing to scope the
+      // visibility row to. Skip silently at verbose level.
+      this.logger?.verbose(
+        `[ClaudeCodeManager] auto-deny visibility skipped (no workflow_runs row for run ${runId})`,
+      );
+      return;
+    }
+
+    const reason = typeof e.decision_reason === 'string' ? e.decision_reason : undefined;
+    const reasonType = typeof e.decision_reason_type === 'string' ? e.decision_reason_type : undefined;
+    const payload: PermissionPayload = {
+      kind: 'permission',
+      toolName,
+      toolInput: e.tool_input ?? null,
+    };
+    const create: ReviewItemCreate = {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'permission',
+      title: `Auto-mode denied ${toolName}`,
+      body: reason ?? null,
+      blocking: false, // NON-BLOCKING — visibility only, never pauses the run.
+      source: reasonType ? `auto:${reasonType}` : 'auto',
+      runId,
+      payload,
+    };
+
+    // Fire-and-forget — the run is NEVER gated on the inbox.
+    void router.applyReviewItem(projectId, create).catch((err) => {
+      this.logger?.warn(
+        `[ClaudeCodeManager] auto-deny visibility folding failed (non-blocking) for run ${runId}: ${
+          err instanceof ReviewItemError ? err.code : err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // SDK options builder
   // ---------------------------------------------------------------------------
 
   private async buildSdkOptions(options: ClaudeSpawnOptions): Promise<Options> {
+    // Resolve the effective mode ONCE (applies the model-eligibility guard, may
+    // warn). Both the hook installation and the native-auto permissionMode flag
+    // derive from this single value so the guard never logs twice.
+    const effectiveMode = this.resolveEffectiveSdkMode(options);
+
     const sdkOptions: Options = {
       cwd: options.worktreePath,
       includePartialMessages: true,
@@ -554,24 +721,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
           previewFormat: 'markdown' as const,
         },
       },
-      // When permissionMode is 'ignore', omit PreToolUse entirely so every tool call
-      // is auto-allowed by the SDK — matching the pre-SDK "skip the bridge" behavior.
-      ...(options.permissionMode !== 'ignore' ? {
-        hooks: {
-          PreToolUse: [{
-            // Load the user/project allow-list ONCE per spawn and capture it in
-            // the hook closure — the hook fires per tool call and must not touch
-            // the filesystem each time. The PreToolUse hook is first in the CLI's
-            // permission order, so the SDK's own settingSources allow-rule
-            // evaluation never runs; the hook honors those grants itself.
-            hooks: [this.makePreToolUseHook(
-              options.runId ?? options.panelId,
-              loadMergedPermissionRules(options.worktreePath),
-            )]
-          }]
-        }
-      } : {})
+      ...this.composeHookOptions(options, effectiveMode),
     };
+
+    // Native Claude auto-mode (model classifier owns gating). Set ONLY when the
+    // resolved effective mode is 'auto' — the eligibility guard inside
+    // resolveEffectiveSdkMode() has already downgraded unsupported models to
+    // 'default', so this never sets permissionMode on an old pinned id.
+    if (effectiveMode === 'auto') {
+      // SDK PermissionMode includes 'auto' (sdk.d.ts). This is the native
+      // auto-mode the LOCKED design routes BOTH substrates through.
+      sdkOptions.permissionMode = 'auto';
+    }
 
     if (options.model && options.model !== 'auto') {
       sdkOptions.model = options.model;
@@ -668,6 +829,122 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
+   * Resolve the effective hook-installation mode for a spawn.
+   *
+   * Precedence (per the LOCKED design): the NEW 4-mode `agentPermissionMode`
+   * (workflow runs) wins when present; otherwise fall back to the legacy
+   * `permissionMode` ('ignore' → 'dontAsk', anything else → 'default') so
+   * quick/legacy sessions behave exactly as before this step.
+   *
+   * Returns the 4-mode value DIRECTLY (no eligibility downgrade) — the
+   * separate resolveEffectiveSdkMode() applies the model-eligibility guard for
+   * the native-auto path so the two concerns stay independent.
+   */
+  private resolveHookMode(options: ClaudeSpawnOptions): PermissionMode {
+    if (options.agentPermissionMode) {
+      return options.agentPermissionMode;
+    }
+    return options.permissionMode === 'ignore' ? 'dontAsk' : 'default';
+  }
+
+  /**
+   * Resolve the effective mode the SDK should run under, applying the
+   * MODEL-ELIGIBILITY GUARD for native auto-mode.
+   *
+   * Native auto requires a recent classifier-capable model (Opus 4.6+ /
+   * Sonnet 4.6+). When 'auto' is requested but the pinned model is clearly
+   * older, fall back to 'default' (the normal approval hook is installed) and
+   * log a warning so auto never silently degrades to approve on an unsupported
+   * model. Any other mode passes through unchanged.
+   */
+  private resolveEffectiveSdkMode(options: ClaudeSpawnOptions): PermissionMode {
+    const mode = this.resolveHookMode(options);
+    if (mode === 'auto' && !modelSupportsAutoMode(options.model)) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] auto permission mode requested but model '${options.model}' does not support native auto-mode; falling back to 'default' (approval hook installed).`,
+      );
+      return 'default';
+    }
+    return mode;
+  }
+
+  /**
+   * Compose the `hooks` slice of the SDK Options based on the effective mode.
+   *
+   * HOOK PRE-EMPTION RULE: PreToolUse hooks run FIRST in the CLI permission
+   * order. The hook installed here MUST match the mode so it never pre-empts a
+   * native decision:
+   *   - 'dontAsk' → NO PreToolUse hook (unrestricted; legacy 'ignore' parity).
+   *   - 'auto'    → an AskUserQuestion-ONLY hook (question gates still reach
+   *                 QuestionRouter) that defers EVERY other tool to the native
+   *                 classifier — it MUST NOT route through ApprovalRouter.
+   *   - 'default' / 'acceptEdits' → the full permission hook (allowlist +
+   *                 optional acceptEdits auto-allow + ApprovalRouter routing),
+   *                 with AskUserQuestion routed to QuestionRouter.
+   *
+   * The user/project allow-list is loaded ONCE per spawn and captured in the
+   * hook closure (the hook fires per tool call and must not touch the FS each
+   * time).
+   *
+   * @param mode - the already-resolved effective mode (post eligibility guard);
+   *   passed in by buildSdkOptions so the guard's warn only fires once.
+   */
+  private composeHookOptions(options: ClaudeSpawnOptions, mode: PermissionMode): Pick<Options, 'hooks'> {
+    const runId = options.runId ?? options.panelId;
+
+    if (mode === 'dontAsk') {
+      // No PreToolUse hook — every tool call is auto-allowed by the SDK
+      // (matches the pre-SDK / legacy 'ignore' "skip the bridge" behavior).
+      return {};
+    }
+
+    const hook =
+      mode === 'auto'
+        ? this.makeAutoModePreToolUseHook(runId)
+        : this.makePreToolUseHook(runId, loadMergedPermissionRules(options.worktreePath), mode);
+
+    return {
+      hooks: {
+        PreToolUse: [{ hooks: [hook] }],
+      },
+    };
+  }
+
+  /**
+   * Build the AskUserQuestion-ONLY PreToolUse hook for native auto-mode.
+   *
+   * Auto-mode delegates ALL permission gating to the native Claude classifier
+   * (set via sdkOptions.permissionMode = 'auto'). A PreToolUse hook that emitted
+   * an allow/deny decision would pre-empt that classifier (hooks run first in
+   * the CLI permission order), silently degrading auto to approve. So this hook:
+   *   - routes tool_name === 'AskUserQuestion' to QuestionRouter (so planner /
+   *     sprint question gates still work), and
+   *   - for EVERY other tool returns a pass-through with NO permissionDecision,
+   *     deferring to the lower layers (the native classifier). Per the SDK
+   *     contract (PreToolUseHookSpecificOutput.permissionDecision is optional),
+   *     omitting the decision means "no opinion — defer".
+   *
+   * It MUST NOT call routePreToolUseThroughApprovalRouter.
+   */
+  private makeAutoModePreToolUseHook(runId: string): HookCallback {
+    const loggerLike = makeLoggerLike(this.logger);
+    return async (input, _toolUseId, _ctx) => {
+      const pretool = input as PreToolUseHookInput;
+      if (pretool.tool_name === 'AskUserQuestion') {
+        return this.routeAskUserQuestion(pretool, runId, loggerLike);
+      }
+      // Defer to the native classifier: emit a PreToolUse output with NO
+      // permissionDecision so the lower permission layers decide. This is the
+      // documented "no opinion" form (permissionDecision is optional).
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+        },
+      };
+    };
+  }
+
+  /**
    * Build the PreToolUse hook callback that routes tool-use permission
    * decisions through ApprovalRouter (or QuestionRouter for AskUserQuestion)
    * and translates to SDK hookSpecificOutput.
@@ -676,21 +953,45 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * user-question gate, not a permission gate, and its answer flows back via
    * `updatedInput: { questions, answers }` rather than allow/deny.
    *
-   * All other tools delegate to routePreToolUseThroughApprovalRouter so the
-   * allow/deny/error semantics are maintained in a single place alongside
-   * permissionModeMapper.
+   * When `mode === 'acceptEdits'`, tool names in ACCEPT_EDITS_AUTO_APPROVE_TOOLS
+   * (Edit/Write/MultiEdit) are auto-allowed BEFORE the user/project allowlist
+   * check; all other tools follow the same allowlist → ApprovalRouter path as
+   * 'default'. `mode === 'default'` keeps the pre-step behavior exactly.
+   *
+   * All non-auto-allowed tools delegate to routePreToolUseThroughApprovalRouter
+   * so the allow/deny/error semantics are maintained in a single place
+   * alongside permissionModeMapper.
    *
    * A deny may originate from clearPendingForRun() when the run is terminated
    * mid-approval (e.g., user cancels the run while awaiting a PreToolUse
    * decision). In that case decision.message will be
    * 'Run was terminated before approval could be processed'.
+   *
+   * @param mode - The effective hook mode; defaults to 'default' so existing
+   *   2-arg callers (tests, legacy) keep their behavior.
    */
-  private makePreToolUseHook(runId: string, allowRules: MergedPermissionRules): HookCallback {
+  private makePreToolUseHook(
+    runId: string,
+    allowRules: MergedPermissionRules,
+    mode: PermissionMode = 'default',
+  ): HookCallback {
     const loggerLike = makeLoggerLike(this.logger);
     return async (input, _toolUseId, _ctx) => {
       const pretool = input as PreToolUseHookInput;
       if (pretool.tool_name === 'AskUserQuestion') {
         return this.routeAskUserQuestion(pretool, runId, loggerLike);
+      }
+      // acceptEdits: auto-allow the edit tools BEFORE the allowlist check.
+      if (
+        mode === 'acceptEdits' &&
+        (ACCEPT_EDITS_AUTO_APPROVE_TOOLS as readonly string[]).includes(pretool.tool_name)
+      ) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+          },
+        };
       }
       // Honor user/project allow grants: a tool the user already approved at the
       // settings level is auto-allowed without re-prompting via ApprovalRouter.
