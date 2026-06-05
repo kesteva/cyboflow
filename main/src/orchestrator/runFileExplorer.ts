@@ -1,10 +1,21 @@
 /**
- * Orchestrator-subtree handler for the workflow-run File Explorer.
+ * Orchestrator-subtree handler for the File Explorer.
  *
- * Resolves a run to its git worktree (workflow_runs.worktree_path) and performs
- * read-only filesystem access scoped strictly inside that worktree:
- *   - listRunFiles(db, runId, relPath?) — one directory level, dirs-first.
- *   - readRunFile(db, runId, relPath)   — a single file's text content.
+ * Performs read-only filesystem access scoped strictly inside a git worktree.
+ * Serves BOTH callers:
+ *   - SESSION-keyed (canonical): resolves a session to its worktree
+ *     (sessions.worktree_path) so the File Explorer tab binds to the selected
+ *     session's tree whether or not a run is active.
+ *       - listSessionFiles(db, sessionId, relPath?) — one directory level.
+ *       - readSessionFile(db, sessionId, relPath)   — a single file's content.
+ *   - RUN-keyed (legacy, preserved): resolves a run to its worktree
+ *     (workflow_runs.worktree_path) for the preserved legacy parentless-run
+ *     fallback route.
+ *       - listRunFiles(db, runId, relPath?) — one directory level, dirs-first.
+ *       - readRunFile(db, runId, relPath)   — a single file's text content.
+ *
+ * Both pairs delegate to the worktree-relative core helpers
+ * (listFilesInWorktree / readFileInWorktree) once the worktree path is resolved.
  *
  * Path safety: every caller-supplied relative path is normalized, rejected if it
  * is absolute or escapes the worktree (`..`), and the resolved real path is
@@ -32,7 +43,8 @@ const BINARY_SNIFF_BYTES = 8000;
  */
 export type RunFileErrorReason =
   | 'run-not-found' // no workflow_runs row for the id
-  | 'no-worktree' // run exists but has no worktree_path yet
+  | 'session-not-found' // no sessions row for the id
+  | 'no-worktree' // run/session exists but has no worktree_path yet
   | 'worktree-missing' // worktree_path points nowhere on disk (e.g. torn down)
   | 'invalid-path' // caller path is absolute or escapes the worktree
   | 'not-found' // target file/dir does not exist
@@ -66,6 +78,26 @@ function resolveWorktreePath(db: DatabaseLike, runId: string): string {
   }
   if (!row.worktree_path) {
     throw new RunFileError('no-worktree', `Run ${runId} has no worktree yet`);
+  }
+  return row.worktree_path;
+}
+
+/**
+ * Look up a SESSION's worktree path (sessions.worktree_path) — the canonical
+ * source for the File Explorer tab, which binds to the SELECTED session's tree
+ * whether or not a run is active. Throws RunFileError('session-not-found') when
+ * the session is unknown. `worktree_path` is NOT NULL in the schema, so the
+ * falsy check is purely defensive (mirrors the run-keyed resolver's shape).
+ */
+export function resolveSessionWorktreePath(db: DatabaseLike, sessionId: string): string {
+  const row = db
+    .prepare('SELECT worktree_path FROM sessions WHERE id = ?')
+    .get(sessionId) as WorktreeRow | undefined;
+  if (!row) {
+    throw new RunFileError('session-not-found', `Session ${sessionId} not found`);
+  }
+  if (!row.worktree_path) {
+    throw new RunFileError('no-worktree', `Session ${sessionId} has no worktree`);
   }
   return row.worktree_path;
 }
@@ -145,16 +177,18 @@ function toPosix(p: string): string {
 }
 
 /**
- * List one directory level of a run's worktree. `relPath` is relative to the
- * worktree root (omit / empty for the root). Directories sort first, then files,
- * each alphabetically (case-insensitive). The `.git` directory is excluded.
+ * List one directory level of an ALREADY-RESOLVED absolute worktree path.
+ * `relPath` is relative to the worktree root (omit / empty for the root).
+ * Directories sort first, then files, each alphabetically (case-insensitive).
+ * The `.git` directory is excluded.
+ *
+ * This is the worktree-relative CORE shared by both the session-keyed and
+ * run-keyed wrappers — all path-safety behavior lives here.
  */
-export async function listRunFiles(
-  db: DatabaseLike,
-  runId: string,
+export async function listFilesInWorktree(
+  worktreePath: string,
   relPath?: string,
 ): Promise<RunFileEntry[]> {
-  const worktreePath = resolveWorktreePath(db, runId);
   const targetAbs = resolveInsideWorktree(worktreePath, relPath);
   await assertWithinWorktree(worktreePath, targetAbs);
 
@@ -221,16 +255,18 @@ export async function listRunFiles(
 }
 
 /**
- * Read a single file from a run's worktree as UTF-8 text. Files over
- * MAX_VIEWABLE_BYTES or that look binary (NUL bytes in the first sniff window)
- * return `content: null` with an `unviewableReason` rather than throwing.
+ * Read a single file from an ALREADY-RESOLVED absolute worktree path as UTF-8
+ * text. Files over MAX_VIEWABLE_BYTES or that look binary (NUL bytes in the
+ * first sniff window) return `content: null` with an `unviewableReason` rather
+ * than throwing.
+ *
+ * This is the worktree-relative CORE shared by both the session-keyed and
+ * run-keyed wrappers — all path-safety + special-file behavior lives here.
  */
-export async function readRunFile(
-  db: DatabaseLike,
-  runId: string,
+export async function readFileInWorktree(
+  worktreePath: string,
   relPath: string,
 ): Promise<RunFileContent> {
-  const worktreePath = resolveWorktreePath(db, runId);
   const targetAbs = resolveInsideWorktree(worktreePath, relPath);
   await assertWithinWorktree(worktreePath, targetAbs);
   const wirePath = toPosix(path.relative(worktreePath, targetAbs));
@@ -261,6 +297,69 @@ export async function readRunFile(
     return { path: wirePath, content: null, size: stat.size, unviewableReason: 'binary' };
   }
   return { path: wirePath, content: buffer.toString('utf8'), size: stat.size, unviewableReason: null };
+}
+
+// ---------------------------------------------------------------------------
+// Session-keyed wrappers (canonical) — bind the File Explorer to the SELECTED
+// session's worktree (sessions.worktree_path), independent of any active run.
+// ---------------------------------------------------------------------------
+
+/**
+ * List one directory level of a SESSION's git worktree. `relPath` is relative to
+ * the worktree root (omit / empty for the root). Resolves
+ * sessions.worktree_path, then delegates to the worktree-relative core.
+ */
+export async function listSessionFiles(
+  db: DatabaseLike,
+  sessionId: string,
+  relPath?: string,
+): Promise<RunFileEntry[]> {
+  const worktreePath = resolveSessionWorktreePath(db, sessionId);
+  return listFilesInWorktree(worktreePath, relPath);
+}
+
+/**
+ * Read a single file from a SESSION's git worktree as UTF-8 text. Resolves
+ * sessions.worktree_path, then delegates to the worktree-relative core.
+ */
+export async function readSessionFile(
+  db: DatabaseLike,
+  sessionId: string,
+  relPath: string,
+): Promise<RunFileContent> {
+  const worktreePath = resolveSessionWorktreePath(db, sessionId);
+  return readFileInWorktree(worktreePath, relPath);
+}
+
+// ---------------------------------------------------------------------------
+// Run-keyed wrappers (legacy, preserved) — thin delegators over the core,
+// kept for the preserved run-keyed routes (Phase-5 parentless-run fallback).
+// ---------------------------------------------------------------------------
+
+/**
+ * List one directory level of a RUN's git worktree (workflow_runs.worktree_path).
+ * Resolves the run's worktree, then delegates to the worktree-relative core.
+ */
+export async function listRunFiles(
+  db: DatabaseLike,
+  runId: string,
+  relPath?: string,
+): Promise<RunFileEntry[]> {
+  const worktreePath = resolveWorktreePath(db, runId);
+  return listFilesInWorktree(worktreePath, relPath);
+}
+
+/**
+ * Read a single file from a RUN's git worktree (workflow_runs.worktree_path).
+ * Resolves the run's worktree, then delegates to the worktree-relative core.
+ */
+export async function readRunFile(
+  db: DatabaseLike,
+  runId: string,
+  relPath: string,
+): Promise<RunFileContent> {
+  const worktreePath = resolveWorktreePath(db, runId);
+  return readFileInWorktree(worktreePath, relPath);
 }
 
 /** Treat a buffer as binary if any NUL byte appears in the leading sniff window. */

@@ -23,8 +23,8 @@ import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
-import { listRunFiles, readRunFile, RunFileError } from '../../runFileExplorer';
-import type { RunFileErrorReason } from '../../runFileExplorer';
+import { listRunFiles, readRunFile } from '../../runFileExplorer';
+import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
@@ -484,42 +484,6 @@ async function killLiveInteractiveSession(runId: string): Promise<void> {
       `[runs.closeout] killSession failed (run ${runId}):`,
       err instanceof Error ? err.message : String(err),
     );
-  }
-}
-
-/**
- * Map a RunFileExplorer failure reason to the appropriate tRPC error code. The
- * handler's message is preserved so the File Explorer rail can show why a read
- * failed (e.g. "Run has no worktree yet" vs a path-traversal rejection).
- */
-function runFileErrorCode(reason: RunFileErrorReason): TRPCError['code'] {
-  // Exhaustive by construction — every RunFileErrorReason must map to a code, so
-  // adding a new reason without a mapping is a compile error here.
-  const codeByReason: Record<RunFileErrorReason, TRPCError['code']> = {
-    'run-not-found': 'NOT_FOUND',
-    'not-found': 'NOT_FOUND',
-    'no-worktree': 'PRECONDITION_FAILED',
-    'worktree-missing': 'PRECONDITION_FAILED',
-    'invalid-path': 'BAD_REQUEST',
-    'not-a-directory': 'BAD_REQUEST',
-    'not-a-file': 'BAD_REQUEST',
-  };
-  return codeByReason[reason];
-}
-
-/**
- * Run an async File Explorer handler and re-throw RunFileError as a TRPCError
- * with a mapped code. Non-RunFileError failures (unexpected fs errors) bubble as
- * INTERNAL_SERVER_ERROR via tRPC's default handling.
- */
-async function withRunFileErrorMapping<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof RunFileError) {
-      throw new TRPCError({ code: runFileErrorCode(err.reason), message: err.message });
-    }
-    throw err;
   }
 }
 
@@ -1024,6 +988,14 @@ export const runsRouter = router({
       return selectRunRawStreamEvents(ctx.db, input.runId);
     }),
 
+  // @cyboflow-hidden: the run-keyed File Explorer routes (listFiles / readFile)
+  // are superseded by the session-keyed cyboflow.files.* routes in cyboflow v1.
+  // PRESERVED for the Phase-5 legacy parentless-run fallback (a pre-upgrade run
+  // with its own worktree and no sessions row). Behavior is unchanged.
+  // Re-enable by adding a runId-keyed File Explorer surface again — the live
+  // component is now session-keyed (SessionFileExplorer.tsx); prefer
+  // cyboflow.files.list/read keyed by the selected session.
+
   /**
    * List one directory level of a run's git worktree for the File Explorer rail.
    * `path` is relative to the worktree root (omit for the root). Directories
@@ -1052,6 +1024,9 @@ export const runsRouter = router({
    * Read a single file from a run's git worktree as UTF-8 text for the File
    * Explorer viewer. Binary or oversized files return `content: null` with an
    * `unviewableReason` instead of throwing. Read-only.
+   *
+   * @cyboflow-hidden: superseded by cyboflow.files.read (session-keyed) in v1;
+   * PRESERVED for the Phase-5 legacy parentless-run fallback. Behavior unchanged.
    *
    * Throws:
    *   PRECONDITION_FAILED — ctx.db missing, or the run has no worktree yet /

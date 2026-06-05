@@ -1,11 +1,13 @@
 /**
- * RunFileExplorer — the File Explorer tab in the run's right rail.
+ * SessionFileExplorer — the File Explorer tab in the right rail.
  *
- * Renders the git worktree of the active workflow run as a lazy-loaded,
- * expand/collapse file tree (cyboflow.runs.listFiles). Clicking a file opens a
- * read-only viewer that takes over the panel (cyboflow.runs.readFile); a back
- * affordance returns to the tree. A refresh control re-reads the visible tree
- * because the worktree mutates while the agent works.
+ * Renders the git worktree of the SELECTED session (sessions.worktree_path) as a
+ * lazy-loaded, expand/collapse file tree (cyboflow.files.list). Because
+ * session-hosted runs execute IN the session worktree, this surfaces the same tree
+ * whether or not a run is active — and crucially it works for a session with NO
+ * active run. Clicking a file opens a read-only viewer that takes over the panel
+ * (cyboflow.files.read); a back affordance returns to the tree. A refresh control
+ * re-reads the visible tree because the worktree mutates while the agent works.
  *
  * Read-only by design — this is for inspecting what an agent produced, not
  * editing. Binary / oversized files show a notice instead of content.
@@ -66,7 +68,7 @@ function formatBytes(bytes: number): string {
 // Component
 // ---------------------------------------------------------------------------
 
-export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element {
+export function SessionFileExplorer({ sessionId }: { sessionId: string }): React.JSX.Element {
   // Tree state: directory contents keyed by relative dir path (ROOT === '').
   const [childrenByDir, setChildrenByDir] = useState<Record<string, RunFileEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -81,16 +83,18 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
 
-  // Staleness guards. The component instance is REUSED across runs (RunRightRail
-  // renders it without a `key`), so an in-flight fetch from a previous run — or a
-  // previous file open — can resolve after the user has moved on. The async
-  // setState calls below bail when their request is no longer current:
-  //   - runIdRef holds the live runId (updated synchronously in the root effect);
-  //     a resolved fetch whose captured runId != runIdRef.current is dropped.
+  // Staleness guards. The component instance is REUSED across sessions
+  // (RunRightRail renders it without a `key`), so an in-flight fetch from a
+  // previous session — or a previous file open — can resolve after the user has
+  // moved on. The async setState calls below bail when their request is no longer
+  // current:
+  //   - sessionIdRef holds the live sessionId (updated synchronously in the root
+  //     effect); a resolved fetch whose captured sessionId != sessionIdRef.current
+  //     is dropped.
   //   - fileReqId increments on every openFileAt / closeFile; a resolved read
   //     whose captured id != fileReqIdRef.current is dropped (covers click-A →
   //     back → click-B, where A would otherwise paint under B's header).
-  const runIdRef = useRef(runId);
+  const sessionIdRef = useRef(sessionId);
   const fileReqIdRef = useRef(0);
 
   const clearDirError = useCallback((dirPath: string): void => {
@@ -105,21 +109,21 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   // Fetch one directory level into childrenByDir.
   const loadDir = useCallback(
     async (dirPath: string): Promise<void> => {
-      const reqRunId = runId;
+      const reqSessionId = sessionId;
       setLoadingDirs((prev) => new Set(prev).add(dirPath));
       // ROOT is re-read by Refresh; reflect that in the header spinner.
       if (dirPath === ROOT) setRootLoading(true);
       try {
-        const entries = await trpc.cyboflow.runs.listFiles.query({
-          runId: reqRunId,
+        const entries = await trpc.cyboflow.files.list.query({
+          sessionId: reqSessionId,
           path: dirPath === ROOT ? undefined : dirPath,
         });
-        if (runIdRef.current !== reqRunId) return; // run switched mid-flight — drop
+        if (sessionIdRef.current !== reqSessionId) return; // session switched mid-flight — drop
         setChildrenByDir((prev) => ({ ...prev, [dirPath]: entries }));
         if (dirPath === ROOT) setRootError(null);
         else clearDirError(dirPath);
       } catch (err) {
-        if (runIdRef.current !== reqRunId) return;
+        if (sessionIdRef.current !== reqSessionId) return;
         const msg = err instanceof Error ? err.message : 'Failed to list files';
         if (dirPath === ROOT) setRootError(msg);
         // A sub-directory failure is surfaced inline on its row (not swallowed),
@@ -134,7 +138,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
           });
         }
       } finally {
-        if (runIdRef.current === reqRunId) {
+        if (sessionIdRef.current === reqSessionId) {
           setLoadingDirs((prev) => {
             const next = new Set(prev);
             next.delete(dirPath);
@@ -144,14 +148,14 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
         }
       }
     },
-    [runId, clearDirError],
+    [sessionId, clearDirError],
   );
 
-  // Load the root whenever the run changes; reset all per-run state first.
+  // Load the root whenever the session changes; reset all per-session state first.
   useEffect(() => {
-    // Mark this run current BEFORE any await so a prior run's in-flight loadDir /
-    // openFileAt resolution sees the switch and drops itself.
-    runIdRef.current = runId;
+    // Mark this session current BEFORE any await so a prior session's in-flight
+    // loadDir / openFileAt resolution sees the switch and drops itself.
+    sessionIdRef.current = sessionId;
     let cancelled = false;
     setChildrenByDir({});
     setExpanded(new Set());
@@ -162,8 +166,8 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
     setFileError(null);
     setRootError(null);
     setRootLoading(true);
-    trpc.cyboflow.runs.listFiles
-      .query({ runId })
+    trpc.cyboflow.files.list
+      .query({ sessionId })
       .then((entries) => {
         if (cancelled) return;
         setChildrenByDir({ [ROOT]: entries });
@@ -178,7 +182,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [sessionId]);
 
   const toggleDir = useCallback(
     (dirPath: string): void => {
@@ -202,16 +206,16 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
 
   const openFileAt = useCallback(
     async (filePath: string): Promise<void> => {
-      const reqRunId = runId;
+      const reqSessionId = sessionId;
       const reqId = ++fileReqIdRef.current;
-      const isCurrent = (): boolean => runIdRef.current === reqRunId && fileReqIdRef.current === reqId;
+      const isCurrent = (): boolean => sessionIdRef.current === reqSessionId && fileReqIdRef.current === reqId;
       setOpenFile(filePath);
       setFileContent(null);
       setFileError(null);
       setFileLoading(true);
       try {
-        const content = await trpc.cyboflow.runs.readFile.query({ runId: reqRunId, path: filePath });
-        if (!isCurrent()) return; // superseded by a newer open / run switch — drop
+        const content = await trpc.cyboflow.files.read.query({ sessionId: reqSessionId, path: filePath });
+        if (!isCurrent()) return; // superseded by a newer open / session switch — drop
         setFileContent(content);
       } catch (err) {
         if (!isCurrent()) return;
@@ -220,7 +224,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
         if (isCurrent()) setFileLoading(false);
       }
     },
-    [runId],
+    [sessionId],
   );
 
   const closeFile = useCallback((): void => {
@@ -247,11 +251,11 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   // -------------------------------------------------------------------------
   if (openFile !== null) {
     return (
-      <div data-testid="run-file-explorer-viewer" className="flex flex-col h-full">
+      <div data-testid="session-file-explorer-viewer" className="flex flex-col h-full">
         <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border-secondary bg-bg-secondary">
           <button
             type="button"
-            data-testid="run-file-explorer-back"
+            data-testid="session-file-explorer-back"
             onClick={closeFile}
             className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
             aria-label="Back to file tree"
@@ -279,7 +283,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             </div>
           ) : fileError !== null ? (
             <div
-              data-testid="run-file-explorer-viewer-error"
+              data-testid="session-file-explorer-viewer-error"
               className="flex items-start gap-2 p-4 text-sm text-status-error"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -287,7 +291,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             </div>
           ) : fileContent === null ? null : fileContent.unviewableReason !== null ? (
             <div
-              data-testid="run-file-explorer-unviewable"
+              data-testid="session-file-explorer-unviewable"
               className="p-4 text-sm text-text-tertiary"
             >
               {fileContent.unviewableReason === 'binary'
@@ -298,7 +302,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             <div className="p-4 text-sm text-text-tertiary italic">Empty file</div>
           ) : (
             <pre
-              data-testid="run-file-explorer-content"
+              data-testid="session-file-explorer-content"
               className="p-3 text-[11px] leading-relaxed font-mono text-text-primary whitespace-pre"
             >
               {fileContent.content}
@@ -324,7 +328,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
           role="treeitem"
           aria-level={depth + 1}
           aria-expanded={entry.isDirectory ? isOpen : undefined}
-          data-testid={`run-file-explorer-node-${entry.path}`}
+          data-testid={`session-file-explorer-node-${entry.path}`}
           onClick={() => (entry.isDirectory ? toggleDir(entry.path) : void openFileAt(entry.path))}
           style={{ paddingLeft: indent }}
           className="w-full flex items-center gap-1 pr-2 py-1 text-left text-xs text-text-primary hover:bg-bg-hover transition-colors"
@@ -375,7 +379,7 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
             <button
               key={`${entry.path}__error`}
               type="button"
-              data-testid={`run-file-explorer-node-error-${entry.path}`}
+              data-testid={`session-file-explorer-node-error-${entry.path}`}
               style={{ paddingLeft: childIndent }}
               onClick={() => void loadDir(entry.path)}
               className="w-full flex items-start gap-1.5 pr-2 py-1 text-left text-[11px] text-status-error hover:bg-bg-hover transition-colors"
@@ -407,14 +411,14 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
   const rootEntries = childrenByDir[ROOT];
 
   return (
-    <div data-testid="run-file-explorer" className="flex flex-col h-full">
+    <div data-testid="session-file-explorer" className="flex flex-col h-full">
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-border-secondary bg-bg-secondary">
         <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-text-tertiary">
           Worktree
         </span>
         <button
           type="button"
-          data-testid="run-file-explorer-refresh"
+          data-testid="session-file-explorer-refresh"
           onClick={refresh}
           disabled={rootLoading}
           className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors disabled:opacity-50"
@@ -428,25 +432,25 @@ export function RunFileExplorer({ runId }: { runId: string }): React.JSX.Element
       <div className="flex-1 overflow-auto py-1">
         {rootLoading && rootEntries === undefined ? (
           <div
-            data-testid="run-file-explorer-loading"
+            data-testid="session-file-explorer-loading"
             className="flex items-center gap-2 p-4 text-sm text-text-secondary"
           >
             <Loader2 className="w-4 h-4 animate-spin" /> Loading…
           </div>
         ) : rootError !== null ? (
           <div
-            data-testid="run-file-explorer-error"
+            data-testid="session-file-explorer-error"
             className="flex items-start gap-2 p-4 text-sm text-text-secondary"
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-text-tertiary" />
             <span className="min-w-0 break-words">{rootError}</span>
           </div>
         ) : rootEntries !== undefined && rootEntries.length === 0 ? (
-          <div data-testid="run-file-explorer-empty-tree" className="p-4 text-sm text-text-tertiary">
+          <div data-testid="session-file-explorer-empty-tree" className="p-4 text-sm text-text-tertiary">
             No files in this worktree.
           </div>
         ) : (
-          <div data-testid="run-file-explorer-tree" role="tree" aria-label="Worktree files">
+          <div data-testid="session-file-explorer-tree" role="tree" aria-label="Worktree files">
             {renderRows(ROOT, 0)}
           </div>
         )}

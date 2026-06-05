@@ -1,13 +1,20 @@
 /**
- * Unit tests for the run File Explorer handler (listRunFiles / readRunFile).
+ * Unit tests for the File Explorer handler.
  *
- * Seeds an in-memory workflow_runs row whose worktree_path points at a real
- * temp directory (created per-test under os.tmpdir()), then exercises:
+ * Run-keyed path (listRunFiles / readRunFile): seeds an in-memory workflow_runs
+ * row whose worktree_path points at a real temp directory (created per-test under
+ * os.tmpdir()), then exercises:
  *   - directory listing (dirs-first ordering, .git exclusion, sizes)
  *   - lazy subdirectory listing via a relative path
  *   - file reads (utf-8), empty files, binary detection, size cap
  *   - path-safety rejections (absolute, traversal, symlink escape)
  *   - run-resolution failures (unknown run, no worktree, missing worktree)
+ *
+ * Session-keyed path (listSessionFiles / readSessionFile /
+ * resolveSessionWorktreePath): seeds a minimal sessions row whose worktree_path
+ * points at a real temp dir, asserting the wrappers delegate to the same core
+ * (identical shapes + path-safety) and that an unknown session throws
+ * session-not-found.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -18,6 +25,9 @@ import { execFileSync } from 'child_process';
 import {
   listRunFiles,
   readRunFile,
+  listSessionFiles,
+  readSessionFile,
+  resolveSessionWorktreePath,
   RunFileError,
   MAX_VIEWABLE_BYTES,
 } from '../runFileExplorer';
@@ -304,6 +314,98 @@ describe('runFileExplorer', () => {
     seedRun(db, { id: 'run-gone', projectId: 1, worktreePath: '/nonexistent/cyboflow/worktree' });
     await expect(listRunFiles(dbAdapter(db), 'run-gone')).rejects.toMatchObject({
       reason: 'worktree-missing',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session-keyed path (canonical) — the File Explorer tab binds to the SELECTED
+// session's worktree (sessions.worktree_path), independent of any active run.
+//
+// The session functions share the SAME worktree-relative core as the run-keyed
+// path (covered exhaustively above), so these tests focus on:
+//   - the session→worktree resolution + delegation produce identical shapes;
+//   - resolveSessionWorktreePath throws session-not-found for an unknown id.
+// GATE_SCHEMA omits the `sessions` table, so layer a minimal one on top.
+// ---------------------------------------------------------------------------
+
+const SESSION_ID = 'session-fe-001';
+
+describe('runFileExplorer (session-keyed)', () => {
+  let db: Database.Database;
+  let worktree: string;
+
+  beforeEach(() => {
+    db = createTestDb();
+    // GATE_SCHEMA has no sessions table — create the minimal slice this path reads.
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, worktree_path TEXT NOT NULL)');
+    worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-fe-sess-'));
+    db.prepare('INSERT INTO sessions (id, worktree_path) VALUES (?, ?)').run(SESSION_ID, worktree);
+  });
+
+  afterEach(() => {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  });
+
+  it('listSessionFiles returns the same shape as the run-keyed core (dirs-first, .git excluded)', async () => {
+    fs.writeFileSync(path.join(worktree, 'README.md'), '# hello');
+    fs.writeFileSync(path.join(worktree, 'app.ts'), 'export const a = 1;');
+    fs.mkdirSync(path.join(worktree, 'src'));
+    fs.mkdirSync(path.join(worktree, '.git'));
+
+    const entries = await listSessionFiles(dbAdapter(db), SESSION_ID);
+
+    expect(entries.map((e) => e.name)).toEqual(['src', 'app.ts', 'README.md']);
+    expect(entries[0]).toMatchObject({ name: 'src', path: 'src', isDirectory: true });
+    const readme = entries.find((e) => e.name === 'README.md');
+    expect(readme).toMatchObject({ isDirectory: false, path: 'README.md' });
+    expect(readme?.size).toBe(Buffer.byteLength('# hello'));
+  });
+
+  it('listSessionFiles lists a subdirectory addressed by a relative path', async () => {
+    fs.mkdirSync(path.join(worktree, 'src', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, 'src', 'index.ts'), 'x');
+
+    const entries = await listSessionFiles(dbAdapter(db), SESSION_ID, 'src');
+    expect(entries.map((e) => e.name)).toEqual(['nested', 'index.ts']);
+    expect(entries.find((e) => e.name === 'index.ts')?.path).toBe('src/index.ts');
+  });
+
+  it('readSessionFile returns the same shape as the run-keyed core', async () => {
+    fs.writeFileSync(path.join(worktree, 'note.md'), 'line1\nline2');
+    const result = await readSessionFile(dbAdapter(db), SESSION_ID, 'note.md');
+    expect(result).toEqual({
+      path: 'note.md',
+      content: 'line1\nline2',
+      size: Buffer.byteLength('line1\nline2'),
+      unviewableReason: null,
+    });
+  });
+
+  it('readSessionFile still enforces path-safety (rejects a traversal escape)', async () => {
+    await expect(readSessionFile(dbAdapter(db), SESSION_ID, '../secret.txt')).rejects.toMatchObject({
+      reason: 'invalid-path',
+    });
+  });
+
+  it('resolveSessionWorktreePath returns the worktree path for a known session', () => {
+    expect(resolveSessionWorktreePath(dbAdapter(db), SESSION_ID)).toBe(worktree);
+  });
+
+  it('resolveSessionWorktreePath throws session-not-found for an unknown id', () => {
+    expect(() => resolveSessionWorktreePath(dbAdapter(db), 'no-such-session')).toThrow(RunFileError);
+    try {
+      resolveSessionWorktreePath(dbAdapter(db), 'no-such-session');
+      throw new Error('expected resolveSessionWorktreePath to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RunFileError);
+      expect((err as RunFileError).reason).toBe('session-not-found');
+    }
+  });
+
+  it('listSessionFiles throws session-not-found for an unknown session id', async () => {
+    await expect(listSessionFiles(dbAdapter(db), 'no-such-session')).rejects.toMatchObject({
+      reason: 'session-not-found',
     });
   });
 });

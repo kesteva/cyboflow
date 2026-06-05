@@ -8,13 +8,15 @@
  * Behaviors verified:
  *   1. Renders three tabs (Workflow Progress / File Explorer / Diff);
  *      Workflow Progress is default selected; shows empty-state when activeRunId is null.
- *   2. Clicking File Explorer with no activeRunId shows its empty state and hides
- *      the Workflow Progress panel.
- *   3. Clicking Diff with no active quick session shows the neutral "select a session"
+ *   2. Clicking File Explorer with no active quick session shows its empty state
+ *      and hides the Workflow Progress panel.
+ *   3. Clicking File Explorer WITH an active quick session mounts SessionFileExplorer
+ *      keyed by that session id.
+ *   4. Clicking Diff with no active quick session shows the neutral "select a session"
  *      message (the working <CombinedDiffView> mounts only when a sessionId is resolved).
- *   4. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
+ *   5. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
  *      (timeline renders phase sections from the phaseState prop).
- *   5. Shows empty state in workflow-progress tab when activeRunId is null.
+ *   6. Shows empty state in workflow-progress tab when activeRunId is null.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
@@ -31,6 +33,14 @@ vi.mock('../../../utils/cyboflowApi', () => ({
     subscribeToStreamEvents: vi.fn(() => vi.fn()),
     approveRun: vi.fn(),
   },
+}));
+
+// Stub SessionFileExplorer so the File-Explorer-content test can assert the rail
+// mounts it (keyed by the selected session) WITHOUT firing real tRPC.
+vi.mock('../SessionFileExplorer', () => ({
+  SessionFileExplorer: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="session-file-explorer-mock">{sessionId}</div>
+  ),
 }));
 
 // Import after mocks
@@ -109,20 +119,45 @@ describe('RunRightRail', () => {
     expect(root).toHaveClass('border-l');
   });
 
-  it('clicking File Explorer tab with no active run shows its empty state and hides the Workflow Progress panel', () => {
+  it('clicking File Explorer tab with no active session shows its empty state and hides the Workflow Progress panel', () => {
+    // No quick session is active, so the File Explorer renders its neutral empty
+    // state rather than mounting SessionFileExplorer.
+    act(() => {
+      useCyboflowStore.setState({ activeQuickSessionId: null });
+    });
+
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
 
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
 
-    // With activeRunId === null the rail renders a neutral empty state rather
-    // than mounting RunFileExplorer (which would fire tRPC).
     expect(screen.getByTestId('run-right-rail-file-explorer-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('run-right-rail-file-explorer-empty')).toHaveTextContent(
+      'Select a session to view its files.',
+    );
+    expect(screen.queryByTestId('session-file-explorer-mock')).not.toBeInTheDocument();
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
 
     expect(screen.getByRole('tab', { name: 'File Explorer' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByRole('tab', { name: 'Workflow Progress' }).getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('clicking File Explorer tab WITH an active quick session mounts SessionFileExplorer keyed by that session', () => {
+    act(() => {
+      useCyboflowStore.setState({ activeQuickSessionId: 'session-fe-001' });
+    });
+
+    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+
+    // The session-keyed explorer mounts (keyed by the selected session, NOT a run);
+    // the neutral empty state is hidden.
+    const explorer = screen.getByTestId('session-file-explorer-mock');
+    expect(explorer).toBeInTheDocument();
+    expect(explorer).toHaveTextContent('session-fe-001');
+    expect(screen.queryByTestId('run-right-rail-file-explorer-empty')).not.toBeInTheDocument();
   });
 
   it('clicking Diff tab with no active session shows the neutral empty message and hides the other two', () => {

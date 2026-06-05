@@ -4,14 +4,15 @@
  * Contains three tabs:
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
  *     is non-null; neutral empty state otherwise.
- *   - File Explorer — live RunFileExplorer (run worktree tree + read-only viewer) when
- *     activeRunId is non-null; neutral empty state otherwise.
+ *   - File Explorer — live SessionFileExplorer (selected session's worktree tree +
+ *     read-only viewer) when activeQuickSessionId is non-null; neutral empty state
+ *     otherwise.
  *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
  *     message when no session is active.
  */
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
-import { RunFileExplorer } from './RunFileExplorer';
+import { SessionFileExplorer } from './SessionFileExplorer';
 import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
@@ -128,14 +129,14 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
             </div>
           )
         ) : currentTab.id === 'file-explorer' ? (
-          activeRunId !== null ? (
-            <RunFileExplorer runId={activeRunId} />
+          activeQuickSessionId ? (
+            <SessionFileExplorer sessionId={activeQuickSessionId} />
           ) : (
             <div
               data-testid="run-right-rail-file-explorer-empty"
               className="p-4 text-sm text-text-secondary"
             >
-              No active run
+              Select a session to view its files.
             </div>
           )
         ) : (
