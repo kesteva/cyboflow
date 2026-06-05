@@ -11,17 +11,12 @@ import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
-import type { Project, CreateProjectRequest } from '../types/project';
+import type { Project } from '../types/project';
 import type { Folder } from '../types/folder';
 import type { Session } from '../types/session';
 import { useContextMenu } from '../contexts/ContextMenuContext';
-import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
-import { Button } from './ui/Button';
-import { EnhancedInput } from './ui/EnhancedInput';
-import { FieldWithTooltip } from './ui/FieldWithTooltip';
-import { Card } from './ui/Card';
+import { CreateProjectDialog } from './CreateProjectDialog';
 import { formatDistanceToNow } from '../utils/timestampUtils';
-import { panelApi } from '../services/panelApi';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,17 +77,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const [projectsWithRuns, setProjectsWithRuns] = useState<ProjectWithRuns[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<number>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  // Project whose "Start new session" CTA is currently in flight (shows a spinner
-  // + disables the button). Single hook-free handler keeps the rules of hooks intact
-  // across the project list — see startSessionForProject below.
-  const [startingSessionProjectId, setStartingSessionProjectId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [selectedProjectForSettings, setSelectedProjectForSettings] = useState<Project | null>(null);
   const [showAddProjectDialog, setShowAddProjectDialog] = useState(false);
-  const [newProject, setNewProject] = useState<CreateProjectRequest>({ name: '', path: '', buildScript: '', runScript: '' });
-  const [showValidationErrors, setShowValidationErrors] = useState(false);
-  const [detectedBranchForNewProject, setDetectedBranchForNewProject] = useState<string | null>(null);
   const [showCreateFolderDialog, setShowCreateFolderDialog] = useState(false);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<number>>(new Set());
   const [runningProjectId, setRunningProjectId] = useState<number | null>(null);
@@ -642,43 +630,13 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // Project creation
   // ---------------------------------------------------------------------------
 
-  const detectCurrentBranch = async (path: string) => {
-    if (!path) return;
-    try {
-      const response = await API.projects.detectBranch(path);
-      if (response.success && response.data) {
-        setDetectedBranchForNewProject(response.data);
-      }
-    } catch (_e) {
-      setDetectedBranchForNewProject(null);
-    }
-  };
-
-  const handleCreateProject = async () => {
-    if (!newProject.name || !newProject.path) {
-      setShowValidationErrors(true);
-      return;
-    }
-    try {
-      const response = await API.projects.create({ ...newProject, active: false });
-      if (!response.success || !response.data) {
-        showError({
-          title: 'Failed to Create Project',
-          error: response.error || 'An error occurred while creating the project.',
-          details: response.details,
-          command: response.command,
-        });
-        return;
-      }
-      setShowAddProjectDialog(false);
-      setNewProject({ name: '', path: '', buildScript: '', runScript: '' });
-      setDetectedBranchForNewProject(null);
-      setShowValidationErrors(false);
-      const newProjectWithRuns: ProjectWithRuns = { ...response.data, sessions: [] as never[], folders: [] };
-      setProjectsWithRuns(prev => [...prev, newProjectWithRuns]);
-    } catch (error: unknown) {
-      showError({ title: 'Failed to Create Project', error: error instanceof Error ? error.message : 'An error occurred while creating the project.' });
-    }
+  // A freshly-created project is reflected in the rail via the project-updated
+  // event stream + next load; the create flow itself routes the center to the
+  // new-flow wizard locked to that project (onCreated below).
+  const handleProjectCreated = (project: Project) => {
+    setShowAddProjectDialog(false);
+    setProjectsWithRuns(prev => [...prev, { ...project, sessions: [] as never[], folders: [] }]);
+    useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
   };
 
   // ---------------------------------------------------------------------------
@@ -841,6 +799,9 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
     }
+    // The center now defaults to home; opening a session must flip it to the
+    // session workspace surface.
+    useNavigationStore.getState().goToSession();
   };
 
   // Active workflow runs (NON-quick) open the workflow-run pane — mirroring how
@@ -865,44 +826,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         .find((r) => r.id === runId);
     useCyboflowStore.getState().setActiveRun(runId, row?.session_id ?? null);
     useNavigationStore.getState().setActiveProjectId(projectId);
+    // The center now defaults to home; opening a run must flip it to the
+    // session workspace surface.
+    useNavigationStore.getState().goToSession();
   };
-
-  // Start a quick session for a SPECIFIC project from its empty-state CTA. The
-  // useQuickSession hook binds a single projectId per instance, so it can't be
-  // called inside the project .map() (rules of hooks). Instead we replicate its
-  // effect at the call site — createQuick + the same Claude+Terminal panel
-  // creation + setActiveQuickSession — keyed off startingSessionProjectId for the
-  // in-flight spinner.
-  const startSessionForProject = useCallback(async (projectId: number) => {
-    if (startingSessionProjectId !== null) return;
-    setStartingSessionProjectId(projectId);
-    try {
-      const result = await API.sessions.createQuick({ prompt: '', projectId });
-      if (!result.success || !result.data) {
-        throw new Error(result.error ?? 'Failed to create quick session');
-      }
-      const { sessionId, worktreePath, runId } = result.data;
-      // Always create both panels: Claude first, then Terminal.
-      await panelApi.createPanel({ sessionId, type: 'claude' });
-      await panelApi.createPanel({
-        sessionId,
-        type: 'terminal',
-        title: 'Terminal',
-        initialState: { cwd: worktreePath },
-      });
-      useNavigationStore.getState().closeHumanReview();
-      useNavigationStore.getState().closeBacklog();
-      useCyboflowStore.getState().setActiveQuickSession(sessionId, runId);
-      useNavigationStore.getState().setActiveProjectId(projectId);
-    } catch (error: unknown) {
-      showError({
-        title: 'Failed to start session',
-        error: error instanceof Error ? error.message : 'Failed to create quick session',
-      });
-    } finally {
-      setStartingSessionProjectId(null);
-    }
-  }, [startingSessionProjectId, showError]);
 
   // ---------------------------------------------------------------------------
   // Render helpers
@@ -1077,7 +1004,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
-              const isStartingSession = startingSessionProjectId === project.id;
 
               return (
                 <div key={project.id} className="mb-1">
@@ -1299,16 +1225,14 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                       {/* Start-session + Add-folder buttons */}
                       <div className="ml-6 mt-2 border-t border-border-primary pt-2 space-y-1">
                         <button
-                          onClick={(e) => { e.stopPropagation(); startSessionForProject(project.id); }}
-                          disabled={isStartingSession}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
+                          }}
                           className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
                         >
-                          {isStartingSession ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Plus className="w-3 h-3" />
-                          )}
-                          <span>{isStartingSession ? 'Starting…' : 'Start new session'}</span>
+                          <Plus className="w-3 h-3" />
+                          <span>Start new session</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -1330,16 +1254,14 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                   {isExpanded && !hasChildren && (
                     <div className="px-4 py-2">
                       <button
-                        onClick={(e) => { e.stopPropagation(); startSessionForProject(project.id); }}
-                        disabled={isStartingSession}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
+                        }}
                         className="w-full px-2 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center justify-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
                       >
-                        {isStartingSession ? (
-                          <RefreshCw className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Plus className="w-3 h-3" />
-                        )}
-                        <span>{isStartingSession ? 'Starting…' : 'Start new session'}</span>
+                        <Plus className="w-3 h-3" />
+                        <span>Start new session</span>
                       </button>
                     </div>
                   )}
@@ -1380,166 +1302,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       )}
 
       {/* Add Project Dialog */}
-      <Modal
+      <CreateProjectDialog
         isOpen={showAddProjectDialog}
-        onClose={() => {
-          setShowAddProjectDialog(false);
-          setNewProject({ name: '', path: '', buildScript: '', runScript: '' });
-          setDetectedBranchForNewProject(null);
-          setShowValidationErrors(false);
-        }}
-        size="lg"
-      >
-        <ModalHeader title="Add New Project" icon={<Plus className="w-5 h-5" />} />
-        <ModalBody>
-          <div className="space-y-8">
-            <div className="space-y-6">
-              <div className="flex items-center gap-2 pb-2 border-b border-border-primary">
-                <FolderIcon className="w-5 h-5 text-interactive" />
-                <h3 className="text-heading-3 font-semibold text-text-primary">Project Information</h3>
-              </div>
-
-              <FieldWithTooltip
-                label="Project Name"
-                tooltip="A descriptive name for your project that will appear in the project selector."
-                required
-              >
-                <EnhancedInput
-                  type="text"
-                  value={newProject.name}
-                  onChange={(e) => { setNewProject({ ...newProject, name: e.target.value }); if (showValidationErrors) setShowValidationErrors(false); }}
-                  placeholder="Enter project name"
-                  size="lg"
-                  fullWidth
-                  required
-                  showRequiredIndicator={showValidationErrors}
-                />
-              </FieldWithTooltip>
-
-              <FieldWithTooltip
-                label="Repository Path"
-                tooltip="Path to your git repository. This is where Cyboflow will create worktrees for parallel development."
-                required
-              >
-                <div className="space-y-3">
-                  <EnhancedInput
-                    type="text"
-                    value={newProject.path}
-                    onChange={(e) => {
-                      setNewProject({ ...newProject, path: e.target.value });
-                      detectCurrentBranch(e.target.value);
-                      if (showValidationErrors) setShowValidationErrors(false);
-                    }}
-                    placeholder="/path/to/your/repository"
-                    size="lg"
-                    fullWidth
-                    required
-                    showRequiredIndicator={showValidationErrors}
-                  />
-                  <div className="flex justify-end">
-                    <Button
-                      type="button"
-                      onClick={async () => {
-                        const result = await API.dialog.openDirectory({ title: 'Select Repository Directory', buttonLabel: 'Select' });
-                        if (result.success && result.data) {
-                          setNewProject({ ...newProject, path: result.data });
-                          detectCurrentBranch(result.data);
-                        }
-                      }}
-                      variant="secondary"
-                      size="sm"
-                    >
-                      Browse
-                    </Button>
-                  </div>
-                </div>
-              </FieldWithTooltip>
-            </div>
-
-            <div className="space-y-6">
-              <div className="flex items-center gap-2 pb-2 border-b border-border-primary">
-                <GitBranch className="w-5 h-5 text-interactive" />
-                <h3 className="text-heading-3 font-semibold text-text-primary">Git Information</h3>
-              </div>
-
-              <FieldWithTooltip
-                label="Main Branch"
-                tooltip="The main branch of your repository. Cyboflow will automatically detect this from your git configuration."
-              >
-                <Card variant="bordered" padding="md" className="text-text-secondary bg-surface-secondary">
-                  <div className="flex items-center gap-2">
-                    <GitBranch className="w-4 h-4" />
-                    <span className="font-mono">
-                      {detectedBranchForNewProject || (newProject.path ? 'Detecting...' : 'Select a repository path first')}
-                    </span>
-                  </div>
-                </Card>
-              </FieldWithTooltip>
-            </div>
-
-            <div className="space-y-6">
-              <div className="flex items-center gap-2 pb-2 border-b border-border-primary">
-                <span className="text-xl">▶️</span>
-                <h3 className="text-heading-3 font-semibold text-text-primary">Optional Scripts</h3>
-              </div>
-
-              <FieldWithTooltip
-                label="Build Script"
-                tooltip="Command to build your project. This runs automatically before each Claude Code session starts."
-              >
-                <EnhancedInput
-                  type="text"
-                  value={newProject.buildScript}
-                  onChange={(e) => setNewProject({ ...newProject, buildScript: e.target.value })}
-                  placeholder="pnpm build"
-                  size="lg"
-                  fullWidth
-                />
-              </FieldWithTooltip>
-
-              <FieldWithTooltip
-                label="Run Script"
-                tooltip="Command to start your development server. You can run this manually from the Terminal view during sessions."
-              >
-                <EnhancedInput
-                  type="text"
-                  value={newProject.runScript}
-                  onChange={(e) => setNewProject({ ...newProject, runScript: e.target.value })}
-                  placeholder="pnpm dev"
-                  size="lg"
-                  fullWidth
-                />
-              </FieldWithTooltip>
-            </div>
-          </div>
-        </ModalBody>
-        <ModalFooter>
-          <Button
-            onClick={() => {
-              setShowAddProjectDialog(false);
-              setNewProject({ name: '', path: '', buildScript: '', runScript: '' });
-              setDetectedBranchForNewProject(null);
-              setShowValidationErrors(false);
-            }}
-            variant="ghost"
-            size="md"
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={() => {
-              if (!newProject.name || !newProject.path) { setShowValidationErrors(true); return; }
-              handleCreateProject();
-            }}
-            disabled={!newProject.name || !newProject.path}
-            variant="primary"
-            size="md"
-            className={(!newProject.name || !newProject.path) ? 'border-status-error border-2' : ''}
-          >
-            Create Project
-          </Button>
-        </ModalFooter>
-      </Modal>
+        onClose={() => setShowAddProjectDialog(false)}
+        onCreated={handleProjectCreated}
+      />
 
       {/* Create Folder Dialog */}
       {showCreateFolderDialog && selectedProjectForFolder && (
