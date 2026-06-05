@@ -17,6 +17,7 @@
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
+import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 
 export interface TaskRunLaunchState {
   /** Task id currently being launched, or null when idle. */
@@ -41,8 +42,13 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         setError('No workflow available to run');
         return null;
       }
+      // Phase 3 (session<->run restructure): a backlog "Run" must be session-hosted
+      // like every other launch surface — ensure a session (the active one, else a
+      // fresh one) so the run executes in the session worktree and Diff/File-Explorer
+      // can follow it. Without this the run takes the legacy parentless path.
+      const sessionId = await ensureSessionForLaunch(projectId);
       // taskId is the new contract launch param; forwarded through runs.start.
-      const result = await trpc.cyboflow.runs.start.mutate({ workflowId, projectId, taskId });
+      const result = await trpc.cyboflow.runs.start.mutate({ workflowId, projectId, taskId, sessionId });
       return result.runId;
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to launch run');

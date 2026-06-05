@@ -14,6 +14,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
@@ -139,12 +140,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       setError(null);
       setIsStarting(true);
       try {
+        // Ensure the run executes INSIDE a session (active one if selected, else
+        // a freshly created session). The id is threaded into runs.start so the
+        // run runs in that session's worktree, and used to nest the run under
+        // the session in the store (setActiveRun's parentSessionId).
+        const sessionId = await ensureSessionForLaunch(projectId);
         const result = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
-            ? { workflowId, projectId, substrate }
-            : { workflowId, projectId, substrate, ideaId },
+            ? { workflowId, projectId, substrate, sessionId }
+            : { workflowId, projectId, substrate, sessionId, ideaId },
         );
-        useCyboflowStore.getState().setActiveRun(result.runId);
+        useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start run');

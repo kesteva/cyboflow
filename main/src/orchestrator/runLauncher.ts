@@ -17,6 +17,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { WorkflowRegistry } from './workflowRegistry';
+import { QUICK_WORKFLOW_NAME } from './workflowRegistry';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -181,14 +182,21 @@ export class RunLauncher {
     // One-running-at-a-time guard for SESSION-HOSTED runs: a session may own many
     // runs over its lifetime but only ONE may be in flight at a time. Checked
     // BEFORE createRun so we never leave a half-created run behind on rejection.
+    //
+    // The __quick__ SENTINEL run (created by sessions:create-quick to back a quick
+    // session in the workflow_runs pipeline) is permanently 'running' and must NOT
+    // count toward this limit — otherwise launching the FIRST real workflow into a
+    // quick session would always be wrongly blocked by its own sentinel. Exclude
+    // any run whose workflow is the sentinel.
     if (sessionId) {
       const activeRow = this.db
         .prepare(
           `SELECT COUNT(*) AS n FROM workflow_runs
             WHERE session_id = ?
-              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input')`,
+              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input')
+              AND workflow_id NOT IN (SELECT id FROM workflows WHERE name = ?)`,
         )
-        .get(sessionId) as { n: number };
+        .get(sessionId, QUICK_WORKFLOW_NAME) as { n: number };
       if (activeRow.n > 0) {
         throw new Error(
           `RunLauncher.launch: session ${sessionId} already has a running workflow`,

@@ -92,10 +92,29 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// Phase 3: "Run with modifications" launches INSIDE a session via
+// ensureSessionForLaunch, which calls API.sessions.createQuick + panelApi.createPanel
+// when no session is active. Stub both so the create path runs in jsdom.
+vi.mock('../../../utils/api', () => ({
+  API: {
+    sessions: {
+      createQuick: vi.fn(),
+    },
+  },
+}));
+
+vi.mock('../../../services/panelApi', () => ({
+  panelApi: {
+    createPanel: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 // Import after mocks so vi.mock hoisting is in effect.
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { trpc } from '../../../trpc/client';
+import { API } from '../../../utils/api';
+import { panelApi } from '../../../services/panelApi';
 
 const mockGetDefinition = vi.mocked(trpc.cyboflow.workflows.getDefinition.query);
 const mockGet = vi.mocked(trpc.cyboflow.workflows.get.query);
@@ -104,10 +123,13 @@ const mockUpdateSpec = vi.mocked(trpc.cyboflow.workflows.updateSpec.mutate);
 const mockResetSpec = vi.mocked(trpc.cyboflow.workflows.resetSpec.mutate);
 const mockCreateCustom = vi.mocked(trpc.cyboflow.workflows.createCustom.mutate);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
+const mockCreateQuick = vi.mocked(API.sessions.createQuick);
+const mockCreatePanel = vi.mocked(panelApi.createPanel);
 
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
+    useCyboflowStore.getState().clearActiveQuickSession();
   });
 
   vi.clearAllMocks();
@@ -122,6 +144,11 @@ beforeEach(() => {
     runId: 'run-001',
     worktreePath: '/tmp/wt',
     branchName: 'run/run-001',
+  });
+  // Phase 3: ensureSessionForLaunch creates a session when none is active.
+  mockCreateQuick.mockResolvedValue({
+    success: true,
+    data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt', runId: 'run-quick-001' },
   });
 });
 
@@ -270,11 +297,20 @@ describe('WorkflowEditorModal — edit mode', () => {
 
     // A dirty edit-mode run persists via updateSpec before starting.
     expect(mockUpdateSpec).toHaveBeenCalledOnce();
-    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: EDIT_WORKFLOW_ID, projectId: 1 });
+    // Phase 3: the run launches INSIDE a session. With none active, the helper
+    // creates one (createQuick → 'session-quick-001') and threads its id.
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-quick-001',
+    });
 
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
     });
+    // setActiveRun nested the run under its parent session.
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -288,11 +324,44 @@ describe('WorkflowEditorModal — edit mode', () => {
     });
 
     expect(mockUpdateSpec).not.toHaveBeenCalled();
-    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: EDIT_WORKFLOW_ID, projectId: 1 });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-quick-001',
+    });
 
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
     });
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('"Run with modifications" reuses the ACTIVE session (no createQuick) and nests the run under it', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveQuickSession('session-existing-007');
+    });
+
+    const { onClose } = await renderEditMode();
+
+    const runBtn = screen.getByTestId('editor-run-button');
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    // No new session created — the active one is reused.
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    expect(mockCreatePanel).not.toHaveBeenCalled();
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-existing-007',
+    });
+
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
+    });
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-existing-007');
     expect(onClose).toHaveBeenCalled();
   });
 

@@ -326,7 +326,14 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledOnce();
-    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-1', projectId: 1, substrate: 'sdk' });
+    // Phase 3: the run launches INSIDE a session. With no active session the
+    // helper creates one (createQuick → 'session-quick-001') and threads its id.
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-quick-001',
+    });
   });
 
   it("includes substrate: 'interactive' in the mutate payload when 'interactive' is picked", async () => {
@@ -343,7 +350,12 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledOnce();
-    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-1', projectId: 1, substrate: 'interactive' });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'interactive',
+      sessionId: 'session-quick-001',
+    });
   });
 
   it("does NOT render the interactive caveats while 'sdk' is selected", async () => {
@@ -424,6 +436,90 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     });
 
     expect(mockRunStart).toHaveBeenCalledOnce();
-    expect(mockRunStart).toHaveBeenCalledWith({ workflowId: 'wf-planner', projectId: 1, substrate: 'sdk', ideaId: 'IDEA-9' });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-planner',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-quick-001',
+      ideaId: 'IDEA-9',
+    });
+  });
+});
+
+describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockCreateQuick.mockClear();
+    vi.mocked(panelApi.createPanel).mockClear();
+    // Sprint flows so "Start Run" hits the DIRECT launch path (not the Planner
+    // idea gate). The prior Planner describe leaves the list mock pointed at a
+    // planner row, so re-point it here.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+  });
+
+  it('with NO active session: creates one (createQuick + panels), threads its id, and nests the run under it', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // A session was created for the launch + its default panels bootstrapped.
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
+    expect(panelApi.createPanel).toHaveBeenCalledWith({
+      sessionId: 'session-quick-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/quick-wt' },
+    });
+
+    // runs.start carries the created session id.
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-quick-001',
+    });
+
+    // setActiveRun nested the run under its parent session: BOTH ids are set.
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
+    });
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+  });
+
+  it('with an active session preset: reuses it, does NOT call createQuick, and nests the run under it', async () => {
+    // Preset an already-selected quick session (no workflow-run subscription).
+    act(() => {
+      useCyboflowStore.getState().setActiveQuickSession('session-existing-007');
+    });
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // No new session created — the active one is reused.
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    expect(panelApi.createPanel).not.toHaveBeenCalled();
+
+    // runs.start carries the EXISTING session id.
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-existing-007',
+    });
+
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
+    });
+    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-existing-007');
   });
 });

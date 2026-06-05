@@ -56,6 +56,13 @@ vi.mock('../../trpc/client', () => ({
   },
 }));
 
+// Phase 3: the backlog "Run" path is now session-hosted — it resolves a session
+// via ensureSessionForLaunch before runs.start. Stub it so the launch does not hit
+// the real createQuick IPC and so we can assert the sessionId is threaded.
+vi.mock('../../utils/ensureSessionForLaunch', () => ({
+  ensureSessionForLaunch: vi.fn().mockResolvedValue('sess-backlog'),
+}));
+
 import { BacklogPane } from '../BacklogPane';
 
 // ---------------------------------------------------------------------------
@@ -277,7 +284,7 @@ describe('BacklogPane', () => {
     });
     // Allow the workflows.list + runs.start promise chain to settle.
     await vi.waitFor(() => expect(mockStart).toHaveBeenCalled());
-    expect(mockStart).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'tsk_run', projectId: 1, workflowId: 'wf-1' }));
+    expect(mockStart).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'tsk_run', projectId: 1, workflowId: 'wf-1', sessionId: 'sess-backlog' }));
   });
 
   it('opens the New task dialog from the + New affordance', () => {

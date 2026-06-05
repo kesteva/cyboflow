@@ -1317,4 +1317,97 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       expect(result.worktreePath).toBe(sessionWorktree);
     });
   });
+
+  it('allows a real workflow launch when the session\'s ONLY non-terminal run is a __quick__ sentinel', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-quick', ?, 'main', NULL)",
+      ).run(sessionWorktree);
+
+      // Seed the __quick__ SENTINEL: a workflows row named '__quick__' plus a
+      // permanently-'running' workflow_runs row for this session. The Phase-1
+      // guard MUST NOT count it, so launching a REAL workflow is still allowed.
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES ('wf-quick', 1, '__quick__', '/fake/quick.md', 'default')",
+      ).run();
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES ('run-quick', 'wf-quick', 1, 'running', 'default', 'sess-quick')",
+      ).run();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'planner', cannedRunId);
+
+      const createDeterministicWorktree = vi.fn();
+      const fakeWorktree = {
+        createDeterministicWorktree,
+        getProjectMainBranch: vi.fn().mockResolvedValue('feature/session-branch'),
+        getHeadCommit: vi.fn().mockResolvedValue('cafef00dbeef'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-quick');
+
+      // The sentinel did NOT block the launch: createRun ran and the run reuses
+      // the session worktree (no dedicated worktree created).
+      expect(createRunSpy).toHaveBeenCalledOnce();
+      expect(createDeterministicWorktree).not.toHaveBeenCalled();
+      expect(result.runId).toBe(cannedRunId);
+      expect(result.worktreePath).toBe(sessionWorktree);
+    });
+  });
+
+  it('still BLOCKS a 2nd real launch when the session has a REAL non-terminal run (sentinel exclusion does not weaken the guard)', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-realbusy', ?, 'main', NULL)",
+      ).run(sessionWorktree);
+
+      // A REAL (non-sentinel) in-flight run already owns this session.
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES ('wf-real', 1, 'sprint', '/fake/path.md', 'default')",
+      ).run();
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES ('run-real', 'wf-real', 1, 'running', 'default', 'sess-realbusy')",
+      ).run();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'planner', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn(),
+        getHeadCommit: vi.fn(),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-realbusy'),
+      ).rejects.toThrow(/already has a running workflow/);
+
+      // The guard fires BEFORE createRun, so no half-created run is left behind.
+      expect(createRunSpy).not.toHaveBeenCalled();
+      const count = db
+        .prepare("SELECT COUNT(*) AS n FROM workflow_runs WHERE session_id = 'sess-realbusy'")
+        .get() as { n: number };
+      expect(count.n).toBe(1); // only the pre-existing real run
+    });
+  });
 });

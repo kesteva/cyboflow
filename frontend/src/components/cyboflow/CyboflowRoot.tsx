@@ -104,10 +104,15 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     setIsEditorOpen(false);
     // Force the canvas to re-resolve its phase state: clear + reselect the run so
     // useWorkflowPhaseState re-runs getPhaseState (which re-reads spec_json).
+    // Preserve the run's parent session (Phase 3) across the reselect — otherwise
+    // setActiveRun(runId) would null activeQuickSessionId and the Diff / File-Explorer
+    // (which read it) would flip to the empty state while the run is still executing
+    // in the session worktree.
     if (activeRunId !== null) {
       const store = useCyboflowStore.getState();
+      const parentSessionId = store.activeQuickSessionId;
       store.clearActiveRun();
-      store.setActiveRun(activeRunId);
+      store.setActiveRun(activeRunId, parentSessionId);
     }
   }, [activeRunId]);
 
