@@ -12,15 +12,15 @@ files_readonly:
   - build/entitlements.mac.plist
   - main/src/index.ts
 acceptance_criteria:
-  - criterion: "package.json version is set to '1.0.0' (no '-rc', '-beta', or '-alpha' suffix)."
-    verification: "node -e \"console.log(require('./package.json').version)\" prints exactly '1.0.0'."
+  - criterion: "package.json version is set to '0.1.2' (no '-rc', '-beta', or '-alpha' suffix)."
+    verification: "node -e \"console.log(require('./package.json').version)\" prints exactly '0.1.2'."
   - criterion: "package.json build.appId is 'com.cyboflow.app' and build.productName is 'Cyboflow'."
     verification: "node -e \"const p=require('./package.json'); console.log(p.build.appId+'|'+p.build.productName)\" prints 'com.cyboflow.app|Cyboflow'."
   - criterion: "package.json top-level 'name' is 'cyboflow' (not 'crystal')."
     verification: "node -e \"console.log(require('./package.json').name)\" prints exactly 'cyboflow'."
-  - criterion: "A signed, notarized universal DMG named 'Cyboflow-1.0.0-macOS-universal.dmg' is produced under dist-electron/ by the build pipeline established in epic apple-signing-notarization-setup."
-    verification: "After running `pnpm build:mac:universal`, `ls dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` exits 0 and `codesign -dvv dist-electron/mac-universal/Cyboflow.app 2>&1 | grep 'Authority=Developer ID Application'` returns a match."
-  - criterion: "Notarization status is 'Accepted' — verified via `spctl --assess --type install dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` returns exit 0 and `stapler validate dist-electron/Cyboflow-1.0.0-macOS-universal.dmg` returns 'The validate action worked!'."
+  - criterion: "A signed, notarized universal DMG named 'Cyboflow-0.1.2-macOS-universal.dmg' is produced under dist-electron/ by the build pipeline established in epic apple-signing-notarization-setup."
+    verification: "After running `pnpm build:mac:universal`, `ls dist-electron/Cyboflow-0.1.2-macOS-universal.dmg` exits 0 and `codesign -dvv dist-electron/mac-universal/Cyboflow.app 2>&1 | grep 'Authority=Developer ID Application'` returns a match."
+  - criterion: "Notarization status is 'Accepted' — verified via `spctl --assess --type install dist-electron/Cyboflow-0.1.2-macOS-universal.dmg` returns exit 0 and `stapler validate dist-electron/Cyboflow-0.1.2-macOS-universal.dmg` returns 'The validate action worked!'."
     verification: Run both commands; record their stdout in DMG-VERIFICATION.md. Both must succeed.
   - criterion: "Clean-account smoke test: a separate macOS user account (or a fresh test machine) opens the DMG, drags Cyboflow.app to /Applications, launches it. Gatekeeper shows no warnings. The app reaches the main UI with a green StatusBar dot."
     verification: "DMG-VERIFICATION.md contains a 'Clean-Account Smoke Test' section with: account/machine used, screenshot or terminal log of the launch, and a PASS/FAIL stamp."
@@ -47,11 +47,11 @@ prerequisites:
     description: "Crystal's inherited package.json ships with hardenedRuntime: false and notarize: false (Crystal's dev shortcut). Notarization will not run unless both flags are true."
     blocking: true
 ---
-# Produce, Sign, and Notarize the v1.0.0 DMG
+# Produce, Sign, and Notarize the v0.1.2 DMG
 
 ## Objective
 
-Cut v1.0.0 of Cyboflow: bump `package.json` to 1.0.0, finalize the appId/productName rebrand if still incomplete, run the full sign + notarize + staple pipeline established in `apple-signing-notarization-setup` (epic 2), and verify the resulting DMG installs and launches cleanly on a fresh macOS user account from the GitHub release page. Capture verification evidence (codesign output, spctl/stapler results, lipo verification, clean-account smoke test) in `DMG-VERIFICATION.md`. This is the shippable artifact — the "ship event" the brief calls out as the gating deliverable of the MVP.
+Cut v0.1.2 of Cyboflow: bump `package.json` to 0.1.2, finalize the appId/productName rebrand if still incomplete, run the full sign + notarize + staple pipeline established in `apple-signing-notarization-setup` (epic 2), and verify the resulting DMG installs and launches cleanly on a fresh macOS user account from the GitHub release page. Capture verification evidence (codesign output, spctl/stapler results, lipo verification, clean-account smoke test) in `DMG-VERIFICATION.md`. This is the shippable artifact — the "ship event" the brief calls out as the gating deliverable of the MVP.
 
 ## Implementation Steps
 
@@ -59,7 +59,7 @@ Cut v1.0.0 of Cyboflow: bump `package.json` to 1.0.0, finalize the appId/product
 
 2. Modify `package.json` (single PR, atomic):
    - `"name": "cyboflow"` (replaces `"crystal"`).
-   - `"version": "1.0.0"` (replaces `"0.3.5"`).
+   - `"version": "0.1.2"` (already set — inherited Crystal `"0.3.5"` was reset to `0.1.2` in a prior chore commit; confirm it is still `0.1.2`).
    - `"description": "Cyboflow - Cross-workflow review queue for Claude Code"`.
    - `"author": { "name": "Cyboflow", "email": "<author email>" }`.
    - `"build.appId": "com.cyboflow.app"` (replaces `"com.stravu.crystal"`).
@@ -71,14 +71,14 @@ Cut v1.0.0 of Cyboflow: bump `package.json` to 1.0.0, finalize the appId/product
 3. Run the build pipeline locally:
    - `pnpm install` (in case dep changes from upstream merges).
    - `pnpm run setup` (rebuilds native modules against current Electron).
-   - `pnpm run build:mac:universal` — produces `dist-electron/Cyboflow-1.0.0-macOS-universal.dmg`.
+   - `pnpm run build:mac:universal` — produces `dist-electron/Cyboflow-0.1.2-macOS-universal.dmg`.
    - Monitor electron-builder output for any sign failures (unsigned helper executables, wrong identity). The notarytool submission step prints a submission ID; record it.
 
 4. Verification commands (each result captured in DMG-VERIFICATION.md):
    - `codesign -dvv dist-electron/mac-universal/Cyboflow.app 2>&1 | grep -E 'Authority|TeamIdentifier|Format'`
-   - `spctl --assess --type install dist-electron/Cyboflow-1.0.0-macOS-universal.dmg`
-   - `stapler validate dist-electron/Cyboflow-1.0.0-macOS-universal.dmg`
-   - Mount the DMG: `hdiutil attach dist-electron/Cyboflow-1.0.0-macOS-universal.dmg`
+   - `spctl --assess --type install dist-electron/Cyboflow-0.1.2-macOS-universal.dmg`
+   - `stapler validate dist-electron/Cyboflow-0.1.2-macOS-universal.dmg`
+   - Mount the DMG: `hdiutil attach dist-electron/Cyboflow-0.1.2-macOS-universal.dmg`
    - `lipo -info /Volumes/Cyboflow/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node` — expect 'x86_64 arm64'.
    - `lipo -info /Volumes/Cyboflow/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/@homebridge/node-pty-prebuilt-multiarch/build/Release/pty.node` (path may vary — locate with `find /Volumes/Cyboflow -name 'pty.node'`).
    - `hdiutil detach /Volumes/Cyboflow`.
@@ -94,7 +94,7 @@ Cut v1.0.0 of Cyboflow: bump `package.json` to 1.0.0, finalize the appId/product
 
 6. Create `.soloflow/active/acceptance/DMG-VERIFICATION.md` with sections:
    ```
-   # v1.0.0 DMG Verification
+   # v0.1.2 DMG Verification
 
    Build commit: <git rev-parse HEAD>
    Built at: <ISO timestamp>
@@ -118,7 +118,7 @@ Cut v1.0.0 of Cyboflow: bump `package.json` to 1.0.0, finalize the appId/product
    - Evidence: <path to screenshot or terminal log>
    ```
 
-7. If all verifications PASS, this task is done. The DMG is the shippable artifact. Push to the GitHub release (manually for v1.0.0 — auto-update is out of scope per brief).
+7. If all verifications PASS, this task is done. The DMG is the shippable artifact. Push to the GitHub release (manually for v0.1.2 — auto-update is out of scope per brief).
 
 ## Acceptance Criteria
 
