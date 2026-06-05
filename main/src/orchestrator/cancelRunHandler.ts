@@ -1,0 +1,218 @@
+/**
+ * cancelRunHandler — extracted business logic for the GIT-NEUTRAL `runs.cancel`
+ * tRPC mutation (session<->run restructure, Phase 4a).
+ *
+ * Cancel is PURELY git-neutral: it stops the live agent on BOTH substrates and
+ * marks the run terminal ('canceled'). It NEVER removes a worktree, NEVER merges,
+ * NEVER deletes a branch, and NEVER calls the session close-out guard
+ * (assertNotSessionHosted) — a session-hosted run shares its session's worktree,
+ * and cancelling the run must leave that worktree intact. Worktree/branch lifecycle
+ * (Merge / PR / Dismiss) belongs to the SESSION, not the run.
+ *
+ * Contrast with cancelAndRestartHandler (the closest template): cancel does the
+ * same queue-serialized fail-soft kill + guarded UPDATE, but does NOT re-INSERT a
+ * fresh run.
+ *
+ * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
+ * or any concrete service in main/src/services/*. All collaborators are injected
+ * via CancelRunDeps.
+ */
+import type { DatabaseLike, LoggerLike } from './types';
+import type { RunQueueRegistry } from './RunQueueRegistry';
+import {
+  TERMINAL_RUN_STATUSES,
+  TERMINAL_RUN_STATUSES_SQL_IN,
+} from '../../../shared/types/cyboflow';
+
+// ---------------------------------------------------------------------------
+// Dependency bag
+//
+// NOTE (git-neutral invariant): there is DELIBERATELY no worktreeManager,
+// removeWorktreeByPath, deleteBranch, merge, or worktree-path collaborator on
+// this bag. Cancel must never touch git — the absence of any such dep is the
+// structural guarantee, asserted in the unit tests.
+// ---------------------------------------------------------------------------
+
+export interface CancelRunDeps {
+  db: DatabaseLike;
+  runQueues: RunQueueRegistry;
+  /**
+   * Stop the LIVE run process for `runId` on WHICHEVER substrate it ran. Backed
+   * by SubstrateDispatchFacade.abort(runId) at the boot seam — the universal,
+   * substrate-aware kill that routes to killProcess on the manager that spawned
+   * the run (the SDK manager overrides it to abort its query() iterator; the
+   * interactive manager inherits it to kill the PTY tree). NOT
+   * defaultCliManager.stopPanel (SDK-only — would silently orphan an interactive
+   * run's PTY) and NOT killSession (interactive-only — a strict no-op for SDK).
+   * Injection (function-ref shape, mirroring CancelAndRestartDeps.claudeManagerStop)
+   * keeps this handler free of any services/* import.
+   */
+  stopLiveRun: (runId: string) => Promise<void>;
+  /**
+   * Settle + drop any pending approvals for the run BEFORE the kill, so cancel
+   * doesn't leave orphaned items in the review queue. Backed by
+   * ApprovalRouter.clearPendingForRun.
+   */
+  clearPendingApprovalsForRun: (runId: string) => void;
+  /**
+   * Settle any pending AskUserQuestion gate Promises for the run BEFORE the kill,
+   * symmetric with clearPendingApprovalsForRun. Backed by
+   * QuestionRouter.clearPendingForRun. Optional — when omitted, question gates are
+   * not explicitly settled (the kill still tears the run down).
+   */
+  clearPendingQuestionsForRun?: (runId: string) => void;
+  /**
+   * Emit the project-wide run-status-changed signal AFTER the guarded UPDATE
+   * succeeds, so the rail / action-bar reactivity (activeRunsStore) sees the
+   * cancel. Backed by the SAME emitRunStatus closure the lifecycleTransitions
+   * adapter uses (index.ts).
+   */
+  emitRunStatusChanged: (runId: string, status: 'canceled') => void;
+  /**
+   * Optional structured logger. When provided, a rejection from `stopLiveRun` is
+   * logged as a `[cancelRun]` entry before the handler proceeds to the DB write
+   * (the run is conceptually canceled regardless of kill success). When omitted,
+   * the error is silently swallowed.
+   */
+  logger?: LoggerLike;
+}
+
+// ---------------------------------------------------------------------------
+// Result type
+// ---------------------------------------------------------------------------
+
+export type CancelRunResult =
+  | { success: true }
+  | { noOp: true; reason: string };
+
+// ---------------------------------------------------------------------------
+// Internal row type
+// ---------------------------------------------------------------------------
+
+interface CancelRunRow {
+  status: string;
+}
+
+// Terminal statuses — cancel is an idempotent no-op on these (double-cancel).
+const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Git-neutral cancel of a workflow run: stop the live agent + mark the run
+ * 'canceled'. NEVER touches git.
+ *
+ * Execution order (all within the per-run PQueue for `runId`):
+ *   (a) Fetch the run row. If not found → { noOp, reason: 'not_found' }.
+ *   (b) If already terminal → { noOp, reason: 'already_terminal' } (idempotent).
+ *   (c) Clear pending approvals + questions for the run (BEFORE the kill).
+ *   (d) `stopLiveRun(runId)` — abort the in-flight agent (BOTH substrates), wrapped
+ *       in try/catch so a rejection / no-live-process does NOT block the DB write.
+ *   (e) Guarded UPDATE: status='canceled', ended_at=now WHERE status NOT IN
+ *       terminal; AND outcome='canceled' WHERE outcome IS NULL. If the guarded
+ *       update changes 0 rows → { noOp, reason: 'race' } (concurrent terminal flip).
+ *   (f) emitRunStatusChanged(runId, 'canceled').
+ *   (g) return { success: true }.
+ *
+ * Worktree preservation: NO worktreeManager.remove, NO deleteBranch, NO merge.
+ * A session-hosted run's worktree (and a legacy run's own worktree) survive
+ * cancel untouched — the worktree may hold partial work the user wants to inspect,
+ * and for session-hosted runs the worktree belongs to the session.
+ */
+export async function cancelRunHandler(
+  runId: string,
+  deps: CancelRunDeps,
+): Promise<CancelRunResult> {
+  const {
+    db,
+    runQueues,
+    stopLiveRun,
+    clearPendingApprovalsForRun,
+    clearPendingQuestionsForRun,
+    emitRunStatusChanged,
+    logger,
+  } = deps;
+
+  // Serialize with any concurrent status changes for this run.
+  const result = await runQueues.getOrCreate(runId).add(async (): Promise<CancelRunResult> => {
+    // (a) Fetch the run row.
+    const row = db
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get(runId) as CancelRunRow | undefined;
+
+    if (!row) {
+      return { noOp: true as const, reason: 'not_found' };
+    }
+
+    // (b) Idempotent double-cancel guard.
+    if (TERMINAL_STATUSES.has(row.status)) {
+      return { noOp: true as const, reason: 'already_terminal' };
+    }
+
+    const now = new Date().toISOString();
+
+    // (c) Settle pending approvals + questions BEFORE the kill so cancel doesn't
+    // leave orphaned items in the review queue / dangling gate Promises.
+    clearPendingApprovalsForRun(runId);
+    clearPendingQuestionsForRun?.(runId);
+
+    // (d) Stop the live agent on whichever substrate it ran. Wrapped in try/catch
+    // (fail-soft): a rejection here — or simply no live process for an idle run —
+    // must NOT leave the run stuck. The DB write below still applies; the run is
+    // conceptually canceled from the user's perspective regardless of kill success.
+    try {
+      await stopLiveRun(runId);
+    } catch (err: unknown) {
+      logger?.error('[cancelRun] stopLiveRun rejected — proceeding to DB write', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // (e) Guarded, atomic UPDATE: mark the run 'canceled' (transitionToCanceled-
+    // equivalent guard) AND stamp outcome='canceled' where not already set. NO
+    // task-stage derivation (cancel is git-neutral and does NOT revert a linked
+    // task — that is the Dismiss path's job). If the guarded UPDATE matches 0 rows,
+    // a concurrent process moved the run terminal between the guard above and here.
+    const cancelTx = db.transaction(() => {
+      const updateResult = db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'canceled', ended_at = ?, updated_at = ?
+            WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+        )
+        .run(now, now, runId) as { changes: number };
+
+      if (updateResult.changes === 0) {
+        return false;
+      }
+
+      // Stamp the DB-canonical cancel signal — but only when outcome is unset, so a
+      // pre-existing outcome (e.g. 'pr_open') is never clobbered by a late cancel.
+      db.prepare(
+        `UPDATE workflow_runs
+            SET outcome = 'canceled', updated_at = ?
+          WHERE id = ? AND outcome IS NULL`,
+      ).run(now, runId);
+
+      return true;
+    });
+
+    const changed = cancelTx() as boolean;
+    if (!changed) {
+      return { noOp: true as const, reason: 'race' };
+    }
+
+    // (f) Project-wide run-status-changed signal — only after the write succeeded.
+    emitRunStatusChanged(runId, 'canceled');
+
+    // (g) Done.
+    return { success: true as const };
+  });
+
+  // p-queue returns undefined only if the task returns undefined; ours always
+  // returns a value, so this cast is safe.
+  return result as CancelRunResult;
+}

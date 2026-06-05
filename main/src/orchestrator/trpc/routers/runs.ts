@@ -1,16 +1,12 @@
 /**
  * cyboflow.runs sub-router.
  *
- * All procedure bodies are deliberate not-implemented placeholders.
- * They will be filled in during the workflow-runs epic — grep for
- * `throwNotImplemented` to find every remaining stub.
- *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
-import { router, protectedProcedure, throwNotImplemented } from '../trpc';
+import { router, protectedProcedure } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
 import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState, PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -32,6 +28,12 @@ import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
 } from '../../cancelAndRestartHandler';
+import {
+  cancelRunHandler,
+  type CancelRunDeps,
+  type CancelRunResult,
+} from '../../cancelRunHandler';
+import type { WorkflowRunRow } from '../../../../../shared/types/cyboflow';
 import {
   nudgeRunHandler,
   type NudgeRunDeps,
@@ -61,6 +63,33 @@ let cancelAndRestartDeps: CancelAndRestartDeps | null = null;
  */
 export function setCancelAndRestartDeps(deps: CancelAndRestartDeps): void {
   cancelAndRestartDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// cancel dependency bag (session<->run restructure, Phase 4a — git-neutral run Cancel)
+//
+// Injected at boot by main/src/index.ts via setCancelRunDeps(). The git-neutral
+// Cancel stops the live agent on BOTH substrates (via SubstrateDispatchFacade.
+// abort — which routes to the spawning manager's killProcess; killSession is a
+// no-op for SDK runs) and marks the run 'canceled' — it NEVER touches git (no worktree
+// removal, no merge, no branch delete), so its dep bag is deliberately free of any
+// WorktreeManager collaborator (contrast RunCloseoutDeps). Until wired the mutation
+// throws METHOD_NOT_SUPPORTED — same stub pattern as the other dep-bags.
+// ---------------------------------------------------------------------------
+
+let cancelRunDeps: CancelRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the git-neutral `cancel` mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry,
+ * SubstrateDispatchFacade, ApprovalRouter, and QuestionRouter are constructed.
+ *
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED (same as all
+ * other stub procedures in this router).
+ */
+export function setCancelRunDeps(deps: CancelRunDeps): void {
+  cancelRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +368,10 @@ function resolveRunForCloseout(
  * not the run. Merging is likewise the session's job (wired in Phase 3). For such
  * runs every run-level close-out mutation (merge / createPr / dismiss) throws
  * PRECONDITION_FAILED; the frontend routes those actions to the owning session in
- * Phase 3, and run-level cancel/pause arrive in Phase 4.
+ * Phase 3. Run-level Cancel (Phase 4a) is IMPLEMENTED and deliberately does NOT
+ * go through this guard — it is git-neutral (stop the agent + mark 'canceled', no
+ * worktree touch), so it is safe for session-hosted runs. Run-level Pause is
+ * deferred to a later pass.
  *
  * Legacy runs (session_id == null) are unaffected — this is a no-op for them.
  */
@@ -564,16 +596,66 @@ export const runsRouter = router({
       return { runId, worktreePath, branchName };
     }),
 
-  /** Cancel a running workflow run by ID. */
+  /**
+   * Git-neutral Cancel of a running workflow run (session<->run restructure,
+   * Phase 4a). Stops the live agent on BOTH substrates (via the
+   * SubstrateDispatchFacade kill seam injected as cancelRunDeps.stopLiveRun) and
+   * marks the run terminal ('canceled') — it NEVER removes a worktree, merges, or
+   * deletes a branch. That worktree/branch lifecycle (Merge / PR / Dismiss) is the
+   * SESSION's job, so cancel deliberately does NOT call assertNotSessionHosted and
+   * is safe for a session-hosted run (the shared session worktree survives).
+   *
+   * Returns:
+   *   { success: true }                — the run was stopped + marked 'canceled'.
+   *   { noOp: true; reason }           — 'not_found' / 'already_terminal'
+   *                                      (idempotent double-cancel) / 'race'
+   *                                      (a concurrent terminal transition won).
+   *
+   * Standalone-typecheck invariant: collaborators (db, runQueues, stopLiveRun,
+   * clearPendingApprovalsForRun, clearPendingQuestionsForRun, emitRunStatusChanged)
+   * are injected via setCancelRunDeps(). Until wired the mutation throws
+   * METHOD_NOT_SUPPORTED.
+   */
   cancel: protectedProcedure
-    .input(z.object({ runId: z.string() }))
-    .mutation(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<CancelRunResult> => {
+      if (!cancelRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'cancel-run deps not wired yet. Call setCancelRunDeps() at boot.',
+        });
+      }
+      return cancelRunHandler(input.runId, cancelRunDeps);
+    }),
 
-  /** Get a single workflow run by ID. */
+  /**
+   * Get a single workflow run by ID (session<->run restructure, Phase 4a).
+   *
+   * Reads the full workflow_runs row directly from ctx.db (matching the dominant
+   * convention in this router — the WorkflowRegistry surface in the tRPC context
+   * does not expose getRunById). Throws NOT_FOUND when the run does not exist.
+   */
   get: protectedProcedure
-    .input(z.object({ runId: z.string() }))
-    // STUB — no raw-IPC equivalent. Implementation pending (workflow-runs epic).
-    .query(() => throwNotImplemented('workflow-runs')),
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ ctx, input }): WorkflowRunRow => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      const row = ctx.db
+        .prepare(
+          `SELECT id, workflow_id, project_id, worktree_path, status, policy_json,
+                  stuck_at, stuck_reason, created_at, updated_at, started_at, ended_at
+             FROM workflow_runs WHERE id = ?`,
+        )
+        .get(input.runId) as WorkflowRunRow | undefined;
+      if (!row) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
+      }
+      return row;
+    }),
 
   /**
    * Cancel a stuck workflow run and immediately enqueue a fresh run for

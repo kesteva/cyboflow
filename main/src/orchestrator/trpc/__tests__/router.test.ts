@@ -95,15 +95,22 @@ describe('appRouter (createCaller)', () => {
     ).rejects.toSatisfy(isNotImplemented);
   });
 
-  it('cyboflow.runs.cancel throws NOT_IMPLEMENTED', async () => {
+  // cyboflow.runs.cancel is live (Phase 4a) but throws METHOD_NOT_SUPPORTED until
+  // setCancelRunDeps() is wired at boot — this default caller has no deps wired, so
+  // the unwired-deps guard fires (same stub-guard family as runs.start). Handler +
+  // wired-delegation coverage lives in cancelRunHandler.test.ts and runs.test.ts.
+  it('cyboflow.runs.cancel throws METHOD_NOT_SUPPORTED when deps not wired', async () => {
     await expect(caller.cyboflow.runs.cancel({ runId: 'run-1' })).rejects.toSatisfy(
       isNotImplemented,
     );
   });
 
-  it('cyboflow.runs.get throws NOT_IMPLEMENTED', async () => {
+  // cyboflow.runs.get is live (Phase 4a) — it reads ctx.db directly. With the
+  // default caller (no db in context) it throws PRECONDITION_FAILED, not the old
+  // NOT_IMPLEMENTED stub. Happy-path + NOT_FOUND coverage lives in runs.test.ts.
+  it('cyboflow.runs.get throws PRECONDITION_FAILED when ctx.db is missing', async () => {
     await expect(caller.cyboflow.runs.get({ runId: 'run-1' })).rejects.toSatisfy(
-      isNotImplemented,
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
   });
 
@@ -135,9 +142,10 @@ describe('appRouter (createCaller)', () => {
     // All procedures use protectedProcedure; if any threw UNAUTHORIZED we
     // would have seen it in the tests above. This test makes the intent
     // explicit by asserting the error code is METHOD_NOT_SUPPORTED, not UNAUTHORIZED.
-    // Uses cyboflow.runs.get (still a NOT_IMPLEMENTED stub) since
-    // cyboflow.runs.list went live in TASK-710.
-    const err = await caller.cyboflow.runs.get({ runId: 'run-1' }).catch((e: unknown) => e);
+    // Uses cyboflow.runs.cancel (METHOD_NOT_SUPPORTED until setCancelRunDeps() is
+    // wired) since cyboflow.runs.get went live (Phase 4a) and now throws
+    // PRECONDITION_FAILED on a db-less context instead of the old stub error.
+    const err = await caller.cyboflow.runs.cancel({ runId: 'run-1' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TRPCError);
     expect((err as TRPCError).code).toBe('METHOD_NOT_SUPPORTED');
     expect((err as TRPCError).code).not.toBe('UNAUTHORIZED');

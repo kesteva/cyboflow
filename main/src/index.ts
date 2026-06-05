@@ -34,7 +34,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -990,6 +990,34 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] cancelAndRestart deps wired');
+
+    // Phase 4a — git-neutral run Cancel. Stops the live agent on BOTH substrates
+    // by routing through the SubstrateDispatchFacade kill seam
+    // (substrateFacade.abort), NOT defaultCliManager.stopPanel (SDK-only — would
+    // orphan an interactive run's PTY). abort() resolves the manager that spawned
+    // the run's panel and calls killProcess on it — the SDK manager overrides
+    // killProcess to abort its query() iterator, the interactive manager inherits
+    // it to kill the PTY tree — so a single call stops whichever substrate ran.
+    // (killSession is interactive-ONLY — a strict no-op for SDK — so it is the
+    // wrong seam for a universal cancel.) Reuses the SAME `db`, `runQueues`,
+    // ApprovalRouter / QuestionRouter accessors, and `loggerLike` as the
+    // cancelAndRestart wiring above. emitRunStatusChanged emits on the SAME
+    // module-level `runStatusEvents` 'changed' channel the lifecycleTransitions
+    // adapter uses, so the rail / action-bar (activeRunsStore) reacts to a cancel.
+    // The bag has NO worktree collaborator — cancel never touches git.
+    setCancelRunDeps({
+      db,
+      runQueues,
+      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      clearPendingApprovalsForRun: (runId: string) =>
+        ApprovalRouter.getInstance().clearPendingForRun(runId),
+      clearPendingQuestionsForRun: (runId: string) =>
+        QuestionRouter.getInstance().clearPendingForRun(runId),
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      logger: loggerLike,
+    });
+    console.log('[Main] runs.cancel deps wired');
 
     setStartRunDeps({
       runLauncher,

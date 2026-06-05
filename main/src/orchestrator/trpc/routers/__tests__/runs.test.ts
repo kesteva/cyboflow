@@ -59,8 +59,9 @@ import * as path from 'path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps } from '../runs';
 import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
+import type { CancelRunDeps, CancelRunResult } from '../../../cancelRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
@@ -527,6 +528,127 @@ describe('cyboflow.runs.nudge', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.cancel — git-neutral run Cancel (Phase 4a, router delegation).
+//
+// The handler's full guard matrix is covered in cancelRunHandler.test.ts; here we
+// verify that once wired the router forwards { runId } to the injected handler deps
+// and returns the result verbatim. A fake CancelRunDeps is injected via
+// setCancelRunDeps() so the test stays free of the SubstrateDispatchFacade /
+// services-*. The METHOD_NOT_SUPPORTED-when-unwired path is covered by the
+// separately-loaded module instance in router.test.ts (per-file module isolation
+// guarantees cancelRunDeps === null there) — same rationale documented for
+// runs.start above, so this block deliberately sets deps and does not reset them.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.cancel (Phase 4a)', () => {
+  /** A CancelRunDeps whose collaborators are vi.fn() spies over a real in-memory DB. */
+  function makeFakeCancelDeps(
+    db: Database.Database,
+    overrides?: Partial<CancelRunDeps>,
+  ): CancelRunDeps {
+    return {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      stopLiveRun: vi.fn<CancelRunDeps['stopLiveRun']>().mockResolvedValue(undefined),
+      clearPendingApprovalsForRun: vi.fn<CancelRunDeps['clearPendingApprovalsForRun']>(),
+      clearPendingQuestionsForRun: vi.fn<NonNullable<CancelRunDeps['clearPendingQuestionsForRun']>>(),
+      emitRunStatusChanged: vi.fn<CancelRunDeps['emitRunStatusChanged']>(),
+      ...overrides,
+    };
+  }
+
+  // (b) WIRED — delegates to the handler and returns its { success: true } result.
+  it('(b) delegates to the handler and returns { success: true } for a running run', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'running' });
+    const stopLiveRun = vi.fn<CancelRunDeps['stopLiveRun']>().mockResolvedValue(undefined);
+    const emitRunStatusChanged = vi.fn<CancelRunDeps['emitRunStatusChanged']>();
+    setCancelRunDeps(makeFakeCancelDeps(db, { stopLiveRun, emitRunStatusChanged }));
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: CancelRunResult = await caller.cyboflow.runs.cancel({ runId });
+
+      expect(result).toEqual({ success: true });
+      expect(stopLiveRun).toHaveBeenCalledWith(runId);
+      expect(emitRunStatusChanged).toHaveBeenCalledWith(runId, 'canceled');
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('canceled');
+    } finally {
+      db.close();
+    }
+  });
+
+  // (b2) WIRED — forwards a noOp result verbatim (already-terminal idempotent path).
+  it('(b2) forwards a noOp { reason: already_terminal } result verbatim', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'completed' });
+    const stopLiveRun = vi.fn<CancelRunDeps['stopLiveRun']>().mockResolvedValue(undefined);
+    setCancelRunDeps(makeFakeCancelDeps(db, { stopLiveRun }));
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: CancelRunResult = await caller.cyboflow.runs.cancel({ runId });
+
+      expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+      expect(stopLiveRun).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.get — single workflow run lookup (Phase 4a).
+//
+// Reads the workflow_runs row directly from ctx.db. Verifies the happy-path row
+// shape, NOT_FOUND for an unknown id, and PRECONDITION_FAILED when ctx.db is
+// missing.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.get (Phase 4a)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ includeStuckDetectedAt: true });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns the workflow run row for a known id', async () => {
+    seedRun(db, { id: 'run-get-1', status: 'running', worktreePath: '/tmp/wt/run-get-1' });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const row = await caller.cyboflow.runs.get({ runId: 'run-get-1' });
+
+    expect(row.id).toBe('run-get-1');
+    expect(row.status).toBe('running');
+    expect(row.worktree_path).toBe('/tmp/wt/run-get-1');
+    expect(row.project_id).toBe(1);
+  });
+
+  it('throws NOT_FOUND for an unknown run id', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      caller.cyboflow.runs.get({ runId: 'no-such-run' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+
+  it('throws PRECONDITION_FAILED when ctx.db is missing', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.get({ runId: 'any-run' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
   });
 });
 
