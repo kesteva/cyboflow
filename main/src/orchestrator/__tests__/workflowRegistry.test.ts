@@ -21,7 +21,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
 import { writeFileSync } from 'fs';
 import * as path from 'path';
-import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor } from '../workflowRegistry';
+import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type WorkflowConfigProvider } from '../workflowRegistry';
+import type { PermissionMode } from '../../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -71,6 +73,21 @@ function makeDefinition(id: string): WorkflowDefinition {
         ],
       },
     ],
+  };
+}
+
+/**
+ * Build a stub WorkflowConfigProvider supplying the global defaults that
+ * createRun feeds into the resolvers. Mirrors ConfigManager's surface without
+ * importing the concrete service (standalone-typecheck invariant).
+ */
+function makeConfig(
+  agentMode: PermissionMode,
+  substrate: CliSubstrate = 'sdk',
+): WorkflowConfigProvider {
+  return {
+    getDefaultAgentPermissionMode: () => agentMode,
+    getDefaultSubstrate: () => substrate,
   };
 }
 
@@ -492,6 +509,58 @@ describe('WorkflowRegistry', () => {
       expect(() => registry.createRun('nonexistent-id')).toThrow('not found');
     });
 
+    // ───── permission-mode resolution (global default + frontmatter opt-in) ─────
+
+    it("falls through a 'default' column to the injected global default", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // No frontmatter permission_mode → column seeded as 'default' (unset).
+        const path = writeTempMd(tmpDir, 'global-default.md', '---\n---\n');
+        const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, makeConfig('auto'));
+        cfgRegistry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const result = cfgRegistry.createRun(workflowId);
+
+        // Column was 'default' (treated as unset) → global default 'auto' wins.
+        expect(result.permissionMode).toBe('auto');
+        interface SnapshotRow { permission_mode_snapshot: string }
+        const row = db.prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?').get(result.runId) as SnapshotRow;
+        expect(row.permission_mode_snapshot).toBe('auto');
+      });
+    });
+
+    it('an explicit frontmatter opt-in on the column beats the global default', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const content = `---\npermission_mode: dontAsk\n---\n`;
+        const path = writeTempMd(tmpDir, 'frontmatter-opt-in.md', content);
+        const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, makeConfig('auto'));
+        cfgRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = cfgRegistry.createRun(workflowId);
+
+        // Column 'dontAsk' is an explicit per-agent opt-in → wins over the
+        // global default 'auto'.
+        expect(result.permissionMode).toBe('dontAsk');
+      });
+    });
+
+    it("floors to 'default' when no config is injected and the column is 'default' (test-fixture path)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'no-config-floor.md', '---\n---\n');
+        // `registry` (beforeEach) is constructed WITHOUT a config provider.
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const result = registry.createRun(workflowId);
+
+        expect(result.permissionMode).toBe('default');
+      });
+    });
+
     // ───── substrate stamping (IDEA-013 / TASK-806) ─────
 
     it("stamps the default substrate 'sdk' when no override is set (zero-behavior-change)", async () => {
@@ -571,6 +640,37 @@ describe('WorkflowRegistry', () => {
         const row = db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get(runId) as SessionRow;
         expect(row.session_id).toBeNull();
       });
+    });
+
+    it("stamps 'interactive' from the injected global default substrate", async () => {
+      // The substrate TODO closure: the injected config's getDefaultSubstrate()
+      // is threaded into resolveSubstrate as the globalDefaultSubstrate rung.
+      // Ensure no env override masks the global-default rung under test.
+      const prev = process.env.CYBOFLOW_SUBSTRATE;
+      delete process.env.CYBOFLOW_SUBSTRATE;
+      try {
+        await withTempDir('workflow-registry-test-', async (tmpDir) => {
+          const path = writeTempMd(tmpDir, 'substrate-global-default.md', '---\n---\n');
+          const cfgRegistry = new WorkflowRegistry(
+            dbAdapter(db),
+            logger,
+            makeConfig('default', 'interactive'),
+          );
+          cfgRegistry.seed(1, [{ name: 'sprint', path }]);
+
+          interface IdRow { id: string }
+          const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+          const result = cfgRegistry.createRun(workflowId);
+
+          expect(result.substrate).toBe('interactive');
+        });
+      } finally {
+        if (prev === undefined) {
+          delete process.env.CYBOFLOW_SUBSTRATE;
+        } else {
+          process.env.CYBOFLOW_SUBSTRATE = prev;
+        }
+      }
     });
   });
 

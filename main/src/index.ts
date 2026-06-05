@@ -532,7 +532,10 @@ async function initializeServices() {
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
   const cyboflowDb = makeDatabaseLike(databaseService);
-  workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger);
+  // Inject the global-config provider so createRun resolves the global default
+  // agent permission mode + CLI substrate via the resolvers (ConfigManager
+  // satisfies WorkflowConfigProvider structurally).
+  workflowRegistry = new WorkflowRegistry(cyboflowDb, cyboflowLogger, configManager);
   const mcpConfigWriter = new McpConfigWriter();
 
   // Native task-tracking write chokepoint (migration 014). The single serialized

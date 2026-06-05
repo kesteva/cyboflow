@@ -19,6 +19,7 @@ import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName,
 import { isCyboflowWorkflowName } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
+import { resolvePermissionMode } from './permissionModeResolver';
 
 // ---------------------------------------------------------------------------
 // Descriptor types
@@ -27,6 +28,20 @@ import { resolveSubstrate } from './substrateResolver';
 export interface WorkflowDescriptor {
   name: CyboflowWorkflowName;
   path: string;
+}
+
+/**
+ * Narrow config surface required by createRun to inject the global defaults
+ * (agent permission mode + CLI substrate) into the resolvers.
+ *
+ * Injected as a provider object rather than the concrete ConfigManager so the
+ * standalone-typecheck invariant holds (no concrete-service import). The real
+ * ConfigManager satisfies this shape structurally. Optional so existing
+ * test-fixture constructions (no config) keep flooring to 'default' / 'sdk'.
+ */
+export interface WorkflowConfigProvider {
+  getDefaultAgentPermissionMode(): PermissionMode;
+  getDefaultSubstrate(): CliSubstrate;
 }
 
 // The built-in workflow descriptors now live in-repo. See
@@ -66,6 +81,13 @@ export class WorkflowRegistry {
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger: LoggerLike,
+    /**
+     * Optional global-config provider. When supplied, createRun injects the
+     * global default agent permission mode + substrate into the resolvers.
+     * When omitted (test fixtures), both fall through to their hard floors
+     * ('default' / 'sdk').
+     */
+    private readonly config?: WorkflowConfigProvider,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -73,17 +95,26 @@ export class WorkflowRegistry {
   // --------------------------------------------------------------------------
 
   /**
-   * Extract the `permission_mode` field from frontmatter, normalising to a
-   * valid PermissionMode.  Absent or unrecognised values fall back to
-   * `'default'`.
+   * Extract the `permission_mode` field from frontmatter.
+   *
+   * Returns the value only when a VALID PermissionMode key is present;
+   * otherwise returns `null` (meaning UNSET — let the resolver decide at
+   * createRun, falling through to the global default). An absent key OR an
+   * unrecognised value both yield `null`. The built-in flows ship without a
+   * frontmatter `permission_mode`, so this is the common (null) case.
+   *
+   * The `workflows.permission_mode` COLUMN stays non-null: seed/reconcile
+   * coalesce this `null` to `'default'` when persisting (see seed /
+   * reconcileBuiltIns), and createRun treats a column value of `'default'` as
+   * "fall through to the global default".
    */
-  private extractPermissionMode(md: string): PermissionMode {
+  private extractPermissionMode(md: string): PermissionMode | null {
     const { frontmatter } = parseMarkdownFrontmatter(md);
     const raw = frontmatter['permission_mode'];
-    if (raw === 'acceptEdits' || raw === 'dontAsk' || raw === 'default') {
+    if (raw === 'acceptEdits' || raw === 'dontAsk' || raw === 'default' || raw === 'auto') {
       return raw;
     }
-    return 'default';
+    return null;
   }
 
   // --------------------------------------------------------------------------
@@ -109,10 +140,13 @@ export class WorkflowRegistry {
 
     const seedTx = this.db.transaction(() => {
       for (const descriptor of workflowDescriptors) {
+        // Seed the non-null COLUMN with 'default' when frontmatter has no
+        // (valid) permission_mode — a column value of 'default' is treated as
+        // "fall through to the global default" at createRun.
         let permissionMode: PermissionMode = 'default';
         try {
           const md = readFileSync(descriptor.path, 'utf-8');
-          permissionMode = this.extractPermissionMode(md);
+          permissionMode = this.extractPermissionMode(md) ?? 'default';
         } catch (err) {
           this.logger.error(
             `WorkflowRegistry.seed: could not read workflow file, defaulting permission_mode to 'default'`,
@@ -156,10 +190,13 @@ export class WorkflowRegistry {
 
     const reconcileTx = this.db.transaction(() => {
       for (const descriptor of workflowDescriptors) {
+        // Seed the non-null COLUMN with 'default' when frontmatter has no
+        // (valid) permission_mode — a column value of 'default' is treated as
+        // "fall through to the global default" at createRun.
         let permissionMode: PermissionMode = 'default';
         try {
           const md = readFileSync(descriptor.path, 'utf-8');
-          permissionMode = this.extractPermissionMode(md);
+          permissionMode = this.extractPermissionMode(md) ?? 'default';
         } catch (err) {
           this.logger.error(
             `WorkflowRegistry.reconcileBuiltIns: could not read workflow file, defaulting permission_mode to 'default'`,
@@ -357,10 +394,20 @@ export class WorkflowRegistry {
   /**
    * Create a new workflow_runs row for the given workflow.
    *
-   * Snapshots the workflow's current `permission_mode` onto the run row so the
-   * ApprovalRouter can consult per-run policy without re-reading the workflow
-   * file.  The caller (epic-8 deterministic naming task) will later UPDATE
-   * `worktree_path` and `branch_name`.
+   * Snapshots the RESOLVED `permission_mode` onto the run row so the
+   * ApprovalRouter / substrate mapper can consult per-run policy without
+   * re-reading the workflow file.  The caller (epic-8 deterministic naming
+   * task) will later UPDATE `worktree_path` and `branch_name`.
+   *
+   * Permission-mode resolution (resolvePermissionMode):
+   *   per-run override (DEFERRED) > flow frontmatter > global default > 'default'.
+   * The workflow row's `permission_mode` column is the frontmatter rung, but a
+   * column value of `'default'` is treated as UNSET (fall through to the global
+   * default) — built-in flows ship without an explicit per-agent override, so
+   * only an opt-in 'acceptEdits' / 'auto' / 'dontAsk' on the column wins over
+   * the global default. The global default comes from the injected config
+   * (ConfigManager.getDefaultAgentPermissionMode()); when no config is injected
+   * (test fixtures) resolution floors to 'default'.
    *
    * Stamps the resolved CLI substrate ('sdk' | 'interactive') onto the run row.
    * The substrate is resolved ONCE here and is immutable for the run lifetime —
@@ -386,18 +433,29 @@ export class WorkflowRegistry {
     }
 
     const runId = randomUUID().replace(/-/g, '');
-    const permissionMode = workflow.permission_mode;
+
+    // Resolve the agent permission mode via the override ladder. The column's
+    // 'default' sentinel means "unset → fall through to the global default", so
+    // it is passed as undefined frontmatterMode; any explicit opt-in value on
+    // the column wins. The per-run override rung (requestedMode) is DEFERRED.
+    const frontmatterMode =
+      workflow.permission_mode === 'default' ? undefined : workflow.permission_mode;
+    const permissionMode = resolvePermissionMode({
+      frontmatterMode,
+      globalDefaultMode: this.config?.getDefaultAgentPermissionMode(),
+    });
 
     // Resolve the substrate via the override ladder. The explicit per-run UI
     // choice (requestedSubstrate, from WorkflowPicker → runs.start →
     // RunLauncher.launch) is the HIGHEST-precedence level and is threaded here.
-    // The registry does not yet receive the project/global config or workflow
-    // frontmatter collaborators, so the remaining levels still resolve from env
-    // (CYBOFLOW_SUBSTRATE) + the 'sdk' floor.
-    // TODO(S4/S7): thread frontmatterSubstrate / projectConfigSubstrate /
-    // globalDefaultSubstrate through once those collaborators are injected here.
+    // The global default comes from the injected config; frontmatter /
+    // project-config rungs are not yet wired (still resolve from env + floor).
     // With no override at any level every run resolves 'sdk' (zero-behavior-change).
-    const substrate = resolveSubstrate({ requestedSubstrate, env: process.env });
+    const substrate = resolveSubstrate({
+      requestedSubstrate,
+      globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
+      env: process.env,
+    });
 
     const insert = this.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, session_id)
