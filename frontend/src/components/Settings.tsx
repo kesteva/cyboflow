@@ -244,7 +244,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 description="How workflow agents handle tool use that touches your files"
                 icon={<ShieldCheck className="w-4 h-4" />}
               >
-                <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1.5">
                   {([
                     { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
                     { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
@@ -256,13 +256,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       type="button"
                       onClick={() => setDefaultAgentPermissionMode(id)}
                       aria-pressed={defaultAgentPermissionMode === id}
-                      className={`flex flex-col items-start gap-1 px-3 py-3 rounded-button border transition-colors text-left ${
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                         defaultAgentPermissionMode === id
                           ? 'border-interactive bg-interactive-surface'
                           : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
                       }`}
                     >
-                      <span className="text-text-primary font-medium">{label}</span>
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
                       <span className="text-xs text-text-tertiary">{hint}</span>
                     </button>
                   ))}
