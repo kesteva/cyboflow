@@ -29,9 +29,13 @@ dynamically in the system-prompt append produced by `buildStepReportingAppend`,
 derived from the run's RESOLVED workflow definition (which honors user edits). Do
 not hardcode step ids in this asset.
 
-## v1 limitation — main session only
+## Single writer — main session only
 
-In v1 only the main orchestrating session can report steps. Agent-tool sub-sessions
-(subagents) spawned during planning do NOT inherit the cyboflow `mcpServers`
-configuration, so they cannot call `cyboflow_report_step`. Report each step from the
-main session yourself, even when the underlying work is delegated to a subagent.
+The main orchestrating session is the single writer of cyboflow state. The
+Agent-tool subagents it delegates heavy phases to — `cyboflow-context`,
+`cyboflow-research`, `cyboflow-epics`, `cyboflow-tasks` — are deliberately scoped
+WITHOUT the cyboflow tools (an explicit `tools:` allowlist that excludes them), so
+they never report steps or write entities; they return a compact result the
+orchestrator persists. The human idea/plan approval gates stay inline (subagents
+have no AskUserQuestion). Report each step from the main session yourself, even when
+the underlying work is delegated to a subagent.
