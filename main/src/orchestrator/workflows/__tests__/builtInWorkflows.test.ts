@@ -41,12 +41,26 @@ describe('buildBuiltInWorkflows', () => {
     }
   });
 
-  it('prompt frontmatter declares a permission_mode the registry can parse', () => {
+  it('frontmatter permission_mode is optional; if present it is one of the four valid modes', () => {
+    // Built-in flows ship WITHOUT a frontmatter permission_mode (null by
+    // default); per-agent override is opt-in only. Absent values fall back to
+    // the global agentPermissionMode default, not a flow-pinned mode — so an
+    // ABSENT permission_mode is allowed and is the current baseline. We scan
+    // ONLY the leading frontmatter fence so a prose mention can't false-trigger,
+    // and IF a flow declares permission_mode we assert it is one of the four
+    // valid PermissionMode values the registry can parse (incl. 'auto').
     for (const descriptor of buildBuiltInWorkflows()) {
       const body = readFileSync(descriptor.path, 'utf-8');
-      expect(body, `${descriptor.name} frontmatter`).toMatch(
-        /permission_mode:\s*(default|acceptEdits|dontAsk)/,
-      );
+      const frontmatterMatch = body.match(/^---\n([\s\S]*?)\n---/);
+      expect(frontmatterMatch, `${descriptor.name} has a frontmatter block`).not.toBeNull();
+      const frontmatter = frontmatterMatch![1];
+      const declared = frontmatter.match(/^permission_mode:\s*([A-Za-z]+)/m);
+      if (declared) {
+        expect(
+          ['default', 'acceptEdits', 'auto', 'dontAsk'],
+          `${descriptor.name} frontmatter permission_mode must be a valid PermissionMode`,
+        ).toContain(declared[1]);
+      }
     }
   });
 

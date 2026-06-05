@@ -17,8 +17,28 @@ import type { CliSubstrate } from './substrate';
  * `./permissionMode` (`'approve' | 'ignore'`): the two surfaces have different
  * vocabularies and different consumers, and `interactiveSettingsWriter`
  * treats them as parallel (`'ignore'`/`'dontAsk'`). Do NOT collapse them.
+ *
+ * Mode semantics:
+ *  - 'default'     → ask before edits (every PreToolUse routed for approval)
+ *  - 'acceptEdits' → auto-allow Edit/Write/MultiEdit; route the rest
+ *  - 'auto'        → NATIVE Claude auto-mode (the model classifier owns gating
+ *                    via `--permission-mode auto` / `sdkOptions.permissionMode`);
+ *                    NO PreToolUse approval hook participates
+ *  - 'dontAsk'     → run unrestricted (no hook; --dangerously-skip-permissions)
  */
-export type PermissionMode = 'default' | 'acceptEdits' | 'dontAsk';
+export type PermissionMode = 'default' | 'acceptEdits' | 'auto' | 'dontAsk';
+
+/**
+ * Canonical ordered list of the four user-facing permission modes.
+ * Single source of truth for the union above; imported by the
+ * permissionModeResolver and any UI that needs to enumerate modes.
+ */
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'dontAsk'] as const;
+
+/** Runtime guard for an untyped value (config row, IPC payload) being a PermissionMode. */
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === 'string' && (PERMISSION_MODES as readonly string[]).includes(value);
+}
 
 export interface WorkflowRow {
   id: string;

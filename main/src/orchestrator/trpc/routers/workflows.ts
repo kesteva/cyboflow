@@ -155,7 +155,7 @@ export const workflowsRouter = router({
         projectId: z.number().int().positive(),
         name: z.string().min(1),
         definition: workflowDefinitionSchema,
-        permissionMode: z.enum(['default', 'acceptEdits', 'dontAsk']).optional(),
+        permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
       }),
     )
     .mutation(async ({ ctx, input }): Promise<WorkflowRow> => {

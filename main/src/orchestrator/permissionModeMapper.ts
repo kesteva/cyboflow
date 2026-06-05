@@ -6,6 +6,13 @@
  *  - 'default'     → every PreToolUse is routed through ApprovalRouter
  *  - 'acceptEdits' → Edit/Write/MultiEdit are auto-approved; all other tools
  *                    are routed through ApprovalRouter (same as 'default')
+ *  - 'auto'        → no hook here (native Claude auto-mode owns gating via the
+ *                    model classifier). The real auto wiring lives in
+ *                    buildSdkOptions (`sdkOptions.permissionMode = 'auto'`) and
+ *                    the interactive `--permission-mode auto` CLI flag, NOT this
+ *                    mapper. A PreToolUse hook would pre-empt the native
+ *                    classifier (hooks run first in the CLI permission order),
+ *                    silently degrading auto to approve.
  *
  * Standalone-typecheck invariant: NO imports from 'electron', 'better-sqlite3',
  * or any concrete service in main/src/services/*.
@@ -47,6 +54,13 @@ export function buildPreToolUseHook(
 ): HookCallback | undefined {
   switch (mode) {
     case 'dontAsk':
+      return undefined;
+
+    case 'auto':
+      // Native Claude auto-mode owns gating (model classifier). No PreToolUse
+      // hook participates here; doing so would pre-empt the native classifier
+      // (hooks run first in the CLI permission order). Auto wiring lives in
+      // buildSdkOptions / the interactive `--permission-mode auto` flag.
       return undefined;
 
     case 'default':
