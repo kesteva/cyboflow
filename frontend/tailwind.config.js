@@ -99,6 +99,7 @@ export default {
           'focus': 'var(--color-border-focus)',
           'interactive-subtle': 'var(--color-border-interactive-subtle)',
           'interactive': 'var(--color-border-interactive)',
+          'emphasized': 'var(--color-border-emphasized)',
         },
         // Interactive colors
         'interactive': {
