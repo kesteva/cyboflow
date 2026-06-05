@@ -83,11 +83,13 @@ vi.mock('../../../trpc/client', () => ({
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([
-            // Sprint fixtures so "Start Run" exercises the DIRECT launch path.
-            // The Planner flow is gated behind IdeaPickerModal (migration 017),
-            // covered in WorkflowPicker.test.tsx's planner-gate describe block.
-            { id: 'wf-1', project_id: 0, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
-            { id: 'wf-2', project_id: 0, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
+            // Custom (non-planner, non-sprint) fixtures so "Start Run" exercises
+            // the DIRECT launch path. The Planner flow is gated behind
+            // IdeaPickerModal (migration 017) and Sprint behind the parallel-batch
+            // TaskBatchPickerModal (feat/parallel-sprint) — both covered in
+            // WorkflowPicker.test.tsx's own gate describe blocks.
+            { id: 'wf-1', project_id: 0, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
+            { id: 'wf-2', project_id: 0, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
           ]),
         },
       },

@@ -32,15 +32,29 @@ vi.mock('../../../trpc/client', () => ({
             branchName: 'run/run-test-001',
           }),
         },
+        // feat/parallel-sprint P6 — the Sprint flow opens the batch picker and
+        // launches via startBatch (session-less). batchProgress backs the badge.
+        startBatch: {
+          mutate: vi.fn().mockResolvedValue({ batchId: 'batch-test-001' }),
+        },
+        batchProgress: {
+          query: vi.fn().mockResolvedValue({
+            status: 'running', total: 2, queued: 1, running: 1, integrated: 0, failed: 0,
+          }),
+        },
+      },
+      substrates: {
+        resolveEffective: { query: vi.fn().mockResolvedValue({ substrate: 'sdk' }) },
       },
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([
-            // Sprint fixtures so "Start Run" exercises the DIRECT launch path.
-            // The Planner flow is gated behind IdeaPickerModal (migration 017) and
-            // is covered by its own describe block below.
-            { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
-            { id: 'wf-2', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', created_at: '' },
+            // Custom (non-planner, non-sprint) fixtures so "Start Run" exercises
+            // the DIRECT launch path. The Planner flow is gated behind
+            // IdeaPickerModal (migration 017) and Sprint behind the batch picker
+            // (feat/parallel-sprint); both have their own describe blocks below.
+            { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
+            { id: 'wf-2', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', created_at: '' },
           ]),
         },
       },
@@ -53,6 +67,9 @@ vi.mock('../../../trpc/client', () => ({
       },
       events: {
         onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onApprovalCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onApprovalDecided: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onRunStatusChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         setBadgeCount: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
       },
       approvals: {
@@ -122,6 +139,7 @@ import type { ToolPanel } from '../../../../../shared/types/panels';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
+const mockStartBatch = vi.mocked(trpc.cyboflow.runs.startBatch.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockTasksList = vi.mocked(trpc.cyboflow.tasks.list.query);
 
@@ -399,9 +417,14 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
 describe('WorkflowPicker — agent permission selector (per-run override)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();
-    // Sprint flow so "Start Run" hits the DIRECT launch path (not the Planner gate).
+    // A CUSTOM (non-planner, non-sprint) flow so "Start Run" hits the DIRECT
+    // launch path (runs.start). Both built-in flows are now gated behind a
+    // pre-launch modal — Planner behind IdeaPickerModal (migration 017) and
+    // Sprint behind the batch picker (feat/parallel-sprint, session-less
+    // startBatch which does NOT thread a per-run permission mode) — so neither
+    // would fire runs.start synchronously on click.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
     ]);
   });
 
@@ -577,11 +600,12 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     mockRunStart.mockClear();
     mockCreateQuick.mockClear();
     vi.mocked(panelApi.createPanel).mockClear();
-    // Sprint flows so "Start Run" hits the DIRECT launch path (not the Planner
-    // idea gate). The prior Planner describe leaves the list mock pointed at a
-    // planner row, so re-point it here.
+    // Custom (non-planner, non-sprint) flow so "Start Run" hits the DIRECT launch
+    // path (not the Planner idea gate or the Sprint batch picker). The prior
+    // Planner describe leaves the list mock pointed at a planner row, so re-point
+    // it here.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
     ]);
   });
 
@@ -654,5 +678,92 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     });
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-existing-007');
+  });
+});
+
+describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    mockStartBatch.mockClear();
+    mockCreateQuick.mockClear();
+    // A single Sprint flow so "Start Run" opens the batch picker (not the direct
+    // launch path or the Planner idea gate).
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-sprint', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+    // One eligible task so the picker's Launch button can enable.
+    mockTasksList.mockResolvedValue([
+      {
+        id: 'TASK-1', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Do a thing', summary: null,
+        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'ready', version: 1, inFlow: [], awaitingReview: false,
+        isDone: false, readyToWork: true, created_at: '', updated_at: '',
+      },
+    ]);
+  });
+
+  it('opens TaskBatchPickerModal on Start Run and does NOT launch a single run', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // The batch picker opened; no single run AND no batch started yet.
+    expect(await screen.findByTestId('task-batch-picker-launch')).toBeInTheDocument();
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockStartBatch).not.toHaveBeenCalled();
+  });
+
+  it('threads the selected task ids into runs.startBatch (session-less)', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // Select the task + launch.
+    await screen.findByTestId('task-batch-picker-list');
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Select TASK-1'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
+    });
+
+    expect(mockStartBatch).toHaveBeenCalledOnce();
+    expect(mockStartBatch).toHaveBeenCalledWith({
+      workflowId: 'sprint',
+      projectId: 1,
+      substrate: 'sdk',
+      taskIds: ['TASK-1'],
+      concurrency: 5,
+    });
+    // A batch is session-less — no per-task run started, no session created.
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
+  it('renders the batch progress badge after a batch launches', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+    await screen.findByTestId('task-batch-picker-list');
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Select TASK-1'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
+    });
+
+    const badge = await screen.findByTestId('sprint-batch-progress');
+    expect(badge).toHaveTextContent('2 tasks');
+    expect(badge).toHaveTextContent('1 running');
+    expect(badge).toHaveTextContent('running');
   });
 });
