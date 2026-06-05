@@ -154,6 +154,7 @@ export class InteractiveSettingsWriter {
     }
 
     const hookScriptPath = resolveShellHookScriptPath(opts.hookDirOverride);
+    this.ensureHookExecutable(hookScriptPath);
     const settingsPath = this.settingsPath(worktreePath);
     const settings = this.readSettings(settingsPath);
 
@@ -181,6 +182,28 @@ export class InteractiveSettingsWriter {
       hookScriptPath,
     });
     return hookScriptPath;
+  }
+
+  /**
+   * Best-effort: ensure the resolved hook script is executable. The hook is
+   * registered as a BARE-PATH PreToolUse command (above), so Claude Code execs it
+   * via `/bin/sh` — which needs the execute bit plus the file's `#!/usr/bin/env
+   * node` shebang. `tsc` emits the compiled `.js` at mode 644, so a fresh build (or
+   * a stale dev dist) would otherwise leave the gate non-executable and it fails
+   * OPEN at runtime ("Permission denied", non-blocking → tool proceeds ungated).
+   * Self-heal at the write site. Swallow failures: a packaged read-only bundle
+   * already ships the file +x via the build's `mark-hooks-executable` step, and a
+   * unit test may point `hookDirOverride` at a dir without the compiled file.
+   */
+  private ensureHookExecutable(hookScriptPath: string): void {
+    try {
+      fs.chmodSync(hookScriptPath, 0o755);
+    } catch (err) {
+      this.logger?.debug('[Cyboflow InteractiveSettings] could not chmod hook script (non-fatal)', {
+        hookScriptPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
