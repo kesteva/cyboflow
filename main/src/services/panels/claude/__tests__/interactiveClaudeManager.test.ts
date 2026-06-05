@@ -396,6 +396,61 @@ describe('InteractiveClaudeManager', () => {
       expect(withoutFlag).not.toContain('--strict-mcp-config');
     });
 
+    it('emits "--permission-mode auto" when agentPermissionMode === "auto" (native auto-mode)', () => {
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+        agentPermissionMode: 'auto',
+      });
+      const idx = args.indexOf('--permission-mode');
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(args[idx + 1]).toBe('auto');
+    });
+
+    it('emits "--permission-mode auto" BEFORE any end-of-options "--" separator', () => {
+      // buildCommandArgs does NOT push the "--" / positional prompt itself (that
+      // happens in spawnCliProcess), but the flag must precede where it lands.
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+        agentPermissionMode: 'auto',
+      });
+      const sepIdx = args.indexOf('--');
+      const flagIdx = args.indexOf('--permission-mode');
+      expect(flagIdx).toBeGreaterThanOrEqual(0);
+      // No separator emitted by buildCommandArgs; if one ever were, the flag must precede it.
+      if (sepIdx >= 0) {
+        expect(flagIdx).toBeLessThan(sepIdx);
+      }
+    });
+
+    it('omits "--permission-mode" for non-auto agentPermissionMode values', () => {
+      for (const mode of ['default', 'acceptEdits', 'dontAsk'] as const) {
+        const args = mgr.callBuildCommandArgs({
+          panelId: 'p1',
+          sessionId: 's1',
+          worktreePath: '/tmp/wt',
+          prompt: 'hi',
+          agentPermissionMode: mode,
+        });
+        expect(args).not.toContain('--permission-mode');
+      }
+    });
+
+    it('omits "--permission-mode" when agentPermissionMode is unset', () => {
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+      });
+      expect(args).not.toContain('--permission-mode');
+    });
+
     it('includes --mcp-config (pointing at the per-run config) and does NOT emit the dangling --settings flag (TASK-819)', () => {
       // buildCommandArgs emits --mcp-config ONLY when the per-run config exists on
       // disk — writeInteractiveMcpConfig writes `<worktree>/.cyboflow/interactive-
@@ -539,6 +594,51 @@ describe('InteractiveClaudeManager', () => {
       expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'ignore' });
       expect(writeSpy.mock.results[0].value).toBeNull();
       expect(hasCyboflowHook(readSettings(worktreePath))).toBe(false);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('Step F: agentPermissionMode "auto" drives the writer (skip) and writes NO gating hook (native classifier owns gating)', async () => {
+      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+      const worktreePath = freshWorktree();
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-auto',
+        sessionId: 'sess-auto',
+        worktreePath,
+        prompt: 'go',
+        agentPermissionMode: 'auto',
+      });
+      await waitFor(() => mgr.ptys.length > 0);
+
+      // The effective writer mode is the 4-mode agentPermissionMode (precedence
+      // over the legacy permissionMode) — the writer skips and installs nothing.
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'auto' });
+      expect(writeSpy.mock.results[0].value).toBeNull();
+      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(false);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('Step F: agentPermissionMode "acceptEdits" drives the writer to INSTALL the hook (gate stays; edits fast-pathed in the handler)', async () => {
+      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+      const worktreePath = freshWorktree();
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-ae',
+        sessionId: 'sess-ae',
+        worktreePath,
+        prompt: 'go',
+        agentPermissionMode: 'acceptEdits',
+      });
+      await waitFor(() => mgr.ptys.length > 0);
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'acceptEdits' });
+      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(true);
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

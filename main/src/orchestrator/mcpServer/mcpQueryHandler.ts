@@ -45,11 +45,13 @@
  */
 import * as net from 'net';
 import type { DatabaseLike, LoggerLike } from '../types';
-import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
+import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
+import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
@@ -1083,10 +1085,20 @@ export class McpQueryHandler {
    * Flow (mirrors the SDK PreToolUse hook at claudeCodeManager.ts:572-587):
    *   (a) reject the 'orchestrator' sentinel runId (parity with the checkpoint /
    *       report-step guards) — a deny with no approvals row;
-   *   (b) apply isToolAllowed(loadMergedPermissionRules(worktree)) FIRST and
+   *   (a2) acceptEdits fast-path (Step F): when the run's effective mode (from
+   *       permission_mode_snapshot) is 'acceptEdits' and the tool is in
+   *       ACCEPT_EDITS_AUTO_APPROVE_TOOLS (Edit/Write/MultiEdit), AUTO-ALLOW with
+   *       ZERO approvals row and NO folded review_item — SDK-mapper parity, applied
+   *       BEFORE the allow-list check;
+   *   (b) apply isToolAllowed(loadMergedPermissionRules(worktree)) and
    *       short-circuit ALLOW with ZERO approvals row (no double-prompt);
    *   (c) otherwise route through ApprovalRouter.requestApproval, writing the
    *       verdict back on the held-open socket from the socketReply closure.
+   *
+   * The 'auto'/'dontAsk' modes never install the wildcard shell hook (the
+   * interactive settingsWriter opt-out), so this handler is only reached under
+   * 'default' (full gate) and 'acceptEdits' (the (a2) fast-path + gate for
+   * non-edit tools).
    *
    * P4 fold: requestApproval co-writes a blocking permission review_item into the
    * unified inbox (source 'approval:interactive') inside its own transaction. The
@@ -1111,6 +1123,26 @@ export class McpQueryHandler {
     // CYBOFLOW_RUN_ID='orchestrator', which has no workflow_runs row.
     if (msg.runId === 'orchestrator') {
       this.writeShellVerdict(client, msg.requestId, { behavior: 'deny' });
+      return;
+    }
+
+    // (a2) acceptEdits fast-path (Step F): when the run's effective 4-mode is
+    // 'acceptEdits' and the tool is in the Edit/Write/MultiEdit set, AUTO-ALLOW
+    // with ZERO approvals row and NO folded review_item — parity with the SDK
+    // mapper's acceptEdits branch (permissionModeMapper.ts auto-approves the same
+    // ACCEPT_EDITS_AUTO_APPROVE_TOOLS set). This runs BEFORE the allow-list check
+    // so an edit never needs a permissions.allow entry under acceptEdits.
+    //
+    // The 'auto'/'dontAsk' modes never install the wildcard shell hook (the
+    // settingsWriter opt-out — interactiveClaudeManager.ts), so the hook does not
+    // fire and this handler is not reached for them; 'default' falls through to
+    // the existing allow-list + router gate unchanged.
+    const effectiveMode = this.resolveRunPermissionMode(msg.runId);
+    if (
+      effectiveMode === 'acceptEdits' &&
+      (ACCEPT_EDITS_AUTO_APPROVE_TOOLS as readonly string[]).includes(msg.toolName)
+    ) {
+      this.writeShellVerdict(client, msg.requestId, { behavior: 'allow' });
       return;
     }
 
@@ -1252,6 +1284,24 @@ export class McpQueryHandler {
       return null;
     }
     return row.worktree_path;
+  }
+
+  /**
+   * Resolve the run's effective 4-mode agentPermissionMode from the IMMUTABLE
+   * `workflow_runs.permission_mode_snapshot` (Step F). Returns null when the run
+   * row is absent or the column holds an unrecognized value — the caller then
+   * falls through to the existing allow-list + router gate (conservative; never
+   * auto-allows on an unknown mode). Used by the acceptEdits fast-path; the
+   * 'auto'/'dontAsk' modes never reach this handler (no shell hook installed).
+   */
+  private resolveRunPermissionMode(runId: string): PermissionMode | null {
+    const row = this.db
+      .prepare(`SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?`)
+      .get(runId) as { permission_mode_snapshot?: unknown } | undefined;
+    if (!row || !isPermissionMode(row.permission_mode_snapshot)) {
+      return null;
+    }
+    return row.permission_mode_snapshot;
   }
 
   /**

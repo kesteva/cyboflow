@@ -244,6 +244,36 @@ describe('InteractiveSettingsWriter', () => {
       expect(fs.existsSync(settingsPath(worktree))).toBe(false);
     });
 
+    it('skips writing under permissionMode "auto" (native classifier owns gating — no hook to pre-empt it)', () => {
+      const result = writer.write(worktree, { permissionMode: 'auto', hookDirOverride: HOOK_DIR });
+      expect(result).toBeNull();
+      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
+    });
+
+    it('does NOT mutate a pre-existing user settings file under "auto"', () => {
+      writeUserSettings(worktree, { permissions: { allow: ['Bash(ls:*)'] } });
+      const before = fs.readFileSync(settingsPath(worktree), 'utf8');
+
+      writer.write(worktree, { permissionMode: 'auto', hookDirOverride: HOOK_DIR });
+
+      expect(fs.readFileSync(settingsPath(worktree), 'utf8')).toBe(before);
+    });
+
+    it('still INSTALLS the hook under permissionMode "acceptEdits" (gate stays; edits fast-pathed in the handler)', () => {
+      const result = writer.write(worktree, { permissionMode: 'acceptEdits', hookDirOverride: HOOK_DIR });
+      expect(result).toBe(hookPath);
+      expect(fs.existsSync(settingsPath(worktree))).toBe(true);
+
+      const groups = readSettings(worktree).hooks?.PreToolUse ?? [];
+      expect(groups.some((g) => g.matcher === '*' && g.hooks.some((h) => h.command === hookPath))).toBe(true);
+    });
+
+    it('still INSTALLS the hook under permissionMode "default" (full gate)', () => {
+      const result = writer.write(worktree, { permissionMode: 'default', hookDirOverride: HOOK_DIR });
+      expect(result).toBe(hookPath);
+      expect(fs.existsSync(settingsPath(worktree))).toBe(true);
+    });
+
     it('does NOT mutate a pre-existing user settings file under "ignore"', () => {
       writeUserSettings(worktree, { permissions: { allow: ['Bash(ls:*)'] } });
       const before = fs.readFileSync(settingsPath(worktree), 'utf8');

@@ -22,6 +22,7 @@ import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-rep
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
+import type { PermissionMode } from '../../../../../shared/types/workflows';
 
 /**
  * InteractiveClaudeManager — the interactive (subscription-billed) Claude
@@ -106,6 +107,17 @@ interface InteractiveClaudeSpawnOptions {
    */
   isResume?: boolean;
   permissionMode?: 'approve' | 'ignore';
+  /**
+   * Workflow 4-mode agent permission value resolved from the run snapshot
+   * (`workflow_runs.permission_mode_snapshot`) and threaded by RunExecutor →
+   * SubstrateDispatchFacade (Step D). This is the NEW 4-mode field
+   * ('default' | 'acceptEdits' | 'auto' | 'dontAsk') governing workflow runs —
+   * DISTINCT from the legacy session `permissionMode` above ('approve' |
+   * 'ignore'), which stays for quick/legacy sessions. When set it drives the
+   * settings-hook write (auto/dontAsk skip the wildcard shell hook so native
+   * gating owns the decision) and, for 'auto', emits `--permission-mode auto`.
+   */
+  agentPermissionMode?: PermissionMode;
   model?: string;
   /**
    * The workflow_runs row ID for ApprovalRouter / the per-run RawEventsSink. For
@@ -427,6 +439,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--strict-mcp-config');
     }
 
+    // agentPermissionMode 'auto': hand gating to NATIVE Claude auto-mode via the
+    // CLI's `--permission-mode auto` flag (host CLI 2.1.163 accepts it). The
+    // wildcard PreToolUse shell hook is NOT installed in this mode (see the
+    // settingsWriter.write call in spawnCliProcess), so the model classifier owns
+    // the decision and the hook cannot pre-empt it (hooks run FIRST in the CLI
+    // permission order — a hook here would silently degrade auto to approve). The
+    // flag is pushed INSIDE buildCommandArgs so it lands before the load-bearing
+    // end-of-options `--` separator that precedes the positional prompt.
+    if (options.agentPermissionMode === 'auto') {
+      args.push('--permission-mode', 'auto');
+    }
+
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
     // disk. writeInteractiveMcpConfig (called by spawnCliProcess just before args
     // are built) writes `<worktree>/.cyboflow/interactive-mcp.json` whenever an
@@ -599,11 +623,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // default `.claude/settings.json` BEFORE `claude` launches (TASK-819), so the
     // live interactive REPL gates tool calls for human review. The writer is
     // idempotent (drops any stale cyboflow entry before re-adding) so a respawn
-    // is safe, and SKIPS internally when permissionMode is 'ignore'/'dontAsk'
-    // (interactiveSettingsWriter.ts) — returning null — so NO second gate is
-    // added here (the writer's opt-out branch is the single source of truth).
-    // Synchronous fs; no await needed.
-    this.settingsWriter.write(worktreePath, { permissionMode: options.permissionMode });
+    // is safe, and SKIPS internally when its `permissionMode` opt opts out of
+    // gating (interactiveSettingsWriter.ts) — returning null — so NO second gate
+    // is added here (the writer's opt-out branch is the single source of truth).
+    //
+    // The NEW 4-mode `agentPermissionMode` (workflow runs) takes precedence when
+    // set: 'auto'/'dontAsk' make the writer skip the wildcard hook so native
+    // gating owns the decision ('auto' = the model classifier reached via
+    // `--permission-mode auto`; 'dontAsk' = unrestricted), while 'default'/
+    // 'acceptEdits' keep the hook (acceptEdits' Edit/Write/MultiEdit fast-path is
+    // applied in the handler — mcpQueryHandler.ts). When agentPermissionMode is
+    // unset (quick/legacy sessions) the legacy `permissionMode` 'ignore'/'dontAsk'
+    // opt-out is preserved. Synchronous fs; no await needed.
+    const effectiveWriterMode = options.agentPermissionMode ?? options.permissionMode;
+    this.settingsWriter.write(worktreePath, { permissionMode: effectiveWriterMode });
 
     // Pre-enable the worktree's project `.mcp.json` MCP servers (TASK-IDEA-030
     // launch fix). The committed project `.mcp.json` (e.g. playwright/maestro)

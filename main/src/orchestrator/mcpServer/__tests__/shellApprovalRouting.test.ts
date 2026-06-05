@@ -187,6 +187,16 @@ describe('shell-approval-request handler branch', () => {
     return row.n;
   }
 
+  /**
+   * Seed a run with an empty allow-list and stamp its permission_mode_snapshot
+   * (the immutable 4-mode value the handler reads for the acceptEdits fast-path).
+   */
+  function seedRunWithMode(runId: string, mode: string): string {
+    const worktree = seedWorktreeWithAllow(runId, []);
+    db.prepare(`UPDATE workflow_runs SET permission_mode_snapshot = ? WHERE id = ?`).run(mode, runId);
+    return worktree;
+  }
+
   it('(a) auto-allows an allow-listed tool with ZERO approvals rows (SDK parity, no router round-trip)', async () => {
     seedWorktreeWithAllow('run-allow', ['Bash(git status:*)']);
     const { socket, writes } = makeSocketDouble();
@@ -205,6 +215,71 @@ describe('shell-approval-request handler branch', () => {
 
     expect(decisionOf(writes)).toBe('allow');
     expect(pendingApprovalCount('run-allow')).toBe(0);
+  });
+
+  it('(a2) acceptEdits fast-path: auto-allows Edit/Write/MultiEdit with ZERO approvals rows (no allow-list entry needed)', async () => {
+    for (const tool of ['Edit', 'Write', 'MultiEdit']) {
+      const runId = `run-ae-${tool}`;
+      seedRunWithMode(runId, 'acceptEdits');
+      const { socket, writes } = makeSocketDouble();
+
+      await handler.handleMessage(
+        {
+          type: 'shell-approval-request',
+          requestId: `req-ae-${tool}`,
+          runId,
+          toolName: tool,
+          toolInput: { file_path: '/tmp/x.ts', content: 'x' },
+        },
+        socket,
+      );
+      await flush();
+
+      expect(decisionOf(writes)).toBe('allow');
+      expect(pendingApprovalCount(runId)).toBe(0);
+    }
+  });
+
+  it('(a3) acceptEdits does NOT fast-path a non-edit tool — it routes through the normal gate (one pending approval)', async () => {
+    seedRunWithMode('run-ae-bash', 'acceptEdits');
+    const { socket, writes } = makeEmitterSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'req-ae-bash',
+        runId: 'run-ae-bash',
+        toolName: 'Bash',
+        toolInput: { command: 'rm -rf /tmp/x' },
+      },
+      socket,
+    );
+    await flush();
+
+    // Non-edit tool under acceptEdits: held open, one pending approval row.
+    expect(writes).toHaveLength(0);
+    expect(pendingApprovalCount('run-ae-bash')).toBe(1);
+  });
+
+  it('(a4) under "default" mode an Edit is NOT fast-pathed — it routes through the normal gate', async () => {
+    seedRunWithMode('run-default-edit', 'default');
+    const { socket, writes } = makeEmitterSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'req-default-edit',
+        runId: 'run-default-edit',
+        toolName: 'Edit',
+        toolInput: { file_path: '/tmp/x.ts', content: 'x' },
+      },
+      socket,
+    );
+    await flush();
+
+    // No acceptEdits fast-path; the edit needs a human (one pending approval).
+    expect(writes).toHaveLength(0);
+    expect(pendingApprovalCount('run-default-edit')).toBe(1);
   });
 
   it('(b) rejects the "orchestrator" sentinel runId with a deny and NO approvals row', async () => {

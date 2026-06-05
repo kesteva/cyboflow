@@ -14,9 +14,12 @@
  * cyboflow `'*'` entry and never clobbers user keys; `remove` strips ONLY that
  * entry (identified by the hook-script path) and leaves everything else intact.
  *
- * `write` SKIPS entirely when permissionMode is `ignore`/dontAsk — parity with
- * the SDK's `permissionMode !== 'ignore'` branch (claudeCodeManager.ts:446): in
- * that mode the user opted out of gating, so no hook is installed.
+ * `write` SKIPS entirely when permissionMode is `ignore`/`dontAsk`/`auto` —
+ * parity with the SDK's hook opt-out: `ignore`/`dontAsk` mean the user opted out
+ * of gating, and `auto` hands gating to NATIVE Claude auto-mode (the model
+ * classifier reached via `--permission-mode auto`). A PreToolUse shell hook in
+ * `auto` would pre-empt the native classifier (hooks run FIRST in the CLI
+ * permission order) and silently degrade auto to approve, so it MUST be skipped.
  *
  * The manager-side call sites (interactiveClaudeManager.initializeCliEnvironment
  * → write, cleanupCliResources → remove) land in TASK-808; this file delivers the
@@ -114,8 +117,13 @@ const HIGH_TIMEOUT_SECONDS = 86_400;
 
 export interface InteractiveSettingsWriteOptions {
   /**
-   * Skip the write when the user opted out of gating (ignore/dontAsk). Mirrors
-   * the SDK's `permissionMode !== 'ignore'` branch (claudeCodeManager.ts:446).
+   * Skip the write when gating is owned elsewhere. The wildcard PreToolUse shell
+   * hook is NOT installed for `ignore`/`dontAsk` (user opted out) nor for `auto`
+   * (NATIVE Claude auto-mode owns gating via `--permission-mode auto`; a hook
+   * would pre-empt the classifier and degrade auto to approve). Kept `string`-
+   * tolerant so both the legacy session field ('approve'|'ignore') and the new
+   * 4-mode `agentPermissionMode` ('default'|'acceptEdits'|'auto'|'dontAsk') flow
+   * through the same opt-out check.
    */
   permissionMode?: string;
   /**
@@ -130,7 +138,7 @@ export interface InteractiveSettingsWriteOptions {
  * missing/unreadable/malformed file), in-place merges the cyboflow PreToolUse
  * `'*'` hook entry without clobbering user keys, and writes it back. Returns the
  * resolved hook-script path that was installed, or null when the write was
- * skipped (ignore/dontAsk mode).
+ * skipped (ignore/dontAsk/auto mode).
  */
 export class InteractiveSettingsWriter {
   /**
@@ -142,10 +150,15 @@ export class InteractiveSettingsWriter {
   /**
    * Install the cyboflow PreToolUse `'*'` hook into the worktree settings.
    *
-   * @returns the installed hook-script path, or null when skipped (ignore mode).
+   * @returns the installed hook-script path, or null when skipped
+   *   (ignore/dontAsk/auto mode).
    */
   write(worktreePath: string, opts: InteractiveSettingsWriteOptions = {}): string | null {
-    if (opts.permissionMode === 'ignore' || opts.permissionMode === 'dontAsk') {
+    if (
+      opts.permissionMode === 'ignore' ||
+      opts.permissionMode === 'dontAsk' ||
+      opts.permissionMode === 'auto'
+    ) {
       this.logger?.debug('[Cyboflow InteractiveSettings] permissionMode opts out of gating — skipping hook write', {
         worktreePath,
         permissionMode: opts.permissionMode,
