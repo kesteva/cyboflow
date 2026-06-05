@@ -41,3 +41,21 @@ describe('ConfigManager permissionMode default', () => {
     expect(config.defaultPermissionMode).toBe('approve');
   });
 });
+
+describe('ConfigManager getDefaultAgentPermissionMode', () => {
+  it('floors to "default" when defaultAgentPermissionMode is unset', () => {
+    // Additive pattern: the constructor must NOT seed defaultAgentPermissionMode,
+    // so a fresh instance has it undefined and the getter floors to 'default'.
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    expect(mgr.getConfig().defaultAgentPermissionMode).toBeUndefined();
+    expect(mgr.getDefaultAgentPermissionMode()).toBe('default');
+  });
+
+  it('returns the configured value when defaultAgentPermissionMode is set', () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    (
+      mgr as unknown as { config: { defaultAgentPermissionMode: 'acceptEdits' } }
+    ).config.defaultAgentPermissionMode = 'acceptEdits';
+    expect(mgr.getDefaultAgentPermissionMode()).toBe('acceptEdits');
+  });
+});

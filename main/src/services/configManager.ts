@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import type { AppConfig } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
+import type { PermissionMode } from '../../../shared/types/workflows';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -161,6 +162,20 @@ export class ConfigManager extends EventEmitter {
    */
   getDefaultSubstrate(): CliSubstrate {
     return this.config.defaultSubstrate ?? DEFAULT_SUBSTRATE;
+  }
+
+  /**
+   * The global default agent permission mode for new workflow runs, applied on
+   * both CLI substrates (SDK + interactive).
+   *
+   * Floors to 'default' ('ask before edits') when unset. Like
+   * `defaultSubstrate`, `defaultAgentPermissionMode` is intentionally NOT seeded
+   * into the constructor defaults, so existing config.json files are not
+   * rewritten on launch — preserving byte-identical behavior for users who
+   * never opt into a different permission mode.
+   */
+  getDefaultAgentPermissionMode(): PermissionMode {
+    return this.config.defaultAgentPermissionMode ?? 'default';
   }
 
   getSessionCreationPreferences() {
