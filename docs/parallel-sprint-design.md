@@ -90,12 +90,12 @@ Terminal: `completed | failed | canceled`.
 
 ---
 
-## 4. Data model (migration 020)
+## 4. Data model (migration 022)
 
-New file: `main/src/database/migrations/020_sprint_batches.sql` (latest existing is 019). Also mirror the seed in `main/src/database/database.ts` if that file eagerly creates tables (verify: migrations are the canonical path; `seedDefaultBoard` is the board-only equivalent — there is no eager table-create for entity tables, so 020 is migration-only).
+New file: `main/src/database/migrations/022_sprint_batches.sql` (latest existing is 021). Also mirror the seed in `main/src/database/database.ts` if that file eagerly creates tables (verify: migrations are the canonical path; `seedDefaultBoard` is the board-only equivalent — there is no eager table-create for entity tables, so 020 is migration-only).
 
 ```sql
--- 020_sprint_batches.sql
+-- 022_sprint_batches.sql
 
 CREATE TABLE IF NOT EXISTS sprint_batches (
   id                 TEXT PRIMARY KEY,                 -- uuid
@@ -151,7 +151,7 @@ Add to a new `shared/types/sprintBatch.ts` (importable in both processes, no Nod
 - `SprintBatchStatus`, `SprintBatchTaskStatus` string unions + `TERMINAL_BATCH_STATUSES` const array (mirror `TERMINAL_RUN_STATUSES`).
 - `SprintBatchRow`, `SprintBatchTaskRow` interfaces matching the columns above.
 - `SPRINT_BATCH_CAP = 5` (concurrency), `SPRINT_BATCH_MAX_TASKS = { sdk: 15, interactive: 10 } as const` (the N selection cap).
-- `WorkflowRunRow.batch_id?: string | null` added in `shared/types/workflows.ts` (migration 020).
+- `WorkflowRunRow.batch_id?: string | null` added in `shared/types/workflows.ts` (migration 022).
 
 ---
 
@@ -389,7 +389,7 @@ rehydrate():
 Each phase ends green (`pnpm typecheck && pnpm lint` + touched-workspace unit tests) and is its own atomic commit. P0 (this doc) is committed alone.
 
 ### P1 — DB & shared types (foundation)
-- `main/src/database/migrations/020_sprint_batches.sql` — `sprint_batches`, `sprint_batch_tasks`, `workflow_runs.batch_id`.
+- `main/src/database/migrations/022_sprint_batches.sql` — `sprint_batches`, `sprint_batch_tasks`, `workflow_runs.batch_id`.
 - `shared/types/sprintBatch.ts` — status unions, terminal-status const, row types, `SPRINT_BATCH_CAP`, `SPRINT_BATCH_MAX_TASKS`.
 - `shared/types/workflows.ts` — add `batch_id?: string|null` to `WorkflowRunRow`; add `'integrated'` to `outcome` union.
 - Migration-parity test + a schema-shape unit test. Verify the migration runner picks up 020 (mirror an existing migration test).

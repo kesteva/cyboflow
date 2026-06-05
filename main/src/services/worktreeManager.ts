@@ -287,6 +287,46 @@ export class WorktreeManager {
     });
   }
 
+  /**
+   * Create a bare branch REF (no worktree) off a base branch — the integration
+   * branch for a parallel-sprint batch (`sprint/<id8>` off the project main
+   * branch). Idempotent: an already-existing branch of the same name is treated
+   * as success (so a rehydrating scheduler does not fail when the ref survived a
+   * crash). Returns the SHA the branch points at.
+   *
+   * Unlike createDeterministicWorktree this does NOT add a working tree — the
+   * integration branch is only ever materialized as a worktree transiently (per
+   * per-task run / at finalize), never as a standing checkout.
+   */
+  async createBranchRef(
+    projectPath: string,
+    branchName: string,
+    baseBranch: string,
+  ): Promise<{ sha: string }> {
+    const branch = branchName.trim();
+    if (branch === '') throw new Error('createBranchRef: branchName is empty');
+    return await withLock(`branch-create-${projectPath}-${branch}`, async () => {
+      try {
+        await execWithShellPath(
+          `git branch ${escapeShellArg(branch)} ${escapeShellArg(baseBranch)}`,
+          { cwd: projectPath },
+        );
+      } catch (error: unknown) {
+        const err = error as Error & { stderr?: string; stdout?: string };
+        const errorMessage = err.stderr || err.stdout || err.message || String(err);
+        // Already exists — treat as success (idempotent rehydration).
+        if (!errorMessage.includes('already exists')) {
+          throw new Error(`Failed to create branch ${branch}: ${errorMessage}`);
+        }
+      }
+      const { stdout } = await execWithShellPath(
+        `git rev-parse ${escapeShellArg(branch)}`,
+        { cwd: projectPath },
+      );
+      return { sha: stdout.trim() };
+    });
+  }
+
   async listWorktrees(projectPath: string): Promise<Array<{ path: string; branch: string }>> {
     try {
       const { stdout } = await execWithShellPath(`git worktree list --porcelain`, { cwd: projectPath });

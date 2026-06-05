@@ -34,7 +34,8 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setSprintBatchDeps } from './orchestrator/trpc/routers/runs';
+import { SprintBatchScheduler } from './orchestrator/sprintBatchScheduler';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -101,6 +102,10 @@ let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
+// Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Module-scoped so
+// the app.whenReady() wiring block can subscribe it to runStatusEvents + inject
+// its deps after recoverActiveStateOrphans runs.
+let sprintBatchScheduler: SprintBatchScheduler;
 // Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
@@ -801,6 +806,35 @@ async function initializeServices() {
     taskChangeRouter,
   );
 
+  // Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Constructed here
+  // where every collaborator is in scope; subscribed to runStatusEvents +
+  // rehydrated in the app.whenReady() block (after recoverActiveStateOrphans).
+  // The launcher adapter currently drops the optional baseBranch arg — threading
+  // it through RunLauncher.launch is P4 (integration-merge phase); for now per-task
+  // runs branch off main, which is harmless while the integration merge is stubbed.
+  sprintBatchScheduler = new SprintBatchScheduler({
+    db: cyboflowDb,
+    logger: cyboflowLogger,
+    runLauncher: {
+      launch: (workflowId, projectPath, substrate, taskId, ideaId, sessionId /* , baseBranch (P4) */) =>
+        runLauncher.launch(workflowId, projectPath, substrate, taskId, ideaId, sessionId),
+    },
+    worktreeManager: {
+      getProjectMainBranch: (projectPath) => worktreeManager.getProjectMainBranch(projectPath),
+      createBranchRef: (projectPath, branchName, baseBranch) =>
+        worktreeManager.createBranchRef(projectPath, branchName, baseBranch),
+    },
+    taskStageDeriver: {
+      recomputeTaskExecutionStage: (taskId) => taskChangeRouter.recomputeTaskExecutionStage(taskId),
+    },
+    projectResolver: {
+      getProjectById: (projectId) => {
+        const p = sessionManager.getProjectById(projectId);
+        return p ? { path: p.path } : undefined;
+      },
+    },
+  });
+
   // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
   const socketPath = orchSocketServer.getSocketPath();
 
@@ -1073,6 +1107,18 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Wire the
+    // startBatch / batchProgress tRPC deps, then start() — which subscribes the
+    // scheduler to runStatusEvents and rehydrates any non-terminal batch. Started
+    // AFTER recoverActiveStateOrphans (above) so a crashed in-flight per-task run
+    // is already `failed` when rehydrate reconciles it.
+    setSprintBatchDeps({
+      createBatch: (batchInput) => sprintBatchScheduler.createBatch(batchInput),
+      batchProgress: (batchId) => sprintBatchScheduler.batchProgress(batchId),
+    });
+    sprintBatchScheduler.start(runStatusEvents);
+    console.log('[Main] sprint-batch scheduler started + deps wired');
 
     // Piece C — idle-chat nudge. Uses the SAME `db` DatabaseLike adapter +
     // `runQueues` + `loggerLike` as the cancelAndRestart wiring above, plus the

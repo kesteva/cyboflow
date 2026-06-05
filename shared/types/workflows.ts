@@ -84,8 +84,16 @@ export interface WorkflowRunRow {
   claude_session_id?: string | null;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. */
   session_id?: string | null;
-  /** DB-canonical close-out signal set on terminal close-out. NULL while the run is in flight (migration 014). */
-  outcome?: 'merged' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
+  /** Parallel-sprint batch (migration 022) — soft link to sprint_batches.id, NULL for every non-batch run. Set on init/task/finalize runs the SprintBatchScheduler launches. */
+  batch_id?: string | null;
+  /**
+   * DB-canonical close-out signal set on terminal close-out. NULL while the run
+   * is in flight (migration 014). `'integrated'` (migration 022 / feat/parallel-sprint)
+   * is the per-task close-out outcome: the run's branch was merged into the batch
+   * integration branch (not main). The plain TEXT column has no SQL CHECK, so this
+   * is a TypeScript-union-only addition.
+   */
+  outcome?: 'merged' | 'integrated' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
   base_branch?: string | null;
   /** Base SHA captured at launch — future git triage only (migration 014). */
@@ -123,6 +131,8 @@ export interface WorkflowRunListRow {
   substrate?: CliSubstrate;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
   session_id?: string | null;
+  /** Parallel-sprint batch (migration 022) — soft link to sprint_batches.id, NULL for every non-batch run. */
+  batch_id?: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;

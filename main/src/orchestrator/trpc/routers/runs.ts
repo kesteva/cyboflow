@@ -24,6 +24,8 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import type { SprintBatchProgress } from '../../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_CAP, SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -221,6 +223,32 @@ let startRunDeps: StartRunDeps | null = null;
  */
 export function setStartRunDeps(deps: StartRunDeps): void {
   startRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// sprint-batch dependency bag (feat/parallel-sprint, P3)
+//
+// Backs cyboflow.runs.startBatch + cyboflow.runs.batchProgress. Injected at boot
+// by main/src/index.ts via setSprintBatchDeps() after the SprintBatchScheduler is
+// constructed. Until wired the mutations throw METHOD_NOT_SUPPORTED — same stub
+// pattern as the other dep-bags.
+// ---------------------------------------------------------------------------
+
+/** Narrow slice of SprintBatchScheduler the runs router calls. */
+export interface SprintBatchDeps {
+  createBatch(input: {
+    projectId: number;
+    substrate: CliSubstrate;
+    taskIds: string[];
+    concurrency?: number;
+  }): Promise<{ batchId: string }>;
+  batchProgress(batchId: string): SprintBatchProgress | null;
+}
+
+let sprintBatchDeps: SprintBatchDeps | null = null;
+
+export function setSprintBatchDeps(deps: SprintBatchDeps): void {
+  sprintBatchDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -1396,5 +1424,71 @@ export const runsRouter = router({
         if (ev.runId !== input.runId) continue;
         yield ev;
       }
+    }),
+
+  /**
+   * Launch a parallel-sprint BATCH (feat/parallel-sprint, P3). Creates the
+   * sprint_batches row + one sprint_batch_tasks per selected task, cuts the
+   * integration branch, and launches the single sprint-init run (dependency
+   * analysis). The substrate-keyed selection cap N is enforced here (defense in
+   * depth — the picker also enforces it client-side) and again inside
+   * createBatch. Returns the new batch id.
+   *
+   * Standalone-typecheck invariant: the SprintBatchScheduler is injected via
+   * setSprintBatchDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  startBatch: protectedProcedure
+    .input(
+      z.object({
+        workflowId: z.literal('sprint'),
+        projectId: z.number().int().positive(),
+        substrate: z.enum(['sdk', 'interactive']).optional(),
+        taskIds: z.array(z.string().min(1)).min(1),
+        concurrency: z.number().int().positive().max(SPRINT_BATCH_CAP).optional(),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ batchId: string }> => {
+      if (!sprintBatchDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'sprint-batch dependencies not wired yet. Call setSprintBatchDeps() at boot.',
+        });
+      }
+      const substrate: CliSubstrate = input.substrate ?? 'sdk';
+      const max = SPRINT_BATCH_MAX_TASKS[substrate];
+      if (input.taskIds.length > max) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `too many tasks for the ${substrate} substrate: ${input.taskIds.length} > ${max}`,
+        });
+      }
+      return sprintBatchDeps.createBatch({
+        projectId: input.projectId,
+        substrate,
+        taskIds: input.taskIds,
+        concurrency: input.concurrency,
+      });
+    }),
+
+  /**
+   * Read aggregate progress for a sprint batch (feat/parallel-sprint, P3). A
+   * small poll-friendly snapshot ({total, queued, running, integrated, failed,
+   * status}) for the picker / progress UI; the reactive subscription lands in a
+   * later phase. Throws NOT_FOUND when the batch id is unknown.
+   */
+  batchProgress: protectedProcedure
+    .input(z.object({ batchId: z.string().min(1) }))
+    .query(({ input }): SprintBatchProgress => {
+      if (!sprintBatchDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'sprint-batch dependencies not wired yet. Call setSprintBatchDeps() at boot.',
+        });
+      }
+      const progress = sprintBatchDeps.batchProgress(input.batchId);
+      if (!progress) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `batch ${input.batchId} not found` });
+      }
+      return progress;
     }),
 });

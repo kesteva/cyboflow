@@ -375,6 +375,17 @@ export interface TaskFileRow {
   ownership: 'owned' | 'readonly';
 }
 
+// Parallel-sprint batch row types (migration 022). The canonical definitions
+// live in shared/types/sprintBatch.ts so both processes share one shape; re-export
+// here so main-process DB callers can import row types from this barrel alongside
+// the other table-row interfaces.
+export type {
+  SprintBatchRow,
+  SprintBatchTaskRow,
+  SprintBatchStatus,
+  SprintBatchTaskStatus,
+} from '../../../shared/types/sprintBatch';
+
 export interface TaskExternalLinkRow {
   id: number;
   task_id: string;
