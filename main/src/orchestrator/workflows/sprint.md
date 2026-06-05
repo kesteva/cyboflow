@@ -1,6 +1,5 @@
 ---
 description: Execute a ready task — implement, test, review, and verify it against its acceptance criteria.
-permission_mode: default
 ---
 
 # Sprint

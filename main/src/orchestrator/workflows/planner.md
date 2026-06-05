@@ -1,6 +1,5 @@
 ---
 description: Plan a new idea — research it, lock an idea spec, then decompose it into execution-ready tasks.
-permission_mode: default
 ---
 
 # Planner
