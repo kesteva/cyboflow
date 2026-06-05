@@ -21,7 +21,6 @@ import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
 import { Card } from './ui/Card';
 import { formatDistanceToNow } from '../utils/timestampUtils';
-import { migrateLocalStorageKey } from '../utils/migrateLocalStorageKey';
 import { panelApi } from '../services/panelApi';
 
 // ---------------------------------------------------------------------------
@@ -83,11 +82,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const [projectsWithRuns, setProjectsWithRuns] = useState<ProjectWithRuns[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<number>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  // Per-project "AGENTS" disclosure — collapses ONLY that project's session rows
-  // (distinct from expandedProjects, which collapses the whole subtree). Default
-  // is expanded for every project; we persist only the COLLAPSED set so a brand-new
-  // project is expanded by default. `null` = collapsed-set not yet loaded from storage.
-  const [collapsedProjectSessions, setCollapsedProjectSessions] = useState<Set<number> | null>(null);
   // Project whose "Start new session" CTA is currently in flight (shows a spinner
   // + disables the button). Single hook-free handler keeps the rules of hooks intact
   // across the project list — see startSessionForProject below.
@@ -165,37 +159,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     const folderIds = Array.from(expandedFolders);
     saveUIState(projectIds, folderIds);
   }, [expandedProjects, expandedFolders, saveUIState]);
-
-  // Load the persisted COLLAPSED per-project AGENTS set on mount. Stored as a JSON
-  // array of project ids; default (nothing stored) = all expanded (empty set).
-  useEffect(() => {
-    const raw = migrateLocalStorageKey('cyboflow-collapsed-project-agents', 'cyboflow-collapsed-project-agents');
-    if (!raw) {
-      setCollapsedProjectSessions(new Set());
-      return;
-    }
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      const ids = Array.isArray(parsed) ? parsed.filter((v): v is number => typeof v === 'number') : [];
-      setCollapsedProjectSessions(new Set(ids));
-    } catch {
-      setCollapsedProjectSessions(new Set());
-    }
-  }, []);
-
-  // Persist the COLLAPSED per-project AGENTS set whenever it changes (skip the
-  // pre-load `null` sentinel so we never clobber stored state before it loads).
-  useEffect(() => {
-    if (collapsedProjectSessions === null) return;
-    try {
-      localStorage.setItem(
-        'cyboflow-collapsed-project-agents',
-        JSON.stringify(Array.from(collapsedProjectSessions)),
-      );
-    } catch {
-      // localStorage may be unavailable (e.g. private mode) — non-fatal.
-    }
-  }, [collapsedProjectSessions]);
 
   const handleFolderCreated = (folder: Folder) => {
     setProjectsWithRuns(prevProjects => {
@@ -481,24 +444,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         newSet.delete(folderId);
       } else {
         newSet.add(folderId);
-      }
-      return newSet;
-    });
-  }, []);
-
-  // Toggle the per-project "AGENTS" disclosure. We track the COLLAPSED set (default
-  // = all expanded), so adding a projectId here collapses that project's session rows.
-  const toggleProjectSessions = useCallback((projectId: number, event?: React.MouseEvent) => {
-    if (event) {
-      event.stopPropagation();
-      event.preventDefault();
-    }
-    setCollapsedProjectSessions(prev => {
-      const newSet = new Set(prev ?? []);
-      if (newSet.has(projectId)) {
-        newSet.delete(projectId);
-      } else {
-        newSet.add(projectId);
       }
       return newSet;
     });
@@ -1110,9 +1055,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
-              // AGENTS disclosure — expanded unless the project id is in the collapsed
-              // set. While the set is loading (null) treat everything as expanded.
-              const agentsExpanded = !(collapsedProjectSessions?.has(project.id) ?? false);
               const isStartingSession = startingSessionProjectId === project.id;
 
               return (
@@ -1222,31 +1164,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
-                      {/* AGENTS disclosure — collapses ONLY this project's session
-                          rows (distinct from the project-row chevron above). */}
-                      {sessionCount > 0 && (
-                        <div className="relative" style={{ marginLeft: '16px' }}>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProjectSessions(project.id, e); }}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            className="relative flex items-center gap-1 px-2 py-1 rounded hover:bg-surface-hover transition-colors w-full text-left"
-                            style={{ paddingLeft: '24px' }}
-                            title={agentsExpanded ? 'Hide agents' : 'Show agents'}
-                          >
-                            {agentsExpanded ? (
-                              <ChevronDown className="w-3 h-3 text-text-tertiary flex-shrink-0" />
-                            ) : (
-                              <ChevronRight className="w-3 h-3 text-text-tertiary flex-shrink-0" />
-                            )}
-                            <span className="text-[10px] font-semibold tracking-wider text-text-tertiary uppercase">
-                              Agents ({sessionCount})
-                            </span>
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Active session rows — hidden when the AGENTS disclosure is collapsed */}
-                      {agentsExpanded && projectSessions.map((session, index) => {
+                      {/* Active session rows */}
+                      {projectSessions.map((session, index) => {
                         // A session is "last" only when no run rows follow it — keeps
                         // the vertical connector line continuous down to the runs.
                         const isLastSession = index === projectSessions.length - 1 && runCount === 0;
