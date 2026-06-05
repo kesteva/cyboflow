@@ -1,9 +1,15 @@
 /**
  * ChatInput — Mode-gated chat input bar for the per-run bottom pane.
  *
- * Dispatches user text to the correct transport for each of three modes:
+ * Dispatches user text to the correct transport for each of three modes.
  *
- *   quick             — `activeQuickSessionId` is non-null; text is sent via
+ * Precedence: an active RUN (`activeRunId`) wins over a co-selected quick
+ * session, so a run nested in a session drives the chat to the run while
+ * `activeQuickSessionId` stays pointed at the parent session for Diff /
+ * File-Explorer / panels. Quick mode is reached only when `activeRunId` is null.
+ *
+ *   quick             — `activeRunId` is null AND `activeQuickSessionId` is
+ *                       non-null; text is sent via
  *                       `API.sessions.sendInput(activeQuickSessionId, text)`.
  *
  *   workflow-question — `runId` is non-null AND there is a pending Question
@@ -118,16 +124,25 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   const isInteractiveRunning =
     runId != null && activeRun?.substrate === 'interactive' && activeRun.status === 'running';
 
+  // Precedence: an active RUN wins over a co-selected quick session. A run nested
+  // in a session keeps activeQuickSessionId pointed at its parent session (so Diff /
+  // File-Explorer / panels follow the session), while the chat input must follow the
+  // RUN — hence the `runId` prop (the active run; === activeRunId in production) is
+  // checked first. Quick mode is reached only when there is NO active run. Behavior
+  // is unchanged today (the two are never both set until a run carries a session_id
+  // in Phase 3); this is the forward-correct ordering.
   const mode: 'quick' | 'workflow-question' | 'workflow-interactive' | 'workflow-idle' | 'none' =
-    activeQuickSessionId != null
-      ? 'quick'
-      : runId != null && activeQuestion != null
+    runId != null
+      ? runId != null && activeQuestion != null
         ? 'workflow-question'
         : isInteractiveRunning
           ? 'workflow-interactive'
           : runId != null
             ? 'workflow-idle'
-            : 'none';
+            : 'none'
+      : activeQuickSessionId != null
+        ? 'quick'
+        : 'none';
 
   if (mode === 'none') return null;
 

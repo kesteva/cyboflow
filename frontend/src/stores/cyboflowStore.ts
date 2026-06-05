@@ -12,11 +12,15 @@
  *   streamEvents              — ordered log of events received from the active run's stream
  *
  * Actions:
- *   setActiveRun(runId)                        — switch to a new run (clears prior events +
- *                                                clears activeQuickSessionId /
- *                                                activeQuickSessionRunId), starts the
+ *   setActiveRun(runId, parentSessionId?)      — switch to a new run (clears prior events +
+ *                                                clears activeQuickSessionRunId), starts the
  *                                                module-level stream-event subscription
- *                                                singleton
+ *                                                singleton. Sets activeQuickSessionId to the
+ *                                                run's parent session (parentSessionId) so the
+ *                                                File Explorer / Diff / panels keep following
+ *                                                the session while the run is active; when no
+ *                                                parent is supplied it clears activeQuickSessionId
+ *                                                (legacy standalone run).
  *   clearActiveRun()                           — deselect the active run, tears down the
  *                                                subscription
  *   setActiveQuickSession(sessionId, runId?)   — switch to a quick session: clears activeRunId,
@@ -33,11 +37,17 @@
  *                                                active stream subscription
  *   appendStreamEvent(event)                   — push one stream event onto the log
  *
- * Mutual-exclusion invariant (IDEA-024 / TASK-743):
- *   Exactly one of `activeRunId` and `activeQuickSessionId` is non-null at any
- *   given time (or both are null when nothing is selected).
- *   - setActiveRun clears activeQuickSessionId and activeQuickSessionRunId.
- *   - setActiveQuickSession clears activeRunId.
+ * Selection invariant (IDEA-024 / TASK-743; relaxed in the session<->run restructure):
+ *   This is NO LONGER a strict XOR. A workflow run is nested inside its parent
+ *   session, so `activeRunId` and `activeQuickSessionId` may BOTH be non-null at
+ *   the same time (a run selected within its session).
+ *   - setActiveRun(runId, parentSessionId) sets activeQuickSessionId to the run's
+ *     parent session, so the File Explorer / Diff / panels (which read
+ *     activeQuickSessionId) keep following the session while Workflow-Progress
+ *     (which reads activeRunId) follows the run. When no parent is supplied it
+ *     clears activeQuickSessionId (legacy standalone run). It always clears
+ *     activeQuickSessionRunId.
+ *   - setActiveQuickSession clears activeRunId (selecting a session with no run).
  *
  * Subscription management:
  *   The IPC subscription for stream events is managed as a module-level singleton
@@ -102,7 +112,7 @@ interface CyboflowState {
   /** workflow_runs row id for the active quick session, or null */
   activeQuickSessionRunId: string | null;
   streamEvents: StreamEvent[];
-  setActiveRun: (runId: string) => void;
+  setActiveRun: (runId: string, parentSessionId?: string | null) => void;
   clearActiveRun: () => void;
   setActiveQuickSession: (sessionId: string, runId?: string) => void;
   clearActiveQuickSession: () => void;
@@ -115,15 +125,18 @@ export const useCyboflowStore = create<CyboflowState>((set) => ({
   activeQuickSessionRunId: null,
   streamEvents: [],
 
-  setActiveRun: (runId) => {
+  setActiveRun: (runId, parentSessionId) => {
     // Start the IPC subscription BEFORE updating state so the renderer is
     // subscribed before any React re-render may cause timing issues.
-    // Also clears activeQuickSessionId / activeQuickSessionRunId —
-    // mutual-exclusion invariant (IDEA-024).
+    // Points activeQuickSessionId at the run's parent session so the File
+    // Explorer / Diff / panels keep following the session while the run is
+    // active (a run nested in its session); when no parent is supplied it
+    // clears activeQuickSessionId (legacy standalone run). Always clears
+    // activeQuickSessionRunId.
     _startSubscription(runId);
     set({
       activeRunId: runId,
-      activeQuickSessionId: null,
+      activeQuickSessionId: parentSessionId ?? null,
       activeQuickSessionRunId: null,
       streamEvents: [],
     });

@@ -851,7 +851,19 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // Picking a run leaves the human-review overview for the workflow-run pane.
     useNavigationStore.getState().closeHumanReview();
     useNavigationStore.getState().closeBacklog();
-    useCyboflowStore.getState().setActiveRun(runId);
+    // Forward the run's PARENT session id (migration 019) so a co-selected run
+    // can keep activeQuickSessionId pointed at its session — Diff / File-Explorer /
+    // panels (which read activeQuickSessionId) follow the session while
+    // Workflow-Progress (reads activeRunId) follows the run. Resolve the row from
+    // this project's active-run rows, falling back to a scan across projects (run
+    // ids are unique); session_id is null for legacy parentless runs, which is
+    // valid. Harmless today (no run carries a session_id until Phase 3).
+    const row =
+      runsByProject[projectId]?.find((r) => r.id === runId) ??
+      Object.values(runsByProject)
+        .flat()
+        .find((r) => r.id === runId);
+    useCyboflowStore.getState().setActiveRun(runId, row?.session_id ?? null);
     useNavigationStore.getState().setActiveProjectId(projectId);
   };
 
