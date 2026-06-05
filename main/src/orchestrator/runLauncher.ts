@@ -178,6 +178,18 @@ export class RunLauncher {
     // ladder in WorkflowRegistry.createRun. OPTIONAL — when omitted the ladder
     // falls through to frontmatter → global default → 'default'.
     requestedPermissionMode?: PermissionMode,
+    // Parallel-sprint (feat/parallel-sprint, P4). When supplied, the run's
+    // worktree branch is cut off `baseBranch` (the CURRENT integration tip) so a
+    // dependent task sees its already-integrated prereqs' changes — instead of
+    // the project's default branch. Forwarded straight into
+    // createDeterministicWorktree (which already supports the 4th baseBranch arg).
+    // Ignored for session-hosted runs (they reuse the session worktree).
+    baseBranch?: string,
+    // Parallel-sprint (feat/parallel-sprint, P4). When supplied, the run is
+    // stamped onto this batch (`workflow_runs.batch_id`) so the
+    // SprintBatchScheduler can route its runStatusEvents back to the batch.
+    // A direct workflow_runs write — NOT routed through the task chokepoint.
+    batchId?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -220,6 +232,7 @@ export class RunLauncher {
             projectPath,
             workflow.name,
             runId,
+            baseBranch,
           );
 
       // Write the per-run .mcp.json into the worktree so Claude can discover
@@ -266,6 +279,16 @@ export class RunLauncher {
         this.db
           .prepare('UPDATE workflow_runs SET seed_idea_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(ideaId, runId);
+      }
+
+      // Parallel-sprint batch link (feat/parallel-sprint, P4 / migration 020).
+      // A direct workflow_runs write — the SprintBatchScheduler reads batch_id to
+      // route this run's runStatusEvents back to the owning batch. Stamped at
+      // launch so the link exists before the first status event can fire.
+      if (batchId) {
+        this.db
+          .prepare('UPDATE workflow_runs SET batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(batchId, runId);
       }
 
       // Native-task linkage + in-process stage derivation (migration 014).

@@ -1111,11 +1111,16 @@ export class TaskChangeRouter {
    * with actor='orchestrator' + entityType='task'.
    *
    * Aggregation (first match wins):
-   *   any outcome='merged'                                          -> done
-   *   else any status='running'                                     -> indev
-   *   else any (awaiting_review | outcome='pr_open' | pending appr.) -> merge
-   *   else (runs nonempty && all terminal-without-merge)            -> entry_stage_id (fallback 'ready')
-   *   else (no runs)                                                -> no-op
+   *   any outcome='merged'                                                       -> done
+   *   else any status='running'                                                  -> indev
+   *   else any (awaiting_review | outcome='pr_open' | outcome='integrated' | pending appr.) -> merge
+   *   else (runs nonempty && all terminal-without-merge)                         -> entry_stage_id (fallback 'ready')
+   *   else (no runs)                                                             -> no-op
+   *
+   * `outcome='integrated'` (feat/parallel-sprint) is the per-task close-out for a
+   * batch run whose branch merged into the integration branch but NOT yet into
+   * main — it must hold the task at stage 8 (Ready to merge), exactly like
+   * `pr_open`, until the finalize merge-to-main stamps `outcome='merged'`.
    */
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
     const task = this.db
@@ -1147,7 +1152,9 @@ export class TaskChangeRouter {
       targetStageId = this.stageIdForPosition(task.board_id, 7); // indev
     } else {
       const runIds = runs.map((r) => r.id);
-      const anyAwaitingReview = runs.some((r) => r.status === 'awaiting_review' || r.outcome === 'pr_open');
+      const anyAwaitingReview = runs.some(
+        (r) => r.status === 'awaiting_review' || r.outcome === 'pr_open' || r.outcome === 'integrated',
+      );
       const pendingApprovals = this.hasPendingApprovals(runIds);
       if (anyAwaitingReview || pendingApprovals) {
         targetStageId = this.stageIdForPosition(task.board_id, 8); // merge
@@ -1379,7 +1386,9 @@ export class TaskChangeRouter {
 
     const runIds = runs.map((r) => r.id);
     const awaitingReview =
-      runs.some((r) => r.status === 'awaiting_review' || r.outcome === 'pr_open') ||
+      runs.some(
+        (r) => r.status === 'awaiting_review' || r.outcome === 'pr_open' || r.outcome === 'integrated',
+      ) ||
       this.hasPendingApprovals(runIds);
 
     const isDone = isTerminal && isDonePosition;

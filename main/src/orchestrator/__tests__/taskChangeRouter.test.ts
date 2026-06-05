@@ -988,6 +988,20 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(9));
     });
 
+    it("integrated outcome on a completed run -> merge (position 8), NOT a revert", async () => {
+      // Parallel-sprint per-task close-out: the run is terminal ('completed') but
+      // its outcome='integrated' (merged into the integration branch, not main).
+      // It must HOLD the task at stage 8 (Ready to merge), the same as pr_open —
+      // NOT fall through to the terminal-without-merge revert branch.
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'completed', outcome: 'integrated' });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(8));
+    });
+
     it('all runs terminal-without-merge -> revert to entry_stage_id', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));

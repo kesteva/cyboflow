@@ -218,8 +218,10 @@ describe('RunLauncher.launch', () => {
       expect(row.branch_name).toBe(cannedBranchName);
       expect(row.status).toBe('starting');
 
-      // Verify worktree manager was called with correct args
-      expect(fakeWorktree.createDeterministicWorktree).toHaveBeenCalledWith(tmpDir, 'sprint', cannedRunId);
+      // Verify worktree manager was called with correct args. The 4th arg is the
+      // optional baseBranch (parallel-sprint P4) — undefined for a non-batch launch,
+      // forwarded verbatim into createDeterministicWorktree.
+      expect(fakeWorktree.createDeterministicWorktree).toHaveBeenCalledWith(tmpDir, 'sprint', cannedRunId, undefined);
     });
   });
 

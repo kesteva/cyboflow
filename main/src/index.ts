@@ -806,23 +806,35 @@ async function initializeServices() {
     taskChangeRouter,
   );
 
-  // Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Constructed here
+  // Parallel-sprint batch scheduler (feat/parallel-sprint, P4). Constructed here
   // where every collaborator is in scope; subscribed to runStatusEvents +
   // rehydrated in the app.whenReady() block (after recoverActiveStateOrphans).
-  // The launcher adapter currently drops the optional baseBranch arg — threading
-  // it through RunLauncher.launch is P4 (integration-merge phase); for now per-task
-  // runs branch off main, which is harmless while the integration merge is stubbed.
+  // The launcher adapter forwards baseBranch (per-task runs branch off the CURRENT
+  // integration tip) + batchId (stamps workflow_runs.batch_id); the worktree
+  // adapter exposes mergeWorktreeToBranch + worktree/branch cleanup for the
+  // per-task integration merge.
   sprintBatchScheduler = new SprintBatchScheduler({
     db: cyboflowDb,
     logger: cyboflowLogger,
     runLauncher: {
-      launch: (workflowId, projectPath, substrate, taskId, ideaId, sessionId /* , baseBranch (P4) */) =>
-        runLauncher.launch(workflowId, projectPath, substrate, taskId, ideaId, sessionId),
+      // The scheduler's BatchRunLauncherLike is sprint-focused (…, sessionId,
+      // baseBranch, batchId) and never sets a per-run agent-permission mode — it
+      // inherits the global default. Bridge to the real 9-param launcher by
+      // passing `undefined` for the requestedPermissionMode slot between sessionId
+      // and baseBranch (added by the agent-permission-mode work on main).
+      launch: (workflowId, projectPath, substrate, taskId, ideaId, sessionId, baseBranch, batchId) =>
+        runLauncher.launch(workflowId, projectPath, substrate, taskId, ideaId, sessionId, undefined, baseBranch, batchId),
     },
     worktreeManager: {
       getProjectMainBranch: (projectPath) => worktreeManager.getProjectMainBranch(projectPath),
       createBranchRef: (projectPath, branchName, baseBranch) =>
         worktreeManager.createBranchRef(projectPath, branchName, baseBranch),
+      mergeWorktreeToBranch: (projectPath, worktreePath, targetBranch) =>
+        worktreeManager.mergeWorktreeToBranch(projectPath, worktreePath, targetBranch),
+      removeWorktreeByPath: (projectPath, worktreePath) =>
+        worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
+      deleteBranch: (projectPath, branchName, opts) =>
+        worktreeManager.deleteBranch(projectPath, branchName, opts),
     },
     taskStageDeriver: {
       recomputeTaskExecutionStage: (taskId) => taskChangeRouter.recomputeTaskExecutionStage(taskId),

@@ -3,18 +3,20 @@
  * executed with bounded concurrency over ONE shared integration branch, with a
  * single human review at finalize (feat/parallel-sprint).
  *
- * Lifecycle (this phase — P3 — covers planning + drain; integration-merge is P4,
- * finalize is P5, both TODO-stubbed):
+ * Lifecycle (P4 — covers planning + drain + per-task integration merge; finalize
+ * is P5, still TODO-stubbed):
  *   1. createBatch  — insert sprint_batches (planning) + one sprint_batch_tasks
  *                     per task (queued); create the integration branch off the
  *                     project main branch; launch the single `sprint-init` run
  *                     (dependency analysis) tagged with batch_id.
  *   2. onRunStatusChanged — the runStatusEvents hook. When the init run drains
  *                     clean (awaiting_review) → batch planning→running + drain().
- *                     When a `task` run drains clean → mark its batch_task
- *                     integrated (TODO(P4): integration merge here), unblock
- *                     dependents, drain(). When all tasks integrated → finalizing
- *                     (TODO(P5): launch finalize).
+ *                     When a `task` run drains clean → MERGE its worktree branch
+ *                     into the integration branch (rebase + ff-only), close the
+ *                     run (outcome='integrated'), mark its batch_task integrated,
+ *                     derive the task to stage 8, unblock dependents, drain(). A
+ *                     merge CONFLICT fails just that task (batch survives). When
+ *                     all tasks integrated → finalizing (TODO(P5): launch finalize).
  *   3. drain        — compute READY batch tasks from the in-batch blocking DAG
  *                     (task_dependencies), launch up to `concurrency` ready
  *                     tasks as standalone `task` runs.
@@ -66,10 +68,15 @@ export interface BatchRunLauncherLike {
     ideaId?: string,
     sessionId?: string,
     baseBranch?: string,
+    batchId?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string }>;
 }
 
-/** Narrow slice of WorktreeManager the scheduler needs for the integration branch. */
+/**
+ * Narrow slice of WorktreeManager the scheduler needs for the integration branch
+ * AND per-task close-out (P4): cut the integration ref, merge a finished run's
+ * worktree branch into it, then remove the worktree + delete the run branch.
+ */
 export interface BatchWorktreeManagerLike {
   getProjectMainBranch(projectPath: string): Promise<string>;
   createBranchRef(
@@ -77,6 +84,19 @@ export interface BatchWorktreeManagerLike {
     branchName: string,
     baseBranch: string,
   ): Promise<{ sha: string }>;
+  /**
+   * Rebase + ff-only merge the run's worktree branch INTO `targetBranch` (the
+   * integration branch). Throws a MergeConflictError (name 'MergeConflictError')
+   * on conflict — the scheduler catches it to fail the batch task without
+   * crashing the batch. Does NOT special-case main.
+   */
+  mergeWorktreeToBranch(
+    projectPath: string,
+    worktreePath: string,
+    targetBranch: string,
+  ): Promise<void>;
+  removeWorktreeByPath(projectPath: string, worktreePath: string): Promise<void>;
+  deleteBranch(projectPath: string, branchName: string, opts?: { force?: boolean }): Promise<void>;
 }
 
 /**
@@ -133,6 +153,17 @@ export class SprintBatchSchedulerError extends Error {
 
 const TERMINAL_BATCH_SQL_IN = `('${TERMINAL_BATCH_STATUSES.join("','")}')`;
 const TERMINAL_RUN_SQL_IN = `('${TERMINAL_RUN_STATUSES.join("','")}')`;
+
+/**
+ * Structural guard for the WorktreeManager's MergeConflictError. The scheduler
+ * lives in the orchestrator layer and must NOT import from services/* (standalone
+ * -typecheck invariant), so it cannot `instanceof MergeConflictError` against the
+ * concrete class — it matches on the stable `name` discriminator instead. Any
+ * OTHER throw from mergeWorktreeToBranch is treated as an unexpected failure.
+ */
+function isMergeConflict(err: unknown): err is Error & { gitOutput?: string } {
+  return err instanceof Error && err.name === 'MergeConflictError';
+}
 
 export class SprintBatchScheduler {
   private readonly db: DatabaseLike;
@@ -281,8 +312,12 @@ export class SprintBatchScheduler {
         workflowId,
         project.path,
         substrate,
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // baseBranch (init runs off the project default branch)
+        batchId,
       );
-      this.tagRunWithBatch(runId, batchId);
       this.db
         .prepare('UPDATE sprint_batches SET init_run_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(runId, batchId);
@@ -389,33 +424,12 @@ export class SprintBatchScheduler {
     if (!batch || batch.status !== 'running') return;
 
     if (status === 'awaiting_review') {
-      // Clean Phase-1 drain → this task is ready to integrate.
-      //
-      // TODO(P4): perform the integration MERGE here —
-      //   worktreeManager.mergeWorktreeToBranch(projectPath, run.worktree, integration_branch)
-      //   on conflict: mark batch_task 'failed' (do NOT crash the batch).
-      // For THIS phase the merge is stubbed; we mark the task integrated and
-      // derive its board stage to 8 (Ready to merge) WHILE the run is still
-      // awaiting_review (so recomputeTaskExecutionStage lands stage 8, not a
-      // revert). The actual run close-out / outcome='integrated' stamping is P4.
-      const marked = this.db
-        .prepare(
-          `UPDATE sprint_batch_tasks
-              SET status = 'integrated', integrated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE batch_id = ? AND run_id = ? AND status = 'running'`,
-        )
-        .run(batchId, runId) as { changes: number };
-      if (marked.changes > 0 && taskId) {
-        try {
-          await this.taskStageDeriver.recomputeTaskExecutionStage(taskId);
-        } catch (err) {
-          this.logger.warn('[SprintBatchScheduler] stage derivation failed after integrate', {
-            batchId,
-            taskId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      // Clean Phase-1 drain → this task is ready to integrate. Merge its worktree
+      // branch INTO the integration branch (rebase + ff-only), then close the run
+      // out with outcome='integrated' and derive the task to stage 8 (Ready to
+      // merge). On a merge CONFLICT the batch task is marked 'failed' but the
+      // batch keeps draining (it does NOT crash).
+      await this.integrateTaskRun(batch, runId, taskId);
       await this.drain(batchId);
     } else if (this.isTerminalRunStatus(status)) {
       // Per-task run failed/canceled → mark the batch_task failed, free the slot,
@@ -429,6 +443,150 @@ export class SprintBatchScheduler {
         .run(`run ${status}`, batchId, runId);
       await this.drain(batchId);
     }
+  }
+
+  /**
+   * Per-task close-out (P4): merge the finished run's worktree branch into the
+   * batch's integration branch, then mark the task integrated + derive its board
+   * stage to 8 (Ready to merge). The whole thing is status-guarded on the
+   * batch_task being `running` (idempotent under a redelivered event).
+   *
+   * Success path:
+   *   1. mergeWorktreeToBranch(integration_branch)   — rebase + ff-only
+   *   2. close the run: status='completed', outcome='integrated'
+   *   3. remove the run's worktree + delete its branch
+   *   4. batch_task → 'integrated' (integrated_at=now)
+   *   5. recomputeTaskExecutionStage(taskId) → stage 8 (outcome='integrated')
+   * Conflict path (MergeConflictError): batch_task → 'failed' with the git output;
+   *   the run is LEFT for inspection (not closed), the batch survives.
+   */
+  private async integrateTaskRun(
+    batch: SprintBatchRow,
+    runId: string,
+    taskId: string | null,
+  ): Promise<void> {
+    // Only act while the batch_task is still 'running' (status-guarded idempotency).
+    const bt = this.db
+      .prepare(
+        `SELECT id FROM sprint_batch_tasks
+          WHERE batch_id = ? AND run_id = ? AND status = 'running'`,
+      )
+      .get(batch.id, runId) as { id: number } | undefined;
+    if (!bt) return;
+
+    const run = this.db
+      .prepare('SELECT worktree_path, branch_name FROM workflow_runs WHERE id = ?')
+      .get(runId) as { worktree_path: string | null; branch_name: string | null } | undefined;
+    const project = this.projectResolver.getProjectById(batch.project_id);
+    const integrationBranch = batch.integration_branch;
+
+    if (!run?.worktree_path || !project || !integrationBranch) {
+      // Missing prerequisites to merge — fail the task rather than silently
+      // marking it integrated without merging its content.
+      this.failBatchTask(batch.id, runId, 'cannot integrate: missing worktree / project / integration branch');
+      return;
+    }
+
+    try {
+      await this.worktreeManager.mergeWorktreeToBranch(
+        project.path,
+        run.worktree_path,
+        integrationBranch,
+      );
+    } catch (err) {
+      if (isMergeConflict(err)) {
+        // Merge conflict — surface, mark failed, LEAVE the run + worktree for
+        // inspection, keep the batch alive.
+        const detail = err.gitOutput?.trim() || err.message;
+        this.failBatchTask(batch.id, runId, `merge conflict: ${detail}`);
+        this.logger.error('[SprintBatchScheduler] integration merge conflict', {
+          batchId: batch.id,
+          runId,
+          taskId,
+          integrationBranch,
+          gitOutput: detail,
+        });
+        return;
+      }
+      // Unexpected (non-conflict) failure — also fail the task, but log loudly.
+      this.failBatchTask(
+        batch.id,
+        runId,
+        `integration merge failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.logger.error('[SprintBatchScheduler] integration merge failed (non-conflict)', {
+        batchId: batch.id,
+        runId,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
+      return;
+    }
+
+    // Merge succeeded: close the run (outcome='integrated', terminal) so the
+    // chokepoint aggregate keys the task at stage 8 — NOT stage 9 (reserved for
+    // the finalize merge-to-main). The status flip happens BEFORE the stage
+    // derivation so recomputeTaskExecutionStage reads outcome='integrated'.
+    this.db
+      .prepare(
+        `UPDATE workflow_runs
+            SET status = 'completed', outcome = 'integrated', updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status NOT IN ${TERMINAL_RUN_SQL_IN}`,
+      )
+      .run(runId);
+
+    // Clean up the run's worktree + branch (idempotent). Best-effort: a cleanup
+    // failure must not undo the integration (the content is already on the branch).
+    try {
+      await this.worktreeManager.removeWorktreeByPath(project.path, run.worktree_path);
+      if (run.branch_name) {
+        await this.worktreeManager.deleteBranch(project.path, run.branch_name, { force: true });
+      }
+    } catch (cleanupErr) {
+      this.logger.warn('[SprintBatchScheduler] post-integration worktree cleanup failed', {
+        batchId: batch.id,
+        runId,
+        error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+      });
+    }
+
+    const marked = this.db
+      .prepare(
+        `UPDATE sprint_batch_tasks
+            SET status = 'integrated', integrated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE batch_id = ? AND run_id = ? AND status = 'running'`,
+      )
+      .run(batch.id, runId) as { changes: number };
+
+    if (marked.changes > 0) {
+      this.logger.info('[SprintBatchScheduler] task integrated into integration branch', {
+        batchId: batch.id,
+        runId,
+        taskId,
+        integrationBranch,
+      });
+      if (taskId) {
+        try {
+          await this.taskStageDeriver.recomputeTaskExecutionStage(taskId);
+        } catch (err) {
+          this.logger.warn('[SprintBatchScheduler] stage derivation failed after integrate', {
+            batchId: batch.id,
+            taskId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
+  /** Mark a still-`running` batch_task as `failed` with a reason (slot-freeing). */
+  private failBatchTask(batchId: string, runId: string, reason: string): void {
+    this.db
+      .prepare(
+        `UPDATE sprint_batch_tasks
+            SET status = 'failed', error_message = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE batch_id = ? AND run_id = ? AND status = 'running'`,
+      )
+      .run(reason, batchId, runId);
   }
 
   private async handleFinalizeStatus(batchId: string, status: WorkflowRunStatus): Promise<void> {
@@ -511,11 +669,11 @@ export class SprintBatchScheduler {
           project.path,
           batch.substrate,
           t.task_id,
-          undefined,
-          undefined,
-          batch.integration_branch ?? undefined,
+          undefined, // ideaId
+          undefined, // sessionId
+          batch.integration_branch ?? undefined, // baseBranch = current integration tip
+          batchId,
         );
-        this.tagRunWithBatch(runId, batchId);
         const claimed = this.db
           .prepare(
             `UPDATE sprint_batch_tasks
@@ -696,12 +854,6 @@ export class SprintBatchScheduler {
       set.add(row.depends_on_task_id);
     }
     return result;
-  }
-
-  private tagRunWithBatch(runId: string, batchId: string): void {
-    this.db
-      .prepare('UPDATE workflow_runs SET batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-      .run(batchId, runId);
   }
 
   private markBatchFailed(batchId: string, reason: string): void {

@@ -39,6 +39,7 @@ interface LaunchCall {
   workflowId: string;
   taskId?: string;
   baseBranch?: string;
+  batchId?: string;
 }
 
 /** A fake launcher that records calls and hands out sequential run ids. */
@@ -50,32 +51,67 @@ function makeFakeLauncher(db: Database.Database): {
   const calls: LaunchCall[] = [];
   const taskRunIds = new Map<string, string>();
   let counter = 0;
+  // Mirror RunLauncher: a workflow_runs row exists post-launch with its
+  // worktree_path/branch_name stamped + batch_id (the scheduler reads all three
+  // during the integration merge / close-out).
   const insertRun = db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, task_id)
-     VALUES (?, ?, ?, 'running', ?)`,
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, task_id, batch_id, worktree_path, branch_name)
+     VALUES (?, ?, ?, 'running', ?, ?, ?, ?)`,
   );
   const launcher: BatchRunLauncherLike = {
-    async launch(workflowId, _projectPath, _substrate, taskId, _ideaId, _sessionId, baseBranch) {
+    async launch(workflowId, _projectPath, _substrate, taskId, _ideaId, _sessionId, baseBranch, batchId) {
       counter += 1;
       const runId = `run${counter.toString().padStart(2, '0')}`;
-      // Mirror RunLauncher: a workflow_runs row exists post-launch (status running
-      // here; the scheduler's onRunStatusChanged drives it forward).
-      insertRun.run(runId, workflowId, PROJECT_ID, taskId ?? null);
-      calls.push({ workflowId, taskId, baseBranch });
+      const worktreePath = `/wt/${runId}`;
+      const branchName = `cyboflow/x/${runId}`;
+      insertRun.run(runId, workflowId, PROJECT_ID, taskId ?? null, batchId ?? null, worktreePath, branchName);
+      calls.push({ workflowId, taskId, baseBranch, batchId });
       if (taskId) taskRunIds.set(taskId, runId);
-      return { runId, worktreePath: `/wt/${runId}`, branchName: `cyboflow/x/${runId}` };
+      return { runId, worktreePath, branchName };
     },
   };
   return { launcher, calls, runIdFor: (taskId) => taskRunIds.get(taskId) };
 }
 
-function makeFakeWorktree(): BatchWorktreeManagerLike {
+/**
+ * A fake worktree manager that records merge targets and can be told to throw a
+ * MergeConflictError (matched structurally by name) for specific worktree paths,
+ * so the conflict-handling path is exercised without a real git repo.
+ */
+function makeFakeWorktree(conflictPaths: Set<string> = new Set()): BatchWorktreeManagerLike & {
+  merges: Array<{ worktreePath: string; targetBranch: string }>;
+  removed: string[];
+  deletedBranches: string[];
+} {
+  const merges: Array<{ worktreePath: string; targetBranch: string }> = [];
+  const removed: string[] = [];
+  const deletedBranches: string[] = [];
   return {
+    merges,
+    removed,
+    deletedBranches,
     async getProjectMainBranch() {
       return 'main';
     },
     async createBranchRef() {
       return { sha: 'deadbeef' };
+    },
+    async mergeWorktreeToBranch(_projectPath, worktreePath, targetBranch) {
+      if (conflictPaths.has(worktreePath)) {
+        const err = new Error(`Failed to rebase worktree branch onto ${targetBranch}`) as Error & {
+          gitOutput?: string;
+        };
+        err.name = 'MergeConflictError';
+        err.gitOutput = 'CONFLICT (content): both modified file.ts';
+        throw err;
+      }
+      merges.push({ worktreePath, targetBranch });
+    },
+    async removeWorktreeByPath(_projectPath, worktreePath) {
+      removed.push(worktreePath);
+    },
+    async deleteBranch(_projectPath, branchName) {
+      deletedBranches.push(branchName);
     },
   };
 }
@@ -105,7 +141,8 @@ function makeDb(): Database.Database {
     );
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, project_id INTEGER NOT NULL,
-      status TEXT NOT NULL, task_id TEXT, batch_id TEXT,
+      status TEXT NOT NULL, task_id TEXT, batch_id TEXT, outcome TEXT,
+      worktree_path TEXT, branch_name TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE task_dependencies (
@@ -143,18 +180,20 @@ interface Harness {
   launchCalls: LaunchCall[];
   runIdFor(taskId: string): string | undefined;
   deriver: BatchTaskStageDeriverLike & { derived: string[] };
+  worktree: ReturnType<typeof makeFakeWorktree>;
   emit(runId: string, status: WorkflowRunStatus): Promise<void>;
 }
 
-function makeHarness(): Harness {
+function makeHarness(opts?: { conflictPaths?: Set<string> }): Harness {
   const db = makeDb();
   const { launcher, calls, runIdFor } = makeFakeLauncher(db);
   const deriver = makeFakeDeriver();
+  const worktree = makeFakeWorktree(opts?.conflictPaths);
   const emitter = new EventEmitter();
   const scheduler = new SprintBatchScheduler({
     db: dbAdapter(db),
     runLauncher: launcher,
-    worktreeManager: makeFakeWorktree(),
+    worktreeManager: worktree,
     taskStageDeriver: deriver,
     projectResolver,
     logger: makeSpyLogger(),
@@ -166,6 +205,7 @@ function makeHarness(): Harness {
     launchCalls: calls,
     runIdFor,
     deriver,
+    worktree,
     async emit(runId, status) {
       emitter.emit('changed', { runId, status });
       await scheduler.whenSettled();
@@ -284,7 +324,7 @@ describe('SprintBatchScheduler drain + lifecycle', () => {
     expect(taskStatus(h.db, batchId, 't1')).toBe('running');
     expect(taskStatus(h.db, batchId, 't2')).toBe('queued');
 
-    // t1's run drains clean → integrated; t2 now unblocks and launches.
+    // t1's run drains clean → merged into integration, integrated; t2 unblocks.
     const t1Run = h.runIdFor('t1');
     expect(t1Run).toBeDefined();
     await h.emit(t1Run as string, 'awaiting_review');
@@ -292,6 +332,53 @@ describe('SprintBatchScheduler drain + lifecycle', () => {
     expect(taskStatus(h.db, batchId, 't1')).toBe('integrated');
     expect(h.deriver.derived).toContain('t1'); // stage derived to Ready-to-merge
     expect(taskStatus(h.db, batchId, 't2')).toBe('running');
+
+    // The integration MERGE actually ran, into the batch's integration branch.
+    const integ = (h.db.prepare('SELECT integration_branch FROM sprint_batches WHERE id = ?').get(batchId) as { integration_branch: string }).integration_branch;
+    expect(h.worktree.merges).toContainEqual({ worktreePath: `/wt/${t1Run}`, targetBranch: integ });
+    // Run closed out with outcome='integrated' + worktree/branch cleaned up.
+    const t1RunRow = h.db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get(t1Run as string) as { status: string; outcome: string | null };
+    expect(t1RunRow.status).toBe('completed');
+    expect(t1RunRow.outcome).toBe('integrated');
+    expect(h.worktree.removed).toContain(`/wt/${t1Run}`);
+    expect(h.worktree.deletedBranches).toContain(`cyboflow/x/${t1Run}`);
+
+    // The dependent (t2) launched with baseBranch = the integration tip ONLY
+    // after its prereq integrated (it was gated until then).
+    const t2Call = h.launchCalls.find((c) => c.taskId === 't2');
+    expect(t2Call?.baseBranch).toBe(integ);
+    expect(t2Call?.batchId).toBe(batchId);
+  });
+
+  it('a merge conflict fails only that task and the batch keeps draining', async () => {
+    // t1 and t2 are independent; t1's worktree merge will conflict.
+    const conflictPaths = new Set<string>();
+    h = makeHarness({ conflictPaths });
+    h.scheduler.start(h.emitter);
+
+    const { batchId } = await h.scheduler.createBatch({ projectId: PROJECT_ID, substrate: SUB, taskIds: ['t1', 't2'] });
+    await h.emit('run01', 'awaiting_review'); // init → running, both launched
+
+    const t1Run = h.runIdFor('t1') as string;
+    const t2Run = h.runIdFor('t2') as string;
+    // Arm the conflict for t1's worktree, then drain t1.
+    conflictPaths.add(`/wt/${t1Run}`);
+    await h.emit(t1Run, 'awaiting_review');
+
+    // t1 failed with the merge-conflict detail; the run is LEFT for inspection
+    // (not closed / no outcome), the batch survives.
+    expect(taskStatus(h.db, batchId, 't1')).toBe('failed');
+    const t1Err = (h.db.prepare('SELECT error_message FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?').get(batchId, 't1') as { error_message: string }).error_message;
+    expect(t1Err).toMatch(/merge conflict/i);
+    const t1RunRow = h.db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get(t1Run) as { status: string; outcome: string | null };
+    expect(t1RunRow.status).toBe('running'); // not closed
+    expect(t1RunRow.outcome).toBeNull();
+    expect(h.worktree.removed).not.toContain(`/wt/${t1Run}`); // worktree kept
+    expect(batchStatus(h.db, batchId)).toBe('running'); // batch alive
+
+    // t2 still drains clean → integrated; the batch keeps making progress.
+    await h.emit(t2Run, 'awaiting_review');
+    expect(taskStatus(h.db, batchId, 't2')).toBe('integrated');
   });
 
   it('marks all-integrated batch as finalizing', async () => {

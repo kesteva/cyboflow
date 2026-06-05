@@ -21,6 +21,31 @@ interface RawCommitData {
 
 const execAsync = promisify(exec);
 
+/**
+ * Typed, identifiable error thrown by {@link WorktreeManager.mergeWorktreeToBranch}
+ * when rebasing a per-task run branch onto the integration branch hits a conflict
+ * (or the integration update is not a fast-forward). The SprintBatchScheduler
+ * catches THIS specific class to mark the batch task `failed` without crashing the
+ * batch — distinguishing a real merge conflict from any other launch/IO failure.
+ */
+export class MergeConflictError extends Error {
+  readonly gitOutput: string;
+  readonly worktreePath: string;
+  readonly targetBranch: string;
+  constructor(message: string, details: { gitOutput: string; worktreePath: string; targetBranch: string }) {
+    super(message);
+    this.name = 'MergeConflictError';
+    this.gitOutput = details.gitOutput;
+    this.worktreePath = details.worktreePath;
+    this.targetBranch = details.targetBranch;
+  }
+}
+
+/** Narrow runtime guard for {@link MergeConflictError} (survives instanceof across module copies). */
+export function isMergeConflictError(err: unknown): err is MergeConflictError {
+  return err instanceof MergeConflictError || (err instanceof Error && err.name === 'MergeConflictError');
+}
+
 // Wrapper for execAsync that includes enhanced PATH
 async function execWithShellPath(command: string, options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
   const shellPath = getShellPath();
@@ -870,6 +895,130 @@ export class WorktreeManager {
         gitError.projectPath = projectPath;
         gitError.originalError = err;
 
+        throw gitError;
+      }
+    });
+  }
+
+  /**
+   * Merge a per-task run's worktree branch into an ARBITRARY target branch — the
+   * parallel-sprint integration branch (`sprint/<id8>`) — instead of main. A
+   * generalization of {@link mergeWorktreeToMain}: same rebase-then-fast-forward
+   * semantics, parameterized on the target. Does NOT special-case main.
+   *
+   * Topology: the target (integration) branch is a BARE ref (no checkout); each
+   * per-task run branch was cut off the integration tip via
+   * `createDeterministicWorktree(..., baseBranch=integrationBranch)`. So:
+   *   1. rebase the worktree branch onto the (possibly advanced) integration tip
+   *      — resolves conflicts in the worktree, never touching the shared ref;
+   *   2. fast-forward the integration ref to the rebased worktree HEAD via
+   *      `git branch -f` (a strict ff by construction once the rebase succeeds,
+   *      because the rebased branch is an ancestor-descendant of the integration
+   *      tip). Because the integration branch is never checked out, `branch -f`
+   *      cannot be refused for "checked out in a worktree".
+   *
+   * On a rebase conflict (or any non-ff) the rebase is aborted in the worktree and
+   * a typed {@link MergeConflictError} is thrown — the scheduler marks the batch
+   * task `failed` and continues draining other tasks (the batch does NOT crash).
+   * On success the integration branch points at the run's content; the caller
+   * (scheduler) then removes the worktree + deletes the run branch.
+   */
+  async mergeWorktreeToBranch(projectPath: string, worktreePath: string, targetBranch: string): Promise<void> {
+    return await withLock(`git-merge-worktree-${worktreePath}`, async () => {
+      const executedCommands: string[] = [];
+      let lastOutput = '';
+
+      // Resolve the worktree's own branch name up front so error paths can name it.
+      let branchName = '';
+      try {
+        console.log(`[WorktreeManager] Merging worktree into branch ${targetBranch}: ${worktreePath}`);
+
+        let command = `git branch --show-current`;
+        executedCommands.push(`git branch --show-current (in ${worktreePath})`);
+        const { stdout: currentBranch, stderr: stderr1 } = await execWithShellPath(command, { cwd: worktreePath });
+        lastOutput = currentBranch || stderr1 || '';
+        branchName = currentBranch.trim();
+
+        // Nothing to merge: the run made no commits beyond the integration tip
+        // (e.g. a commit-less flow). Treat as a benign success — the integration
+        // ref is already at-or-ahead of this branch, so there is nothing to do.
+        command = `git log --oneline ${escapeShellArg(targetBranch)}..HEAD`;
+        const { stdout: commits, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
+        lastOutput = commits || stderr2 || '';
+        if (!commits.trim()) {
+          console.log(`[WorktreeManager] No commits to merge into ${targetBranch}; benign no-op.`);
+          return;
+        }
+
+        // SAFETY 1: rebase the worktree branch onto the integration tip. Conflicts
+        // surface here and are resolved in the worktree, never on the shared ref.
+        command = `git rebase ${escapeShellArg(targetBranch)}`;
+        executedCommands.push(`git rebase ${targetBranch} (in ${worktreePath})`);
+        try {
+          const rebaseResult = await execWithShellPath(command, { cwd: worktreePath });
+          lastOutput = rebaseResult.stdout || rebaseResult.stderr || '';
+          console.log(`[WorktreeManager] Rebased worktree onto ${targetBranch}`);
+        } catch (error: unknown) {
+          const err = error as Error & { stderr?: string; stdout?: string };
+          // Abort so the worktree is left clean for inspection / a later retry.
+          try {
+            await execWithShellPath(`git rebase --abort`, { cwd: worktreePath });
+          } catch {
+            // ignore abort failures — best effort.
+          }
+          throw new MergeConflictError(
+            `Failed to rebase worktree branch ${branchName} onto ${targetBranch}: conflicts must be resolved first.`,
+            {
+              gitOutput: err.stderr || err.stdout || err.message || lastOutput || '',
+              worktreePath,
+              targetBranch,
+            },
+          );
+        }
+
+        // SAFETY 2: fast-forward the integration ref to the rebased worktree HEAD.
+        // `git branch -f <target> HEAD` is a strict ff here (the rebased branch is
+        // a descendant of the integration tip) and is rejected by git only if the
+        // target is checked out — which the bare integration ref never is.
+        command = `git branch -f ${escapeShellArg(targetBranch)} HEAD`;
+        executedCommands.push(`git branch -f ${targetBranch} HEAD (in ${worktreePath})`);
+        try {
+          const ffResult = await execWithShellPath(command, { cwd: worktreePath });
+          lastOutput = ffResult.stdout || ffResult.stderr || '';
+          console.log(`[WorktreeManager] Fast-forwarded ${targetBranch} to ${branchName}`);
+        } catch (error: unknown) {
+          const err = error as Error & { stderr?: string; stdout?: string };
+          throw new MergeConflictError(
+            `Failed to fast-forward ${targetBranch} to ${branchName}.`,
+            {
+              gitOutput: err.stderr || err.stdout || err.message || lastOutput || '',
+              worktreePath,
+              targetBranch,
+            },
+          );
+        }
+
+        console.log(`[WorktreeManager] Merged worktree branch ${branchName} into ${targetBranch}`);
+      } catch (error: unknown) {
+        // A MergeConflictError is already shaped + identifiable — rethrow as-is.
+        if (isMergeConflictError(error)) {
+          console.error(`[WorktreeManager] Merge conflict into ${targetBranch}:`, error.gitOutput);
+          throw error;
+        }
+        const err = error as Error & { stderr?: string; stdout?: string };
+        console.error(`[WorktreeManager] Failed to merge worktree into ${targetBranch}:`, err);
+        const gitError = new Error(`Failed to merge worktree into ${targetBranch}`) as Error & {
+          gitCommands?: string[];
+          gitOutput?: string;
+          workingDirectory?: string;
+          projectPath?: string;
+          originalError?: Error;
+        };
+        gitError.gitCommands = executedCommands;
+        gitError.gitOutput = err.stderr || err.stdout || err.message || lastOutput || '';
+        gitError.workingDirectory = worktreePath;
+        gitError.projectPath = projectPath;
+        gitError.originalError = err;
         throw gitError;
       }
     });
