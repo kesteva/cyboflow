@@ -1,11 +1,14 @@
 /**
- * Contract test for the SHIPPED built-in workflow bundles (IDEA-013 rung-(ii)).
+ * Contract test for the SHIPPED built-in workflow bundles (IDEA-013 rung-(ii),
+ * subagent rework).
  *
- * Resolves each built-in flow's co-located command bundle directly from the source
- * tree (the same `<name>/commands` layout `copy:assets` ships to dist) and locks
- * the exact set of `/cyboflow-<phase>` commands. This guards against a phase
- * command being added/removed/renamed out of sync with the slim orchestrator prose
- * and the WORKFLOW_DEFINITIONS step ids.
+ * Resolves each built-in flow's co-located bundle directly from the source tree
+ * (the same `<name>/agents` layout `copy:assets` ships to dist) and locks the exact
+ * set of `cyboflow-<phase>` subagents. Heavy phases are delegated to subagents
+ * (own context window); human-gate phases run INLINE in the orchestrator, so they
+ * ship no bundle file. This guards against a phase subagent being added/removed/
+ * renamed out of sync with the orchestrator prose and the WORKFLOW_DEFINITIONS step
+ * ids, and locks the single-writer invariant (no `cyboflow_*` tool in a subagent).
  */
 import { describe, it, expect } from 'vitest';
 import * as path from 'path';
@@ -28,11 +31,13 @@ describe('built-in workflow bundles', () => {
     assertAgentShape(bundle.agents);
   });
 
-  it('sprint ships its 8 phase commands in order', () => {
+  it('sprint ships its 7 heavy-phase subagents in order (gate stays inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'sprint.md'));
-    expect(bundle.commands.map((c) => c.name)).toEqual([
+    // The human-review gate runs inline in the orchestrator — not delegated — so the
+    // bundle ships no commands, only subagents.
+    expect(bundle.commands).toEqual([]);
+    expect(bundle.agents.map((a) => a.name)).toEqual([
       'code-review',
-      'human-review',
       'implement',
       'sprint-review',
       'sprint-verify',
@@ -40,17 +45,9 @@ describe('built-in workflow bundles', () => {
       'visual-verify',
       'write-tests',
     ]);
-    assertCommandShape(bundle.commands);
+    assertAgentShape(bundle.agents);
   });
 });
-
-/** Every phase command carries a description frontmatter line and reports its step. */
-function assertCommandShape(commands: { name: string; content: string }[]): void {
-  for (const cmd of commands) {
-    expect(cmd.content).toMatch(/^---[\s\S]*description:/);
-    expect(cmd.content).toContain('cyboflow_report_step');
-  }
-}
 
 /**
  * Every phase subagent carries name + description + tools frontmatter, returns a
