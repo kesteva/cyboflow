@@ -170,6 +170,64 @@ describe('cyboflowMcpServer ListTools', () => {
     const finding = tools.find((t) => t.name === 'cyboflow_report_finding');
     expect(finding!.description.toLowerCase()).toContain('non-blocking');
   });
+
+  it('declares cyboflow_add_task_dependency with the documented inputSchema', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('cyboflow_add_task_dependency');
+
+    const dep = tools.find((t) => t.name === 'cyboflow_add_task_dependency');
+    expect(dep).toBeDefined();
+    const schema = dep!.inputSchema;
+    expect(schema.required).toEqual(['task_id', 'depends_on_task_id']);
+    expect(schema.properties['task_id'].type).toBe('string');
+    expect(schema.properties['depends_on_task_id'].type).toBe('string');
+    expect(schema.properties['kind'].enum).toEqual(['blocking', 'related']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CallTool cyboflow_add_task_dependency validation
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer CallTool cyboflow_add_task_dependency validation', () => {
+  it('rejects a missing or empty task_id', async () => {
+    expect(await callTool('cyboflow_add_task_dependency', { depends_on_task_id: 'tsk_b' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(
+      await callTool('cyboflow_add_task_dependency', { task_id: '', depends_on_task_id: 'tsk_b' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects a missing or empty depends_on_task_id', async () => {
+    expect(await callTool('cyboflow_add_task_dependency', { task_id: 'tsk_a' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(
+      await callTool('cyboflow_add_task_dependency', { task_id: 'tsk_a', depends_on_task_id: '' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects an out-of-enum kind', async () => {
+    expect(
+      await callTool('cyboflow_add_task_dependency', {
+        task_id: 'tsk_a',
+        depends_on_task_id: 'tsk_b',
+        kind: 'soft',
+      }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('passes validation with valid args and surfaces the (mocked) connection error, not a validation error', async () => {
+    const res = await callTool('cyboflow_add_task_dependency', {
+      task_id: 'tsk_a',
+      depends_on_task_id: 'tsk_b',
+    });
+    // The net mock reports destroyed:true so sendQuery rejects immediately; the
+    // point is that arg validation PASSED (no 'invalid_arguments').
+    expect(res.error).not.toBe('invalid_arguments');
+  });
 });
 
 // ---------------------------------------------------------------------------

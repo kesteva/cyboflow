@@ -76,6 +76,18 @@ export interface FlowOverlay {
 }
 
 /**
+ * A task->task dependency edge surfaced on the read model. `taskId` is the OTHER
+ * endpoint (the prerequisite for `blockedBy`, the related peer for `relatedTo`);
+ * `ref`/`title` are denormalized from that task for display without a second
+ * round-trip. Computed on read from `task_dependencies` (migration 015).
+ */
+export interface TaskDependencyRef {
+  taskId: string;
+  ref: string;
+  title: string;
+}
+
+/**
  * The read-model item rendered by the backlog UI. Columns from `tasks` plus
  * the derived overlays computed on read (selectProjectBacklog / computeTaskOverlay).
  */
@@ -108,6 +120,19 @@ export interface BacklogTaskItem {
   inFlow: FlowOverlay[]; // MULTIPLE — parallel runs supported
   awaitingReview: boolean;
   isDone: boolean;
+  /**
+   * Blocking prerequisites of this task (task_dependencies kind='blocking').
+   * Optional for shape parity across processes; absent ⇒ not computed/empty.
+   */
+  blockedBy?: TaskDependencyRef[];
+  /** Advisory related-to peers (task_dependencies kind='related'). */
+  relatedTo?: TaskDependencyRef[];
+  /**
+   * True when this task has no blocking prerequisites, OR every blocking
+   * prerequisite has reached the Done stage (board position 9). Optional for
+   * shape parity; consumers should treat `undefined` as "unknown / not gated".
+   */
+  readyToWork?: boolean;
   children?: BacklogTaskItem[]; // for epics
   childCount?: number;
   pendingTasks?: number;

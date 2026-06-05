@@ -45,8 +45,12 @@ import type {
   Board,
   BoardStage,
   FlowOverlay,
+  TaskDependencyRef,
 } from '../../../shared/types/tasks';
 import type { DatabaseLike } from './types';
+
+/** The board stage position considered "done" — a blocking prereq is satisfied here. */
+const DONE_POSITION = 9;
 
 // ---------------------------------------------------------------------------
 // Internal DB row shapes for the SELECTs below. SQLite BOOLEAN columns surface
@@ -313,6 +317,124 @@ function hasPendingApprovals(db: DatabaseLike, runIds: string[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency-edge overlay (task_dependencies, migration 015)
+// ---------------------------------------------------------------------------
+
+/** One row of the dependency JOIN: the OTHER endpoint's identity + done-state. */
+interface DependencyEdgeRow {
+  task_id: string;
+  depends_on_task_id: string;
+  kind: 'blocking' | 'related';
+  /** The prerequisite's ref/title, denormalized for display. */
+  dep_ref: string;
+  dep_title: string;
+  /** The prerequisite's stage position (null when the stage row is missing). */
+  dep_position: number | null;
+}
+
+/**
+ * The dependency overlay computed for ONE task: its blocking prerequisites, its
+ * related peers, and whether it is ready to work (no blocking deps OR all
+ * blocking deps at the Done position).
+ */
+export interface DependencyOverlay {
+  blockedBy: TaskDependencyRef[];
+  relatedTo: TaskDependencyRef[];
+  readyToWork: boolean;
+}
+
+/**
+ * Build a `taskId -> DependencyOverlay` map for an ENTIRE project in ONE query.
+ *
+ * Each `task_dependencies` row is LEFT JOINed to the prerequisite task (for
+ * ref/title) and its board stage (for the position used by the readyToWork
+ * predicate). A task with no rows is absent from the map; callers default it to
+ * `{ blockedBy: [], relatedTo: [], readyToWork: true }` (no blockers ⇒ ready).
+ *
+ * @param db        - Narrow DatabaseLike interface.
+ * @param projectId - Project whose tasks' dependency edges to load.
+ */
+function loadProjectDependencyOverlays(
+  db: DatabaseLike,
+  projectId: number,
+): Map<string, DependencyOverlay> {
+  const rows = db
+    .prepare(
+      `SELECT d.task_id, d.depends_on_task_id, d.kind,
+              dep.ref   AS dep_ref,
+              dep.title AS dep_title,
+              s.position AS dep_position
+         FROM task_dependencies d
+         JOIN tasks t   ON t.id = d.task_id
+         JOIN tasks dep ON dep.id = d.depends_on_task_id
+         LEFT JOIN board_stages s ON s.id = dep.stage_id
+        WHERE t.project_id = ?`,
+    )
+    .all(projectId) as DependencyEdgeRow[];
+
+  return foldDependencyRows(rows);
+}
+
+/**
+ * Load the dependency overlay for a SINGLE task id (used by selectTaskById,
+ * which projects one row without a full project scan).
+ */
+function loadTaskDependencyOverlay(db: DatabaseLike, taskId: string): DependencyOverlay {
+  const rows = db
+    .prepare(
+      `SELECT d.task_id, d.depends_on_task_id, d.kind,
+              dep.ref   AS dep_ref,
+              dep.title AS dep_title,
+              s.position AS dep_position
+         FROM task_dependencies d
+         JOIN tasks dep ON dep.id = d.depends_on_task_id
+         LEFT JOIN board_stages s ON s.id = dep.stage_id
+        WHERE d.task_id = ?`,
+    )
+    .all(taskId) as DependencyEdgeRow[];
+
+  return foldDependencyRows(rows).get(taskId) ?? { blockedBy: [], relatedTo: [], readyToWork: true };
+}
+
+/**
+ * Fold dependency-edge rows into a per-blocked-task overlay map. readyToWork is
+ * true when a task has NO blocking edges, or EVERY blocking prerequisite sits at
+ * the Done position (9). `related` edges are advisory and never gate readiness.
+ */
+function foldDependencyRows(rows: DependencyEdgeRow[]): Map<string, DependencyOverlay> {
+  const byTask = new Map<string, DependencyOverlay>();
+  for (const r of rows) {
+    let overlay = byTask.get(r.task_id);
+    if (!overlay) {
+      overlay = { blockedBy: [], relatedTo: [], readyToWork: true };
+      byTask.set(r.task_id, overlay);
+    }
+    const ref: TaskDependencyRef = {
+      taskId: r.depends_on_task_id,
+      ref: r.dep_ref,
+      title: r.dep_title,
+    };
+    if (r.kind === 'blocking') {
+      overlay.blockedBy.push(ref);
+      // A blocking prereq not yet at the Done position keeps the task blocked.
+      if (r.dep_position !== DONE_POSITION) {
+        overlay.readyToWork = false;
+      }
+    } else {
+      overlay.relatedTo.push(ref);
+    }
+  }
+  return byTask;
+}
+
+/** Attach a dependency overlay to a projected item (no-op fields kept stable). */
+function applyDependencyOverlay(item: BacklogTaskItem, overlay: DependencyOverlay): void {
+  item.blockedBy = overlay.blockedBy;
+  item.relatedTo = overlay.relatedTo;
+  item.readyToWork = overlay.readyToWork;
+}
+
+// ---------------------------------------------------------------------------
 // Backlog projection
 // ---------------------------------------------------------------------------
 
@@ -368,6 +490,10 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
 
   const item = projectTaskItem(db, row);
 
+  if (row.type === 'task') {
+    applyDependencyOverlay(item, loadTaskDependencyOverlay(db, row.id));
+  }
+
   if (row.type === 'epic') {
     // Children are always tasks (only `tasks` carries parent_epic_id).
     const childRows = db
@@ -382,7 +508,11 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
           ORDER BY t.created_at ASC, t.ref ASC`,
       )
       .all(taskId) as TaskDbRow[];
-    const children = childRows.map((c) => projectTaskItem(db, c));
+    const children = childRows.map((c) => {
+      const childItem = projectTaskItem(db, c);
+      applyDependencyOverlay(childItem, loadTaskDependencyOverlay(db, c.id));
+      return childItem;
+    });
     item.children = children;
     item.childCount = children.length;
     item.pendingTasks = children.filter((c) => !c.isDone).length;
@@ -423,10 +553,21 @@ export function selectProjectBacklog(db: DatabaseLike, projectId: number | null)
   );
   const rows = (scoped ? stmt.all(projectId, projectId, projectId) : stmt.all()) as TaskDbRow[];
 
+  // Dependency edges are task-only — load the whole project's overlays in ONE
+  // query and map them onto each task item as we project.
+  const depOverlays = loadProjectDependencyOverlays(db, projectId);
+
   // First pass: project every row to a BacklogTaskItem keyed by id.
   const itemsById = new Map<string, BacklogTaskItem>();
   for (const row of rows) {
-    itemsById.set(row.id, projectTaskItem(db, row));
+    const item = projectTaskItem(db, row);
+    if (row.type === 'task') {
+      applyDependencyOverlay(
+        item,
+        depOverlays.get(row.id) ?? { blockedBy: [], relatedTo: [], readyToWork: true },
+      );
+    }
+    itemsById.set(row.id, item);
   }
 
   // Second pass: nest child tasks under their parent epic; collect top level.

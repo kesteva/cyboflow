@@ -239,6 +239,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_add_task_dependency',
+        description:
+          'Record a task->task dependency edge for THIS run\'s project. task_id is the BLOCKED task; depends_on_task_id is the PREREQUISITE that must finish first. Routes through the single write chokepoint. Both must be real TASKS in this project (rejected with error invalid_dependency otherwise); a self-edge is rejected (invalid_dependency); an edge that would create a cycle among blocking edges is rejected (error dependency_cycle); re-adding an existing edge is an idempotent no-op. Default kind=\'blocking\' participates in sprint ordering; kind=\'related\' is advisory metadata only.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: { type: 'string', description: 'The BLOCKED task id (required)' },
+            depends_on_task_id: { type: 'string', description: 'The PREREQUISITE task id that must finish first (required)' },
+            kind: { type: 'string', enum: ['blocking', 'related'], description: "Optional edge kind; defaults to 'blocking'" },
+          },
+          required: ['task_id', 'depends_on_task_id'],
+        },
+      },
+      {
         name: 'cyboflow_report_finding',
         description:
           'Report a NON-BLOCKING observation, decision, or human action item into THIS project\'s unified review queue (the human-attention inbox). The item is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single review-item chokepoint, and surfaces in the review queue. By default findings are NON-BLOCKING (the run is never paused, status is unchanged, the user is not interrupted); set blocking:true only for items that should gate run resume. This is OBSERVATIONAL — contrast with the PreToolUse approval gate.',
@@ -603,6 +617,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id, stageId: stage_id };
       if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
       return executeMcpQuery('mcp-set-task-stage', queryParams);
+    }
+
+    case 'cyboflow_add_task_dependency': {
+      const args = (request.params.arguments ?? {}) as {
+        task_id?: unknown;
+        depends_on_task_id?: unknown;
+        kind?: unknown;
+      };
+      const { task_id, depends_on_task_id, kind } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string' }) },
+          ],
+        };
+      }
+      if (typeof depends_on_task_id !== 'string' || depends_on_task_id.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'depends_on_task_id: string' }),
+            },
+          ],
+        };
+      }
+      if (kind !== undefined && kind !== 'blocking' && kind !== 'related') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "kind: 'blocking' | 'related' (optional)" }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { taskId: task_id, dependsOnTaskId: depends_on_task_id };
+      if (kind !== undefined) queryParams['dependencyKind'] = kind;
+      return executeMcpQuery('mcp-add-task-dependency', queryParams);
     }
 
     case 'cyboflow_report_finding': {

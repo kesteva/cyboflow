@@ -234,3 +234,109 @@ describe('taskListing — 3-table UNION', () => {
     expect(boards[1].stages).toHaveLength(11);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dependency overlay (blockedBy / relatedTo / readyToWork)
+// ---------------------------------------------------------------------------
+
+/** Insert a bare top-level task at a given stage position. Returns its id. */
+function seedTask(db: Database.Database, id: string, ref: string, position: number): void {
+  db.prepare(
+    `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, created_at)
+     VALUES (?, 1, ?, ?, 'b', 'board-1-default', ?, '2026-01-01T00:00:00.000Z')`,
+  ).run(id, ref, `Title ${ref}`, stageId(position));
+}
+
+function addEdge(
+  db: Database.Database,
+  taskId: string,
+  dependsOn: string,
+  kind: 'blocking' | 'related' = 'blocking',
+): void {
+  db.prepare(
+    'INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, ?)',
+  ).run(taskId, dependsOn, kind);
+}
+
+describe('taskListing — dependency overlay', () => {
+  it('a task with no dependencies is readyToWork with empty edge arrays', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    expect(a.blockedBy).toEqual([]);
+    expect(a.relatedTo).toEqual([]);
+    expect(a.readyToWork).toBe(true);
+  });
+
+  it('a task blocked by an unfinished prereq is NOT readyToWork and surfaces blockedBy ref/title', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6); // blocked task at Ready-for-dev
+    seedTask(db, 'tsk_b', 'TASK-002', 5); // prereq still at Tasks-extracted (not done)
+    addEdge(db, 'tsk_a', 'tsk_b');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    expect(a.readyToWork).toBe(false);
+    expect(a.blockedBy).toEqual([{ taskId: 'tsk_b', ref: 'TASK-002', title: 'Title TASK-002' }]);
+    expect(a.relatedTo).toEqual([]);
+
+    // The prereq itself has no blockers ⇒ ready.
+    const b = backlog.find((t) => t.id === 'tsk_b')!;
+    expect(b.readyToWork).toBe(true);
+    expect(b.blockedBy).toEqual([]);
+  });
+
+  it('a task becomes readyToWork once ALL blocking prereqs reach the Done stage (position 9)', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 9); // prereq at Done
+    seedTask(db, 'tsk_c', 'TASK-003', 9); // prereq at Done
+    addEdge(db, 'tsk_a', 'tsk_b');
+    addEdge(db, 'tsk_a', 'tsk_c');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    expect(a.readyToWork).toBe(true);
+    expect(a.blockedBy!.map((d) => d.ref).sort()).toEqual(['TASK-002', 'TASK-003']);
+  });
+
+  it('one of several blocking prereqs not done keeps the task blocked', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 9); // done
+    seedTask(db, 'tsk_c', 'TASK-003', 7); // in dev — NOT done
+    addEdge(db, 'tsk_a', 'tsk_b');
+    addEdge(db, 'tsk_a', 'tsk_c');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    expect(a.readyToWork).toBe(false);
+    expect(a.blockedBy).toHaveLength(2);
+  });
+
+  it('related edges populate relatedTo and never gate readyToWork', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 5); // not done, but only a related peer
+    addEdge(db, 'tsk_a', 'tsk_b', 'related');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    expect(a.relatedTo).toEqual([{ taskId: 'tsk_b', ref: 'TASK-002', title: 'Title TASK-002' }]);
+    expect(a.blockedBy).toEqual([]);
+    expect(a.readyToWork).toBe(true);
+  });
+
+  it('selectTaskById carries the same dependency overlay for a single task', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 5);
+    addEdge(db, 'tsk_a', 'tsk_b');
+
+    const a = selectTaskById(dbAdapter(db), 'tsk_a')!;
+    expect(a.readyToWork).toBe(false);
+    expect(a.blockedBy).toEqual([{ taskId: 'tsk_b', ref: 'TASK-002', title: 'Title TASK-002' }]);
+  });
+});

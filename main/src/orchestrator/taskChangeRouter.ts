@@ -109,7 +109,12 @@ export type TaskChangeErrorCode =
   | 'invalid_lineage'
   | 'forbidden_stage'
   | 'active_runs'
-  | 'concurrency';
+  | 'concurrency'
+  | 'invalid_dependency'
+  | 'dependency_cycle';
+
+/** Edge kind for a task->task dependency (mirrors the task_dependencies.kind CHECK). */
+export type TaskDependencyKind = 'blocking' | 'related';
 
 /** Discriminated error for all chokepoint rejections. */
 export class TaskChangeError extends Error {
@@ -174,6 +179,20 @@ export interface TaskChange {
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
   runId?: string;
+  // ----- add-dependency path (task->task edge) -----
+  /**
+   * ADD-DEPENDENCY path: when set (alongside `taskId`), the change records a
+   * task->task dependency edge — `taskId` is the BLOCKED task and
+   * `dependsOnTaskId` is the PREREQUISITE. The write goes into
+   * `task_dependencies` (NOT the entity table), is cycle-checked over the
+   * existing blocking edges, INSERT-OR-IGNOREs on the UNIQUE constraint, and
+   * appends a `dependency-added` entity_events row on the blocked task. This is
+   * a dedicated branch in applyChange so it still serializes on the per-project
+   * PQueue alongside every other entity write.
+   */
+  dependsOnTaskId?: string;
+  /** Edge kind for the add-dependency path. Defaults to 'blocking'. */
+  dependencyKind?: TaskDependencyKind;
   // ----- create-only fields (ignored on update) -----
   /** @deprecated use entityType. Kept so existing callers compile; entityType wins. */
   type?: TaskType;
@@ -336,9 +355,13 @@ export class TaskChangeRouter {
     change: TaskChange,
   ): Promise<{ taskId: string; event: { id: number; seq: number } }> {
     const result = (await this.getProjectQueue(projectId).add(() => {
-      return change.taskId === undefined
-        ? this.runCreate(projectId, change)
-        : this.runUpdate(projectId, change);
+      if (change.taskId === undefined) {
+        return this.runCreate(projectId, change);
+      }
+      if (change.dependsOnTaskId !== undefined) {
+        return this.runAddDependency(projectId, change);
+      }
+      return this.runUpdate(projectId, change);
     })) as { taskId: string; event: { id: number; seq: number } };
 
     // FIX-STAGE-MODEL (B): when a CREATE introduces the FIRST child of an idea
@@ -912,6 +935,128 @@ export class TaskChangeRouter {
   }
 
   // --------------------------------------------------------------------------
+  // Add-dependency path (task->task edge in task_dependencies)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Record a task->task dependency edge. `taskId` is the BLOCKED task,
+   * `change.dependsOnTaskId` the PREREQUISITE. Both must be real TASKS in this
+   * project (dependencies are task-only; ideas/epics never carry one). The edge:
+   *   1. rejects self-edges (`invalid_dependency`),
+   *   2. validates both endpoints exist + same project (`invalid_dependency`),
+   *   3. is cycle-checked over the existing blocking-edge closure
+   *      (`dependency_cycle`) — only `blocking` edges form the DAG, so `related`
+   *      edges skip the cycle guard,
+   *   4. INSERT-OR-IGNOREs (the UNIQUE(task_id, depends_on_task_id) makes a
+   *      re-add a no-op),
+   *   5. appends a `dependency-added` entity_events row on the blocked task so
+   *      the change is in the faithful changelog.
+   *
+   * Returns the BLOCKED task id + the (new or last) entity_events row. A dup
+   * re-add returns the most recent event without writing a new one.
+   */
+  private runAddDependency(
+    projectId: number,
+    change: TaskChange,
+  ): { taskId: string; event: { id: number; seq: number } } {
+    const taskId = change.taskId as string;
+    const dependsOnTaskId = change.dependsOnTaskId as string;
+    const kind: TaskDependencyKind = change.dependencyKind ?? 'blocking';
+    const now = new Date().toISOString();
+
+    let eventId = 0;
+    let eventSeq = 0;
+    let wroteEdge = false;
+
+    const txn = this.db.transaction(() => {
+      // Self-edge guard.
+      if (taskId === dependsOnTaskId) {
+        throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
+      }
+
+      // Both endpoints must be real tasks in this project. Dependencies are
+      // task-only (ideas/epics never participate in the execution DAG).
+      const blocked = this.db
+        .prepare('SELECT id, project_id FROM tasks WHERE id = ?')
+        .get(taskId) as { id: string; project_id: number } | undefined;
+      if (!blocked) {
+        throw new TaskChangeError('invalid_dependency', `task ${taskId} not found`);
+      }
+      if (blocked.project_id !== projectId) {
+        throw new TaskChangeError('invalid_dependency', `task ${taskId} belongs to a different project`);
+      }
+      const prereq = this.db
+        .prepare('SELECT id, project_id FROM tasks WHERE id = ?')
+        .get(dependsOnTaskId) as { id: string; project_id: number } | undefined;
+      if (!prereq) {
+        throw new TaskChangeError('invalid_dependency', `prerequisite task ${dependsOnTaskId} not found`);
+      }
+      if (prereq.project_id !== projectId) {
+        throw new TaskChangeError(
+          'invalid_dependency',
+          `prerequisite task ${dependsOnTaskId} belongs to a different project`,
+        );
+      }
+
+      // Idempotent no-op: the edge already exists (any kind on this pair).
+      const existing = this.db
+        .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+        .get(taskId, dependsOnTaskId) as { kind: string } | undefined;
+      if (existing) {
+        return; // wroteEdge stays false — surface the last event below
+      }
+
+      // Cycle guard: only blocking edges form the ordering DAG. Reject an edge
+      // that would create a cycle in the transitive closure of blocking edges.
+      if (kind === 'blocking') {
+        this.validateDependencyEdge(taskId, dependsOnTaskId);
+      }
+
+      // INSERT OR IGNORE — the UNIQUE(task_id, depends_on_task_id) makes a
+      // racing re-add a no-op even if the SELECT above missed it.
+      this.db
+        .prepare(
+          'INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, ?)',
+        )
+        .run(taskId, dependsOnTaskId, kind);
+
+      const deltas: FieldDelta[] = [
+        { field: 'depends_on_task_id', from: null, to: dependsOnTaskId },
+        { field: 'dependency_kind', from: null, to: kind },
+      ];
+      const ev = this.insertEvent(
+        'task',
+        taskId,
+        change.kind ?? 'dependency-added',
+        change.actor,
+        change.runId ?? null,
+        deltas,
+        now,
+      );
+      eventId = ev.id;
+      eventSeq = ev.seq;
+      wroteEdge = true;
+    });
+    (txn as () => void)();
+
+    // Dup re-add: surface the most recent entity_events row so callers still get
+    // a stable { id, seq } (no new event was written).
+    if (!wroteEdge) {
+      const last = this.db
+        .prepare(
+          'SELECT id, seq FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
+        )
+        .get('task', taskId) as { id: number; seq: number } | undefined;
+      eventId = last?.id ?? 0;
+      eventSeq = last?.seq ?? 0;
+    } else {
+      this.emitChange(projectId, 'task', taskId, 'updated');
+    }
+
+    return { taskId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  // --------------------------------------------------------------------------
   // Entity location / per-table reads
   // --------------------------------------------------------------------------
 
@@ -1096,6 +1241,44 @@ export class TaskChangeRouter {
     // An epic cannot originate from the very task that points at it (cycle guard).
     if (parent.originating_idea_id === childId) {
       throw new TaskChangeError('invalid_parent', 'parent/child cycle detected');
+    }
+  }
+
+  /**
+   * Cycle guard for a proposed BLOCKING dependency edge `(blockedId ->
+   * dependsOnId)` — "blockedId is blocked by dependsOnId". The blocking edges
+   * form a DAG: a row `(task_id=A, depends_on_task_id=B)` means A waits for B,
+   * so the directed edge A -> B points from dependent to prerequisite. Adding
+   * the new edge `blocked -> prereq` creates a cycle iff `prereq` can already
+   * reach `blocked` by following existing `task_id -> depends_on_task_id`
+   * blocking edges (i.e. prereq already transitively depends on blocked).
+   *
+   * DFS the transitive closure of blocking edges starting at `dependsOnId`; if
+   * it ever reaches `blockedId` the proposed edge would close a cycle. Mirrors
+   * the lineage cycle guard in validateParentEpic, generalized to the full
+   * task_dependencies graph. Rejects with `dependency_cycle`.
+   */
+  private validateDependencyEdge(blockedId: string, dependsOnId: string): void {
+    // A direct A->A self-loop is rejected earlier; this walks the existing graph.
+    const stmt = this.db.prepare(
+      "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ? AND kind = 'blocking'",
+    );
+    const visited = new Set<string>();
+    const stack: string[] = [dependsOnId];
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      if (current === blockedId) {
+        throw new TaskChangeError(
+          'dependency_cycle',
+          `adding dependency ${blockedId} -> ${dependsOnId} would create a cycle`,
+        );
+      }
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const next = stmt.all(current) as Array<{ depends_on_task_id: string }>;
+      for (const edge of next) {
+        stack.push(edge.depends_on_task_id);
+      }
     }
   }
 

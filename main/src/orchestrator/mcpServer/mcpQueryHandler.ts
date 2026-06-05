@@ -53,7 +53,7 @@ import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
 import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
-import type { TaskChange, TaskActor } from '../taskChangeRouter';
+import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
@@ -109,6 +109,17 @@ export type McpQueryMessage =
       entityType?: TaskType;
       stageId: string;
       expectedVersion?: number;
+    }
+  | {
+      type: 'mcp-add-task-dependency';
+      requestId: string;
+      runId: string;
+      /** The BLOCKED task id. */
+      taskId: string;
+      /** The PREREQUISITE task id that must finish first. */
+      dependsOnTaskId: string;
+      /** Edge kind; defaults to 'blocking' at the chokepoint. */
+      dependencyKind?: TaskDependencyKind;
     }
   | {
       type: 'mcp-report-finding';
@@ -253,6 +264,9 @@ export class McpQueryHandler {
           break;
         case 'mcp-set-task-stage':
           await this.handleSetTaskStage(msg, client);
+          break;
+        case 'mcp-add-task-dependency':
+          await this.handleAddTaskDependency(msg, client);
           break;
         case 'mcp-report-finding':
           // NON-BLOCKING: writes its response synchronously after enqueuing the
@@ -814,6 +828,54 @@ export class McpQueryHandler {
           task_id: taskId,
           stage_id: identity?.stage_id,
           version: identity?.version,
+        },
+      });
+    } catch (err) {
+      this.writeTaskChangeError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Record a task->task dependency edge via the chokepoint. Routes through the
+   * same run-context guards as the other task writes, then applies a
+   * `dependsOnTaskId`-carrying TaskChange (the chokepoint's add-dependency
+   * branch). Designed rejections surface as TaskChangeError.code
+   * (invalid_dependency | dependency_cycle | not_found) via writeTaskChangeError.
+   */
+  private async handleAddTaskDependency(
+    msg: Extract<McpQueryMessage, { type: 'mcp-add-task-dependency' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const change: TaskChange = {
+      actor: ctx.actor,
+      runId: msg.runId,
+      entityType: 'task',
+      taskId: msg.taskId,
+      dependsOnTaskId: msg.dependsOnTaskId,
+      ...(msg.dependencyKind !== undefined ? { dependencyKind: msg.dependencyKind } : {}),
+    };
+
+    try {
+      const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          task_id: taskId,
+          depends_on_task_id: msg.dependsOnTaskId,
+          kind: msg.dependencyKind ?? 'blocking',
         },
       });
     } catch (err) {

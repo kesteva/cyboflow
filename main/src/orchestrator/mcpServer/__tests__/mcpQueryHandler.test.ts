@@ -1076,6 +1076,118 @@ describe('McpQueryHandler', () => {
     });
 
     // -----------------------------------------------------------------------
+    // add-dependency
+    // -----------------------------------------------------------------------
+
+    describe('mcp-add-task-dependency', () => {
+      /** Create a real TASK via the create handler and return its id. */
+      async function createTask(runId: string, title: string): Promise<string> {
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: `ct-${title}`, runId, taskType: 'task', title },
+          created.socket,
+        );
+        return (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+      }
+
+      it('records a blocking edge and replies ok:true with the edge data', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'analyze-deps',
+          stepsSnapshot: { 'analyze-deps': 'dependency-analyzer' },
+        });
+        const a = await createTask('run-1', 'A');
+        const b = await createTask('run-1', 'B');
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-add-task-dependency',
+            requestId: 'dep-1',
+            runId: 'run-1',
+            taskId: a,
+            dependsOnTaskId: b,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string; depends_on_task_id: string; kind: string };
+        expect(data).toEqual({ task_id: a, depends_on_task_id: b, kind: 'blocking' });
+
+        const row = taskDb
+          .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+          .get(a, b) as { kind: string };
+        expect(row.kind).toBe('blocking');
+      });
+
+      it('surfaces a cycle as ok:false error "dependency_cycle"', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'analyze-deps',
+          stepsSnapshot: { 'analyze-deps': 'dependency-analyzer' },
+        });
+        const a = await createTask('run-1', 'A');
+        const b = await createTask('run-1', 'B');
+
+        const first = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-add-task-dependency', requestId: 'dep-2a', runId: 'run-1', taskId: a, dependsOnTaskId: b },
+          first.socket,
+        );
+        expect(parseLastWrite(first.writes).ok).toBe(true);
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-add-task-dependency', requestId: 'dep-2b', runId: 'run-1', taskId: b, dependsOnTaskId: a },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('dependency_cycle');
+      });
+
+      it('surfaces a self-edge as ok:false error "invalid_dependency"', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'analyze-deps',
+          stepsSnapshot: { 'analyze-deps': 'dependency-analyzer' },
+        });
+        const a = await createTask('run-1', 'A');
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-add-task-dependency', requestId: 'dep-3', runId: 'run-1', taskId: a, dependsOnTaskId: a },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('invalid_dependency');
+      });
+
+      it('rejects the "orchestrator" sentinel run with "task_write_requires_real_run"', async () => {
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-add-task-dependency',
+            requestId: 'dep-4',
+            runId: 'orchestrator',
+            taskId: 'tsk_x',
+            dependsOnTaskId: 'tsk_y',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('task_write_requires_real_run');
+      });
+    });
+
+    // -----------------------------------------------------------------------
     // run-context guards (shared across all three handlers)
     // -----------------------------------------------------------------------
 

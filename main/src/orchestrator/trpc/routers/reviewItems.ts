@@ -70,6 +70,8 @@ function rethrowAsTRPCError(err: unknown): never {
       forbidden_stage: 'FORBIDDEN',
       active_runs: 'CONFLICT',
       concurrency: 'CONFLICT',
+      invalid_dependency: 'BAD_REQUEST',
+      dependency_cycle: 'CONFLICT',
     };
     throw new TRPCError({
       code: codeMap[err.code],

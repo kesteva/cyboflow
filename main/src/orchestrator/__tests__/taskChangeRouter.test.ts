@@ -998,6 +998,159 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
     });
   });
+
+  // -------------------------------------------------------------------------
+  // add-dependency path (task_dependencies write + cycle detection)
+  // -------------------------------------------------------------------------
+
+  describe('addDependency', () => {
+    /** Create N tasks and return their ids (TASK-001..). */
+    async function makeTasks(
+      db: Database.Database,
+      router: TaskChangeRouter,
+      n: number,
+    ): Promise<string[]> {
+      const ids: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const { taskId } = await router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title: `T${i}`,
+        });
+        ids.push(taskId);
+      }
+      return ids;
+    }
+
+    function depCount(db: Database.Database, taskId: string): number {
+      return (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM task_dependencies WHERE task_id = ?')
+          .get(taskId) as { n: number }
+      ).n;
+    }
+
+    it('inserts a blocking edge + appends a dependency-added entity_event on the blocked task', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      const before = eventCount(db, 'task', a);
+      const { taskId, event } = await router.applyChange(1, {
+        actor: 'agent:executor',
+        entityType: 'task',
+        taskId: a,
+        dependsOnTaskId: b,
+      });
+
+      expect(taskId).toBe(a);
+      const row = db
+        .prepare('SELECT task_id, depends_on_task_id, kind FROM task_dependencies WHERE task_id = ?')
+        .get(a) as { task_id: string; depends_on_task_id: string; kind: string };
+      expect(row).toEqual({ task_id: a, depends_on_task_id: b, kind: 'blocking' });
+
+      // A new entity_events row keyed (task, a) with kind 'dependency-added'.
+      expect(eventCount(db, 'task', a)).toBe(before + 1);
+      const ev = db
+        .prepare('SELECT kind, actor FROM entity_events WHERE entity_type = ? AND entity_id = ? AND seq = ?')
+        .get('task', a, event.seq) as { kind: string; actor: string };
+      expect(ev.kind).toBe('dependency-added');
+      expect(ev.actor).toBe('agent:executor');
+    });
+
+    it('records a related edge without participating in the cycle guard', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        taskId: a,
+        dependsOnTaskId: b,
+        dependencyKind: 'related',
+      });
+
+      const row = db
+        .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+        .get(a, b) as { kind: string };
+      expect(row.kind).toBe('related');
+    });
+
+    it('is idempotent: re-adding the same edge does not double-write the row or a new event', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
+      const eventsAfterFirst = eventCount(db, 'task', a);
+
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
+
+      expect(depCount(db, a)).toBe(1);
+      expect(eventCount(db, 'task', a)).toBe(eventsAfterFirst); // no new event
+    });
+
+    it('rejects a self-edge with invalid_dependency', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a] = await makeTasks(db, router, 1);
+
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: a }),
+      ).rejects.toMatchObject({ code: 'invalid_dependency' });
+      expect(depCount(db, a)).toBe(0);
+    });
+
+    it('rejects an edge to a missing task with invalid_dependency', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a] = await makeTasks(db, router, 1);
+
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: 'tsk_missing' }),
+      ).rejects.toMatchObject({ code: 'invalid_dependency' });
+    });
+
+    it('rejects a back-edge that would create a cycle with dependency_cycle', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b, c] = await makeTasks(db, router, 3);
+
+      // Build A->B->C (A blocked by B, B blocked by C).
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: b, dependsOnTaskId: c });
+
+      // C blocked by A would close the cycle C->A->B->C.
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: c, dependsOnTaskId: a }),
+      ).rejects.toMatchObject({ code: 'dependency_cycle' });
+      // The rejected edge was NOT written.
+      expect(depCount(db, c)).toBe(0);
+    });
+
+    it('rejects a direct back-edge (A->B then B->A) with dependency_cycle', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: b, dependsOnTaskId: a }),
+      ).rejects.toMatchObject({ code: 'dependency_cycle' });
+    });
+
+    it('serializes the write on the per-project queue and commits before resolving', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: b });
+      // The per-project queue is drained once applyChange resolves.
+      await router._queueForProject(1).onIdle();
+      expect(depCount(db, a)).toBe(1);
+    });
+  });
 });
 
 // Compile-time smoke: TaskChangeRouter satisfies a DatabaseLike-injected constructor.
