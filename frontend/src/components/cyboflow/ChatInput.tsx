@@ -5,12 +5,12 @@
  *
  * Precedence: an active RUN (`activeRunId`) wins over a co-selected quick
  * session, so a run nested in a session drives the chat to the run while
- * `activeQuickSessionId` stays pointed at the parent session for Diff /
+ * `selectedSessionId` stays pointed at the parent session for Diff /
  * File-Explorer / panels. Quick mode is reached only when `activeRunId` is null.
  *
- *   quick             — `activeRunId` is null AND `activeQuickSessionId` is
+ *   quick             — `activeRunId` is null AND `selectedSessionId` is
  *                       non-null; text is sent via
- *                       `API.sessions.sendInput(activeQuickSessionId, text)`.
+ *                       `API.sessions.sendInput(selectedSessionId, text)`.
  *
  *   workflow-question — `runId` is non-null AND there is a pending Question
  *                       for this run; text is forwarded to `questionStore`
@@ -29,7 +29,7 @@
  *                       distinct "Resume to continue" hint — the user must Resume
  *                       from the run action bar before the chat re-enables.
  *
- *   none              — neither `runId` nor `activeQuickSessionId` is set;
+ *   none              — neither `runId` nor `selectedSessionId` is set;
  *                       renders nothing.
  *
  * Props:
@@ -73,7 +73,7 @@ export interface ChatInputProps {
 // ---------------------------------------------------------------------------
 
 export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null {
-  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
+  const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
 
@@ -128,7 +128,7 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     runId != null && activeRun?.substrate === 'interactive' && activeRun.status === 'running';
 
   // Precedence: an active RUN wins over a co-selected quick session. A run nested
-  // in a session keeps activeQuickSessionId pointed at its parent session (so Diff /
+  // in a session keeps selectedSessionId pointed at its parent session (so Diff /
   // File-Explorer / panels follow the session), while the chat input must follow the
   // RUN — hence the `runId` prop (the active run; === activeRunId in production) is
   // checked first. Quick mode is reached only when there is NO active run. Behavior
@@ -143,7 +143,7 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
           : runId != null
             ? 'workflow-idle'
             : 'none'
-      : activeQuickSessionId != null
+      : selectedSessionId != null
         ? 'quick'
         : 'none';
 
@@ -176,7 +176,7 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       setIsSending(true);
       setSendError(null);
       try {
-        const result: IPCResponse<void> = await API.sessions.sendInput(activeQuickSessionId!, text);
+        const result: IPCResponse<void> = await API.sessions.sendInput(selectedSessionId!, text);
         if (result.success) {
           setText('');
         } else {

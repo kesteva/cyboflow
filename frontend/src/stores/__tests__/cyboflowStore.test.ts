@@ -18,14 +18,15 @@
  *      side) results in exactly 1 live subscription.
  *
  *   Quick-session tests added in TASK-789:
- *   14. setActiveQuickSession(id, runId) starts subscription and stores runId
+ *   14. setActiveQuickSession(id, runId) starts subscription for the runId
  *   15. setActiveQuickSession(id) without runId does NOT start subscription
- *   16. setActiveRun clears activeQuickSessionRunId
- *   17. clearActiveQuickSession tears down subscription and clears runId
+ *   16. setActiveRun starts a fresh run subscription (and, with no parent,
+ *       clears selectedSessionId)
+ *   17. clearActiveQuickSession tears down subscription and clears the session
  *   18. Quick-to-workflow switch tears down quick subscription first
  *   19. Rapid quick session switches properly teardown/replace subscriptions
- *   20. setActiveQuickSession with runId sets both activeQuickSessionId and
- *       activeQuickSessionRunId
+ *   20. setActiveQuickSession with runId sets selectedSessionId and starts the
+ *       subscription
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -168,7 +169,7 @@ describe('cyboflowStore subscription lifecycle', () => {
   // Quick-session tests (TASK-745 / IDEA-024)
   // -------------------------------------------------------------------------
 
-  it('(8) setActiveQuickSession sets activeQuickSessionId and clears activeRunId', () => {
+  it('(8) setActiveQuickSession sets selectedSessionId and clears activeRunId', () => {
     // Start from a state where a run is active.
     useCyboflowStore.getState().setActiveRun('run-workflow');
     expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow');
@@ -176,7 +177,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     useCyboflowStore.getState().setActiveQuickSession('quick-session-001');
 
     const state = useCyboflowStore.getState();
-    expect(state.activeQuickSessionId).toBe('quick-session-001');
+    expect(state.selectedSessionId).toBe('quick-session-001');
     expect(state.activeRunId).toBeNull();
   });
 
@@ -201,39 +202,37 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(unsub).toHaveBeenCalledOnce();
   });
 
-  it('(11a) setActiveRun(runId) without a parent session clears activeQuickSessionId (legacy standalone run)', () => {
+  it('(11a) setActiveRun(runId) without a parent session clears selectedSessionId (legacy standalone run)', () => {
     useCyboflowStore.getState().setActiveQuickSession('quick-session-004');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('quick-session-004');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('quick-session-004');
 
     useCyboflowStore.getState().setActiveRun('run-workflow-after-qs');
 
     const state = useCyboflowStore.getState();
     expect(state.activeRunId).toBe('run-workflow-after-qs');
-    expect(state.activeQuickSessionId).toBeNull();
+    expect(state.selectedSessionId).toBeNull();
   });
 
-  it('(11b) setActiveRun(runId, parentSessionId) keeps activeQuickSessionId pointing at the parent session', () => {
+  it('(11b) setActiveRun(runId, parentSessionId) keeps selectedSessionId pointing at the parent session', () => {
     useCyboflowStore.getState().setActiveRun('run-nested', 'sess-1');
 
     const state = useCyboflowStore.getState();
     expect(state.activeRunId).toBe('run-nested');
     // The run is nested inside its session: both fields are non-null so the
     // File Explorer / Diff / panels keep following the session.
-    expect(state.activeQuickSessionId).toBe('sess-1');
-    // activeQuickSessionRunId is always cleared by setActiveRun.
-    expect(state.activeQuickSessionRunId).toBeNull();
+    expect(state.selectedSessionId).toBe('sess-1');
   });
 
-  it('(12) clearActiveQuickSession clears activeQuickSessionId without touching activeRunId', () => {
+  it('(12) clearActiveQuickSession clears selectedSessionId without touching activeRunId', () => {
     // Manually put the store in a state with both null (after clearActiveRun cleared runId).
     // Then call clearActiveQuickSession — runId must remain null (untouched).
     useCyboflowStore.getState().setActiveQuickSession('quick-session-005');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('quick-session-005');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('quick-session-005');
 
     useCyboflowStore.getState().clearActiveQuickSession();
 
     const state = useCyboflowStore.getState();
-    expect(state.activeQuickSessionId).toBeNull();
+    expect(state.selectedSessionId).toBeNull();
     // activeRunId was not set in this test — must remain null.
     expect(state.activeRunId).toBeNull();
     // No workflow-run subscription was ever started (no runId) — mockSubscribe untouched.
@@ -243,22 +242,22 @@ describe('cyboflowStore subscription lifecycle', () => {
   it('(13) selection invariant: a run nested in its session keeps both fields; a session selection clears the run', () => {
     // Initially both null.
     expect(useCyboflowStore.getState().activeRunId).toBeNull();
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
 
-    // Set a standalone run (no parent session) — activeQuickSessionId clears.
+    // Set a standalone run (no parent session) — selectedSessionId clears.
     useCyboflowStore.getState().setActiveRun('run-mutex');
     expect(useCyboflowStore.getState().activeRunId).toBe('run-mutex');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
 
     // Switch to a quick session — clears activeRunId.
     useCyboflowStore.getState().setActiveQuickSession('qs-mutex');
     expect(useCyboflowStore.getState().activeRunId).toBeNull();
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('qs-mutex');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('qs-mutex');
 
     // Select a run nested in its parent session — both fields are now non-null.
     useCyboflowStore.getState().setActiveRun('run-mutex-2', 'qs-mutex');
     expect(useCyboflowStore.getState().activeRunId).toBe('run-mutex-2');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('qs-mutex');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('qs-mutex');
   });
 
   it('(7) after rapid A→B switch, new subscription onEvent routes to current store state (not stale closure)', () => {
@@ -299,10 +298,11 @@ describe('cyboflowStore subscription lifecycle', () => {
   });
 
   // -------------------------------------------------------------------------
-  // TASK-789: activeQuickSessionRunId tests
+  // TASK-789: runId-arg subscription tests (the runId arg's only live purpose
+  // is to start a stream subscription — it is no longer stored in state).
   // -------------------------------------------------------------------------
 
-  it('(14) setActiveQuickSession(id, runId) starts subscription and stores runId', () => {
+  it('(14) setActiveQuickSession(id, runId) starts a subscription for the runId', () => {
     const unsub = vi.fn();
     mockSubscribe.mockReturnValueOnce(unsub);
 
@@ -314,33 +314,39 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(args.runId).toBe('run-quick-001');
     expect(typeof args.onEvent).toBe('function');
 
-    // activeQuickSessionRunId must be stored.
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBe('run-quick-001');
+    // The session is selected.
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('qs-with-run');
   });
 
   it('(15) setActiveQuickSession(id) without runId does NOT start subscription', () => {
     useCyboflowStore.getState().setActiveQuickSession('qs-no-run');
 
     expect(mockSubscribe).not.toHaveBeenCalled();
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('qs-no-run');
   });
 
-  it('(16) setActiveRun always clears activeQuickSessionRunId (and, with no parent, activeQuickSessionId)', () => {
-    // First establish a quick session with a runId.
-    mockSubscribe.mockImplementation(() => vi.fn());
-    useCyboflowStore.getState().setActiveQuickSession('qs-with-run', 'run-quick-002');
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBe('run-quick-002');
+  it('(16) setActiveRun starts a fresh run subscription (and, with no parent, clears selectedSessionId)', () => {
+    const quickUnsub = vi.fn();
+    mockSubscribe.mockReturnValueOnce(quickUnsub);
 
-    // Now switch to a standalone workflow run (no parent session).
+    // First establish a quick session with a runId (so a subscription is live).
+    useCyboflowStore.getState().setActiveQuickSession('qs-with-run', 'run-quick-002');
+    expect(quickUnsub).not.toHaveBeenCalled();
+
+    // Now switch to a standalone workflow run (no parent session). The prior
+    // quick-session subscription must be torn down and a fresh one started.
     useCyboflowStore.getState().setActiveRun('run-workflow-003');
+
+    expect(quickUnsub).toHaveBeenCalledOnce();
+    expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    expect((mockSubscribe.mock.calls[1][0] as { runId: string }).runId).toBe('run-workflow-003');
 
     const state = useCyboflowStore.getState();
     expect(state.activeRunId).toBe('run-workflow-003');
-    expect(state.activeQuickSessionRunId).toBeNull();
-    expect(state.activeQuickSessionId).toBeNull();
+    expect(state.selectedSessionId).toBeNull();
   });
 
-  it('(17) clearActiveQuickSession tears down subscription and clears runId', () => {
+  it('(17) clearActiveQuickSession tears down subscription and clears the session', () => {
     const unsub = vi.fn();
     mockSubscribe.mockReturnValueOnce(unsub);
 
@@ -352,9 +358,8 @@ describe('cyboflowStore subscription lifecycle', () => {
 
     // Subscription must be torn down.
     expect(unsub).toHaveBeenCalledOnce();
-    // Both session fields must be cleared.
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+    // The session field must be cleared.
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
   });
 
   it('(18) quick-to-workflow switch tears down quick subscription first', () => {
@@ -374,8 +379,7 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(quickUnsub).toHaveBeenCalledOnce();
     expect(mockSubscribe).toHaveBeenCalledTimes(2);
     expect(useCyboflowStore.getState().activeRunId).toBe('run-workflow-004');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
   });
 
   it('(19) rapid quick session switches properly teardown/replace subscriptions', () => {
@@ -394,21 +398,24 @@ describe('cyboflowStore subscription lifecycle', () => {
 
     expect(unsub1).toHaveBeenCalledOnce();
     expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    // The second subscription targets the second runId.
+    expect((mockSubscribe.mock.calls[1][0] as { runId: string }).runId).toBe('run-quick-006');
 
     const state = useCyboflowStore.getState();
-    expect(state.activeQuickSessionId).toBe('qs-rapid-2');
-    expect(state.activeQuickSessionRunId).toBe('run-quick-006');
+    expect(state.selectedSessionId).toBe('qs-rapid-2');
     expect(state.activeRunId).toBeNull();
   });
 
-  it('(20) setActiveQuickSession with runId sets both activeQuickSessionId and activeQuickSessionRunId', () => {
+  it('(20) setActiveQuickSession with runId selects the session and starts the subscription', () => {
     mockSubscribe.mockImplementation(() => vi.fn());
 
     useCyboflowStore.getState().setActiveQuickSession('qs-both-fields', 'run-quick-007');
 
     const state = useCyboflowStore.getState();
-    expect(state.activeQuickSessionId).toBe('qs-both-fields');
-    expect(state.activeQuickSessionRunId).toBe('run-quick-007');
+    expect(state.selectedSessionId).toBe('qs-both-fields');
+    // The runId arg's only live purpose is to start the subscription.
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+    expect((mockSubscribe.mock.calls[0][0] as { runId: string }).runId).toBe('run-quick-007');
     // setActiveQuickSession (no run-selection) still clears activeRunId.
     expect(state.activeRunId).toBeNull();
   });
@@ -416,7 +423,7 @@ describe('cyboflowStore subscription lifecycle', () => {
   it('(21) clearActiveRun after setActiveRun(runId, parentSessionId) retains the parent session', () => {
     useCyboflowStore.getState().setActiveRun('run-nested-clear', 'sess-1');
     expect(useCyboflowStore.getState().activeRunId).toBe('run-nested-clear');
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-1');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('sess-1');
 
     useCyboflowStore.getState().clearActiveRun();
 
@@ -424,6 +431,6 @@ describe('cyboflowStore subscription lifecycle', () => {
     // Deselecting the run leaves the parent session selected so the File
     // Explorer / Diff / panels keep following it.
     expect(state.activeRunId).toBeNull();
-    expect(state.activeQuickSessionId).toBe('sess-1');
+    expect(state.selectedSessionId).toBe('sess-1');
   });
 });

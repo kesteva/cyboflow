@@ -250,7 +250,7 @@ describe('RunChatView — data flow', () => {
     });
   });
 
-  it('renders quick-session placeholder when runId is null and activeQuickSessionId is set', () => {
+  it('renders quick-session placeholder when runId is null and selectedSessionId is set', () => {
     act(() => {
       useCyboflowStore.getState().setActiveQuickSession('qs-001');
     });
@@ -261,7 +261,7 @@ describe('RunChatView — data flow', () => {
     expect(mockListUnifiedMessages).not.toHaveBeenCalled();
   });
 
-  it('renders "No active run" when runId is null and activeQuickSessionId is also null', () => {
+  it('renders "No active run" when runId is null and selectedSessionId is also null', () => {
     render(<RunChatView runId={null} />);
     expect(screen.getByText('No active run')).toBeInTheDocument();
     expect(mockListUnifiedMessages).not.toHaveBeenCalled();

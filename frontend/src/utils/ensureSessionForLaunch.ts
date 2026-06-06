@@ -5,7 +5,7 @@
  * INSIDE a session (the run executes in the session's worktree, and the run is
  * selected nested under that session). This helper resolves WHICH session:
  *
- *   - If a quick session is already selected (`activeQuickSessionId`), the run
+ *   - If a quick session is already selected (`selectedSessionId`), the run
  *     launches into THAT session — the helper returns its id without creating
  *     anything.
  *   - Otherwise it creates a fresh quick session (via `API.sessions.createQuick`)
@@ -30,7 +30,7 @@ import { useCyboflowStore } from '../stores/cyboflowStore';
  */
 export async function ensureSessionForLaunch(projectId: number): Promise<string> {
   // Launch into the active session if one is already selected.
-  const sel = useCyboflowStore.getState().activeQuickSessionId;
+  const sel = useCyboflowStore.getState().selectedSessionId;
   if (sel) return sel;
 
   // Otherwise create a fresh quick session for this launch.

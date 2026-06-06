@@ -26,8 +26,8 @@
  *
  * Modes:
  *  - runId non-null: full conversation view (this file's main branch)
- *  - runId null + activeQuickSessionId non-null: quick-session placeholder
- *  - runId null + activeQuickSessionId null: "No active run" placeholder
+ *  - runId null + selectedSessionId non-null: quick-session placeholder
+ *  - runId null + selectedSessionId null: "No active run" placeholder
  */
 import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
 import { History } from 'lucide-react';
@@ -66,7 +66,7 @@ const LIVE_REFETCH_DEBOUNCE_MS = 400;
 // ---------------------------------------------------------------------------
 
 export function RunChatView({ runId }: { runId: string | null }): ReactElement {
-  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
+  const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
   const questionQueue = useQuestionStore((s) => s.queue);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
@@ -388,7 +388,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Render branches
   // -------------------------------------------------------------------------
 
-  if (runId === null && activeQuickSessionId !== null) {
+  if (runId === null && selectedSessionId !== null) {
     return (
       <div className="p-4 text-sm text-text-secondary">
         Quick session chat (history rendered by panel surface)

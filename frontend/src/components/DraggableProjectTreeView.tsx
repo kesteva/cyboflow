@@ -112,7 +112,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const activeProjectId = useNavigationStore((state) => state.activeProjectId);
   // Active open sessions drive the rail (reactive — dismiss/merge removes a row).
   const allSessions = useSessionStore((state) => state.sessions);
-  const activeQuickSessionId = useCyboflowStore((state) => state.activeQuickSessionId);
+  const selectedSessionId = useCyboflowStore((state) => state.selectedSessionId);
   // Active workflow runs (workflow_runs table) keyed by project — these have no
   // session row, so they are sourced from a dedicated reactive store.
   const activeRunId = useCyboflowStore((state) => state.activeRunId);
@@ -817,8 +817,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     useNavigationStore.getState().closeHumanReview();
     useNavigationStore.getState().closeBacklog();
     // Forward the run's PARENT session id (migration 019) so a co-selected run
-    // can keep activeQuickSessionId pointed at its session — Diff / File-Explorer /
-    // panels (which read activeQuickSessionId) follow the session while
+    // can keep selectedSessionId pointed at its session — Diff / File-Explorer /
+    // panels (which read selectedSessionId) follow the session while
     // Workflow-Progress (reads activeRunId) follows the run. Resolve the row from
     // this project's active-run rows, falling back to a scan across projects (run
     // ids are unique); session_id is null for legacy parentless runs, which is
@@ -1122,7 +1122,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         // the vertical connector line continuous down to the runs.
                         const isLastSession = index === projectSessions.length - 1 && runCount === 0;
                         const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
-                        const isActive = activeQuickSessionId === session.id;
+                        const isActive = selectedSessionId === session.id;
 
                         return (
                           <div

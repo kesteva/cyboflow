@@ -310,7 +310,7 @@ describe('WorkflowEditorModal — edit mode', () => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
     });
     // setActiveRun nested the run under its parent session.
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -333,7 +333,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
     });
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -361,7 +361,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
     });
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-existing-007');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-existing-007');
     expect(onClose).toHaveBeenCalled();
   });
 

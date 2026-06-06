@@ -222,8 +222,8 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(onWorkflowStarted).toHaveBeenCalledOnce();
     expect(onWorkflowStarted).toHaveBeenCalledWith('session-quick-001');
 
-    // cyboflowStore activeQuickSessionId must be set
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+    // cyboflowStore selectedSessionId must be set
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
     // activeRunId must remain null (mutual-exclusion invariant)
     expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
@@ -280,7 +280,7 @@ describe('WorkflowPicker — Quick Session button', () => {
 
     // No navigation
     expect(onWorkflowStarted).not.toHaveBeenCalled();
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
 
     // panelApi.createPanel must NOT have been called
     expect(panelApi.createPanel).not.toHaveBeenCalled();
@@ -595,7 +595,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     });
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-quick-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
   });
 
   it('with an active session preset: reuses it, does NOT call createQuick, and nests the run under it', async () => {
@@ -627,6 +627,6 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     });
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('session-existing-007');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-existing-007');
   });
 });

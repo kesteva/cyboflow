@@ -11,7 +11,7 @@
  *     – Ensures dashboard + setup-tasks permanent panels exist; guards their close; falls back to
  *       dashboard on close of the last non-permanent panel.
  *
- * Session priority: when a quick session is active (activeQuickSessionId in cyboflowStore),
+ * Session priority: when a quick session is active (selectedSessionId in cyboflowStore),
  * panel operations target it instead of mainRepoSession — the quick session's panels are
  * what the user is interacting with.
  */
@@ -48,11 +48,11 @@ export function usePanelSurface(
   const [mainRepoSession, setMainRepoSession] = useState<Session | null>(null);
 
   // --- Quick session resolution ---
-  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
+  const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const [quickSession, setQuickSession] = useState<Session | null>(null);
 
-  const effectiveSessionId = activeQuickSessionId ?? mainRepoSessionId;
-  const effectiveSession = activeQuickSessionId ? quickSession : mainRepoSession;
+  const effectiveSessionId = selectedSessionId ?? mainRepoSessionId;
+  const effectiveSession = selectedSessionId ? quickSession : mainRepoSession;
 
   const {
     panels,
@@ -93,18 +93,18 @@ export function usePanelSurface(
 
   // Resolve the quick session when one becomes active.
   useEffect(() => {
-    if (!activeQuickSessionId) {
+    if (!selectedSessionId) {
       setQuickSession(null);
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const response = await API.sessions.get(activeQuickSessionId);
+        const response = await API.sessions.get(selectedSessionId);
         if (cancelled) return;
         if (response.success && response.data) {
           setQuickSession(response.data as Session);
-          await useSessionStore.getState().setActiveSession(activeQuickSessionId);
+          await useSessionStore.getState().setActiveSession(selectedSessionId);
         }
       } catch (err) {
         console.error('[usePanelSurface] Failed to resolve quick session:', err);
@@ -113,7 +113,7 @@ export function usePanelSurface(
     return () => {
       cancelled = true;
     };
-  }, [activeQuickSessionId]);
+  }, [selectedSessionId]);
 
   // Load panels when mainRepoSessionId changes, optionally auto-creating permanent panels.
   useEffect(() => {
@@ -197,20 +197,20 @@ export function usePanelSurface(
 
   // Load panels for quick session when it becomes active.
   useEffect(() => {
-    if (!activeQuickSessionId) return;
+    if (!selectedSessionId) return;
     panelApi
-      .loadPanelsForSession(activeQuickSessionId)
+      .loadPanelsForSession(selectedSessionId)
       .then((loaded) => {
         // Diff lives in the right rail now — never surface a central 'diff' panel.
         const surfacePanels = loaded.filter((p) => p.type !== 'diff');
-        setPanels(activeQuickSessionId, surfacePanels);
+        setPanels(selectedSessionId, surfacePanels);
         const firstPanel = surfacePanels[0];
         if (firstPanel) {
-          setActivePanelInStore(activeQuickSessionId, firstPanel.id);
+          setActivePanelInStore(selectedSessionId, firstPanel.id);
         }
       })
       .catch((err) => console.error('[usePanelSurface] Failed to load quick session panels:', err));
-  }, [activeQuickSessionId, setPanels, setActivePanelInStore]);
+  }, [selectedSessionId, setPanels, setActivePanelInStore]);
 
   // Subscribe to sessionStore changes to keep mainRepoSession in sync with IPC-driven updates
   // (e.g. updateSession fired by useIPCEvents when the backend emits a session-updated event).

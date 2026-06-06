@@ -123,7 +123,7 @@ describe('RunRightRail', () => {
     // No quick session is active, so the File Explorer renders its neutral empty
     // state rather than mounting SessionFileExplorer.
     act(() => {
-      useCyboflowStore.setState({ activeQuickSessionId: null });
+      useCyboflowStore.setState({ selectedSessionId: null });
     });
 
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
@@ -145,7 +145,7 @@ describe('RunRightRail', () => {
 
   it('clicking File Explorer tab WITH an active quick session mounts SessionFileExplorer keyed by that session', () => {
     act(() => {
-      useCyboflowStore.setState({ activeQuickSessionId: 'session-fe-001' });
+      useCyboflowStore.setState({ selectedSessionId: 'session-fe-001' });
     });
 
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
@@ -164,7 +164,7 @@ describe('RunRightRail', () => {
     // No quick session is active in this test, so the working CombinedDiffView is not
     // mounted; the DIFF tab renders the neutral "select a session" message instead.
     act(() => {
-      useCyboflowStore.setState({ activeQuickSessionId: null });
+      useCyboflowStore.setState({ selectedSessionId: null });
     });
 
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);

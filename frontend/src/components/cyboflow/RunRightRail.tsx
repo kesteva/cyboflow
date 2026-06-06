@@ -5,7 +5,7 @@
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
  *     is non-null; neutral empty state otherwise.
  *   - File Explorer — live SessionFileExplorer (selected session's worktree tree +
- *     read-only viewer) when activeQuickSessionId is non-null; neutral empty state
+ *     read-only viewer) when selectedSessionId is non-null; neutral empty state
  *     otherwise.
  *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
  *     message when no session is active.
@@ -74,7 +74,7 @@ function RunRightRailDiff({ sessionId, isActive }: { sessionId: string; isActive
 export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
-  const activeQuickSessionId = useCyboflowStore((s) => s.activeQuickSessionId);
+  const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
@@ -129,8 +129,8 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
             </div>
           )
         ) : currentTab.id === 'file-explorer' ? (
-          activeQuickSessionId ? (
-            <SessionFileExplorer sessionId={activeQuickSessionId} />
+          selectedSessionId ? (
+            <SessionFileExplorer sessionId={selectedSessionId} />
           ) : (
             <div
               data-testid="run-right-rail-file-explorer-empty"
@@ -140,8 +140,8 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
             </div>
           )
         ) : (
-          activeQuickSessionId ? (
-            <RunRightRailDiff sessionId={activeQuickSessionId} isActive />
+          selectedSessionId ? (
+            <RunRightRailDiff sessionId={selectedSessionId} isActive />
           ) : (
             <div
               data-testid="run-right-rail-diff-empty"

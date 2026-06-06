@@ -10,7 +10,8 @@
  *   2. isStarting is boolean (not a string union).
  *   3. createQuick call sends no permissionMode or toolType.
  *   4. start() always creates both Claude panel and Terminal panel.
- *   5. setActiveQuickSession is called with sessionId and runId from the response.
+ *   5. setActiveQuickSession is called with the sessionId, and the runId from the
+ *      response starts a stream subscription.
  *   6. onSuccess is invoked after successful start.
  *   7. Failure path: createQuick returns { success: false, error } →
  *      error state populated; setActiveQuickSession NOT called;
@@ -47,9 +48,18 @@ vi.mock('../../services/panelApi', () => ({
 }));
 
 // cyboflowStore is real (not mocked) — we read/write it to verify side effects.
-// We mock its dependency (subscribeToStreamEvents) to avoid IPC calls.
+// We mock its dependency (subscribeToStreamEvents) to avoid IPC calls; the spy
+// is captured so we can assert the runId arg starts a subscription (the runId's
+// only live purpose now that the run-id state field has been removed).
+const { mockSubscribe } = vi.hoisted(() => ({
+  // Typed param so `mockSubscribe.mock.calls[0][0]` is the options object (the
+  // store calls subscribeToStreamEvents({ runId, onEvent })) rather than an empty
+  // tuple — lets us assert the runId arg without an `any` cast.
+  mockSubscribe: vi.fn((_opts: { runId: string; onEvent: (event: unknown) => void }) => vi.fn()),
+}));
+
 vi.mock('../../utils/cyboflowApi', () => ({
-  subscribeToStreamEvents: vi.fn(() => vi.fn()),
+  subscribeToStreamEvents: mockSubscribe,
 }));
 
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -61,6 +71,8 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 beforeEach(() => {
   mockCreateQuick.mockReset();
   mockCreatePanel.mockReset();
+  mockSubscribe.mockClear();
+  mockSubscribe.mockImplementation(() => vi.fn());
 
   // Default happy-path responses
   mockCreateQuick.mockResolvedValue({
@@ -169,15 +181,17 @@ describe('useQuickSession — always creates both panels', () => {
 });
 
 describe('useQuickSession — store interaction', () => {
-  it('calls setActiveQuickSession with sessionId and runId', async () => {
+  it('selects the session and the runId starts a stream subscription', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
       await result.current.start();
     });
 
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBe('sess-001');
-    expect(useCyboflowStore.getState().activeQuickSessionRunId).toBe('run-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('sess-001');
+    // The runId arg's only live purpose is to start the subscription.
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+    expect((mockSubscribe.mock.calls[0][0] as { runId: string }).runId).toBe('run-001');
     expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
 
@@ -232,7 +246,7 @@ describe('useQuickSession — failure path', () => {
     expect(mockCreatePanel).not.toHaveBeenCalled();
   });
 
-  it('does NOT set activeQuickSessionId when createQuick fails', async () => {
+  it('does NOT set selectedSessionId when createQuick fails', async () => {
     mockCreateQuick.mockResolvedValueOnce({ success: false, error: 'quota exceeded' });
 
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
@@ -241,7 +255,7 @@ describe('useQuickSession — failure path', () => {
       await result.current.start();
     });
 
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
   });
 
   it('does NOT call onSuccess when createQuick fails', async () => {
@@ -280,7 +294,7 @@ describe('useQuickSession — failure path', () => {
 
     expect(result.current.error).toBe('network error');
     expect(mockCreatePanel).not.toHaveBeenCalled();
-    expect(useCyboflowStore.getState().activeQuickSessionId).toBeNull();
+    expect(useCyboflowStore.getState().selectedSessionId).toBeNull();
   });
 });
 

@@ -3,7 +3,7 @@
  *
  * Behaviors verified:
  *   1. Quick session: textarea enabled; submitting calls API.sessions.sendInput
- *      with (activeQuickSessionId, text); textarea cleared after success; failed
+ *      with (selectedSessionId, text); textarea cleared after success; failed
  *      IPC response surfaces an error indicator without clearing the textarea.
  *   2. Workflow-run, no active question: textarea disabled; Send button disabled;
  *      Tooltip with the exact string "Input enabled only when the agent asks a
@@ -145,7 +145,7 @@ function makeQuestion(id: string, runId: string): Question {
 // ---------------------------------------------------------------------------
 
 describe('ChatInput — none mode', () => {
-  it('renders nothing when neither runId nor activeQuickSessionId is set', () => {
+  it('renders nothing when neither runId nor selectedSessionId is set', () => {
     const { container } = render(<ChatInput runId={null} />);
     expect(container.firstChild).toBeNull();
   });
