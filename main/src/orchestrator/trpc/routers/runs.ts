@@ -113,6 +113,10 @@ export interface RunLauncherLike {
     runId: string;
     worktreePath: string;
     branchName: string;
+    // The resolved-and-stamped per-run permission mode. The start mutation does
+    // not forward it in its response (it lives on workflow_runs.permission_mode_snapshot),
+    // but the interface mirrors the implementation's return shape for type accuracy.
+    permissionMode: PermissionMode;
   }>;
 }
 

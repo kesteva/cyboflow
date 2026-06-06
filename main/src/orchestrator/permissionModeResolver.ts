@@ -32,10 +32,10 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = 'default';
  */
 export interface PermissionModeResolverInputs {
   /**
-   * Explicit per-run choice from the run-launch UI. HIGHEST precedence — a
-   * deliberate per-launch override beats any standing default. The per-run UI
-   * is DEFERRED, so this rung is accepted now but not yet supplied by any
-   * caller.
+   * Explicit per-run choice from the run-launch UI (WorkflowPicker). HIGHEST
+   * precedence — a deliberate per-launch override beats any standing default.
+   * Supplied via WorkflowPicker → runs.start → RunLauncher.launch →
+   * WorkflowRegistry.createRun.
    */
   requestedMode?: string | null;
   /**
@@ -54,7 +54,7 @@ export interface PermissionModeResolverInputs {
  * Resolve the agent permission mode for a run.
  *
  * Precedence (highest wins):
- *   1. explicit per-run UI choice (requestedMode) — DEFERRED, not yet supplied
+ *   1. explicit per-run UI choice (requestedMode) from WorkflowPicker
  *   2. workflow frontmatter `permission_mode:` (per-agent opt-in override)
  *   3. ConfigManager global default (globalDefaultMode)
  *   4. DEFAULT_PERMISSION_MODE ('default') — the hard floor.

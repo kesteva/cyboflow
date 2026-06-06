@@ -400,7 +400,8 @@ export class WorkflowRegistry {
    * task) will later UPDATE `worktree_path` and `branch_name`.
    *
    * Permission-mode resolution (resolvePermissionMode):
-   *   per-run override (DEFERRED) > flow frontmatter > global default > 'default'.
+   *   per-run override (requestedPermissionMode, from WorkflowPicker) >
+   *   flow frontmatter > global default > 'default'.
    * The workflow row's `permission_mode` column is the frontmatter rung, but a
    * column value of `'default'` is treated as UNSET (fall through to the global
    * default) — built-in flows ship without an explicit per-agent override, so
