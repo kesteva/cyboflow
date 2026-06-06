@@ -68,6 +68,12 @@ interface WorkflowRunRow {
   worktree_path: string;
   policy_json: string;
   status: string;
+  /**
+   * Owning session (session<->run restructure, migration 019). May be null for
+   * a legacy parentless run; copied verbatim to the restarted run so it stays
+   * nested under the same session.
+   */
+  session_id: string | null;
 }
 
 // Terminal statuses — cancel-and-restart is a no-op on these.
@@ -107,7 +113,7 @@ export async function cancelAndRestartHandler(
   const result = await runQueues.getOrCreate(runId).add(async () => {
     // Step 1: Fetch the run row.
     const row = db.prepare(
-      `SELECT id, workflow_id, project_id, worktree_path, policy_json, status
+      `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
 
@@ -172,16 +178,19 @@ export async function cancelAndRestartHandler(
 
       // Step 5: Insert a new run row, reusing the same workflow/project/worktree.
       // Worktree is PRESERVED — no worktreeManager.remove call.
+      // session_id is copied verbatim (may be null for a legacy parentless run)
+      // so the restarted run stays nested under the same owning session.
       db.prepare(
         `INSERT INTO workflow_runs
-           (id, workflow_id, project_id, worktree_path, policy_json, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           (id, workflow_id, project_id, worktree_path, policy_json, status, session_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
       ).run(
         newRunId,
         row.workflow_id,
         row.project_id,
         row.worktree_path,
         row.policy_json,
+        row.session_id,
         now,
         now,
       );

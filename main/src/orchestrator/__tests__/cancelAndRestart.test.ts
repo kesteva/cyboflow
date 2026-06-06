@@ -42,6 +42,7 @@ function seedWorkflowAndRun(
   runId: string,
   status: string = 'stuck',
   worktreePath: string = '/tmp/wt-test',
+  sessionId: string | null = null,
 ): { workflowId: string; runId: string } {
   const workflowId = `workflow-${randomUUID()}`;
 
@@ -52,9 +53,9 @@ function seedWorkflowAndRun(
 
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json)
-     VALUES (?, ?, 1, ?, ?, '{}')`,
-  ).run(runId, workflowId, worktreePath, status);
+       (id, workflow_id, project_id, worktree_path, status, policy_json, session_id)
+     VALUES (?, ?, 1, ?, ?, '{}', ?)`,
+  ).run(runId, workflowId, worktreePath, status, sessionId);
 
   return { workflowId, runId };
 }
@@ -122,7 +123,10 @@ describe('cancelAndRestartHandler', () => {
   let runQueues: RunQueueRegistry;
 
   beforeEach(() => {
-    db = createTestDb({ includeStuckDetectedAt: true });
+    // includeSubstrate folds in migration 019's session_id column on
+    // workflow_runs (see orchestratorTestDb) so the handler's SELECT + INSERT
+    // of session_id resolve.
+    db = createTestDb({ includeStuckDetectedAt: true, includeSubstrate: true });
     spy = makeOrderSpy();
     runQueues = new RunQueueRegistry();
     vi.clearAllMocks();
@@ -199,6 +203,35 @@ describe('cancelAndRestartHandler', () => {
     expect(newRun.workflow_id).toBe(workflowId);
     expect(newRun.worktree_path).toBe('/tmp/my-worktree');
     expect(newRun.status).toBe('queued');
+  });
+
+  it('copies the original run session_id onto the restarted run (run stays nested under its session)', async () => {
+    const runId = randomUUID();
+    const sessionId = `session-${randomUUID()}`;
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-test', sessionId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    const newRun = db.prepare(
+      'SELECT session_id FROM workflow_runs WHERE id = ?',
+    ).get(result.newRunId) as { session_id: string | null };
+
+    expect(newRun.session_id).toBe(sessionId);
+  });
+
+  it('copies a null session_id verbatim for a legacy parentless run', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-test', null);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    const newRun = db.prepare(
+      'SELECT session_id FROM workflow_runs WHERE id = ?',
+    ).get(result.newRunId) as { session_id: string | null };
+
+    expect(newRun.session_id).toBeNull();
   });
 
   it('returns the new runId (AC4e)', async () => {
