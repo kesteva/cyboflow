@@ -401,6 +401,36 @@ describe('ClaudeCodeManager.spawnClaudeCode — quick/legacy session permission 
 
     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'default' }));
   });
+
+  it("restartPanelWithHistory preserves the session's legacy 'ignore' (no clobber by the global default)", async () => {
+    // A session that opted into legacy 'ignore' (don't-ask). The restart path
+    // must read it and forward it — otherwise spawnClaudeCode would seed the
+    // global default ('auto' here) and silently re-enable prompting.
+    const sessionManager = {
+      getDbSession: vi.fn(() => ({ id: 's-restart', permission_mode: 'ignore' })),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      makeConfigManager('auto'),
+      db,
+    );
+    const spawn = spySpawn(mgr);
+    vi.spyOn(
+      mgr as unknown as { killProcess(id: string): Promise<void> },
+      'killProcess',
+    ).mockResolvedValue(undefined);
+
+    await mgr.restartPanelWithHistory('p-restart', 's-restart', '/tmp/w', 'go', []);
+
+    expect(spawn).toHaveBeenCalledOnce();
+    const opts = spawn.mock.calls[0][0] as { agentPermissionMode?: string; permissionMode?: string };
+    expect(opts.permissionMode).toBe('ignore');
+    expect(opts.agentPermissionMode).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

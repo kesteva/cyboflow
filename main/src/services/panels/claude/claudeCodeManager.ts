@@ -1191,7 +1191,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
   ): Promise<void> {
     await this.killProcess(panelId);
     const historyStrings = conversationHistory.map(msg => msg.content);
-    await this.spawnClaudeCode(panelId, sessionId, worktreePath, initialPrompt, historyStrings);
+    // Carry the session's legacy permission_mode through the restart, parallel to
+    // continuePanel — otherwise spawnClaudeCode seeds agentPermissionMode from the
+    // GLOBAL default and an explicit session-level 'ignore' (don't-ask) would be
+    // silently clobbered on restart.
+    const permissionMode = this.sessionManager.getDbSession(sessionId)?.permission_mode;
+    await this.spawnClaudeCode(panelId, sessionId, worktreePath, initialPrompt, historyStrings, false, permissionMode);
   }
 
   // ---------------------------------------------------------------------------
