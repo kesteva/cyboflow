@@ -1216,9 +1216,32 @@ export class ClaudeCodeManager extends AbstractCliManager {
       conversationHistory,
       isResume,
       permissionMode,
+      // Quick/legacy SDK sessions inherit the GLOBAL 4-mode agent permission
+      // default so the Settings control governs them too (not just workflow
+      // runs). resolveHookMode prefers agentPermissionMode over the legacy
+      // 'approve'|'ignore' value, so this is what takes effect. An explicit
+      // legacy 'ignore' (don't-ask) is a stronger statement than the default
+      // and is preserved by leaving agentPermissionMode unset (the legacy
+      // 'ignore' → 'dontAsk' branch in resolveHookMode then governs).
+      // Workflow runs never reach this path (they call spawnCliProcess directly
+      // with agentPermissionMode already set from the run snapshot).
+      agentPermissionMode: this.resolveSessionAgentPermissionMode(permissionMode),
       model
     };
     await this.spawnCliProcess(options);
+  }
+
+  /**
+   * Resolve the 4-mode agent permission for a quick/legacy SDK session spawn
+   * from the GLOBAL default (Settings → Agent Permission Mode). Returns
+   * undefined when the session explicitly opted into legacy 'ignore' (so the
+   * legacy don't-ask branch is preserved) or when no ConfigManager is wired.
+   */
+  private resolveSessionAgentPermissionMode(
+    legacyPermissionMode?: 'approve' | 'ignore',
+  ): PermissionMode | undefined {
+    if (legacyPermissionMode === 'ignore') return undefined;
+    return this.configManager?.getDefaultAgentPermissionMode();
   }
 
   // ---------------------------------------------------------------------------

@@ -86,10 +86,13 @@ function createMockSessionManager(): SessionManager {
   } as unknown as SessionManager;
 }
 
-function makeConfigManager(): import('../../../configManager').ConfigManager {
+function makeConfigManager(
+  defaultAgentMode: import('../../../../../../shared/types/workflows').PermissionMode = 'default',
+): import('../../../configManager').ConfigManager {
   return {
     getSystemPromptAppend: vi.fn(() => undefined),
     getConfig: vi.fn(() => ({ verbose: false })),
+    getDefaultAgentPermissionMode: vi.fn(() => defaultAgentMode),
   } as unknown as import('../../../configManager').ConfigManager;
 }
 
@@ -329,6 +332,74 @@ describe('ClaudeCodeManager.buildSdkOptions — agentPermissionMode branching', 
       undefined as never,
     );
     expect(requestApproval).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spawnClaudeCode — quick/legacy SDK sessions inherit the global default
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager.spawnClaudeCode — quick/legacy session permission seeding', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+
+  beforeEach(() => {
+    db = createTestDb();
+    logger = makeProdLoggerSpy();
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  /** Build a manager whose ConfigManager reports the given global default. */
+  function mgrWithGlobalDefault(
+    mode: import('../../../../../../shared/types/workflows').PermissionMode,
+  ): ClaudeCodeManager {
+    return new ClaudeCodeManager(
+      createMockSessionManager(),
+      logger as unknown as Logger,
+      makeConfigManager(mode),
+      db,
+    );
+  }
+
+  /** Spy on the spawn chokepoint so no real query runs; capture the options. */
+  function spySpawn(mgr: ClaudeCodeManager) {
+    return vi
+      .spyOn(mgr as unknown as { spawnCliProcess(o: unknown): Promise<void> }, 'spawnCliProcess')
+      .mockResolvedValue(undefined);
+  }
+
+  it('seeds agentPermissionMode from the global default for a legacy approve session', async () => {
+    const mgr = mgrWithGlobalDefault('auto');
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p1', 's1', '/tmp/w', 'go', undefined, false, 'approve');
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'auto' }));
+  });
+
+  it("preserves explicit legacy 'ignore' (don't-ask) by leaving agentPermissionMode unset", async () => {
+    const mgr = mgrWithGlobalDefault('auto');
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p2', 's2', '/tmp/w', 'go', undefined, false, 'ignore');
+
+    expect(spawn).toHaveBeenCalledOnce();
+    const opts = spawn.mock.calls[0][0] as { agentPermissionMode?: string };
+    expect(opts.agentPermissionMode).toBeUndefined();
+  });
+
+  it("seeds 'default' when the global default is 'default' (zero-behavior-change)", async () => {
+    const mgr = mgrWithGlobalDefault('default');
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p3', 's3', '/tmp/w', 'go', undefined, false, 'approve');
+
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'default' }));
   });
 });
 
