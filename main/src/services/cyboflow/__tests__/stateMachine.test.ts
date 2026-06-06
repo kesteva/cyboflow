@@ -7,7 +7,7 @@ import {
   IllegalTransitionError,
 } from '../stateMachine';
 
-// All 9 statuses — used for the terminal-state lockdown sweep.
+// All 10 statuses — used for the terminal-state lockdown sweep.
 const ALL_STATUSES: readonly WorkflowRunStatus[] = [
   'queued',
   'starting',
@@ -18,6 +18,7 @@ const ALL_STATUSES: readonly WorkflowRunStatus[] = [
   'completed',
   'failed',
   'canceled',
+  'paused',
 ];
 
 // ---------------------------------------------------------------------------
@@ -31,8 +32,8 @@ describe('(a) positive sweep — every allowed transition returns true', () => {
       readonly WorkflowRunStatus[],
     ][];
 
-    // Guard: ensure we have all 9 states
-    expect(entries).toHaveLength(9);
+    // Guard: ensure we have all 10 states
+    expect(entries).toHaveLength(10);
 
     // Confirm each allowed (from, to) pair is accepted
     for (const [from, targets] of entries) {
@@ -110,6 +111,27 @@ describe('(a) positive sweep — every allowed transition returns true', () => {
   it('awaiting_input -> canceled is allowed', () => {
     expect(isTransitionAllowed('awaiting_input', 'canceled')).toBe(true);
   });
+
+  // Phase 4b — SDK-only Pause/Resume edges.
+  it('running -> paused is allowed (Pause from a live turn)', () => {
+    expect(isTransitionAllowed('running', 'paused')).toBe(true);
+  });
+
+  it('awaiting_review -> paused is allowed (Pause from an idle-rested run)', () => {
+    expect(isTransitionAllowed('awaiting_review', 'paused')).toBe(true);
+  });
+
+  it('paused -> running is allowed (Resume re-drives via --resume)', () => {
+    expect(isTransitionAllowed('paused', 'running')).toBe(true);
+  });
+
+  it('paused -> canceled is allowed', () => {
+    expect(isTransitionAllowed('paused', 'canceled')).toBe(true);
+  });
+
+  it('paused -> failed is allowed', () => {
+    expect(isTransitionAllowed('paused', 'failed')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -159,6 +181,15 @@ describe('(b) negative sweep — explicit forbidden transitions return false', (
 
   it('awaiting_input -> awaiting_review is forbidden', () => {
     expect(isTransitionAllowed('awaiting_input', 'awaiting_review')).toBe(false);
+  });
+
+  // Phase 4b — paused only resumes to running (then rests/completes from there).
+  it('paused -> completed is forbidden (Resume returns to running first)', () => {
+    expect(isTransitionAllowed('paused', 'completed')).toBe(false);
+  });
+
+  it('completed -> paused is forbidden (terminal state has no edges)', () => {
+    expect(isTransitionAllowed('completed', 'paused')).toBe(false);
   });
 });
 
@@ -288,17 +319,20 @@ describe('(d) terminal-state lockdown', () => {
 });
 
 // ---------------------------------------------------------------------------
-// (e) P4 review_items fold — no new states; the run-pause/aggregate-blocking
-//     invariant reuses awaiting_review / awaiting_input.
+// (e) P4 review_items fold — adds no review states; the run-pause/aggregate-
+//     blocking invariant reuses awaiting_review / awaiting_input. (Phase 4b adds
+//     the explicit 'paused' run state separately; total status count is 10.)
 // ---------------------------------------------------------------------------
 
-describe('(e) P4 review-item fold reuses existing pause states (no new states)', () => {
-  it('the status set is still exactly the 9 documented states — the review fold adds NONE', () => {
+describe('(e) P4 review-item fold reuses existing review states (no new review states)', () => {
+  it('the status set is exactly the 10 documented states (review fold adds NONE; Phase 4b adds only paused)', () => {
     // P4 routes permissions/decisions/human-gates into review_items, NOT into new
-    // workflow_runs statuses. A run pauses by reusing awaiting_review (permission /
-    // human-gate / clean-drain rest) or awaiting_input (AskUserQuestion). If a new
-    // state were ever added the count here drifts and this guard fires.
-    expect(ALL_STATUSES).toHaveLength(9);
+    // workflow_runs statuses — a run pauses for review by reusing awaiting_review
+    // (permission / human-gate / clean-drain rest) or awaiting_input (AskUserQuestion).
+    // Phase 4b adds the single explicit SDK-only 'paused' state for run Pause/Resume,
+    // bringing the total to 10. If a NEW state were ever added the count here drifts
+    // and this guard fires.
+    expect(ALL_STATUSES).toHaveLength(10);
     expect(Object.keys(ALLOWED_TRANSITIONS).sort()).toEqual([...ALL_STATUSES].sort());
   });
 

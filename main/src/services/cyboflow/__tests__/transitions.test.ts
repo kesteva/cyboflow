@@ -18,6 +18,8 @@ import {
   transitionToRunning,
   transitionRunningToAwaitingReview,
   transitionToCompleted,
+  transitionToPaused,
+  transitionPausedToRunning,
   TransitionRejectedError,
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
@@ -56,6 +58,13 @@ describe('transitions', () => {
   beforeEach(() => {
     db = new Database(':memory:');
     db.exec(GATE_SCHEMA);
+    // GATE_SCHEMA mirrors the 006/007 columns only. transitionToPaused must
+    // preserve the resume-critical columns added later (migration 011's
+    // current_step_id, migration 018's claude_session_id); layer them on so the
+    // preservation assertion has real columns to read back. Additive ALTERs —
+    // GATE_SCHEMA itself is untouched (its column-set parity test is unaffected).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
     seedWorkflow(db);
   });
 
@@ -515,6 +524,104 @@ describe('transitions', () => {
       expect(() => transitionToCompleted(db, { runId: RUN_ID, fromStatus: 'awaiting_review' })).toThrow(
         TransitionRejectedError,
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // transitionToPaused — Phase 4b SDK-only Pause. Valid from running OR
+  // awaiting_review; preserves claude_session_id + current_step_id; no ended_at.
+  // -------------------------------------------------------------------------
+  describe('transitionToPaused', () => {
+    it('(happy) pauses a running run and preserves resume state (no ended_at)', () => {
+      seedRun(db, 'running');
+      // Stamp the resume-critical columns Pause must NOT touch.
+      db.prepare(
+        'UPDATE workflow_runs SET claude_session_id = ?, current_step_id = ? WHERE id = ?',
+      ).run('claude-sess-1', 'implement', RUN_ID);
+
+      transitionToPaused(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare(
+          'SELECT status, ended_at, claude_session_id, current_step_id FROM workflow_runs WHERE id = ?',
+        )
+        .get(RUN_ID) as {
+        status: string;
+        ended_at: string | null;
+        claude_session_id: string | null;
+        current_step_id: string | null;
+      };
+      expect(after.status).toBe('paused');
+      // paused is non-terminal — ended_at must remain NULL.
+      expect(after.ended_at).toBeNull();
+      // Resume state preserved.
+      expect(after.claude_session_id).toBe('claude-sess-1');
+      expect(after.current_step_id).toBe('implement');
+    });
+
+    it('(happy) pauses an awaiting_review (idle-rested) run', () => {
+      seedRun(db, 'awaiting_review');
+
+      transitionToPaused(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(after.status).toBe('paused');
+    });
+
+    it('(stale) rejects when the run is not pausable (e.g. already completed)', () => {
+      seedRun(db, 'completed');
+      expect(() => transitionToPaused(db, { runId: RUN_ID })).toThrow(TransitionRejectedError);
+
+      // Row must be unchanged — still completed.
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(after.status).toBe('completed');
+    });
+
+    it('(stale) reject carries workflow_run entity discriminator', () => {
+      seedRun(db, 'queued'); // not running / awaiting_review
+      let caught: unknown;
+      try {
+        transitionToPaused(db, { runId: RUN_ID });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(TransitionRejectedError);
+      const e = caught as TransitionRejectedError;
+      expect(e.code).toBe('TRANSITION_REJECTED');
+      expect(e.details.entity).toBe('workflow_run');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // transitionPausedToRunning — Phase 4b SDK-only Resume.
+  // -------------------------------------------------------------------------
+  describe('transitionPausedToRunning', () => {
+    it('(happy) resumes a paused run back to running', () => {
+      seedRun(db, 'paused');
+
+      transitionPausedToRunning(db, { runId: RUN_ID });
+
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(after.status).toBe('running');
+    });
+
+    it('(reject) throws when the run is not in paused state', () => {
+      seedRun(db, 'running');
+      expect(() => transitionPausedToRunning(db, { runId: RUN_ID })).toThrow(
+        TransitionRejectedError,
+      );
+
+      // Row must be unchanged — still running.
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(after.status).toBe('running');
     });
   });
 });

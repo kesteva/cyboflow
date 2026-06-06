@@ -196,9 +196,11 @@ export class RunLauncher {
     if (sessionId) {
       const activeRow = this.db
         .prepare(
+          // 'paused' (Phase 4b) is non-terminal — a paused run still occupies the
+          // session and must block launching a second run into it.
           `SELECT COUNT(*) AS n FROM workflow_runs
             WHERE session_id = ?
-              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input')
+              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input','paused')
               AND workflow_id NOT IN (SELECT id FROM workflows WHERE name = ?)`,
         )
         .get(sessionId, QUICK_WORKFLOW_NAME) as { n: number };

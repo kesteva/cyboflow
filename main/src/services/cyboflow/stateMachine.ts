@@ -9,7 +9,7 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
  * once a run reaches a terminal state, NO further transitions are legal —
  * not even same-status no-ops (e.g. completed -> completed is rejected).
  *
- * Rationale: the database CHECK constraint enforces "status is one of 9
+ * Rationale: the database CHECK constraint enforces "status is one of 10
  * values" but cannot enforce "this transition from A to B is legal".
  * This table is the in-process source of truth.
  */
@@ -21,13 +21,16 @@ export const ALLOWED_TRANSITIONS: Record<
   starting:        ['running', 'failed', 'canceled'],
   // running -> awaiting_input: the only way to enter awaiting_input — QuestionRouter
   // transitions atomically with the question INSERT (TASK-758).
-  running:         ['awaiting_review', 'awaiting_input', 'completed', 'failed', 'canceled', 'stuck'],
+  // running -> paused: SDK-only Pause from a live turn (Phase 4b). The active turn
+  //   stops but claude_session_id + current_step_id are preserved for Resume.
+  running:         ['awaiting_review', 'awaiting_input', 'completed', 'failed', 'canceled', 'stuck', 'paused'],
   // awaiting_review -> completed: the user accepted the run's artifact (Merge or
   //   Create-PR). The executor never auto-completes; a run RESTS in awaiting_review
   //   on SDK drain and only the user's accept decision drives it to completed.
   // awaiting_review -> running: existing approval cycle — an in-flight tool approval
   //   resolves back to running (transitionFromAwaitingReview).
-  awaiting_review: ['running', 'completed', 'canceled', 'stuck', 'failed'],
+  // awaiting_review -> paused: SDK-only Pause from an idle-rested run (Phase 4b).
+  awaiting_review: ['running', 'completed', 'canceled', 'stuck', 'failed', 'paused'],
   // awaiting_input -> running: symmetric return when QuestionRouter.respond resolves.
   // awaiting_input -> canceled: user/system cancellation while a question is in flight.
   // awaiting_input -> failed: defensive — SDK loop crashed mid-question.
@@ -38,6 +41,13 @@ export const ALLOWED_TRANSITIONS: Record<
   //   StuckDetector flagged (e.g. an orphaned PTY) but whose worktree still holds
   //   deliverable work. Merge / Create-PR is valid from a stuck run.
   stuck:           ['running', 'completed', 'canceled', 'failed'],
+  // paused (Phase 4b, SDK-only, NON-terminal):
+  //   paused -> running: Resume re-drives via the SDK --resume path
+  //     (transitionPausedToRunning).
+  //   paused -> canceled / failed: a paused run can still be canceled or fail.
+  //   No paused -> completed/awaiting_review edge: Resume returns to 'running'
+  //     first; the run rests/completes from there.
+  paused:          ['running', 'canceled', 'failed'],
   completed:       [],
   failed:          [],
   canceled:        [],

@@ -29,6 +29,12 @@ export function recoverActiveStateOrphans(
   runQueues: RunQueueRegistry,
 ): RecoveryResult {
   // Step 1: SELECT all running/starting rows.
+  //
+  // Phase 4b note: 'paused' is DELIBERATELY excluded from this sweep. A paused run
+  // (SDK-only Pause) is a NON-terminal state that retains claude_session_id +
+  // current_step_id so Resume can re-drive via --resume; it MUST survive an app
+  // restart. Because this WHERE only matches 'starting'/'running', a paused run is
+  // never force-failed to 'app_restart' on boot — no behavioral change is needed.
   const candidates = db
     .prepare(`SELECT id, status FROM workflow_runs WHERE status IN ('starting', 'running')`)
     .all() as { id: string; status: 'running' | 'starting' }[];

@@ -7,6 +7,7 @@
  */
 
 import type { CliSubstrate } from './substrate';
+import type { WorkflowRunStatus } from './cyboflow';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -59,15 +60,13 @@ export interface WorkflowRunRow {
   id: string;
   workflow_id: string;
   project_id: number;
-  status:
-    | 'queued'
-    | 'starting'
-    | 'running'
-    | 'awaiting_review'
-    | 'stuck'
-    | 'completed'
-    | 'failed'
-    | 'canceled';
+  /**
+   * Single source of truth: `WorkflowRunStatus` in ./cyboflow (10 values incl.
+   * 'awaiting_input' and 'paused'). Previously a hand-mirrored inline union that
+   * had drifted (it lacked 'awaiting_input'); importing the canonical type kills
+   * the duplicate and keeps this in lockstep with the DB CHECK + state machine.
+   */
+  status: WorkflowRunStatus;
   permission_mode_snapshot: PermissionMode;
   worktree_path: string | null;
   branch_name: string | null;

@@ -271,6 +271,82 @@ export function transitionToCanceled(
   }
 }
 
+// ---------------------------------------------------------------------------
+// transitionToPaused (Phase 4b — SDK-only Pause)
+// ---------------------------------------------------------------------------
+
+export interface TransitionToPausedParams {
+  runId: string;
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'paused' WHERE id = ? AND status IN
+ * ('running', 'awaiting_review'). Pause is SDK-only and valid from a LIVE turn
+ * ('running') OR an idle-rested run ('awaiting_review') — both edges are listed
+ * in ALLOWED_TRANSITIONS.
+ *
+ * Design divergence (mirrors transitionToCanceled): two legal source states, so
+ * no `fromStatus` parameter and no per-edge assertTransitionAllowed call — the
+ * `status IN (...)` SQL guard is sufficient and avoids a SELECT-then-UPDATE round
+ * trip. Both 'running'->'paused' and 'awaiting_review'->'paused' are in the table.
+ *
+ * Deliberately does NOT set ended_at (paused is NON-terminal) and does NOT touch
+ * claude_session_id / current_step_id — those are PRESERVED so Resume can
+ * re-drive via the SDK --resume path (transitionPausedToRunning).
+ *
+ * Throws TransitionRejectedError if the run is not in a pausable state (changes === 0).
+ */
+export function transitionToPaused(
+  db: Database.Database,
+  params: TransitionToPausedParams,
+): void {
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'paused', updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status IN ('running', 'awaiting_review')`,
+  ).run({ runId: params.runId });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot pause run ${params.runId}: not in 'running' or 'awaiting_review' state`,
+      { runId: params.runId, expectedStatus: 'running', entity: 'workflow_run' },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transitionPausedToRunning (Phase 4b — SDK-only Resume)
+// ---------------------------------------------------------------------------
+
+export interface TransitionPausedToRunningParams {
+  runId: string;
+}
+
+/**
+ * Guarded UPDATE: workflow_runs status = 'running' WHERE id = ? AND status = 'paused'.
+ * Resume re-drives the SDK run via the existing --resume path; the run returns to
+ * 'running' and rests/completes from there. started_at is left as-is (the run
+ * already started before it was paused).
+ *
+ * Throws TransitionRejectedError if the run is not in 'paused' state.
+ */
+export function transitionPausedToRunning(
+  db: Database.Database,
+  params: TransitionPausedToRunningParams,
+): void {
+  assertTransitionAllowed('paused', 'running', params.runId);
+  const result = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'running', updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId AND status = 'paused'`,
+  ).run({ runId: params.runId });
+  if (result.changes === 0) {
+    throw new TransitionRejectedError(
+      `Cannot resume run ${params.runId}: not in 'paused' state`,
+      { runId: params.runId, expectedStatus: 'paused', entity: 'workflow_run' },
+    );
+  }
+}
+
 export interface TransitionFromAwaitingReviewParams {
   runId: string;
   approvalId: string;

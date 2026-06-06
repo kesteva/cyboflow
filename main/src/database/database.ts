@@ -1378,6 +1378,18 @@ export class DatabaseService {
 
     if (worktreePathIsNotNull) {
       console.log('[Database] Reconciling workflow_runs: rebuilding table to canonical 006 shape');
+      // STALE-SHAPE WARNING: this reconciler predates every post-006 column. Its
+      // CHECK literal is kept current with the status enum (now 10 values, incl.
+      // 'awaiting_input' + 'paused') so a triggered rebuild can never reject a
+      // valid status. BUT the recreate table + INSERT...SELECT below still enumerate
+      // only the 16 original 006 columns — it does NOT carry current_step_id,
+      // substrate, task_id, outcome, base_branch, base_sha, steps_snapshot_json,
+      // seed_idea_id, claude_session_id, or session_id. This Tier-2 path only fires
+      // on the narrow legacy drift where worktree_path was declared NOT NULL (a
+      // pre-canonical 006 edit); a DB that old has none of those columns, so the
+      // narrow list is correct THERE. If this reconciler is ever generalized to run
+      // against a post-019 DB it WILL silently drop columns 17-26 — widen the column
+      // list to the full 26-column post-019 shape before doing so.
       this.db.exec(`
         PRAGMA foreign_keys=OFF;
         BEGIN;
@@ -1385,7 +1397,7 @@ export class DatabaseService {
           id TEXT PRIMARY KEY,
           workflow_id TEXT NOT NULL,
           project_id INTEGER NOT NULL,
-          status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled')),
+          status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'starting', 'running', 'awaiting_review', 'stuck', 'completed', 'failed', 'canceled', 'awaiting_input', 'paused')),
           permission_mode_snapshot TEXT NOT NULL DEFAULT 'default',
           worktree_path TEXT,
           branch_name TEXT,

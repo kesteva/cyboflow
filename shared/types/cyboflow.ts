@@ -11,7 +11,12 @@ export type WorkflowRunStatus =
   | 'completed'
   | 'failed'
   | 'canceled'
-  | 'awaiting_input';
+  | 'awaiting_input'
+  // Non-terminal. SDK-only: Pause stops the active turn but RETAINS
+  // claude_session_id + current_step_id so Resume can re-drive via --resume.
+  // Deliberately NOT in TERMINAL_RUN_STATUSES — a paused run still occupies its
+  // session and must survive an app restart (boot recovery must not force-fail it).
+  | 'paused';
 
 /**
  * Terminal workflow_runs statuses — runs in these states cannot transition

@@ -136,6 +136,35 @@ describe('recoverActiveStateOrphans', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case F (Phase 4b): "paused runs survive boot recovery"
+  //
+  // A paused run (SDK-only Pause) is NON-terminal but must NOT be force-failed to
+  // 'app_restart' on boot — it retains claude_session_id + current_step_id so
+  // Resume can re-drive via --resume. recoverActiveStateOrphans only sweeps
+  // 'starting'/'running', so a paused row is left untouched.
+  // -------------------------------------------------------------------------
+  it('does NOT recover paused runs (they survive restart)', () => {
+    const db = createTestDb();
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    const runId = 'run-F1';
+    seedRun(db, { id: runId, status: 'paused' });
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    // Nothing recovered — paused is not in the sweep set.
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0 });
+
+    // The row must remain 'paused' — not force-failed.
+    const row = db
+      .prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string; error_message: string | null };
+    expect(row.status).toBe('paused');
+    expect(row.error_message).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // Case E: "ignores already-terminal rows"
   // -------------------------------------------------------------------------
   it('ignores already-terminal rows', () => {

@@ -151,7 +151,7 @@ export interface SeedRunOverrides {
   /** Override the workflow_run id (defaults to a generated uuid-like string). */
   id?: string;
   /** Override the run status (defaults to 'running'). */
-  status?: 'queued' | 'starting' | 'running' | 'awaiting_review' | 'awaiting_input' | 'stuck' | 'completed' | 'failed' | 'canceled';
+  status?: 'queued' | 'starting' | 'running' | 'awaiting_review' | 'awaiting_input' | 'stuck' | 'completed' | 'failed' | 'canceled' | 'paused';
   /** Override the workflow id (defaults to `workflow-${runId}`). */
   workflowId?: string;
   /** Override the project_id FK (defaults to 1). */
