@@ -69,18 +69,23 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
 
   /**
-   * The per-run agent permission choice. SEEDED ONCE from the global default
+   * The per-run agent permission choice, seeded from the global default
    * (Settings → Agent Permission Mode) so an untouched picker forwards the same
    * value the run would otherwise inherit — never silently clobbering the global
-   * default down to a hardcoded 'default'. Read non-reactively at mount via
-   * getState() (config is fetched at app boot); falls back to 'default' when the
-   * store has not loaded yet. Threaded into runs.start.mutate as `permissionMode`
-   * (the AppRouter-inferred input; PermissionMode is imported from the shared
-   * type, never re-declared).
+   * default down to a hardcoded 'default'. The default is read REACTIVELY from
+   * the config store (not once at mount) so a config fetch that resolves AFTER
+   * this picker mounts still re-seeds the selection; `permissionTouchedRef`
+   * guards against clobbering an explicit user pick once they interact.
+   * Threaded into runs.start.mutate as `permissionMode` (the AppRouter-inferred
+   * input; PermissionMode is imported from the shared type, never re-declared).
    */
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
-    () => useConfigStore.getState().config?.defaultAgentPermissionMode ?? 'default',
-  );
+  const globalDefaultPermissionMode =
+    useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(globalDefaultPermissionMode);
+  const permissionTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!permissionTouchedRef.current) setPermissionMode(globalDefaultPermissionMode);
+  }, [globalDefaultPermissionMode]);
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -265,7 +270,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
           <button
             key={id}
             type="button"
-            onClick={() => setPermissionMode(id)}
+            onClick={() => {
+              permissionTouchedRef.current = true;
+              setPermissionMode(id);
+            }}
             aria-pressed={permissionMode === id}
             aria-label={`Permission mode: ${label}`}
             className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${

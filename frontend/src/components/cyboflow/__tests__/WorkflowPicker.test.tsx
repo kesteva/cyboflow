@@ -447,6 +447,49 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
 
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'dontAsk' }));
   });
+
+  it('re-seeds from the global default when config resolves AFTER mount (no race clobber)', async () => {
+    // config starts empty — simulates fetchConfig() not yet resolved at mount.
+    useConfigStore.setState({ config: null });
+    render(<WorkflowPicker projectId={1} />);
+    await screen.findByRole('button', { name: /^Start Run$/ });
+
+    // config resolves late with a non-default global → the picker must pick it up
+    // (it must NOT stay clamped to the mount-time 'default').
+    await act(async () => {
+      useConfigStore.setState({ config: { defaultAgentPermissionMode: 'auto' } as unknown as AppConfig });
+    });
+
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'auto' }));
+  });
+
+  it('a user pick survives a later config change (touched guard)', async () => {
+    useConfigStore.setState({ config: { defaultAgentPermissionMode: 'default' } as unknown as AppConfig });
+    render(<WorkflowPicker projectId={1} />);
+
+    // User explicitly picks 'acceptEdits'.
+    const allowBtn = await screen.findByLabelText('Permission mode: Allow edits');
+    await act(async () => {
+      fireEvent.click(allowBtn);
+    });
+
+    // A late config change must NOT clobber the explicit pick.
+    await act(async () => {
+      useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });
+    });
+
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'acceptEdits' }));
+  });
 });
 
 describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () => {
