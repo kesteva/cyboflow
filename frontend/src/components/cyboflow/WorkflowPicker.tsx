@@ -14,12 +14,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
-import type { WorkflowRow } from '../../../../shared/types/workflows';
+import type { WorkflowRow, PermissionMode } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+
+/**
+ * The per-run agent-permission options, mirroring the global control in
+ * Settings.tsx. Selecting one threads it into runs.start as the highest-precedence
+ * `requestedMode` rung of the permission ladder (per-run > frontmatter > global).
+ */
+const PERMISSION_MODE_OPTIONS: ReadonlyArray<{ id: PermissionMode; label: string; hint: string }> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
+  { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
+];
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -54,6 +67,20 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
    * shared type, never re-declared here.
    */
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+
+  /**
+   * The per-run agent permission choice. SEEDED ONCE from the global default
+   * (Settings → Agent Permission Mode) so an untouched picker forwards the same
+   * value the run would otherwise inherit — never silently clobbering the global
+   * default down to a hardcoded 'default'. Read non-reactively at mount via
+   * getState() (config is fetched at app boot); falls back to 'default' when the
+   * store has not loaded yet. Threaded into runs.start.mutate as `permissionMode`
+   * (the AppRouter-inferred input; PermissionMode is imported from the shared
+   * type, never re-declared).
+   */
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    () => useConfigStore.getState().config?.defaultAgentPermissionMode ?? 'default',
+  );
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -147,8 +174,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         const sessionId = await ensureSessionForLaunch(projectId);
         const result = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
-            ? { workflowId, projectId, substrate, sessionId }
-            : { workflowId, projectId, substrate, sessionId, ideaId },
+            ? { workflowId, projectId, substrate, sessionId, permissionMode }
+            : { workflowId, projectId, substrate, sessionId, permissionMode, ideaId },
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         onWorkflowStarted?.(result.runId);
@@ -159,7 +186,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate, onWorkflowStarted],
+    [projectId, substrate, permissionMode, onWorkflowStarted],
   );
 
   const handleStartRun = async () => {
@@ -227,6 +254,30 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
           <option value="sdk">SDK (default)</option>
           <option value="interactive">Interactive (PTY)</option>
         </select>
+      </div>
+
+      {/* Per-run agent permission selector — overrides the global default for
+          this run only (highest-precedence `requestedMode` rung). Mirrors the
+          global control in Settings.tsx. */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-text-secondary">Agent permission</span>
+        {PERMISSION_MODE_OPTIONS.map(({ id, label, hint }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setPermissionMode(id)}
+            aria-pressed={permissionMode === id}
+            aria-label={`Permission mode: ${label}`}
+            className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+              permissionMode === id
+                ? 'border-interactive bg-interactive-surface'
+                : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+            }`}
+          >
+            <span className="text-text-primary font-medium text-sm">{label}</span>
+            <span className="text-xs text-text-tertiary">{hint}</span>
+          </button>
+        ))}
       </div>
 
       {/* Interactive-substrate v1 caveats — surfaced prominently ONLY when the

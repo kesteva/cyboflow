@@ -13,7 +13,7 @@
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // tRPC mock — override the global setup.ts stub to add runs.start.mutate and
@@ -113,7 +113,9 @@ vi.mock('../../../utils/api', () => ({
 // Import after mocks so vi.mock hoisting is in effect
 import { WorkflowPicker } from '../WorkflowPicker';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useConfigStore } from '../../../stores/configStore';
 import { panelApi } from '../../../services/panelApi';
+import type { AppConfig } from '../../../types/config';
 import { API } from '../../../utils/api';
 import { trpc } from '../../../trpc/client';
 import type { ToolPanel } from '../../../../../shared/types/panels';
@@ -328,11 +330,13 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     expect(mockRunStart).toHaveBeenCalledOnce();
     // Phase 3: the run launches INSIDE a session. With no active session the
     // helper creates one (createQuick → 'session-quick-001') and threads its id.
+    // permissionMode seeds from the (empty) configStore → the 'default' floor.
     expect(mockRunStart).toHaveBeenCalledWith({
       workflowId: 'wf-1',
       projectId: 1,
       substrate: 'sdk',
       sessionId: 'session-quick-001',
+      permissionMode: 'default',
     });
   });
 
@@ -355,6 +359,7 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       projectId: 1,
       substrate: 'interactive',
       sessionId: 'session-quick-001',
+      permissionMode: 'default',
     });
   });
 
@@ -385,6 +390,62 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     // Approval gating DID ship for the interactive substrate (TASK-810), so the
     // "approval routing unavailable" caveat must NOT appear.
     expect(caveats).not.toHaveTextContent(/approval routing/i);
+  });
+});
+
+describe('WorkflowPicker — agent permission selector (per-run override)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    // Sprint flow so "Start Run" hits the DIRECT launch path (not the Planner gate).
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+  });
+
+  afterEach(() => {
+    // Reset the config store so a seeded default doesn't bleed into other suites.
+    useConfigStore.setState({ config: null });
+  });
+
+  it('renders the four agent-permission options', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    expect(await screen.findByLabelText('Permission mode: Ask before edits')).toBeInTheDocument();
+    expect(screen.getByLabelText('Permission mode: Allow edits')).toBeInTheDocument();
+    expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
+    expect(screen.getByLabelText("Permission mode: Don't ask")).toBeInTheDocument();
+  });
+
+  it('forwards an explicit per-run override picked in the selector', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const autoBtn = await screen.findByLabelText('Permission mode: Auto');
+    await act(async () => {
+      fireEvent.click(autoBtn);
+    });
+
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'auto' }));
+  });
+
+  it('seeds the selector from the global default in the config store', async () => {
+    // A non-default global default must seed the picker so an untouched run
+    // forwards it (never silently clobbering the global down to 'default').
+    useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'dontAsk' }));
   });
 });
 
@@ -441,6 +502,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       projectId: 1,
       substrate: 'sdk',
       sessionId: 'session-quick-001',
+      permissionMode: 'default',
       ideaId: 'IDEA-9',
     });
   });
@@ -483,6 +545,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       projectId: 1,
       substrate: 'sdk',
       sessionId: 'session-quick-001',
+      permissionMode: 'default',
     });
 
     // setActiveRun nested the run under its parent session: BOTH ids are set.
@@ -515,6 +578,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       projectId: 1,
       substrate: 'sdk',
       sessionId: 'session-existing-007',
+      permissionMode: 'default',
     });
 
     await waitFor(() => {
