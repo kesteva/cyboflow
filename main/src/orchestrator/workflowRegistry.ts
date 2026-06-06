@@ -426,6 +426,7 @@ export class WorkflowRegistry {
     workflowId: string,
     requestedSubstrate?: CliSubstrate,
     sessionId?: string,
+    requestedPermissionMode?: PermissionMode,
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -434,13 +435,16 @@ export class WorkflowRegistry {
 
     const runId = randomUUID().replace(/-/g, '');
 
-    // Resolve the agent permission mode via the override ladder. The column's
-    // 'default' sentinel means "unset → fall through to the global default", so
-    // it is passed as undefined frontmatterMode; any explicit opt-in value on
-    // the column wins. The per-run override rung (requestedMode) is DEFERRED.
+    // Resolve the agent permission mode via the override ladder. The explicit
+    // per-run UI choice (requestedPermissionMode, from WorkflowPicker →
+    // runs.start → RunLauncher.launch) is the HIGHEST-precedence rung and is
+    // threaded here. The column's 'default' sentinel means "unset → fall through
+    // to the global default", so it is passed as undefined frontmatterMode; any
+    // explicit opt-in value on the column wins below the per-run override.
     const frontmatterMode =
       workflow.permission_mode === 'default' ? undefined : workflow.permission_mode;
     const permissionMode = resolvePermissionMode({
+      requestedMode: requestedPermissionMode,
       frontmatterMode,
       globalDefaultMode: this.config?.getDefaultAgentPermissionMode(),
     });

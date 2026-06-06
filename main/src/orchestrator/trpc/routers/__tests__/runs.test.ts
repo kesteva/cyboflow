@@ -348,10 +348,11 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, ideaId: 'IDEA-7' });
 
       // With an ideaId present, start calls the full-form launch — substrate +
-      // taskId undefined, ideaId in the 5th slot, sessionId (6th) undefined — so
-      // the launcher writes workflow_runs.seed_idea_id directly (no stage derivation).
+      // taskId undefined, ideaId in the 5th slot, sessionId (6th) +
+      // requestedPermissionMode (7th) undefined — so the launcher writes
+      // workflow_runs.seed_idea_id directly (no stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -381,10 +382,45 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-7' });
 
       // With a sessionId present, start calls the full-form launch — substrate +
-      // taskId + ideaId undefined, sessionId in the 6th slot — so the launcher
-      // hosts the run inside the session's existing worktree.
+      // taskId + ideaId undefined, sessionId in the 6th slot, requestedPermissionMode
+      // (7th) undefined — so the launcher hosts the run inside the session's
+      // existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7');
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined);
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a4) permissionMode supplied (WorkflowPicker) → full-form launch carrying the
+  // per-run agent permission override into the 7th launch slot.
+  // -------------------------------------------------------------------------
+  it('(a4) permissionMode supplied → forwards the full-form launch with the per-run override', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-perm',
+      worktreePath: '/tmp/wt/perm',
+      branchName: 'cyboflow/sprint/perm1234',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, permissionMode: 'auto' });
+
+      // With only permissionMode present, start leaves the legacy 2-arg shape (the
+      // all-undefined check now includes permissionMode) and calls the full-form
+      // launch — substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto'
+      // in the 7th slot.
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto');
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

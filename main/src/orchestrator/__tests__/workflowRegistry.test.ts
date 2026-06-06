@@ -547,6 +547,27 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('an explicit per-run requestedPermissionMode beats frontmatter and the global default', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // Frontmatter opt-in 'dontAsk' AND injected global default 'auto' are both
+        // present — the per-run override must outrank both.
+        const content = `---\npermission_mode: dontAsk\n---\n`;
+        const path = writeTempMd(tmpDir, 'per-run-override.md', content);
+        const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, makeConfig('auto'));
+        cfgRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // requestedPermissionMode = 'acceptEdits' is the HIGHEST-precedence rung.
+        const result = cfgRegistry.createRun(workflowId, undefined, undefined, 'acceptEdits');
+
+        expect(result.permissionMode).toBe('acceptEdits');
+        interface SnapshotRow { permission_mode_snapshot: string }
+        const row = db.prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?').get(result.runId) as SnapshotRow;
+        expect(row.permission_mode_snapshot).toBe('acceptEdits');
+      });
+    });
+
     it("floors to 'default' when no config is injected and the column is 'default' (test-fixture path)", async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'no-config-floor.md', '---\n---\n');

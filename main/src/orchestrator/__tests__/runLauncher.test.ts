@@ -264,8 +264,55 @@ describe('RunLauncher.launch', () => {
 
       // The explicit per-run substrate choice must be forwarded to createRun as
       // its 2nd argument (the bug: it was previously dropped as `_substrate`).
-      // The 3rd arg (sessionId) is undefined on the legacy no-session launch.
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined);
+      // The 3rd arg (sessionId) and 4th arg (requestedPermissionMode) are
+      // undefined on the legacy no-session, no-permission-override launch.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined, undefined);
+    });
+  });
+
+  it('threads the per-run agent permission choice into WorkflowRegistry.createRun', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const createRunSpy = vi.fn(() => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'auto')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'auto' as const };
+      });
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: join(tmpDir, 'wt'),
+          branchName: 'cyboflow/sprint/x',
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      // sessionId omitted (undefined), requestedPermissionMode = 'auto'.
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, undefined, 'auto');
+
+      // The explicit per-run permission choice must be forwarded to createRun as
+      // its 4th argument (the highest-precedence `requestedMode` rung).
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, undefined, 'auto');
     });
   });
 
@@ -1137,8 +1184,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
-      // createRun received the sessionId as its 3rd argument.
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1');
+      // createRun received the sessionId as its 3rd argument; the 4th
+      // (requestedPermissionMode) is undefined on this no-override launch.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1', undefined);
 
       // NO dedicated worktree was created — the run reuses the session tree.
       expect(createDeterministicWorktree).not.toHaveBeenCalled();

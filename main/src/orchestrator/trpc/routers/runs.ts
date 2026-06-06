@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure, throwNotImplemented } from '../trpc';
 import type { StuckInspectionResult } from '../../../../../shared/types/stuckInspection';
-import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
+import type { WorkflowRunListRow, WorkflowDefinition, WorkflowStepState, PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
@@ -100,12 +100,16 @@ export interface RunLauncherLike {
    * is the planner's pre-launch seed idea (migration 017), written DIRECTLY to
    * workflow_runs.seed_idea_id (NOT routed through the task-stage deriver);
    * `sessionId` hosts the run inside an existing session's worktree (session<->run
-   * restructure, Phase 1 / migration 019). All are OPTIONAL — when substrate is
-   * omitted the run falls through the resolver ladder to DEFAULT_SUBSTRATE ('sdk');
-   * when taskId / ideaId are omitted no link is recorded; when sessionId is omitted
-   * the run creates its own dedicated worktree (legacy path).
+   * restructure, Phase 1 / migration 019); `requestedPermissionMode` carries the
+   * user's per-run agent-permission choice (WorkflowPicker) down to the resolver's
+   * highest-precedence `requestedMode` rung in WorkflowRegistry.createRun. All are
+   * OPTIONAL — when substrate is omitted the run falls through the resolver ladder
+   * to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no link is
+   * recorded; when sessionId is omitted the run creates its own dedicated worktree
+   * (legacy path); when requestedPermissionMode is omitted the permission ladder
+   * falls through to frontmatter → global default → 'default'.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -556,6 +560,12 @@ export const runsRouter = router({
       // instead of creating its own. DORMANT in Phase 1 — no caller passes it yet
       // (the frontend wires it in Phase 3).
       sessionId: z.string().min(1).optional(),
+      // Optional per-run agent permission override (WorkflowPicker). When supplied,
+      // it is the HIGHEST-precedence rung of the permission ladder in
+      // WorkflowRegistry.createRun (requestedMode > frontmatter > global > 'default'),
+      // stamped immutably onto workflow_runs.permission_mode_snapshot. When omitted
+      // the run inherits the global default — byte-identical to before.
+      permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -572,16 +582,17 @@ export const runsRouter = router({
         });
       }
       // Forward the per-run substrate choice (IDEA-013), native-task link
-      // (migration 014), planner seed idea (migration 017), and session host
-      // (Phase 1 / migration 019). When ALL are omitted, call the legacy 2-arg
-      // shape so the resolver ladder owns the substrate decision and the
+      // (migration 014), planner seed idea (migration 017), session host
+      // (Phase 1 / migration 019), and per-run agent permission override
+      // (WorkflowPicker). When ALL are omitted, call the legacy 2-arg shape so the
+      // resolver ladder owns the substrate/permission decisions and the
       // SDK-default call site stays byte-identical (zero-behavior-change floor);
       // otherwise pass all (any may be undefined, which the launcher treats as
       // "no link / no host / resolver default").
       const { runId, worktreePath, branchName } =
-        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined
+        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined && input.permissionMode === undefined
           ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
-          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId);
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId, input.permissionMode);
       return { runId, worktreePath, branchName };
     }),
 

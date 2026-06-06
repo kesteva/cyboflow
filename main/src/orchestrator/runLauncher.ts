@@ -173,6 +173,11 @@ export class RunLauncher {
     // is hosted inside this session's existing worktree instead of creating its
     // own. OPTIONAL + DORMANT in Phase 1 (no caller passes it yet).
     sessionId?: string,
+    // The user's explicit per-run agent-permission choice (WorkflowPicker),
+    // threaded to the highest-precedence `requestedMode` rung of the permission
+    // ladder in WorkflowRegistry.createRun. OPTIONAL — when omitted the ladder
+    // falls through to frontmatter → global default → 'default'.
+    requestedPermissionMode?: PermissionMode,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -204,7 +209,7 @@ export class RunLauncher {
       }
     }
 
-    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate, sessionId);
+    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate, sessionId, requestedPermissionMode);
 
     try {
       const { worktreePath, branchName } = sessionId
