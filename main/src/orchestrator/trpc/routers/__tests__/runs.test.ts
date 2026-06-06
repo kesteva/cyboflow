@@ -59,9 +59,11 @@ import * as path from 'path';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
-import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps } from '../runs';
+import { setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps } from '../runs';
 import type { RunWorktreeManagerLike, RelayDeps } from '../runs';
 import type { CancelRunDeps, CancelRunResult } from '../../../cancelRunHandler';
+import type { PauseRunDeps, PauseRunResult } from '../../../pauseRunHandler';
+import type { ResumeRunDeps, ResumeRunResult } from '../../../resumeRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
@@ -596,6 +598,142 @@ describe('cyboflow.runs.cancel (Phase 4a)', () => {
 
       expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
       expect(stopLiveRun).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.pause / cyboflow.runs.resume — SDK-only Pause/Resume (Phase 4b,
+// router delegation).
+//
+// The handlers' full guard matrices are covered in pauseRunHandler.test.ts /
+// resumeRunHandler.test.ts; here we verify that once wired the router forwards
+// { runId } to the injected handler deps and returns the result verbatim. Fake
+// dep bags are injected via setPauseRunDeps() / setResumeRunDeps() so the test
+// stays free of the SubstrateDispatchFacade / services-*. The
+// METHOD_NOT_SUPPORTED-when-unwired path is covered by the separately-loaded
+// module instance in router.test.ts (per-file module isolation guarantees the
+// deps are null there) — same rationale documented for runs.start above.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.pause (Phase 4b)', () => {
+  /** A PauseRunDeps whose collaborators are vi.fn() spies over a real in-memory DB. */
+  function makeFakePauseDeps(
+    db: Database.Database,
+    overrides?: Partial<PauseRunDeps>,
+  ): PauseRunDeps {
+    return {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      stopLiveRun: vi.fn<PauseRunDeps['stopLiveRun']>().mockResolvedValue(undefined),
+      clearPendingApprovalsForRun: vi.fn<PauseRunDeps['clearPendingApprovalsForRun']>(),
+      clearPendingQuestionsForRun: vi.fn<NonNullable<PauseRunDeps['clearPendingQuestionsForRun']>>(),
+      emitRunStatusChanged: vi.fn<PauseRunDeps['emitRunStatusChanged']>(),
+      ...overrides,
+    };
+  }
+
+  function makePauseDb(): Database.Database {
+    return createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+  }
+
+  it('(b) delegates to the handler and returns { success: true } for a running SDK run', async () => {
+    const db = makePauseDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'sdk', claude_session_id = 'sess-1' WHERE id = ?").run(runId);
+    const stopLiveRun = vi.fn<PauseRunDeps['stopLiveRun']>().mockResolvedValue(undefined);
+    const emitRunStatusChanged = vi.fn<PauseRunDeps['emitRunStatusChanged']>();
+    setPauseRunDeps(makeFakePauseDeps(db, { stopLiveRun, emitRunStatusChanged }));
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: PauseRunResult = await caller.cyboflow.runs.pause({ runId });
+
+      expect(result).toEqual({ success: true });
+      expect(stopLiveRun).toHaveBeenCalledWith(runId);
+      expect(emitRunStatusChanged).toHaveBeenCalledWith(runId, 'paused');
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('paused');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(b2) forwards a noOp { reason: interactive_unsupported } result verbatim', async () => {
+    const db = makePauseDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'interactive', claude_session_id = 'sess-1' WHERE id = ?").run(runId);
+    const stopLiveRun = vi.fn<PauseRunDeps['stopLiveRun']>().mockResolvedValue(undefined);
+    setPauseRunDeps(makeFakePauseDeps(db, { stopLiveRun }));
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: PauseRunResult = await caller.cyboflow.runs.pause({ runId });
+
+      expect(result).toEqual({ noOp: true, reason: 'interactive_unsupported' });
+      expect(stopLiveRun).not.toHaveBeenCalled();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('cyboflow.runs.resume (Phase 4b)', () => {
+  function makeResumeDb(): Database.Database {
+    return createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+  }
+
+  it('forwards a delivered resume: flips the run to running and returns { delivered: true }', async () => {
+    const db = makeResumeDb();
+    const { runId } = seedRun(db, { status: 'paused' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'sdk', claude_session_id = 'sess-1' WHERE id = ?").run(runId);
+
+    const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
+    const setPendingResume = vi.fn<(id: string) => void>();
+    const emitRunStatusChanged = vi.fn<ResumeRunDeps['emitRunStatusChanged']>();
+    setResumeRunDeps({
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: { setPendingResume, execute },
+      emitRunStatusChanged,
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: ResumeRunResult = await caller.cyboflow.runs.resume({ runId });
+
+      expect(result).toEqual({ delivered: true });
+      expect(setPendingResume).toHaveBeenCalledWith(runId);
+      expect(execute).toHaveBeenCalledWith(runId);
+      expect(emitRunStatusChanged).toHaveBeenCalledWith(runId, 'running');
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+      expect(row.status).toBe('running');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('forwards a noOp result verbatim (guard: not_paused)', async () => {
+    const db = makeResumeDb();
+    const { runId } = seedRun(db, { status: 'running' });
+    db.prepare("UPDATE workflow_runs SET substrate = 'sdk', claude_session_id = 'sess-1' WHERE id = ?").run(runId);
+
+    const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
+    setResumeRunDeps({
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: { setPendingResume: vi.fn(), execute },
+      emitRunStatusChanged: vi.fn<ResumeRunDeps['emitRunStatusChanged']>(),
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      const result: ResumeRunResult = await caller.cyboflow.runs.resume({ runId });
+
+      expect(result).toEqual({ noOp: true, reason: 'not_paused' });
+      expect(execute).not.toHaveBeenCalled();
     } finally {
       db.close();
     }

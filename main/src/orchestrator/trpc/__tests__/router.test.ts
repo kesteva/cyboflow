@@ -105,6 +105,23 @@ describe('appRouter (createCaller)', () => {
     );
   });
 
+  // cyboflow.runs.pause / resume are live (Phase 4b, SDK-only) but throw
+  // METHOD_NOT_SUPPORTED until setPauseRunDeps() / setResumeRunDeps() are wired at
+  // boot — this default caller has no deps wired, so the unwired-deps guard fires
+  // (same stub-guard family as runs.cancel). Handler + wired-delegation coverage
+  // lives in pauseRunHandler.test.ts / resumeRunHandler.test.ts and runs.test.ts.
+  it('cyboflow.runs.pause throws METHOD_NOT_SUPPORTED when deps not wired', async () => {
+    await expect(caller.cyboflow.runs.pause({ runId: 'run-1' })).rejects.toSatisfy(
+      isNotImplemented,
+    );
+  });
+
+  it('cyboflow.runs.resume throws METHOD_NOT_SUPPORTED when deps not wired', async () => {
+    await expect(caller.cyboflow.runs.resume({ runId: 'run-1' })).rejects.toSatisfy(
+      isNotImplemented,
+    );
+  });
+
   // cyboflow.runs.get is live (Phase 4a) — it reads ctx.db directly. With the
   // default caller (no db in context) it throws PRECONDITION_FAILED, not the old
   // NOT_IMPLEMENTED stub. Happy-path + NOT_FOUND coverage lives in runs.test.ts.

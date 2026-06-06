@@ -34,7 +34,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps } from './orchestrator/trpc/routers/runs';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -1018,6 +1018,45 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.cancel deps wired');
+
+    // Phase 4b — SDK-only Pause/Resume. Pause is the NON-terminal twin of Cancel:
+    // it stops the active SDK turn (via the SAME substrateFacade.abort kill seam)
+    // and parks the run in `paused`, PRESERVING claude_session_id +
+    // current_step_id. It reuses the SAME `db`, `runQueues`, ApprovalRouter /
+    // QuestionRouter accessors, and `loggerLike` as the Cancel wiring above, and
+    // emits on the SAME `runStatusEvents` 'changed' channel so the rail /
+    // action-bar (activeRunsStore) reacts. Like Cancel the bag has NO worktree
+    // collaborator — Pause never touches git. SDK-only is enforced inside the
+    // handler (it refuses a non-sdk run before any kill / DB write).
+    setPauseRunDeps({
+      db,
+      runQueues,
+      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      clearPendingApprovalsForRun: (runId: string) =>
+        ApprovalRouter.getInstance().clearPendingForRun(runId),
+      clearPendingQuestionsForRun: (runId: string) =>
+        QuestionRouter.getInstance().clearPendingForRun(runId),
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      logger: loggerLike,
+    });
+    console.log('[Main] runs.pause deps wired');
+
+    // Resume re-drives the SAME SDK conversation via the executor's --resume path.
+    // It uses the SAME module-scoped RunExecutor instance nudge uses (so the
+    // executor's pendingResume / pendingNudge maps are shared), flips the run
+    // paused -> running, and re-drives execute(runId) with the executor marked for
+    // resume (continue prompt + claude_session_id threaded as the SDK resume id).
+    // emitRunStatusChanged rides the SAME runStatusEvents 'changed' channel.
+    setResumeRunDeps({
+      db,
+      runQueues,
+      runExecutor,
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      logger: loggerLike,
+    });
+    console.log('[Main] runs.resume deps wired');
 
     setStartRunDeps({
       runLauncher,

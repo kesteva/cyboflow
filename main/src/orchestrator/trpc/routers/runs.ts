@@ -39,6 +39,16 @@ import {
   type NudgeRunDeps,
   type NudgeRunResult,
 } from '../../nudgeRunHandler';
+import {
+  pauseRunHandler,
+  type PauseRunDeps,
+  type PauseRunResult,
+} from '../../pauseRunHandler';
+import {
+  resumeRunHandler,
+  type ResumeRunDeps,
+  type ResumeRunResult,
+} from '../../resumeRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +100,47 @@ let cancelRunDeps: CancelRunDeps | null = null;
  */
 export function setCancelRunDeps(deps: CancelRunDeps): void {
   cancelRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// pause / resume dependency bags (session<->run restructure, Phase 4b —
+// SDK-ONLY Pause/Resume)
+//
+// Pause is the NON-terminal, git-neutral twin of Cancel: it stops the active SDK
+// turn and parks the run in `paused`, PRESERVING claude_session_id +
+// current_step_id so Resume can re-drive the SAME conversation via the SDK
+// --resume path. Both are SDK-ONLY — the handlers refuse a non-sdk run (the
+// interactive substrate is fresh-session-only with no native --resume). Like
+// Cancel, neither bag carries a WorktreeManager collaborator — they NEVER touch
+// git. Until wired the mutations throw METHOD_NOT_SUPPORTED — same stub pattern as
+// the other dep-bags.
+// ---------------------------------------------------------------------------
+
+let pauseRunDeps: PauseRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the SDK-only `pause` mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry,
+ * SubstrateDispatchFacade, ApprovalRouter, and QuestionRouter are constructed.
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setPauseRunDeps(deps: PauseRunDeps): void {
+  pauseRunDeps = deps;
+}
+
+let resumeRunDeps: ResumeRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the SDK-only `resume` mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry, and
+ * RunExecutor (the SAME module-scoped instance nudge uses, so the executor's
+ * pendingResume / pendingNudge maps are shared) are constructed. Until this is
+ * called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setResumeRunDeps(deps: ResumeRunDeps): void {
+  resumeRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +677,74 @@ export const runsRouter = router({
         });
       }
       return cancelRunHandler(input.runId, cancelRunDeps);
+    }),
+
+  /**
+   * SDK-only Pause of a running workflow run (session<->run restructure, Phase 4b).
+   *
+   * Stops the active SDK turn (via the SubstrateDispatchFacade kill seam injected
+   * as pauseRunDeps.stopLiveRun) and parks the run in the NON-terminal `paused`
+   * status, PRESERVING claude_session_id + current_step_id so Resume can re-drive
+   * the SAME conversation. Like Cancel it is git-neutral (no worktree removal /
+   * merge / branch delete) and safe for a session-hosted run, so it deliberately
+   * does NOT call assertNotSessionHosted.
+   *
+   * SDK-ONLY: the interactive substrate is fresh-session-only (no native --resume),
+   * so the handler refuses a non-sdk run with { noOp: 'interactive_unsupported' }
+   * and the UI disables Pause for interactive runs.
+   *
+   * Returns:
+   *   { success: true }      — the run was paused.
+   *   { noOp: true; reason } — 'not_found' / 'interactive_unsupported' /
+   *                            'not_pausable' (not running|awaiting_review) /
+   *                            'no_session' (no captured claude_session_id) /
+   *                            'race' (a concurrent transition won).
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setPauseRunDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  pause: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<PauseRunResult> => {
+      if (!pauseRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'pause-run deps not wired yet. Call setPauseRunDeps() at boot.',
+        });
+      }
+      return pauseRunHandler(input.runId, pauseRunDeps);
+    }),
+
+  /**
+   * SDK-only Resume of a paused workflow run (session<->run restructure, Phase 4b).
+   *
+   * Flips the run paused -> running and re-drives execute(runId) with the executor
+   * in resume mode: it threads the PRESERVED claude_session_id as the SDK resume id
+   * (so the SAME conversation continues) and sends a minimal CONTINUE prompt (the
+   * base workflow prompt is already in the resumed SDK history).
+   *
+   * SDK-ONLY: the interactive substrate has no native --resume, so the handler
+   * refuses a non-sdk run with { noOp: 'interactive_unsupported' }.
+   *
+   * Returns:
+   *   { delivered: true }    — the run was flipped to running and re-driven.
+   *   { noOp: true; reason } — 'not_found' / 'interactive_unsupported' /
+   *                            'not_paused' / 'no_session' / 'race' /
+   *                            'execute_failed'.
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setResumeRunDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  resume: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<ResumeRunResult> => {
+      if (!resumeRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'resume-run deps not wired yet. Call setResumeRunDeps() at boot.',
+        });
+      }
+      return resumeRunHandler(input.runId, resumeRunDeps);
     }),
 
   /**

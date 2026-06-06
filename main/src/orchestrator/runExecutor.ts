@@ -174,6 +174,17 @@ export interface StepTransitionEmitterLike {
  */
 export type ExecutionPhase = 'pre_spawn' | 'post_spawn' | 'sdk_initialized' | 'drained' | 'failed' | 'canceled';
 
+/**
+ * Minimal CONTINUE prompt sent on a RESUME turn (Phase 4b — SDK-only Pause/Resume).
+ *
+ * Unlike a nudge (free-form human text), Resume carries no user message: it simply
+ * re-drives the PAUSED run on the SAME SDK conversation (execute() threads the run's
+ * claude_session_id as resumeSessionId). The base workflow prompt is already in the
+ * resumed history, so getPrompt() returns this short nudge-to-continue instead of
+ * re-sending it.
+ */
+export const RESUME_CONTINUE_PROMPT = 'Continue.';
+
 export class RunExecutor {
   /**
    * Per-run bridge handles, keyed by runId.
@@ -211,6 +222,23 @@ export class RunExecutor {
    * the same run is a clean fresh turn.
    */
   private pendingNudge = new Map<string, string>();
+
+  /**
+   * Per-run RESUME flag (Phase 4b — SDK-only Pause/Resume). Set by
+   * setPendingResume() before resumeRunHandler re-drives execute() on a run that
+   * was PAUSED (status flipped paused -> running by the handler). It is the
+   * human-text-less twin of pendingNudge: when a run is in resume mode, execute()
+   * threads the run's claude_session_id as the SDK resume id (so the SAME
+   * conversation continues) and getPrompt() returns a minimal CONTINUE prompt
+   * (the base workflow prompt is already in the resumed SDK history). Cleared by
+   * teardownRun() so a later execute() of the same run is a clean fresh turn.
+   *
+   * A Set (not a Map) because resume carries no payload — the continue prompt is
+   * a fixed sentinel. pendingNudge wins over pendingResume in getPrompt/execute
+   * (a nudge is a more specific resumed turn), though in practice a run is never
+   * in both modes at once.
+   */
+  private pendingResume = new Set<string>();
 
   /**
    * Per-run error messages stashed in execute()'s catch arm before firing the
@@ -349,13 +377,16 @@ export class RunExecutor {
         worktreePath: run.worktree_path,
       });
 
-      // Piece C — idle-chat nudge resume. When a pending nudge exists AND the
-      // run captured a claude_session_id on a prior turn, thread it as the
-      // explicit SDK resume id so the agent continues the SAME conversation.
-      // On a fresh run (no pending nudge) this is undefined and the spawn
-      // options stay byte-identical (zero-behavior-change floor).
+      // Resume the SAME SDK conversation when EITHER a Piece-C nudge OR a Phase-4b
+      // Pause/Resume is pending AND the run captured a claude_session_id on a prior
+      // turn. The captured id is threaded as the explicit SDK resume id so the agent
+      // continues the SAME conversation instead of starting fresh. On a plain fresh
+      // run (neither pending) this is undefined and the spawn options stay
+      // byte-identical (zero-behavior-change floor).
       const resumeSessionId =
-        (this.pendingNudge.has(runId) && run.claude_session_id) || undefined;
+        ((this.pendingNudge.has(runId) || this.pendingResume.has(runId)) &&
+          run.claude_session_id) ||
+        undefined;
 
       try {
         await this.spawner.spawnCliProcess({
@@ -476,6 +507,24 @@ export class RunExecutor {
   }
 
   /**
+   * Mark a run for RESUME (Phase 4b — SDK-only Pause/Resume).
+   *
+   * Called by resumeRunHandler immediately before it re-drives execute(runId) on a
+   * run it just flipped paused -> running. The next getPrompt(runId) returns the
+   * minimal CONTINUE prompt (RESUME_CONTINUE_PROMPT) instead of re-sending the base
+   * workflow prompt, and execute() threads the run's claude_session_id as the SDK
+   * resume id so the SAME conversation continues. The flag is cleared by
+   * teardownRun() when that turn drains, so a later execute() of the same run is a
+   * clean fresh turn.
+   *
+   * SDK-path only by construction: the interactive substrate has no native
+   * --resume and resumeRunHandler refuses non-sdk runs before reaching here.
+   */
+  setPendingResume(runId: string): void {
+    this.pendingResume.add(runId);
+  }
+
+  /**
    * Dispose the bridge handle and remove the panelId for the given runId.
    * Also clears the stashed systemPromptAppend + pending nudge to prevent leaks
    * across runs. Safe to call multiple times (idempotent).
@@ -500,6 +549,7 @@ export class RunExecutor {
     this.activePanelIds.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
+    this.pendingResume.delete(runId);
     this.pendingFailedMessage.delete(runId);
     this.pendingFailedFromStatus.delete(runId);
   }
@@ -542,15 +592,18 @@ export class RunExecutor {
    *
    * Throws NOT_IMPLEMENTED if neither a reader nor a subclass override is available.
    *
-   * Injection branches (shared seam for Piece A + Piece C). After resolving the
-   * base prompt + stashing systemPromptAppend, the run state is read via the
-   * already-held registry (no interface widening) and composed in priority order:
+   * Injection branches (shared seam for Piece A + Piece C + Phase 4b). After
+   * resolving the base prompt + stashing systemPromptAppend, the run state is read
+   * via the already-held registry (no interface widening) and composed in priority
+   * order:
    *   1. (Piece C) pending nudge → return JUST the trimmed nudge text (the
    *      resumed conversation already holds planner.md; do NOT re-send it).
-   *   2. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
+   *   2. (Phase 4b) pending resume → return the minimal CONTINUE prompt (the
+   *      resumed conversation already holds the base prompt; do NOT re-send it).
+   *   3. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
    *      `# Selected idea` block to the MAIN prompt (never systemPromptAppend,
    *      which is invisible to the chat transcript).
-   *   3. neither → return the base prompt verbatim (zero-behavior-change floor).
+   *   4. none → return the base prompt verbatim (zero-behavior-change floor).
    *
    * @param runId    The workflow run ID — used to stash systemPromptAppend.
    * @param workflow The workflow row containing workflow_path.
@@ -573,6 +626,16 @@ export class RunExecutor {
     const nudge = this.pendingNudge.get(runId)?.trim();
     if (nudge) {
       return Promise.resolve(nudge);
+    }
+
+    // Phase 4b — Resume. When a run is in resume mode (no human text) return the
+    // minimal CONTINUE prompt: this turn RESUMES the SDK conversation (execute()
+    // threads claude_session_id as resumeSessionId), so the base workflow prompt is
+    // already in the resumed history and must NOT be re-sent. Checked AFTER the
+    // nudge branch (a nudge's free-form text is more specific) but ahead of the
+    // seed-idea branch (which only applies to a fresh planner launch).
+    if (this.pendingResume.has(runId)) {
+      return Promise.resolve(RESUME_CONTINUE_PROMPT);
     }
 
     // Piece A — seed-idea injection. Read the run via the already-held registry

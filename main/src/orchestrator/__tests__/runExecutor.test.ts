@@ -925,6 +925,114 @@ describe('RunExecutor — idle-chat nudge (migration 018)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Phase 4b (SDK-only Pause/Resume): getPrompt CONTINUE branch + resumeSessionId
+// threading in resume mode (setPendingResume — no human text).
+// ---------------------------------------------------------------------------
+
+import { RESUME_CONTINUE_PROMPT } from '../runExecutor';
+
+describe('RunExecutor — SDK-only Resume (Phase 4b)', () => {
+  it('getPrompt returns the minimal CONTINUE prompt (not the base prompt) when resume is pending', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingResume(run.id);
+    await executor.execute(run.id);
+
+    // The prompt is the CONTINUE sentinel — the base prompt ('PLAN BODY') is NOT re-sent.
+    expect(spawnedPrompt(spawner)).toBe(RESUME_CONTINUE_PROMPT);
+    expect(spawnedPrompt(spawner)).not.toContain('PLAN BODY');
+  });
+
+  it('threads resumeSessionId = claude_session_id into spawn options in resume mode', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-resume' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingResume(run.id);
+    await executor.execute(run.id);
+
+    expect(spawnedOpts(spawner).resumeSessionId).toBe('sess-resume');
+  });
+
+  it('does NOT thread resumeSessionId in resume mode when no claude_session_id exists', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no claude_session_id
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingResume(run.id);
+    await executor.execute(run.id);
+
+    // getPrompt still returns the CONTINUE sentinel, but no resume id is threaded.
+    expect(spawnedPrompt(spawner)).toBe(RESUME_CONTINUE_PROMPT);
+    expect(spawnedOpts(spawner).resumeSessionId).toBeUndefined();
+  });
+
+  it('a pending nudge WINS over a pending resume (nudge text, not the CONTINUE sentinel)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    executor.setPendingNudge(run.id, 'the nudge');
+    executor.setPendingResume(run.id);
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('the nudge');
+    expect(spawnedPrompt(spawner)).not.toBe(RESUME_CONTINUE_PROMPT);
+  });
+
+  it('teardownRun clears the resume flag — a second execute() is a clean fresh turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const executor = makeSeedExecutor(spawner, registry, reader);
+
+    // First turn: resume.
+    executor.setPendingResume(run.id);
+    await executor.execute(run.id);
+    expect(
+      ((spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions).prompt,
+    ).toBe(RESUME_CONTINUE_PROMPT);
+
+    // Second turn (no new resume): teardown cleared the flag → base prompt + no resume.
+    await executor.execute(run.id);
+    const secondOpts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[1][0] as ClaudeSpawnerOptions;
+    expect(secondOpts.prompt).toBe('PLAN BODY');
+    expect(secondOpts.resumeSessionId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-662: Lifecycle transition tests
 // ---------------------------------------------------------------------------
 
