@@ -52,6 +52,10 @@ const STATUS_DOT_CLASS: Record<string, string> = {
   starting: 'bg-status-info animate-pulse',
   running: 'bg-status-success animate-pulse',
   awaiting_review: 'bg-status-warning animate-pulse',
+  awaiting_input: 'bg-status-warning animate-pulse',
+  // Paused (SDK-only, Phase 4b) — at rest, so a STATIC (non-pulsing) amber dot,
+  // distinct from the pulsing awaiting_review/awaiting_input attention states.
+  paused: 'bg-status-warning',
   stuck: 'bg-status-error',
   completed: 'bg-status-neutral',
   failed: 'bg-status-error',

@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // setActiveRun starts a stream subscription — stub it so the store action is a no-op.
@@ -7,15 +7,43 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   subscribeToStreamEvents: vi.fn(() => vi.fn()),
 }));
 
+// Mock the tRPC client — the bar calls trpc.cyboflow.runs.pause / .resume.mutate.
+vi.mock('../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        pause: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        resume: { mutate: vi.fn().mockResolvedValue({ delivered: true }) },
+      },
+    },
+  },
+}));
+
+const mockShowError = vi.fn();
+vi.mock('../../../stores/errorStore', () => ({
+  useErrorStore: Object.assign(vi.fn(() => ({})), {
+    getState: vi.fn(() => ({ showError: mockShowError })),
+  }),
+}));
+
 import { RunActionBar } from '../RunActionBar';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+import { trpc } from '../../../trpc/client';
+
+const pauseMutate = (trpc.cyboflow.runs as unknown as {
+  pause: { mutate: ReturnType<typeof vi.fn> };
+}).pause.mutate;
+const resumeMutate = (trpc.cyboflow.runs as unknown as {
+  resume: { mutate: ReturnType<typeof vi.fn> };
+}).resume.mutate;
 
 const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
   id: 'run-1',
   workflow_id: 'wf-1',
   project_id: 1,
   status: 'running' as const,
+  substrate: 'sdk' as const,
   worktree_path: '/tmp/wt',
   branch_name: 'cyboflow/run-1',
   created_at: '',
@@ -28,6 +56,9 @@ const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  pauseMutate.mockResolvedValue({ success: true });
+  resumeMutate.mockResolvedValue({ delivered: true });
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
@@ -64,7 +95,7 @@ describe('RunActionBar', () => {
     expect(screen.getByTestId('run-action-cancel')).toBeInTheDocument();
   });
 
-  it.each(['queued', 'starting', 'running', 'awaiting_review', 'stuck', 'awaiting_input'])(
+  it.each(['queued', 'starting', 'running', 'awaiting_review', 'stuck', 'awaiting_input', 'paused'])(
     'shows Cancel for non-terminal status %s',
     (status) => {
       activate({ status });
@@ -98,5 +129,131 @@ describe('RunActionBar', () => {
     render(<RunActionBar onCancel={onCancel} />);
     fireEvent.click(screen.getByTestId('run-action-cancel'));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Pause (SDK-only, Phase 4b)
+  // -------------------------------------------------------------------------
+
+  it.each(['running', 'awaiting_review'])(
+    'shows an ENABLED Pause for an sdk run in status %s',
+    (status) => {
+      activate({ status, substrate: 'sdk' });
+      render(<RunActionBar onCancel={vi.fn()} />);
+      const pause = screen.getByTestId('run-action-pause');
+      expect(pause).toBeInTheDocument();
+      expect(pause).not.toBeDisabled();
+    },
+  );
+
+  it.each(['queued', 'starting', 'stuck', 'awaiting_input'])(
+    'hides Pause for an sdk run that is not pausable (status %s)',
+    (status) => {
+      activate({ status, substrate: 'sdk' });
+      render(<RunActionBar onCancel={vi.fn()} />);
+      expect(screen.queryByTestId('run-action-pause')).not.toBeInTheDocument();
+    },
+  );
+
+  it('renders Pause DISABLED for an interactive run (SDK-only)', () => {
+    activate({ status: 'running', substrate: 'interactive' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    const pause = screen.getByTestId('run-action-pause');
+    expect(pause).toBeInTheDocument();
+    expect(pause).toBeDisabled();
+    expect(pause).toHaveAttribute('title', 'Pause/Resume is SDK-only');
+  });
+
+  it('clicking a disabled (interactive) Pause does NOT call the pause route', () => {
+    activate({ status: 'running', substrate: 'interactive' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-pause'));
+    expect(pauseMutate).not.toHaveBeenCalled();
+  });
+
+  it('clicking Pause calls runs.pause with the active runId', async () => {
+    activate({ status: 'running', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-pause'));
+    await waitFor(() => {
+      expect(pauseMutate).toHaveBeenCalledWith({ runId: 'run-1' });
+    });
+    expect(mockShowError).not.toHaveBeenCalled();
+  });
+
+  it('a benign noOp pause result does NOT surface an error', async () => {
+    pauseMutate.mockResolvedValue({ noOp: true, reason: 'not_pausable' });
+    activate({ status: 'running', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-pause'));
+    await waitFor(() => {
+      expect(pauseMutate).toHaveBeenCalled();
+    });
+    expect(mockShowError).not.toHaveBeenCalled();
+  });
+
+  it('a rejected pause promise surfaces an error', async () => {
+    pauseMutate.mockRejectedValue(new Error('Network error'));
+    activate({ status: 'running', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-pause'));
+    await waitFor(() => {
+      expect(mockShowError).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Pause failed', error: 'Network error' }),
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Resume (SDK-only, Phase 4b)
+  // -------------------------------------------------------------------------
+
+  it('shows Resume only for a paused sdk run (and no Pause)', () => {
+    activate({ status: 'paused', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    expect(screen.getByTestId('run-action-resume')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-action-pause')).not.toBeInTheDocument();
+  });
+
+  it.each(['running', 'awaiting_review', 'starting', 'queued', 'stuck'])(
+    'hides Resume for non-paused status %s',
+    (status) => {
+      activate({ status, substrate: 'sdk' });
+      render(<RunActionBar onCancel={vi.fn()} />);
+      expect(screen.queryByTestId('run-action-resume')).not.toBeInTheDocument();
+    },
+  );
+
+  it('clicking Resume calls runs.resume with the active runId', async () => {
+    activate({ status: 'paused', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-resume'));
+    await waitFor(() => {
+      expect(resumeMutate).toHaveBeenCalledWith({ runId: 'run-1' });
+    });
+    expect(mockShowError).not.toHaveBeenCalled();
+  });
+
+  it('a benign noOp resume result does NOT surface an error', async () => {
+    resumeMutate.mockResolvedValue({ noOp: true, reason: 'not_paused' });
+    activate({ status: 'paused', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-resume'));
+    await waitFor(() => {
+      expect(resumeMutate).toHaveBeenCalled();
+    });
+    expect(mockShowError).not.toHaveBeenCalled();
+  });
+
+  it('a rejected resume promise surfaces an error', async () => {
+    resumeMutate.mockRejectedValue(new Error('boom'));
+    activate({ status: 'paused', substrate: 'sdk' });
+    render(<RunActionBar onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('run-action-resume'));
+    await waitFor(() => {
+      expect(mockShowError).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Resume failed', error: 'boom' }),
+      );
+    });
   });
 });

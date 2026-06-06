@@ -229,7 +229,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     // and so pinned the badge to RUNNING even after the run
                     // rested in awaiting_review). activeRun.status now stays
                     // fresh via activeRunsStore's onRunStatusChanged subscription.
+                    // A paused run is at rest: isRunning is already false for it,
+                    // and the `paused` prop swaps the running pill for the amber
+                    // PauseCircle badge (Phase 4b).
                     isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
+                    paused={activeRun?.status === 'paused'}
                   />
                 </div>
               )}

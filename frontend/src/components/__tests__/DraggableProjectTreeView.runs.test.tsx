@@ -180,6 +180,29 @@ vi.mock('../../utils/performanceUtils', () => ({
   throttle: (fn: (...args: unknown[]) => unknown) => fn,
 }));
 
+// Mock the activeRunsStore — the rail lists active workflow runs from here. We
+// drive its rows directly per-test so we can assert the workflow-run status dot
+// classes (e.g. the static amber 'paused' dot, Phase 4b) without standing up the
+// real tRPC subscriptions. `init` is a no-op; `refresh` resolves; selectors read
+// the seeded `runsByProject`.
+let mockRunsByProject: Record<number, unknown[]> = {};
+vi.mock('../../stores/activeRunsStore', () => {
+  // Full mocked store state — both the reactive selector path (runsByProject,
+  // refresh) and the getState path (init) read from here so every call site in
+  // the component resolves to a real value.
+  const state = () => ({
+    runsByProject: mockRunsByProject,
+    init: () => () => {},
+    refresh: async () => {},
+  });
+  return {
+    useActiveRunsStore: Object.assign(
+      (selector: (s: ReturnType<typeof state>) => unknown) => selector(state()),
+      { getState: state },
+    ),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // window.electronAPI stub factory
 // ---------------------------------------------------------------------------
@@ -222,6 +245,7 @@ beforeEach(() => {
   mockNavigateToSessions.mockReset();
   mockSetActiveProjectId.mockReset();
   mockCloseHumanReview.mockReset();
+  mockRunsByProject = {};
   // Default: project 1 pre-expanded
   Object.defineProperty(window, 'electronAPI', {
     writable: true,
@@ -399,5 +423,84 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(
       screen.queryByText('No open sessions. Start one with Quick Session.'),
     ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow-run status dot (Phase 4b paused visuals)
+// ---------------------------------------------------------------------------
+
+let runCounter = 0;
+function makeRun(overrides: Record<string, unknown> = {}) {
+  runCounter += 1;
+  return {
+    id: `run-${runCounter}-aaaaaaaa`,
+    workflow_id: 'wf-1',
+    project_id: 1,
+    status: 'running',
+    substrate: 'sdk',
+    worktree_path: '/tmp/wt',
+    branch_name: `branch-${runCounter}`,
+    session_id: null,
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
+    started_at: null,
+    ended_at: null,
+    stuck_reason: null,
+    workflowName: 'planner',
+    ...overrides,
+  };
+}
+
+describe('DraggableProjectTreeView — workflow-run status dots', () => {
+  beforeEach(() => {
+    mockSessions = [];
+  });
+
+  it('renders a STATIC (non-pulsing) amber dot for a paused run', async () => {
+    mockRunsByProject = { 1: [makeRun({ status: 'paused' })] };
+
+    await renderExpanded();
+
+    const pausedDot = await waitFor(() => {
+      const dot = document.querySelector('span[title="paused"]');
+      expect(dot).not.toBeNull();
+      return dot!;
+    });
+
+    // Amber/warning hue, and NOT animate-pulse (a paused run is at rest, distinct
+    // from the pulsing awaiting_review attention state).
+    expect(pausedDot.className).toContain('bg-status-warning');
+    expect(pausedDot.className).not.toContain('animate-pulse');
+  });
+
+  it('renders a PULSING amber dot for awaiting_review (distinct from paused)', async () => {
+    mockRunsByProject = { 1: [makeRun({ status: 'awaiting_review' })] };
+
+    await renderExpanded();
+
+    const reviewDot = await waitFor(() => {
+      const dot = document.querySelector('span[title="awaiting_review"]');
+      expect(dot).not.toBeNull();
+      return dot!;
+    });
+
+    expect(reviewDot.className).toContain('bg-status-warning');
+    expect(reviewDot.className).toContain('animate-pulse');
+  });
+
+  it('renders a pulsing amber dot for awaiting_input (consistency)', async () => {
+    mockRunsByProject = { 1: [makeRun({ status: 'awaiting_input' })] };
+
+    await renderExpanded();
+
+    const inputDot = await waitFor(() => {
+      const dot = document.querySelector('span[title="awaiting_input"]');
+      expect(dot).not.toBeNull();
+      return dot!;
+    });
+
+    expect(inputDot.className).toContain('bg-status-warning');
+    expect(inputDot.className).toContain('animate-pulse');
   });
 });

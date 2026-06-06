@@ -23,8 +23,11 @@
  *                       ENABLED for a free-form "nudge": the text re-spawns the
  *                       run with `--resume` (a follow-up turn on the same SDK
  *                       conversation) via `trpc.cyboflow.runs.nudge`. In any
- *                       other idle status (running / starting / stuck) the
- *                       textarea and Send button stay disabled with a tooltip.
+ *                       other idle status (running / starting / stuck / paused)
+ *                       the textarea and Send button stay disabled with a
+ *                       tooltip. A `paused` run (SDK-only Pause, Phase 4b) gets a
+ *                       distinct "Resume to continue" hint — the user must Resume
+ *                       from the run action bar before the chat re-enables.
  *
  *   none              — neither `runId` nor `activeQuickSessionId` is set;
  *                       renders nothing.
@@ -154,6 +157,11 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   // free-form follow-up that re-drives the (drained) SDK conversation. Any
   // other idle status (running / starting / stuck) keeps the input disabled.
   const isIdleNudgeable = mode === 'workflow-idle' && activeRun?.status === 'awaiting_review';
+  // A run parked in the NON-terminal 'paused' status (SDK-only Pause, Phase 4b)
+  // gets a DISABLED composer with a distinct hint — the user must Resume the run
+  // (run action bar) before the conversation can continue. Treated separately
+  // from the generic idle-disabled case so the messaging is unambiguous.
+  const isPaused = mode === 'workflow-idle' && activeRun?.status === 'paused';
   const isDisabled = mode === 'workflow-idle' && !isIdleNudgeable;
   const canSend = !isDisabled && text.trim().length > 0 && !isSending;
 
@@ -274,11 +282,13 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
         placeholder={
           mode === 'quick'
             ? 'Send a message…'
-            : isIdleNudgeable
-              ? 'Nudge the agent — continues the conversation…'
-              : mode === 'workflow-interactive'
-                ? 'Message the running session — relayed safely…'
-                : 'Type your answer…'
+            : isPaused
+              ? 'Run paused — Resume to continue'
+              : isIdleNudgeable
+                ? 'Nudge the agent — continues the conversation…'
+                : mode === 'workflow-interactive'
+                  ? 'Message the running session — relayed safely…'
+                  : 'Type your answer…'
         }
         disabled={isDisabled}
         rows={1}
@@ -341,7 +351,13 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     <div className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2">
       {statusBar}
       {isDisabled ? (
-        <Tooltip content="Input enabled when the agent asks a question or the run is awaiting your review">
+        <Tooltip
+          content={
+            isPaused
+              ? 'Run paused — Resume to continue the conversation'
+              : 'Input enabled when the agent asks a question or the run is awaiting your review'
+          }
+        >
           {composer}
         </Tooltip>
       ) : (

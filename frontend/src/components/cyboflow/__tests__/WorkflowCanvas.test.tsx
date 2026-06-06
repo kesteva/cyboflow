@@ -75,6 +75,53 @@ describe('WorkflowCanvas', () => {
     expect(pill).toHaveTextContent('running');
   });
 
+  it('renders an amber paused pill (NOT the running pill) when paused=true', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        workflowTitle="SPRINT-014"
+        runLabel="run-001"
+        // paused suppresses the running pill even if isRunning is (stale) true.
+        isRunning={true}
+        paused={true}
+        currentStepId="step-b"
+      />,
+    );
+
+    const pausedPill = screen.getByTestId('workflow-canvas-paused-pill');
+    expect(pausedPill).toBeInTheDocument();
+    expect(pausedPill).toHaveTextContent('paused');
+
+    // The running pill must NOT be present while paused.
+    expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
+  });
+
+  it('shows the running pill (not paused) when isRunning=true and paused is absent', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        runLabel="run-001"
+        isRunning={true}
+        currentStepId="step-b"
+      />,
+    );
+    expect(screen.getByTestId('workflow-canvas-running-pill')).toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-canvas-paused-pill')).not.toBeInTheDocument();
+  });
+
+  it('renders neither pill when not running and not paused', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        runLabel="run-001"
+        isRunning={false}
+        currentStepId="step-b"
+      />,
+    );
+    expect(screen.queryByTestId('workflow-canvas-running-pill')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-canvas-paused-pill')).not.toBeInTheDocument();
+  });
+
   it('renders folder (basename) + branch chips when folderPath/branchName are provided', () => {
     render(
       <WorkflowCanvas

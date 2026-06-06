@@ -492,6 +492,76 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
   });
 });
 
+describe('ChatInput — workflow paused (Phase 4b)', () => {
+  const RUN_ID = 'run-paused-001';
+  const PROJECT_ID = 11;
+
+  function makePausedRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-1',
+      project_id: PROJECT_ID,
+      status: 'paused',
+      substrate: 'sdk',
+      worktree_path: '/Users/me/worktrees/paused-x',
+      branch_name: 'planner/paused-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makePausedRow()] } });
+    });
+  });
+
+  it('disables the composer with the "Run paused — Resume to continue" placeholder', () => {
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).toBeDisabled();
+    expect(textarea.placeholder).toBe('Run paused — Resume to continue');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+  });
+
+  it('shows a distinct paused tooltip (not the awaiting-review hint)', () => {
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    const tooltipWrapper = textarea.closest('.relative.inline-block');
+    expect(tooltipWrapper).not.toBeNull();
+    fireEvent.mouseEnter(tooltipWrapper!);
+
+    expect(
+      screen.getByText('Run paused — Resume to continue the conversation'),
+    ).toBeInTheDocument();
+    // The generic idle hint must NOT be shown for a paused run.
+    expect(
+      screen.queryByText('Input enabled when the agent asks a question or the run is awaiting your review'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does NOT relay or nudge while paused', async () => {
+    render(<ChatInput runId={RUN_ID} />);
+
+    // Disabled textarea — typing + Enter must be a no-op (no transport call).
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'try to send' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+    expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChatInput — run status bar', () => {
   function makeRunRow(overrides: Partial<ActiveRunRow>): ActiveRunRow {
     return {

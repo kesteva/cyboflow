@@ -15,6 +15,7 @@
  * TASK-769 / TASK-780 / IDEA-026
  */
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
+import { PauseCircle } from 'lucide-react';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
@@ -37,6 +38,14 @@ export interface WorkflowCanvasProps {
   elapsed?: string;
   tokenCount?: string;
   isRunning?: boolean;
+  /**
+   * The run is parked in the NON-terminal 'paused' status (SDK-only Pause, Phase
+   * 4b). When true the meta row renders an amber PauseCircle pill INSTEAD of the
+   * pulsing 'running' pill, and the running pill + token animation are suppressed
+   * (CyboflowRoot also passes isRunning=false while paused, but this guard makes
+   * the canvas robust on its own).
+   */
+  paused?: boolean;
 }
 
 /** Last path segment of a worktree path, for a compact "folder" chip. */
@@ -60,7 +69,12 @@ export function WorkflowCanvas({
   elapsed,
   tokenCount,
   isRunning = false,
+  paused = false,
 }: WorkflowCanvasProps) {
+  // A paused run is, by definition, not actively running — suppress the running
+  // pill and the token animation regardless of the isRunning prop so the canvas
+  // is self-consistent even if a caller passes a stale isRunning.
+  const effectiveRunning = isRunning && !paused;
   // ── Flatten all step ids for state derivation ─────────────────────────────
   const stepIds = definition.phases.flatMap((p) => p.steps.map((s) => s.id));
   const currentIdx = currentStepId != null ? stepIds.indexOf(currentStepId) : -1;
@@ -135,7 +149,7 @@ export function WorkflowCanvas({
 
   // ── Animated token clock ───────────────────────────────────────────────────
   const t = useWorkflowTokenAnimation({
-    enabled: isRunning && currentIdx >= 0 && currentIdx < stepIds.length - 1,
+    enabled: effectiveRunning && currentIdx >= 0 && currentIdx < stepIds.length - 1,
   });
 
   // ── Token position via linear interpolation ───────────────────────────────
@@ -225,7 +239,26 @@ export function WorkflowCanvas({
             <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>{tokenCount}</b>
           </span>
         )}
-        {isRunning && (
+        {paused ? (
+          <span
+            style={{
+              padding: '2px 8px',
+              border: '1px solid var(--color-status-warning)',
+              color: 'var(--color-status-warning)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.18em',
+              fontSize: 9,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+            }}
+            data-testid="workflow-canvas-paused-pill"
+          >
+            {/* Static (non-pulsing) PauseCircle — a paused run is at rest. */}
+            <PauseCircle size={10} aria-hidden />
+            paused
+          </span>
+        ) : effectiveRunning ? (
           <span
             style={{
               padding: '2px 8px',
@@ -253,7 +286,7 @@ export function WorkflowCanvas({
             />
             running
           </span>
-        )}
+        ) : null}
       </div>
 
       {/* ── Canvas inner — phase columns with step cards ───────────────────── */}
