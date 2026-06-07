@@ -1,0 +1,506 @@
+/**
+ * QuickSessionCanvas — the resting-view top plane for a session with no active
+ * workflow run.
+ *
+ * A "quick session" is a session started WITHOUT a structured workflow (free-form
+ * interactive Claude Code). This is ALSO the view a session falls back to after a
+ * workflow run ends (cancel / complete / fail) — the session's home base, from
+ * which the operator can add another workflow. It mirrors the WorkflowCanvas slot
+ * (the top ~46% of the centre column) so the layout never collapses, while the
+ * chat / terminal panel surface stays in the bottom pane (rendered by CyboflowRoot).
+ *
+ * Direction "Concept C" (design handoff): a single live "session node" wired to
+ * real session metrics, joined by a dashed edge to an "add a workflow" node — the
+ * first-class path to promote the session into a structured run. Workflow buttons
+ * read the REAL catalogue (cyboflow.workflows.list → planner / sprint), never a
+ * hardcoded list; clicking one launches it onto THIS session (Planner via the
+ * idea-picker gate). "Browse all" opens the full WorkflowPicker.
+ */
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { trpc } from '../../trpc/client';
+import {
+  resolveWorkflowDefinition,
+  type WorkflowRow,
+} from '../../../../shared/types/workflows';
+import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
+import { useSessionMetrics } from '../../hooks/useSessionMetrics';
+import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
+import { IdeaPickerModal } from './IdeaPickerModal';
+import type { Session } from '../../types/session';
+
+interface QuickSessionCanvasProps {
+  session: Session;
+  projectId: number;
+  /** Project (repo) name for the node sub-line, e.g. "tester-mctest". */
+  projectName?: string;
+  /** Open the full workflow chooser (CyboflowRoot's WorkflowPicker modal). */
+  onBrowseAll: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// Stat cell — value over a wide-tracked micro-label.
+// ---------------------------------------------------------------------------
+
+function StatCell({
+  value,
+  label,
+  testId,
+  valueColor,
+}: {
+  value: React.ReactNode;
+  label: string;
+  testId: string;
+  valueColor?: string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <span
+        data-testid={testId}
+        style={{
+          fontSize: 13,
+          fontWeight: 700,
+          color: valueColor ?? 'var(--color-text-primary)',
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {value}
+      </span>
+      <span
+        style={{
+          fontSize: 8.5,
+          letterSpacing: '0.14em',
+          textTransform: 'uppercase',
+          color: 'var(--color-text-tertiary)',
+          fontWeight: 700,
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Workflow command button — phase dot + slash command + chevron, with the
+// system "picker row" hover (hard drop shadow, chevron → rust).
+// ---------------------------------------------------------------------------
+
+function WorkflowCmdButton({
+  label,
+  dotColor,
+  disabled,
+  onClick,
+  testId,
+}: {
+  label: string;
+  dotColor: string;
+  disabled: boolean;
+  onClick: () => void;
+  testId: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      disabled={disabled}
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        fontSize: 11,
+        color: 'var(--color-text-primary)',
+        border: `1px solid ${hovered && !disabled ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
+        background: 'var(--color-surface-primary)',
+        padding: '8px 11px',
+        textAlign: 'left',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
+        boxShadow: hovered && !disabled ? '0 2px 0 var(--color-text-primary)' : 'none',
+        transition: 'box-shadow .12s, border-color .12s',
+      }}
+    >
+      <span
+        style={{ width: 6, height: 6, borderRadius: '50%', background: dotColor, flexShrink: 0 }}
+      />
+      <span style={{ fontWeight: 700 }}>{label}</span>
+      <span
+        style={{
+          marginLeft: 'auto',
+          color: hovered && !disabled ? 'var(--color-interactive-primary)' : 'var(--color-text-tertiary)',
+        }}
+      >
+        ▸
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// QuickSessionCanvas
+// ---------------------------------------------------------------------------
+
+export function QuickSessionCanvas({
+  session,
+  projectId,
+  projectName,
+  onBrowseAll,
+}: QuickSessionCanvasProps) {
+  const metrics = useSessionMetrics(session);
+  const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId);
+
+  const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
+  const [listError, setListError] = useState<string | null>(null);
+  // Planner pre-launch idea gate (migration 017): a planner click opens the
+  // picker first, then launches with the chosen ideaId.
+  const [plannerIdForGate, setPlannerIdForGate] = useState<string | null>(null);
+  const [addHovered, setAddHovered] = useState(false);
+  const [browseHovered, setBrowseHovered] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    trpc.cyboflow.workflows.list
+      .query({ projectId })
+      .then((rows) => {
+        if (!cancelled) setWorkflows(rows);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setListError(err instanceof Error ? err.message : 'Failed to load workflows');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  // Default workflow (sprint) first, then the rest in listed order.
+  const ordered = useMemo(
+    () =>
+      [...workflows].sort(
+        (a, b) =>
+          Number(b.name === DEFAULT_WORKFLOW_NAME) - Number(a.name === DEFAULT_WORKFLOW_NAME),
+      ),
+    [workflows],
+  );
+
+  const phaseDotColor = useCallback((row: WorkflowRow): string => {
+    const def = resolveWorkflowDefinition(row.name, row.spec_json);
+    return def?.phases[0]?.color ?? 'var(--color-text-tertiary)';
+  }, []);
+
+  const handleWorkflowClick = useCallback(
+    (row: WorkflowRow) => {
+      if (isLaunching) return;
+      // Planner is idea-gated — open the picker; Sprint (and others) launch directly.
+      if (row.name === 'planner') {
+        setPlannerIdForGate(row.id);
+        return;
+      }
+      void launch(row.id);
+    },
+    [isLaunching, launch],
+  );
+
+  const handleIdeaPicked = useCallback(
+    (ideaId: string) => {
+      const id = plannerIdForGate;
+      setPlannerIdForGate(null);
+      if (id !== null) void launch(id, ideaId);
+    },
+    [plannerIdForGate, launch],
+  );
+
+  const repo = projectName && projectName.length > 0 ? projectName : session.name;
+  const branch = metrics.branch ?? '';
+  const model = metrics.model ?? '—';
+  const { plus, minus } = metrics.diff;
+  const diffIsEmpty = plus === 0 && minus === 0;
+  const error = launchError ?? listError;
+
+  return (
+    <div
+      className="flex flex-col h-full bg-bg-primary"
+      data-testid="quick-session-canvas"
+    >
+      {/* ── Pane header — mirrors the WorkflowCanvas meta row ─────────────────── */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          fontSize: 10,
+          letterSpacing: '0.02em',
+          color: 'var(--color-text-secondary)',
+          padding: '7px 12px 6px',
+          background: 'var(--color-bg-secondary)',
+          borderBottom: '1px solid var(--color-border-primary)',
+          flexShrink: 0,
+          whiteSpace: 'nowrap',
+        }}
+        data-testid="quick-session-canvas-header"
+      >
+        <b
+          style={{
+            color: 'var(--color-text-primary)',
+            fontWeight: 700,
+            letterSpacing: '0.18em',
+            textTransform: 'uppercase',
+            fontSize: 10,
+          }}
+        >
+          Quick session
+        </b>
+        {branch && (
+          <span style={{ color: 'var(--color-text-tertiary)' }} title={branch}>
+            · {branch}
+          </span>
+        )}
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 9,
+            letterSpacing: '0.16em',
+            textTransform: 'uppercase',
+            fontWeight: 700,
+            color: 'var(--color-interactive-primary)',
+            border: '1px solid var(--color-interactive-primary)',
+            padding: '1px 7px',
+          }}
+          data-testid="quick-session-interactive-pill"
+        >
+          <span
+            className="animate-pulse"
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: '50%',
+              background: 'var(--color-interactive-primary)',
+              display: 'inline-block',
+            }}
+          />
+          interactive
+        </span>
+      </div>
+
+      {/* ── Canvas body — 24px graph-paper grid, single node → edge → add ────── */}
+      <div
+        style={{
+          position: 'relative',
+          flex: 1,
+          overflow: 'auto',
+          display: 'flex',
+          alignItems: 'center',
+          padding: '26px 30px',
+          background:
+            'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+            'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+            'var(--color-bg-primary)',
+        }}
+        data-testid="quick-session-canvas-body"
+      >
+        {/* 1 · Session node */}
+        <div
+          style={{
+            width: 300,
+            flexShrink: 0,
+            background: 'var(--color-surface-primary)',
+            border: '1.4px solid var(--color-text-primary)',
+            outline: '2px solid var(--color-interactive-primary)',
+            outlineOffset: 2,
+          }}
+          data-testid="quick-session-node"
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 12px',
+              background: 'var(--color-phase-execute)',
+            }}
+          >
+            <span
+              className="animate-pulse"
+              style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff', display: 'inline-block' }}
+            />
+            <span
+              style={{
+                fontSize: 9,
+                letterSpacing: '0.16em',
+                textTransform: 'uppercase',
+                color: '#fff',
+                fontWeight: 700,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Interactive
+            </span>
+            <span
+              data-testid="quick-session-node-model"
+              style={{
+                marginLeft: 'auto',
+                fontSize: 9,
+                color: 'rgba(255,255,255,0.85)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {model}
+            </span>
+          </div>
+          <div style={{ padding: '13px 14px' }}>
+            <div
+              style={{ fontSize: 10.5, color: 'var(--color-text-tertiary)' }}
+              data-testid="quick-session-node-sub"
+            >
+              {repo}
+              {branch ? ` · ⌥ ${branch}` : ''}
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '7px 12px',
+                marginTop: 13,
+              }}
+            >
+              <StatCell value={metrics.elapsed} label="elapsed" testId="quick-session-stat-elapsed" />
+              <StatCell value={metrics.tokens} label="tokens" testId="quick-session-stat-tokens" />
+              <StatCell value={metrics.filesSeen} label="files seen" testId="quick-session-stat-files" />
+              <StatCell
+                testId="quick-session-stat-diff"
+                label="diff"
+                value={
+                  <span>
+                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>
+                      +{plus}
+                    </span>{' '}
+                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-interactive-primary)' }}>
+                      −{minus}
+                    </span>
+                  </span>
+                }
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 2 · Dashed edge with a ＋ chip */}
+        <div
+          aria-hidden
+          style={{
+            flex: '0 0 64px',
+            height: 1.4,
+            position: 'relative',
+            background:
+              'repeating-linear-gradient(90deg, var(--color-text-disabled) 0 5px, transparent 5px 10px)',
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              transform: 'translate(-50%, -50%)',
+              background: 'var(--color-bg-primary)',
+              color: 'var(--color-text-tertiary)',
+              fontSize: 12,
+              padding: '0 3px',
+            }}
+          >
+            ＋
+          </span>
+        </div>
+
+        {/* 3 · Add-workflow node */}
+        <div
+          onMouseEnter={() => setAddHovered(true)}
+          onMouseLeave={() => setAddHovered(false)}
+          style={{
+            width: 230,
+            flexShrink: 0,
+            border: `1.4px dashed ${addHovered ? 'var(--color-interactive-primary)' : 'var(--color-text-disabled)'}`,
+            background: addHovered ? 'var(--color-surface-primary)' : 'rgba(255,255,255,0.4)',
+            padding: '18px 16px',
+            transition: 'border-color .12s, background .12s',
+          }}
+          data-testid="quick-session-add-workflow"
+        >
+          <div
+            style={{
+              fontSize: 9,
+              letterSpacing: '0.16em',
+              textTransform: 'uppercase',
+              color: 'var(--color-text-tertiary)',
+              fontWeight: 700,
+            }}
+          >
+            Optional next step
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 7 }}>
+            Add a workflow
+          </div>
+          <div style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--color-text-tertiary)', marginTop: 6 }}>
+            Drop a structured pipeline onto this session at any point.
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 13 }}>
+            {ordered.map((row) => (
+              <WorkflowCmdButton
+                key={row.id}
+                testId={`quick-session-launch-${row.name}`}
+                label={`/${row.name}`}
+                dotColor={phaseDotColor(row)}
+                disabled={isLaunching}
+                onClick={() => handleWorkflowClick(row)}
+              />
+            ))}
+          </div>
+
+          <button
+            type="button"
+            data-testid="quick-session-browse-all"
+            onClick={onBrowseAll}
+            onMouseEnter={() => setBrowseHovered(true)}
+            onMouseLeave={() => setBrowseHovered(false)}
+            style={{
+              width: '100%',
+              marginTop: 8,
+              fontSize: 9.5,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              color: browseHovered ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+              border: `1px solid ${browseHovered ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
+              background: 'transparent',
+              padding: '7px 11px',
+              cursor: 'pointer',
+              transition: 'color .12s, border-color .12s',
+            }}
+          >
+            {workflows.length > 0 ? `Browse all ${workflows.length} workflows →` : 'Browse all workflows →'}
+          </button>
+
+          {error && (
+            <p style={{ marginTop: 8, fontSize: 10, color: 'var(--color-status-error)' }} role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Planner idea-selection gate (migration 017). */}
+      {plannerIdForGate !== null && (
+        <IdeaPickerModal
+          isOpen
+          projectId={projectId}
+          onClose={() => setPlannerIdForGate(null)}
+          onPicked={handleIdeaPicked}
+        />
+      )}
+    </div>
+  );
+}
