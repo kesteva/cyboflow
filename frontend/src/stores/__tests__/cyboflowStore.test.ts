@@ -123,6 +123,33 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(unsub).not.toHaveBeenCalled();
   });
 
+  it('(4b) setRunParentSession sets selectedSessionId WITHOUT touching the run subscription or streamEvents', () => {
+    const unsub = vi.fn();
+    mockSubscribe.mockReturnValueOnce(unsub);
+
+    // Active run with a populated event log.
+    useCyboflowStore.getState().setActiveRun('run-001');
+    useCyboflowStore.getState().appendStreamEvent({
+      runId: 'run-001',
+      type: 'unknown',
+      payload: {},
+      timestamp: new Date().toISOString(),
+    });
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+
+    // Mirror the run's parent session into selectedSessionId (the bug-B fix path).
+    useCyboflowStore.getState().setRunParentSession('sess-99');
+
+    const state = useCyboflowStore.getState();
+    expect(state.selectedSessionId).toBe('sess-99');
+    // The run + its live subscription + event log are all untouched (unlike
+    // setActiveRun, which would tear down the subscription and clear streamEvents).
+    expect(state.activeRunId).toBe('run-001');
+    expect(unsub).not.toHaveBeenCalled();
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+    expect(state.streamEvents).toHaveLength(1);
+  });
+
   it('(5) onEvent callback from subscription calls appendStreamEvent on the store', () => {
     // Capture the onEvent callback passed to subscribeToStreamEvents.
     let capturedOnEvent: ((e: StreamEvent) => void) | undefined;

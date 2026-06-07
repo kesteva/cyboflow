@@ -104,6 +104,18 @@ interface CyboflowState {
   streamEvents: StreamEvent[];
   setActiveRun: (runId: string, parentSessionId?: string | null) => void;
   clearActiveRun: () => void;
+  /**
+   * Set ONLY selectedSessionId — the active run's parent session (migration 019),
+   * WITHOUT touching activeRunId, the stream subscription, or streamEvents.
+   *
+   * The launch path calls setActiveRun(runId) before the run's parent session is
+   * known (the session_id arrives later via activeRunsStore), leaving
+   * selectedSessionId null — which flips the File Explorer / Diff to the main repo
+   * and hides the session close-out (Merge / PR / Dismiss). A reactive effect
+   * mirrors the run's session_id here once it resolves. Distinct from setActiveRun,
+   * which would clear streamEvents + restart the subscription (wiping the run view).
+   */
+  setRunParentSession: (sessionId: string | null) => void;
   setActiveQuickSession: (sessionId: string, runId?: string) => void;
   clearActiveQuickSession: () => void;
   appendStreamEvent: (event: StreamEvent) => void;
@@ -133,6 +145,10 @@ export const useCyboflowStore = create<CyboflowState>((set) => ({
     _stopSubscription();
     set({ activeRunId: null, streamEvents: [] });
   },
+
+  // Set ONLY selectedSessionId — no subscription / streamEvents side effects.
+  // Used to mirror an active run's parent session (see the interface docs).
+  setRunParentSession: (sessionId) => set({ selectedSessionId: sessionId }),
 
   /**
    * Switch to a session.

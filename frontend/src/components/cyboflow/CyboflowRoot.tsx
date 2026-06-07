@@ -66,6 +66,23 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       ? runsByProject[projectId]?.find((r) => r.id === activeRunId)
       : undefined;
 
+  // Session-hosted runs (migration 019): the launch path calls setActiveRun(runId)
+  // before the run's parent session is known, so selectedSessionId starts null —
+  // which flips the File Explorer / Diff to the main repo and hides the session
+  // close-out (Merge / PR / Dismiss, gated by useLifecycleSession→selectedSessionId).
+  // The run's session_id arrives via activeRunsStore; mirror it into selectedSessionId
+  // once it resolves (setRunParentSession does NOT touch the run subscription /
+  // streamEvents, unlike setActiveRun). Only sets — never clears — so the session
+  // stays selected for close-out after the run ends.
+  const activeRunSessionId = activeRun?.session_id ?? null;
+  useEffect(() => {
+    if (activeRunId === null || activeRunSessionId === null) return;
+    const store = useCyboflowStore.getState();
+    if (store.selectedSessionId !== activeRunSessionId) {
+      store.setRunParentSession(activeRunSessionId);
+    }
+  }, [activeRunId, activeRunSessionId]);
+
   const {
     mainRepoSession,
     effectiveSession,
