@@ -29,6 +29,7 @@ export function classifyRun(status: WorkflowRunStatus): RunActivity {
     case 'awaiting_review':
     case 'stuck':
     case 'awaiting_input':
+    case 'paused':
       return 'blocked';
     case 'completed':
     case 'failed':

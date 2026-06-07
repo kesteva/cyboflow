@@ -9,7 +9,7 @@ import {
 } from '../homeClassify';
 
 // ---------------------------------------------------------------------------
-// classifyRun — all 9 statuses
+// classifyRun — all 10 statuses
 // ---------------------------------------------------------------------------
 
 describe('classifyRun', () => {
@@ -20,6 +20,7 @@ describe('classifyRun', () => {
     ['awaiting_review', 'blocked'],
     ['stuck', 'blocked'],
     ['awaiting_input', 'blocked'],
+    ['paused', 'blocked'],
     ['completed', 'terminal'],
     ['failed', 'terminal'],
     ['canceled', 'terminal'],
