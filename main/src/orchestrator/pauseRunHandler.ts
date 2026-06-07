@@ -111,17 +111,19 @@ const PAUSABLE_STATUSES = new Set<string>(['running', 'awaiting_review']);
  * SDK-only, git-neutral Pause of a workflow run: stop the active SDK turn + park
  * the run in `paused`, PRESERVING claude_session_id / current_step_id for Resume.
  *
- * Execution order (all within the per-run PQueue for `runId`):
- *   (a) Fetch the run row. Missing → { noOp: 'not_found' }.
+ * Execution order — abort runs OUTSIDE the per-run PQueue, the DB write inside it
+ * (RunExecutor.execute() holds that same queue for the whole run, so an in-queue
+ * abort could never pre-empt it — see the DEADLOCK FIX note in the body):
+ *   (a) Fetch the run row [outside queue]. Missing → { noOp: 'not_found' }.
  *   (b) substrate !== 'sdk' → { noOp: 'interactive_unsupported' } (no kill, no write).
  *   (c) status NOT IN ('running','awaiting_review') → { noOp: 'not_pausable' }.
  *   (d) claude_session_id null → { noOp: 'no_session' } (cannot resume later).
- *   (e) Clear pending approvals + questions (BEFORE the abort).
- *   (f) `stopLiveRun(runId)` — abort the in-flight SDK turn, wrapped in try/catch
- *       (fail-soft) so a rejection / no-live-process does NOT block the DB write.
- *   (g) Guarded UPDATE: status='paused' WHERE status IN ('running','awaiting_review').
- *       0 rows changed → { noOp: 'race' } (a concurrent transition won). Deliberately
- *       does NOT set ended_at (paused is NON-terminal) and does NOT touch
+ *   (e) Clear pending approvals + questions, BEFORE the abort [outside].
+ *   (f) `stopLiveRun(runId)` — abort the in-flight SDK turn [outside], wrapped in
+ *       try/catch (fail-soft) so a rejection / no-live-process does NOT block the write.
+ *   (g) Guarded UPDATE [INSIDE the queue]: status='paused' WHERE status IN
+ *       ('running','awaiting_review'). 0 rows → { noOp: 'race' }. Deliberately does
+ *       NOT set ended_at (paused is NON-terminal) and does NOT touch
  *       claude_session_id / current_step_id — both are preserved for Resume.
  *   (h) emitRunStatusChanged(runId, 'paused').
  *   (i) return { success: true }.
@@ -143,58 +145,67 @@ export async function pauseRunHandler(
     logger,
   } = deps;
 
-  // Serialize with any concurrent status changes for this run.
+  // (a)–(f) Validate + clear gates + ABORT — all OUTSIDE the per-run queue.
+  //
+  // DEADLOCK FIX (mirrors cancelRunHandler): RunExecutor.execute() HOLDS
+  // runQueues[runId] for the ENTIRE run (runLauncher.ts enqueues execute() onto
+  // that same per-run PQueue), so an in-queue abort can never run until the run
+  // ends — Pause would simply be ignored by a streaming agent. The abort MUST
+  // pre-empt the in-flight run from OUTSIDE the queue.
+
+  // (a) Fetch the run row.
+  const row = db
+    .prepare('SELECT status, substrate, claude_session_id FROM workflow_runs WHERE id = ?')
+    .get(runId) as PauseRunRow | undefined;
+
+  if (!row) {
+    return { noOp: true as const, reason: 'not_found' };
+  }
+
+  // (b) SDK-only guard. The interactive substrate has no native --resume; refuse
+  // before any kill or DB write so an interactive run's PTY is never touched.
+  if (row.substrate !== 'sdk') {
+    return { noOp: true as const, reason: 'interactive_unsupported' };
+  }
+
+  // (c) Pausable only from a live turn ('running') or an idle rest
+  // ('awaiting_review'). Anything else (queued / starting / awaiting_input /
+  // stuck / paused / terminal) is not pausable.
+  if (!PAUSABLE_STATUSES.has(row.status)) {
+    return { noOp: true as const, reason: 'not_pausable' };
+  }
+
+  // (d) No captured SDK conversation id → Resume could not re-drive it, so refuse
+  // the pause up front rather than stranding the run in a non-resumable state.
+  if (!row.claude_session_id) {
+    return { noOp: true as const, reason: 'no_session' };
+  }
+
+  // (e) Settle pending approvals + questions BEFORE the abort so Pause doesn't
+  // leave orphaned items in the review queue / dangling gate Promises.
+  clearPendingApprovalsForRun(runId);
+  clearPendingQuestionsForRun?.(runId);
+
+  // (f) Abort the in-flight SDK turn. Wrapped in try/catch (fail-soft): a
+  // rejection here — or simply no live process for an idle (awaiting_review) run
+  // — must NOT leave the run stuck. The DB write below still applies.
+  try {
+    await stopLiveRun(runId);
+  } catch (err: unknown) {
+    logger?.error('[pauseRun] stopLiveRun rejected — proceeding to DB write', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // (g)+(h) Guarded, atomic UPDATE + status-changed signal — serialized on the
+  // per-run queue. With the abort done above, execute() is unblocked and fires its
+  // own drain transition (→ awaiting_review, also a pausable status), so this
+  // serialized write lands AFTER it and parks the run in 'paused'. PRESERVES
+  // ended_at (null — paused is NON-terminal), claude_session_id, and
+  // current_step_id so Resume can re-drive the SAME SDK conversation. 0 rows → a
+  // concurrent transition moved the run out of a pausable state.
   const result = await runQueues.getOrCreate(runId).add(async (): Promise<PauseRunResult> => {
-    // (a) Fetch the run row.
-    const row = db
-      .prepare('SELECT status, substrate, claude_session_id FROM workflow_runs WHERE id = ?')
-      .get(runId) as PauseRunRow | undefined;
-
-    if (!row) {
-      return { noOp: true as const, reason: 'not_found' };
-    }
-
-    // (b) SDK-only guard. The interactive substrate has no native --resume; refuse
-    // before any kill or DB write so an interactive run's PTY is never touched.
-    if (row.substrate !== 'sdk') {
-      return { noOp: true as const, reason: 'interactive_unsupported' };
-    }
-
-    // (c) Pausable only from a live turn ('running') or an idle rest
-    // ('awaiting_review'). Anything else (queued / starting / awaiting_input /
-    // stuck / paused / terminal) is not pausable.
-    if (!PAUSABLE_STATUSES.has(row.status)) {
-      return { noOp: true as const, reason: 'not_pausable' };
-    }
-
-    // (d) No captured SDK conversation id → Resume could not re-drive it, so refuse
-    // the pause up front rather than stranding the run in a non-resumable state.
-    if (!row.claude_session_id) {
-      return { noOp: true as const, reason: 'no_session' };
-    }
-
-    // (e) Settle pending approvals + questions BEFORE the abort so Pause doesn't
-    // leave orphaned items in the review queue / dangling gate Promises.
-    clearPendingApprovalsForRun(runId);
-    clearPendingQuestionsForRun?.(runId);
-
-    // (f) Abort the in-flight SDK turn. Wrapped in try/catch (fail-soft): a
-    // rejection here — or simply no live process for an idle (awaiting_review) run
-    // — must NOT leave the run stuck. The DB write below still applies.
-    try {
-      await stopLiveRun(runId);
-    } catch (err: unknown) {
-      logger?.error('[pauseRun] stopLiveRun rejected — proceeding to DB write', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    // (g) Guarded, atomic UPDATE: park the run in 'paused' (transitionToPaused-
-    // equivalent guard). PRESERVES ended_at (null — paused is NON-terminal),
-    // claude_session_id, and current_step_id so Resume can re-drive the SAME SDK
-    // conversation. If the guarded UPDATE matches 0 rows, a concurrent process moved
-    // the run out of a pausable state between the guard above and here.
     const pauseTx = db.transaction(() => {
       return db
         .prepare(
@@ -210,10 +221,8 @@ export async function pauseRunHandler(
       return { noOp: true as const, reason: 'race' };
     }
 
-    // (h) Project-wide run-status-changed signal — only after the write succeeded.
+    // Project-wide run-status-changed signal — only after the write succeeded.
     emitRunStatusChanged(runId, 'paused');
-
-    // (i) Done.
     return { success: true as const };
   });
 

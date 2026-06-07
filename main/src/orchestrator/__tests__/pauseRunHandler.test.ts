@@ -365,6 +365,38 @@ describe('pauseRunHandler (SDK-only run Pause — Phase 4b)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // DEADLOCK REGRESSION: the abort must fire even while the per-run queue is held
+  // by the in-flight RunExecutor.execute(). Pre-fix, Pause ran its abort INSIDE
+  // that queue, so a streaming agent ignored Pause until it finished on its own.
+  // -------------------------------------------------------------------------
+
+  it('aborts the live SDK turn even while the per-run queue is held by the running execute()', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    setSubstrate(db, runId, 'sdk');
+    setSession(db, runId, 'sess-1');
+
+    // Simulate RunExecutor.execute() occupying the per-run queue for the whole run.
+    let releaseExecute!: () => void;
+    const executeHeld = new Promise<void>((resolve) => {
+      releaseExecute = resolve;
+    });
+    void runQueues.getOrCreate(runId).add(() => executeHeld);
+
+    const pausePromise = pauseRunHandler(runId, makeDeps(db, spy, runQueues));
+
+    // The abort fires despite the queue being occupied (pre-fix: never ran).
+    await vi.waitFor(() => expect(spy.stopLiveRun).toHaveBeenCalledWith(runId));
+    // The guarded write is still serialized behind execute() until it releases.
+    expect(getRun(db, runId).status).toBe('running');
+
+    releaseExecute();
+    const result = await pausePromise;
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('paused');
+  });
+
+  // -------------------------------------------------------------------------
   // GIT-NEUTRAL invariant — the deps bag has NO git collaborator at all.
   // -------------------------------------------------------------------------
 

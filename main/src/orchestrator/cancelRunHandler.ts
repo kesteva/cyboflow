@@ -104,15 +104,17 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
  * Git-neutral cancel of a workflow run: stop the live agent + mark the run
  * 'canceled'. NEVER touches git.
  *
- * Execution order (all within the per-run PQueue for `runId`):
- *   (a) Fetch the run row. If not found → { noOp, reason: 'not_found' }.
- *   (b) If already terminal → { noOp, reason: 'already_terminal' } (idempotent).
- *   (c) Clear pending approvals + questions for the run (BEFORE the kill).
- *   (d) `stopLiveRun(runId)` — abort the in-flight agent (BOTH substrates), wrapped
- *       in try/catch so a rejection / no-live-process does NOT block the DB write.
- *   (e) Guarded UPDATE: status='canceled', ended_at=now WHERE status NOT IN
- *       terminal; AND outcome='canceled' WHERE outcome IS NULL. If the guarded
- *       update changes 0 rows → { noOp, reason: 'race' } (concurrent terminal flip).
+ * Execution order — the abort runs OUTSIDE the per-run PQueue, the DB write inside
+ * it (see the DEADLOCK FIX note in the body: RunExecutor.execute() holds that same
+ * queue for the whole run, so an in-queue abort can never pre-empt it):
+ *   (a) Fetch the run row [outside queue]. If not found → { noOp: 'not_found' }.
+ *   (b) If already terminal → { noOp: 'already_terminal' } (idempotent) [outside].
+ *   (c) Clear pending approvals + questions for the run, BEFORE the kill [outside].
+ *   (d) `stopLiveRun(runId)` — abort the in-flight agent (BOTH substrates) [outside],
+ *       wrapped in try/catch so a rejection / no-live-process does NOT block the write.
+ *   (e) Guarded UPDATE [INSIDE the queue]: status='canceled', ended_at=now WHERE
+ *       status NOT IN terminal; AND outcome='canceled' WHERE outcome IS NULL. 0 rows
+ *       → { noOp: 'race' } (a concurrent terminal flip, incl. execute()'s drain, won).
  *   (f) emitRunStatusChanged(runId, 'canceled').
  *   (g) return { success: true }.
  *
@@ -135,47 +137,53 @@ export async function cancelRunHandler(
     logger,
   } = deps;
 
-  // Serialize with any concurrent status changes for this run.
+  // (a) Fetch the run row + (b) terminal guard — OUTSIDE the per-run queue.
+  //
+  // DEADLOCK FIX: RunExecutor.execute() HOLDS runQueues[runId] for the ENTIRE run
+  // (runLauncher.ts enqueues execute() onto that same per-run PQueue). Anything
+  // add()'d to that queue cannot run until the run ends — so doing the abort
+  // inside the queue made Cancel wait for the very run it was trying to stop (a
+  // running agent simply ignored Cancel until it finished on its own). The abort
+  // MUST pre-empt the in-flight run from OUTSIDE the queue.
+  const row = db
+    .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+    .get(runId) as CancelRunRow | undefined;
+
+  if (!row) {
+    return { noOp: true as const, reason: 'not_found' };
+  }
+
+  // (b) Idempotent double-cancel guard.
+  if (TERMINAL_STATUSES.has(row.status)) {
+    return { noOp: true as const, reason: 'already_terminal' };
+  }
+
+  // (c) Settle pending approvals + questions BEFORE the kill, and (d) stop the
+  // live agent — BOTH outside the per-run queue so the abort actually interrupts
+  // the in-flight RunExecutor.execute() (which then drains and releases the
+  // queue). Wrapped in try/catch (fail-soft): a rejection here — or simply no live
+  // process for an idle run — must NOT leave the run stuck. The DB write below
+  // still applies; the run is conceptually canceled regardless of kill success.
+  clearPendingApprovalsForRun(runId);
+  clearPendingQuestionsForRun?.(runId);
+  try {
+    await stopLiveRun(runId);
+  } catch (err: unknown) {
+    logger?.error('[cancelRun] stopLiveRun rejected — proceeding to DB write', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // (e)+(f) Guarded, atomic UPDATE + status-changed signal — serialized on the
+  // per-run queue. With the abort done above, execute() is unblocked and will fire
+  // its own drain transition (awaiting_review, non-terminal); this serialized
+  // write lands AFTER that and overwrites it to 'canceled'. The guard (status NOT
+  // IN terminal) also makes the write order-independent + idempotent. NO task-stage
+  // derivation (cancel is git-neutral and does NOT revert a linked task — that is
+  // the Dismiss path's job).
   const result = await runQueues.getOrCreate(runId).add(async (): Promise<CancelRunResult> => {
-    // (a) Fetch the run row.
-    const row = db
-      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-      .get(runId) as CancelRunRow | undefined;
-
-    if (!row) {
-      return { noOp: true as const, reason: 'not_found' };
-    }
-
-    // (b) Idempotent double-cancel guard.
-    if (TERMINAL_STATUSES.has(row.status)) {
-      return { noOp: true as const, reason: 'already_terminal' };
-    }
-
     const now = new Date().toISOString();
-
-    // (c) Settle pending approvals + questions BEFORE the kill so cancel doesn't
-    // leave orphaned items in the review queue / dangling gate Promises.
-    clearPendingApprovalsForRun(runId);
-    clearPendingQuestionsForRun?.(runId);
-
-    // (d) Stop the live agent on whichever substrate it ran. Wrapped in try/catch
-    // (fail-soft): a rejection here — or simply no live process for an idle run —
-    // must NOT leave the run stuck. The DB write below still applies; the run is
-    // conceptually canceled from the user's perspective regardless of kill success.
-    try {
-      await stopLiveRun(runId);
-    } catch (err: unknown) {
-      logger?.error('[cancelRun] stopLiveRun rejected — proceeding to DB write', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    // (e) Guarded, atomic UPDATE: mark the run 'canceled' (transitionToCanceled-
-    // equivalent guard) AND stamp outcome='canceled' where not already set. NO
-    // task-stage derivation (cancel is git-neutral and does NOT revert a linked
-    // task — that is the Dismiss path's job). If the guarded UPDATE matches 0 rows,
-    // a concurrent process moved the run terminal between the guard above and here.
     const cancelTx = db.transaction(() => {
       const updateResult = db
         .prepare(
@@ -205,10 +213,8 @@ export async function cancelRunHandler(
       return { noOp: true as const, reason: 'race' };
     }
 
-    // (f) Project-wide run-status-changed signal — only after the write succeeded.
+    // Project-wide run-status-changed signal — only after the write succeeded.
     emitRunStatusChanged(runId, 'canceled');
-
-    // (g) Done.
     return { success: true as const };
   });
 

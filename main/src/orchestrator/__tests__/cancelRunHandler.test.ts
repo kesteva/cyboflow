@@ -301,6 +301,41 @@ describe('cancelRunHandler (git-neutral run Cancel — Phase 4a)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // DEADLOCK REGRESSION: the abort must fire even while the per-run queue is
+  // occupied by the in-flight RunExecutor.execute() (which holds runQueues[runId]
+  // for the whole run). Before the fix, cancel ran its abort INSIDE that queue, so
+  // it waited for the very run it was trying to stop — a streaming agent ignored
+  // Cancel entirely.
+  // -------------------------------------------------------------------------
+
+  it('aborts the live run even while the per-run queue is held by the running execute()', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+
+    // Simulate RunExecutor.execute() occupying the per-run queue for the entire run.
+    let releaseExecute!: () => void;
+    const executeHeld = new Promise<void>((resolve) => {
+      releaseExecute = resolve;
+    });
+    void runQueues.getOrCreate(runId).add(() => executeHeld);
+
+    // Cancel must abort the live agent WITHOUT waiting for the held queue task.
+    const cancelPromise = cancelRunHandler(runId, makeDeps(db, spy, runQueues));
+
+    // The abort fires despite the queue being occupied (pre-fix: this never ran).
+    await vi.waitFor(() => expect(spy.stopLiveRun).toHaveBeenCalledWith(runId));
+
+    // The guarded DB write is still serialized on the queue, so it lands only once
+    // execute() releases it — proving the write is ordered after the run drains.
+    expect(getRun(db, runId).status).toBe('running');
+
+    releaseExecute();
+    const result = await cancelPromise;
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('canceled');
+  });
+
+  // -------------------------------------------------------------------------
   // GIT-NEUTRAL invariant — the deps bag has NO git collaborator at all.
   // -------------------------------------------------------------------------
 
