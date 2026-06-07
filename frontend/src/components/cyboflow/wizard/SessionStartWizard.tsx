@@ -1,20 +1,29 @@
 /**
  * SessionStartWizard — the center-pane "Start a new session" index-card wizard.
  *
- * Two flows, switched on `wizardOpts.lockProjectId`:
- *   - UNLOCKED (no lockProjectId): a 2-step flow — ① pick a project from a grid
- *     of {@link ProjectFilingCard}s (+ an "Add project" card), then ② pick a
- *     workflow.
+ * Three steps (① Project · ② Workflow · ③ Configure), switched on
+ * `wizardOpts.lockProjectId`:
+ *   - UNLOCKED (no lockProjectId): ① pick a project from a grid of
+ *     {@link ProjectFilingCard}s (+ an "Add project" card), ② pick a workflow
+ *     (or the featured {@link QuickSessionCard}), then ③ configure session
+ *     settings and launch.
  *   - LOCKED (lockProjectId set): the project is pinned; the wizard opens
- *     directly on the workflow step. When `allowQuick` is also set, a featured
- *     {@link QuickSessionCard} is offered above the workflow list.
+ *     directly on ② Workflow. When `allowQuick` is set, the quick card is offered.
  *
- * Launch paths:
- *   - workflow: `trpc.cyboflow.runs.start.mutate` → setActiveRun → goToSession.
- *     The Planner ('planner') is gated behind {@link IdeaPickerModal}; the chosen
- *     idea id is threaded into runs.start.mutate({ ideaId }).
- *   - quick: the {@link useQuickSession} hook (bound to the locked project) — it
- *     creates the session + both panels and calls setActiveQuickSession itself.
+ * Step ③ (Configure) is the launch surface and adapts to the selection:
+ *   - workflow: agent-permission override + CLI substrate (+ caveats) + workflow
+ *     blueprint editor access + a launch summary.
+ *   - quick: agent-permission override + launch summary (substrate is a no-op for
+ *     quick panels, and there is no workflow to edit, so both are omitted).
+ *
+ * Launch paths (both fire from step ③):
+ *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
+ *     permissionMode) → setActiveRun → goToSession. The Planner ('planner') is
+ *     gated behind {@link IdeaPickerModal}; the chosen idea id is threaded as
+ *     runs.start.mutate({ ideaId }).
+ *   - quick: the {@link useQuickSession} hook — it creates the session + both
+ *     panels (passing the chosen agentPermissionMode) and calls
+ *     setActiveQuickSession itself.
  *
  * A synchronous in-flight latch (`startInFlightRef`) guards every launch against
  * the double-submit duplicate-run bug (mirrors WorkflowPicker).
@@ -31,15 +40,21 @@ import type { Project } from '../../../types/project';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useQuickSession } from '../../../hooks/useQuickSession';
+import { useAgentPermissionMode } from '../../../hooks/useAgentPermissionMode';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
 import { IdeaPickerModal } from '../IdeaPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
+import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
+import { SubstrateSelector } from '../SubstrateSelector';
+import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { WizardStepHeader } from './WizardStepHeader';
+import type { WizardStep } from './WizardStepHeader';
 import { ProjectFilingCard } from './ProjectFilingCard';
 import { WorkflowListRow } from './WorkflowListRow';
 import { QuickSessionCard } from './QuickSessionCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
+import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,6 +94,18 @@ function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element
   );
 }
 
+/** A label/value row in the step-③ launch summary. */
+function SummaryRow({ label, value }: { label: string; value: string }): React.JSX.Element {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="eyebrow text-text-muted">{label}</span>
+      <span className="truncate font-mono text-xs text-text-primary" title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -92,8 +119,9 @@ export default function SessionStartWizard(): React.JSX.Element {
   // project is chosen. Not tied to `locked`, so the unlocked path can offer it.
   const allowQuick = opts?.allowQuick === true;
 
-  // Step state (unlocked only). Locked mode is always "on the workflow step".
-  const [step, setStep] = useState<1 | 2>(locked ? 2 : 1);
+  // Step state. Locked mode opens on ② Workflow (project pinned); unlocked opens
+  // on ① Project. ③ Configure is the shared launch step.
+  const [step, setStep] = useState<WizardStep>(locked ? 2 : 1);
 
   // ── Project step (unlocked) ──────────────────────────────────────────────
   const [projects, setProjects] = useState<Project[]>([]);
@@ -111,6 +139,16 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [workflowsLoading, setWorkflowsLoading] = useState(false);
   const [workflowsError, setWorkflowsError] = useState<string | null>(null);
   const [selection, setSelection] = useState<WizardSelection | null>(null);
+
+  // ── Step ③ Configure ─────────────────────────────────────────────────────
+  // Per-run/per-session agent permission (seeded from the global default, race-
+  // guarded by the shared hook) + per-run CLI substrate. Substrate is threaded
+  // into runs.start for workflow launches; for quick launches the permission
+  // mode rides useQuickSession (substrate is a no-op for quick panels).
+  const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
+  const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+  // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
+  const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
   // Planner pre-launch idea gate.
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
@@ -176,32 +214,45 @@ export default function SessionStartWizard(): React.JSX.Element {
   }, [locked]);
 
   // ── Load workflows + runs once a project is active ───────────────────────
-  useEffect(() => {
-    if (selectedProjectId === null) return;
-    const projectId = selectedProjectId;
-    setWorkflowsLoading(true);
-    setWorkflowsError(null);
-    Promise.all([
-      trpc.cyboflow.workflows.list.query({ projectId }),
-      trpc.cyboflow.runs.list.query({ projectId }),
-    ])
-      .then(([rows, runs]) => {
-        const metas = buildWorkflowMeta(rows, runs);
-        setWorkflowMetas(metas);
-        // Pre-select the default workflow if present and nothing chosen yet.
-        setSelection((prev) => {
-          if (prev !== null) return prev;
-          const def = metas.find((m) => m.name === DEFAULT_WORKFLOW_NAME);
-          return def ? { kind: 'workflow', workflowId: def.id } : null;
+  // Refactored out of the mount effect into a callable so the blueprint editor
+  // (step ③) can re-invoke it after saving a new/edited flow. `preferId` selects
+  // a just-saved flow; otherwise the current pick is preserved or the default is
+  // chosen.
+  const loadWorkflows = useCallback(
+    (preferId?: string): Promise<void> => {
+      if (selectedProjectId === null) return Promise.resolve();
+      const projectId = selectedProjectId;
+      setWorkflowsLoading(true);
+      setWorkflowsError(null);
+      return Promise.all([
+        trpc.cyboflow.workflows.list.query({ projectId }),
+        trpc.cyboflow.runs.list.query({ projectId }),
+      ])
+        .then(([rows, runs]) => {
+          const metas = buildWorkflowMeta(rows, runs);
+          setWorkflowMetas(metas);
+          setSelection((prev) => {
+            if (preferId && metas.some((m) => m.id === preferId)) {
+              return { kind: 'workflow', workflowId: preferId };
+            }
+            if (prev !== null) return prev;
+            const def = metas.find((m) => m.name === DEFAULT_WORKFLOW_NAME);
+            return def ? { kind: 'workflow', workflowId: def.id } : null;
+          });
+        })
+        .catch((err: unknown) => {
+          setWorkflowsError(err instanceof Error ? err.message : 'Failed to load workflows');
+        })
+        .finally(() => {
+          setWorkflowsLoading(false);
         });
-      })
-      .catch((err: unknown) => {
-        setWorkflowsError(err instanceof Error ? err.message : 'Failed to load workflows');
-      })
-      .finally(() => {
-        setWorkflowsLoading(false);
-      });
-  }, [selectedProjectId]);
+    },
+    [selectedProjectId],
+  );
+
+  useEffect(() => {
+    void loadWorkflows();
+  }, [loadWorkflows]);
 
   // ── Navigation handlers ──────────────────────────────────────────────────
   const handleBackToQueue = useCallback(() => {
@@ -215,11 +266,29 @@ export default function SessionStartWizard(): React.JSX.Element {
     setWorkflowMetas([]);
   }, []);
 
+  const handleBackToWorkflow = useCallback(() => {
+    setStep(2);
+  }, []);
+
+  const handleGoToConfigure = useCallback(() => {
+    // Advance to the config step. Selection is guaranteed non-null by the CTA's
+    // disabled state, but guard anyway.
+    if (selection !== null) setStep(3);
+  }, [selection]);
+
   const handleSelectProject = useCallback((projectId: number) => {
     setSelectedProjectId(projectId);
     setSelection(null);
     setStep(2);
   }, []);
+
+  const handleEditorSaved = useCallback(
+    (savedId: string) => {
+      setEditorMode(null);
+      void loadWorkflows(savedId);
+    },
+    [loadWorkflows],
+  );
 
   const handleProjectCreated = useCallback((project: Project) => {
     setCreateOpen(false);
@@ -243,8 +312,8 @@ export default function SessionStartWizard(): React.JSX.Element {
         const sessionId = await ensureSessionForLaunch(selectedProjectId);
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
-            ? { workflowId, projectId: selectedProjectId, sessionId }
-            : { workflowId, projectId: selectedProjectId, sessionId, ideaId },
+            ? { workflowId, projectId: selectedProjectId, sessionId, substrate, permissionMode }
+            : { workflowId, projectId: selectedProjectId, sessionId, substrate, permissionMode, ideaId },
         );
         // Nest the run under its session so the close-out + panels resolve
         // (setActiveRun's parentSessionId sets selectedSessionId).
@@ -263,14 +332,14 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
   );
 
   const handleStart = useCallback(() => {
     if (selection === null || startInFlightRef.current) return;
 
     if (selection.kind === 'quick') {
-      void startQuickSession();
+      void startQuickSession(permissionMode);
       return;
     }
 
@@ -284,7 +353,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -297,17 +366,46 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
   const ctaBusy = isLaunching || isQuickStarting;
+  const selectedMeta =
+    selection?.kind === 'workflow'
+      ? workflowMetas.find((m) => m.id === selection.workflowId)
+      : undefined;
   let ctaLabel: string;
   if (selection === null) {
     ctaLabel = 'Select a workflow';
   } else if (selection.kind === 'quick') {
     ctaLabel = 'Start interactive session';
   } else {
-    const meta = workflowMetas.find((m) => m.id === selection.workflowId);
-    ctaLabel = `Run ${meta?.slashCommand ?? '/workflow'}`;
+    ctaLabel = `Run ${selectedMeta?.slashCommand ?? '/workflow'}`;
   }
 
+  // Human-readable agent-permission label for the launch summary.
+  const permissionLabel =
+    PERMISSION_MODE_OPTIONS.find((o) => o.id === permissionMode)?.label ?? permissionMode;
+
   const combinedError = launchError ?? quickError;
+
+  // Selected-project banner card — shared by the workflow step (②) and the
+  // configure step (③).
+  const projectBannerCard = (
+    <div className="flex flex-col gap-1 border border-border-emphasized bg-surface-primary p-3">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true">📁</span>
+        <span
+          className="truncate text-text-primary"
+          style={{ fontSize: '14px', fontWeight: 700 }}
+        >
+          {banner.name}
+        </span>
+        <span className="ml-auto truncate font-mono text-xs text-status-success">
+          ⌥ {banner.branch ?? '—'}
+        </span>
+      </div>
+      <span className="truncate font-mono text-xs text-text-secondary" title={banner.path ?? undefined}>
+        {banner.path ?? '—'}
+      </span>
+    </div>
+  );
 
   return (
     <div className="relative h-full w-full overflow-y-auto" style={GRID_BG_STYLE}>
@@ -317,6 +415,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           step={step}
           onBackToQueue={handleBackToQueue}
           onChangeProject={handleChangeProject}
+          onBackToWorkflow={handleBackToWorkflow}
         />
 
         {/* ── Step 1: project grid (unlocked only) ── */}
@@ -348,24 +447,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         {/* ── Step 2: workflow list ── */}
         {step === 2 && selectedProjectId !== null && (
           <div className="flex flex-col gap-4 pb-24">
-            {/* Selected-project banner */}
-            <div className="flex flex-col gap-1 border border-border-emphasized bg-surface-primary p-3">
-              <div className="flex items-center gap-2">
-                <span aria-hidden="true">📁</span>
-                <span
-                  className="truncate text-text-primary"
-                  style={{ fontSize: '14px', fontWeight: 700 }}
-                >
-                  {banner.name}
-                </span>
-                <span className="ml-auto truncate font-mono text-xs text-status-success">
-                  ⌥ {banner.branch ?? '—'}
-                </span>
-              </div>
-              <span className="truncate font-mono text-xs text-text-secondary" title={banner.path ?? undefined}>
-                {banner.path ?? '—'}
-              </span>
-            </div>
+            {projectBannerCard}
 
             {/* Quick session (featured, allowQuick only) */}
             {allowQuick && (
@@ -405,10 +487,77 @@ export default function SessionStartWizard(): React.JSX.Element {
             </div>
           </div>
         )}
+
+        {/* ── Step 3: configure session settings + launch ── */}
+        {step === 3 && selectedProjectId !== null && selection !== null && (
+          <div className="flex flex-col gap-4 pb-24" data-testid="wizard-step3">
+            {projectBannerCard}
+
+            {/* Agent permission — shown for BOTH workflow and quick launches. */}
+            <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
+
+            {/* Workflow-only controls: CLI substrate (a no-op for quick panels)
+                and blueprint-editor access (there is no workflow to edit for a
+                quick session). */}
+            {selection.kind === 'workflow' && (
+              <>
+                <SubstrateSelector
+                  value={substrate}
+                  onChange={setSubstrate}
+                  id="wizard-substrate"
+                  caveatsTestId="wizard-substrate-caveats"
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditorMode('edit')}
+                    data-testid="wizard-edit-flow"
+                    className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                  >
+                    Edit blueprint
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditorMode('create')}
+                    data-testid="wizard-new-flow"
+                    className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                  >
+                    New flow
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Launch summary */}
+            <div
+              data-testid="wizard-launch-summary"
+              className="flex flex-col gap-1.5 border border-border-primary bg-surface-secondary p-3"
+            >
+              <span className="eyebrow text-text-secondary">Launch summary</span>
+              <SummaryRow label="Project" value={banner.name} />
+              <SummaryRow label="Branch" value={banner.branch ?? '—'} />
+              <SummaryRow
+                label="Mode"
+                value={
+                  selection.kind === 'quick'
+                    ? 'Interactive quick session'
+                    : selectedMeta?.slashCommand ?? '/workflow'
+                }
+              />
+              <SummaryRow label="Permission" value={permissionLabel} />
+              {selection.kind === 'workflow' && (
+                <SummaryRow
+                  label="Substrate"
+                  value={substrate === 'interactive' ? 'Interactive (PTY)' : 'SDK'}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ── Sticky CTA (workflow step) ── */}
-      {step === 2 && selectedProjectId !== null && (
+      {/* ── Sticky CTA (workflow step advances; configure step launches) ── */}
+      {(step === 2 || step === 3) && selectedProjectId !== null && (
         <div className="sticky bottom-0 left-0 right-0 border-t border-border-primary bg-bg-primary/95 px-6 py-3 backdrop-blur">
           <div className="mx-auto flex max-w-[720px] flex-col gap-2">
             {combinedError !== null && combinedError !== undefined && (
@@ -416,15 +565,27 @@ export default function SessionStartWizard(): React.JSX.Element {
                 {combinedError}
               </p>
             )}
-            <button
-              type="button"
-              onClick={handleStart}
-              disabled={selection === null || ctaBusy}
-              data-testid="wizard-cta"
-              className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {ctaLabel}
-            </button>
+            {step === 2 ? (
+              <button
+                type="button"
+                onClick={handleGoToConfigure}
+                disabled={selection === null}
+                data-testid="wizard-next"
+                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {selection === null ? 'Select a workflow' : 'Next: configure →'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleStart}
+                disabled={selection === null || ctaBusy}
+                data-testid="wizard-cta"
+                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {ctaLabel}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -458,6 +619,18 @@ export default function SessionStartWizard(): React.JSX.Element {
           isOpen
           onClose={() => setCreateOpen(false)}
           onCreated={handleProjectCreated}
+        />
+      )}
+
+      {/* ── Workflow blueprint editor (step ③, workflow path) ── */}
+      {editorMode !== null && selectedProjectId !== null && selection?.kind === 'workflow' && (
+        <WorkflowEditorModal
+          isOpen
+          mode={editorMode}
+          workflowId={editorMode === 'edit' ? selection.workflowId : ''}
+          projectId={selectedProjectId}
+          onClose={() => setEditorMode(null)}
+          onSaved={handleEditorSaved}
         />
       )}
     </div>

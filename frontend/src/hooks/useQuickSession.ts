@@ -22,6 +22,7 @@ import { useState, useCallback } from 'react';
 import { API } from '../utils/api';
 import { panelApi } from '../services/panelApi';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import type { PermissionMode } from '../../../shared/types/workflows';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -29,7 +30,12 @@ interface UseQuickSessionOptions {
 }
 
 interface UseQuickSessionReturn {
-  start: () => Promise<void>;
+  /**
+   * Create the quick session. An optional per-session 4-mode agent-permission
+   * override (Session Start Wizard step 3) is threaded into createQuick and
+   * persisted on the session; omitted → the session inherits the global default.
+   */
+  start: (agentPermissionMode?: PermissionMode) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -39,7 +45,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
   const [error, setError] = useState<string | null>(null);
 
   const start = useCallback(
-    async (): Promise<void> => {
+    async (agentPermissionMode?: PermissionMode): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
       setError(null);
@@ -49,6 +55,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         const result = await API.sessions.createQuick({
           prompt: '',
           projectId: opts.projectId,
+          ...(agentPermissionMode ? { agentPermissionMode } : {}),
         });
 
         if (!result.success || !result.data) {
