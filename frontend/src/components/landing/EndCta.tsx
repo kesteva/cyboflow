@@ -2,8 +2,9 @@
  * EndCta — the prominent "kick off more" block that closes the landing home.
  *
  * A bold dashed call-to-action that drops the user into the new-flow wizard
- * unlocked (no pinned project, no quick escape hatch) to start fresh work on
- * any project.
+ * unlocked (no pinned project) to start fresh work on any project. The quick
+ * escape hatch is offered too: pick a project, then choose a quick interactive
+ * session or a workflow.
  */
 import { Plus } from 'lucide-react';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -24,7 +25,7 @@ export function EndCta({ heading = 'Want to kick off more?' }: EndCtaProps) {
         </p>
         <button
           type="button"
-          onClick={() => useNavigationStore.getState().goToWizard({})}
+          onClick={() => useNavigationStore.getState().goToWizard({ allowQuick: true })}
           className="mt-2 inline-flex items-center gap-2 bg-interactive px-5 py-3 text-sm font-bold uppercase tracking-wide text-text-on-interactive transition-colors hover:bg-interactive-hover"
         >
           <Plus className="h-4 w-4" strokeWidth={2.5} />

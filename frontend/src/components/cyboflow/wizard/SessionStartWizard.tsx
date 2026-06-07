@@ -85,7 +85,11 @@ function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element
 export default function SessionStartWizard(): React.JSX.Element {
   const opts = useNavigationStore((s) => s.wizardOpts);
   const locked = opts?.lockProjectId != null;
-  const allowQuick = locked && opts?.allowQuick === true;
+  // Quick session is offered whenever the caller opts in — in BOTH locked mode
+  // (rail "+ NEW FLOW", pinned project) and the unlocked center-pane flow (home /
+  // review-queue "Start a new session"), where the card appears in step 2 once a
+  // project is chosen. Not tied to `locked`, so the unlocked path can offer it.
+  const allowQuick = opts?.allowQuick === true;
 
   // Step state (unlocked only). Locked mode is always "on the workflow step".
   const [step, setStep] = useState<1 | 2>(locked ? 2 : 1);
