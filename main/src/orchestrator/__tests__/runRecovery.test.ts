@@ -22,7 +22,7 @@
  * no mocks, exercises real SQL and real registry semantics.
  */
 import { describe, it, expect } from 'vitest';
-import { recoverActiveStateOrphans } from '../runRecovery';
+import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans } from '../runRecovery';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -190,5 +190,90 @@ describe('recoverActiveStateOrphans', () => {
       .prepare('SELECT status FROM workflow_runs WHERE id = ?')
       .get('run-E2') as { status: string };
     expect(e2.status).toBe('failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recoverArchivedSessionRunOrphans — runs left non-terminal under a dismissed
+// (archived) session, which keep showing in the active-runs rail.
+// ---------------------------------------------------------------------------
+
+describe('recoverArchivedSessionRunOrphans', () => {
+  // The orchestrator GATE_SCHEMA has no `sessions` table; the function only reads
+  // sessions.id / archived / run_id, so a minimal table suffices.
+  function withSessions(db: ReturnType<typeof createTestDb>): ReturnType<typeof createTestDb> {
+    db.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, archived INTEGER DEFAULT 0, run_id TEXT)');
+    return db;
+  }
+
+  it('cancels a non-terminal run whose session (session_id link) is archived', () => {
+    const db = withSessions(createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true }));
+    const { runId } = seedRun(db, { id: 'run-arch-1', status: 'stuck' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-1', runId);
+    db.prepare('INSERT INTO sessions (id, archived, run_id) VALUES (?, 1, ?)').run('sess-1', runId);
+
+    const result = recoverArchivedSessionRunOrphans(dbAdapter(db));
+
+    expect(result.runsCanceled).toBe(1);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get(runId) as {
+      status: string;
+      outcome: string;
+    };
+    expect(row.status).toBe('canceled');
+    expect(row.outcome).toBe('dismissed');
+  });
+
+  it('cancels a non-terminal run linked only via the legacy sessions.run_id back-link', () => {
+    const db = withSessions(createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true }));
+    const { runId } = seedRun(db, { id: 'run-arch-2', status: 'awaiting_review' });
+    // No session_id on the run; the archived session points to it via run_id.
+    db.prepare('INSERT INTO sessions (id, archived, run_id) VALUES (?, 1, ?)').run('sess-2', runId);
+
+    const result = recoverArchivedSessionRunOrphans(dbAdapter(db));
+
+    expect(result.runsCanceled).toBe(1);
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('canceled');
+  });
+
+  it('leaves a non-terminal run whose session is NOT archived', () => {
+    const db = withSessions(createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true }));
+    const { runId } = seedRun(db, { id: 'run-active-1', status: 'stuck' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-active', runId);
+    db.prepare('INSERT INTO sessions (id, archived, run_id) VALUES (?, 0, ?)').run('sess-active', runId);
+
+    const result = recoverArchivedSessionRunOrphans(dbAdapter(db));
+
+    expect(result.runsCanceled).toBe(0);
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('stuck');
+  });
+
+  it('leaves already-terminal runs on archived sessions untouched', () => {
+    const db = withSessions(createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true }));
+    const { runId } = seedRun(db, { id: 'run-term-1', status: 'failed' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-term', runId);
+    db.prepare('INSERT INTO sessions (id, archived, run_id) VALUES (?, 1, ?)').run('sess-term', runId);
+
+    const result = recoverArchivedSessionRunOrphans(dbAdapter(db));
+
+    expect(result.runsCanceled).toBe(0);
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('failed');
+  });
+
+  it('cancels pending approvals for recovered runs', () => {
+    const db = withSessions(createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true }));
+    const { runId } = seedRun(db, { id: 'run-arch-appr', status: 'stuck' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-appr', runId);
+    db.prepare('INSERT INTO sessions (id, archived, run_id) VALUES (?, 1, ?)').run('sess-appr', runId);
+    seedApproval(db, { runId, status: 'pending' });
+
+    const result = recoverArchivedSessionRunOrphans(dbAdapter(db));
+
+    expect(result.runsCanceled).toBe(1);
+    expect(result.approvalsCanceled).toBe(1);
+    const appr = db.prepare('SELECT status FROM approvals WHERE run_id = ?').get(runId) as { status: string };
+    expect(appr.status).toBe('timed_out');
   });
 });

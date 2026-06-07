@@ -67,7 +67,7 @@ import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { buildStepReportingAppend } from './orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
-import { recoverActiveStateOrphans } from './orchestrator/runRecovery';
+import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans } from './orchestrator/runRecovery';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -975,6 +975,16 @@ app.whenReady().then(async () => {
       orphanRecovery.approvalsCanceled > 0
     ) {
       console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
+    }
+
+    // Boot recovery: runs orphaned by an archived (dismissed) session. Left
+    // non-terminal (e.g. 'stuck' from before the dismiss-cascade existed) they
+    // keep showing in the active-runs rail. Cancel them so the rail's
+    // terminal-status filter hides them — self-healing for any dismiss that
+    // failed to cancel a hosted run.
+    const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
+    if (archivedOrphanRecovery.runsCanceled > 0) {
+      console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
     }
 
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op

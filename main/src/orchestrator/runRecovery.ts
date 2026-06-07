@@ -85,3 +85,74 @@ export function recoverActiveStateOrphans(
     approvalsCanceled,
   };
 }
+
+export interface ArchivedSessionRecoveryResult {
+  runsCanceled: number;
+  approvalsCanceled: number;
+}
+
+/**
+ * Boot-time recovery for runs ORPHANED by an archived (dismissed) session.
+ *
+ * When a session is dismissed its worktree is removed, but a run left in a
+ * NON-terminal state — e.g. 'stuck' created before the dismiss-cascade existed —
+ * keeps appearing in the active-runs rail (activeRunsStore lists any non-terminal
+ * run, ignoring whether its session is gone). This sweep cancels every
+ * non-terminal run whose owning session is archived, via EITHER the post-019
+ * `workflow_runs.session_id` link OR the legacy `sessions.run_id` back-link, so
+ * the rail's terminal-status filter hides them. It is self-healing: it also
+ * covers any future dismiss that fails to cancel a hosted run.
+ *
+ * Direct UPDATEs (bypassing the state machine) in a single transaction, mirroring
+ * {@link recoverActiveStateOrphans} — boot recovery is allowed to force a
+ * terminal transition. `outcome='dismissed'` matches the session-dismiss path.
+ */
+export function recoverArchivedSessionRunOrphans(
+  db: DatabaseLike,
+): ArchivedSessionRecoveryResult {
+  const orphans = db
+    .prepare(
+      `SELECT r.id FROM workflow_runs r
+        WHERE r.status NOT IN ('completed', 'failed', 'canceled')
+          AND (
+            EXISTS (SELECT 1 FROM sessions s WHERE s.id = r.session_id AND s.archived = 1)
+            OR EXISTS (SELECT 1 FROM sessions s2 WHERE s2.run_id = r.id AND s2.archived = 1)
+          )`,
+    )
+    .all() as { id: string }[];
+
+  if (orphans.length === 0) {
+    return { runsCanceled: 0, approvalsCanceled: 0 };
+  }
+
+  const ids = orphans.map((r) => r.id);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `UPDATE workflow_runs
+          SET status = 'canceled',
+              outcome = 'dismissed',
+              ended_at = CURRENT_TIMESTAMP,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (${placeholders})
+          AND status NOT IN ('completed', 'failed', 'canceled')`,
+    ).run(...ids);
+
+    const approvalsInfo = db
+      .prepare(
+        `UPDATE approvals
+            SET status = 'timed_out',
+                decided_at = CURRENT_TIMESTAMP,
+                decided_by = 'system'
+          WHERE run_id IN (${placeholders})
+            AND status = 'pending'`,
+      )
+      .run(...ids) as { changes: number };
+
+    return approvalsInfo.changes;
+  });
+
+  const approvalsCanceled = tx();
+  return { runsCanceled: ids.length, approvalsCanceled };
+}
