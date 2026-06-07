@@ -31,6 +31,7 @@ import type { Project } from '../../../types/project';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useQuickSession } from '../../../hooks/useQuickSession';
+import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
 import { IdeaPickerModal } from '../IdeaPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { WizardStepHeader } from './WizardStepHeader';
@@ -234,12 +235,20 @@ export default function SessionStartWizard(): React.JSX.Element {
       setLaunchError(null);
       setIsLaunching(true);
       try {
+        // Ensure the run executes INSIDE a session (the active one if selected,
+        // else a freshly created session) — mirrors WorkflowPicker / the backlog
+        // launcher. Without this the wizard took the legacy PARENTLESS path
+        // (workflow_runs.session_id null), leaving the run with no session to bind
+        // the close-out (Merge / PR / Dismiss) or the File Explorer / Diff to.
+        const sessionId = await ensureSessionForLaunch(selectedProjectId);
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
-            ? { workflowId, projectId: selectedProjectId }
-            : { workflowId, projectId: selectedProjectId, ideaId },
+            ? { workflowId, projectId: selectedProjectId, sessionId }
+            : { workflowId, projectId: selectedProjectId, sessionId, ideaId },
         );
-        useCyboflowStore.getState().setActiveRun(result.runId);
+        // Nest the run under its session so the close-out + panels resolve
+        // (setActiveRun's parentSessionId sets selectedSessionId).
+        useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
 
         const meta = workflowMetas.find((m) => m.id === workflowId);
