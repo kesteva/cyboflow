@@ -14,43 +14,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
-import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
+import { useAgentPermissionMode } from '../../hooks/useAgentPermissionMode';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
-import type { WorkflowRow, PermissionMode } from '../../../../shared/types/workflows';
+import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
+import { SubstrateSelector } from './SubstrateSelector';
+import type { WorkflowRow } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-
-/**
- * The per-run agent-permission options, mirroring the global control in
- * Settings.tsx. Selecting one threads it into runs.start as the highest-precedence
- * `requestedMode` rung of the permission ladder (per-run > frontmatter > global).
- */
-const PERMISSION_MODE_OPTIONS: ReadonlyArray<{ id: PermissionMode; label: string; hint: string }> = [
-  { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
-  { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
-  { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
-  { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
-];
 
 interface WorkflowPickerProps {
   projectId: number;
   onWorkflowStarted?: (runId: string) => void;
 }
-
-/**
- * The v1 limits of the interactive PTY substrate, surfaced when the user picks
- * 'interactive' (IDEA-013 / TASK-812). These are the UNCONDITIONAL caveats —
- * the interactive PreToolUse approval gating DID ship (Probe A passed via
- * TASK-810's shell-hook + async-deferred socket handler), so the
- * "approval routing unavailable" caveat is intentionally NOT listed here.
- */
-const INTERACTIVE_CAVEATS: readonly string[] = [
-  'AskUserQuestion is native-TUI-only — multiple-choice questions surface in the terminal, not the structured panel.',
-  'Subagent gating is limited — only the main session reports step transitions; subagent tool calls are gated but not separately surfaced.',
-  'Streaming is coarser — output arrives at turn-level granularity, not token-level deltas.',
-];
 
 export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerProps) {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
@@ -69,23 +46,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
 
   /**
-   * The per-run agent permission choice, seeded from the global default
-   * (Settings → Agent Permission Mode) so an untouched picker forwards the same
-   * value the run would otherwise inherit — never silently clobbering the global
-   * default down to a hardcoded 'default'. The default is read REACTIVELY from
-   * the config store (not once at mount) so a config fetch that resolves AFTER
-   * this picker mounts still re-seeds the selection; `permissionTouchedRef`
-   * guards against clobbering an explicit user pick once they interact.
+   * The per-run agent permission choice — seeded from the global default and
+   * guarded against the config-load race by {@link useAgentPermissionMode}.
    * Threaded into runs.start.mutate as `permissionMode` (the AppRouter-inferred
-   * input; PermissionMode is imported from the shared type, never re-declared).
+   * input).
    */
-  const globalDefaultPermissionMode =
-    useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(globalDefaultPermissionMode);
-  const permissionTouchedRef = useRef(false);
-  useEffect(() => {
-    if (!permissionTouchedRef.current) setPermissionMode(globalDefaultPermissionMode);
-  }, [globalDefaultPermissionMode]);
+  const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
 
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -241,70 +207,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         </select>
       )}
 
-      {/* Substrate selector — per-run CLI substrate choice (IDEA-013 / TASK-812). */}
-      <div className="flex flex-col gap-1">
-        <label
-          htmlFor="workflow-picker-substrate"
-          className="text-xs font-medium text-text-secondary"
-        >
-          CLI substrate
-        </label>
-        <select
-          id="workflow-picker-substrate"
-          value={substrate}
-          onChange={(e) => setSubstrate(e.target.value === 'interactive' ? 'interactive' : 'sdk')}
-          className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-          aria-label="Select CLI substrate"
-        >
-          <option value="sdk">SDK (default)</option>
-          <option value="interactive">Interactive (PTY)</option>
-        </select>
-      </div>
+      {/* Substrate selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
+      <SubstrateSelector
+        value={substrate}
+        onChange={setSubstrate}
+        id="workflow-picker-substrate"
+        caveatsTestId="workflow-picker-substrate-caveats"
+      />
 
       {/* Per-run agent permission selector — overrides the global default for
-          this run only (highest-precedence `requestedMode` rung). Mirrors the
-          global control in Settings.tsx. */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-text-secondary">Agent permission</span>
-        {PERMISSION_MODE_OPTIONS.map(({ id, label, hint }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => {
-              permissionTouchedRef.current = true;
-              setPermissionMode(id);
-            }}
-            aria-pressed={permissionMode === id}
-            aria-label={`Permission mode: ${label}`}
-            className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
-              permissionMode === id
-                ? 'border-interactive bg-interactive-surface'
-                : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
-            }`}
-          >
-            <span className="text-text-primary font-medium text-sm">{label}</span>
-            <span className="text-xs text-text-tertiary">{hint}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Interactive-substrate v1 caveats — surfaced prominently ONLY when the
-          user selects 'interactive'. Approval routing DID ship for interactive
-          (Probe A passed), so that caveat is intentionally not listed. */}
-      {substrate === 'interactive' && (
-        <div
-          data-testid="workflow-picker-substrate-caveats"
-          role="note"
-          className="rounded-input border border-status-warning bg-bg-secondary px-3 py-2 text-xs text-text-secondary"
-        >
-          <p className="mb-1 font-semibold text-text-primary">Interactive substrate — v1 limits</p>
-          <ul className="list-disc space-y-1 pl-4">
-            {INTERACTIVE_CAVEATS.map((caveat) => (
-              <li key={caveat}>{caveat}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+          this run only (highest-precedence `requestedMode` rung). */}
+      <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
       {combinedError && (
         <p className="text-xs text-status-error" role="alert">
