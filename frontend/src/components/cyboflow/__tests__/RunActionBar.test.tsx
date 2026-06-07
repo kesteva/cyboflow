@@ -104,8 +104,8 @@ describe('RunActionBar', () => {
     },
   );
 
-  it.each(['canceled', 'failed', 'completed'])(
-    'shows the End-workflow gate (not the run controls) for terminal status %s',
+  it.each(['failed', 'completed'])(
+    'shows the End-workflow gate (not the run controls) for self-terminated status %s',
     (status) => {
       activate({ status });
       render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
@@ -117,6 +117,13 @@ describe('RunActionBar', () => {
       expect(screen.queryByTestId('run-action-resume')).not.toBeInTheDocument();
     },
   );
+
+  it('hides the bar entirely for a canceled run (Cancel returns to rest via its own path)', () => {
+    activate({ status: 'canceled' });
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
+    expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-action-end')).not.toBeInTheDocument();
+  });
 
   it('clicking End workflow calls onEndWorkflow', () => {
     activate({ status: 'completed' });

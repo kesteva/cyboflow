@@ -70,8 +70,18 @@ function worktreeBasename(p: string | undefined | null): string | null {
   return idx === -1 ? trimmed : trimmed.slice(idx + 1);
 }
 
+/** Parse an ISO timestamp to epoch ms, or null when missing / unparseable. */
+function createdAtMs(createdAt: string | null): number | null {
+  if (!createdAt) return null;
+  const t = new Date(createdAt).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
 /** Format an elapsed millisecond span as a compact "Xh Ym" / "Xm Ys" / "Xs". */
 export function formatElapsed(ms: number): string {
+  // Guard against NaN/Infinity from a malformed createdAt so the node never
+  // renders "NaNs" (mirrors homeClassify's elapsed guard).
+  if (!Number.isFinite(ms)) return '0s';
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const seconds = totalSeconds % 60;
   const minutes = Math.floor(totalSeconds / 60) % 60;
@@ -93,16 +103,17 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
   const sessionId = session?.id ?? null;
 
   // Elapsed — derived from createdAt, recomputed on a 1s tick.
-  const [elapsedMs, setElapsedMs] = useState<number>(() =>
-    createdAt ? Date.now() - new Date(createdAt).getTime() : 0,
-  );
+  const [elapsedMs, setElapsedMs] = useState<number>(() => {
+    const base = createdAtMs(createdAt);
+    return base === null ? 0 : Date.now() - base;
+  });
 
   useEffect(() => {
-    if (createdAt === null) {
+    const base = createdAtMs(createdAt);
+    if (base === null) {
       setElapsedMs(0);
       return;
     }
-    const base = new Date(createdAt).getTime();
     const tick = () => setElapsedMs(Date.now() - base);
     tick();
     const id = window.setInterval(tick, ELAPSED_TICK_MS);

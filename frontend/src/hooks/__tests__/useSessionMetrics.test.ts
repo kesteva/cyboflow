@@ -107,6 +107,11 @@ describe('useSessionMetrics', () => {
     expect(result.current.elapsed).toMatch(/^\d+m \d+s$/);
   });
 
+  it('never renders NaN for a malformed createdAt', () => {
+    const { result } = renderHook(() => useSessionMetrics(makeSession({ createdAt: 'not-a-date' })));
+    expect(result.current.elapsed).toBe('0s');
+  });
+
   it('falls back to the worktree basename for the branch when stats omit it', async () => {
     mockGetStatistics.mockResolvedValue({
       success: true,

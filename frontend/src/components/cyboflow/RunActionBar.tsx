@@ -8,6 +8,13 @@ import { TERMINAL_RUN_STATUSES } from '../../../../shared/types/cyboflow';
 /** Statuses from which an SDK run can be paused (mirrors the backend guard). */
 const PAUSABLE_STATUSES: readonly string[] = ['running', 'awaiting_review'];
 
+/**
+ * Terminal statuses a run reaches on its OWN — these get the "End workflow" gate.
+ * 'canceled' is deliberately excluded: a user-cancelled run returns to the
+ * resting view via RunCancelDialog's own success path, so it never lingers here.
+ */
+const SELF_TERMINATED_STATUSES: readonly string[] = ['completed', 'failed'];
+
 interface RunActionBarProps {
   /**
    * Open the git-neutral Cancel confirm. Wired by CyboflowRoot to a `setState`
@@ -77,12 +84,11 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   // not surfaced here).
   if (status === undefined) return null;
 
-  // A run that has reached a terminal status on its OWN (completed / failed —
-  // Cancel returns to the resting view via its own path) gets the explicit "End
-  // workflow" gate: the human-confirmed step that drops the centre pane back to
-  // the session's resting QuickSessionCanvas. The git-neutral run controls
-  // (Pause / Resume / Cancel) no longer apply once terminal.
-  if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(status)) {
+  // A run that has reached a terminal status on its OWN (completed / failed) gets
+  // the explicit "End workflow" gate: the human-confirmed step that drops the
+  // centre pane back to the session's resting QuickSessionCanvas. The git-neutral
+  // run controls (Pause / Resume / Cancel) no longer apply once terminal.
+  if (SELF_TERMINATED_STATUSES.includes(status)) {
     return (
       <div className="flex items-center gap-1.5" data-testid="run-action-bar">
         <span className="text-xs font-medium uppercase tracking-wide text-text-muted">Run</span>
@@ -99,6 +105,10 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
       </div>
     );
   }
+
+  // Any OTHER terminal status (canceled) has nothing to act on — Cancel already
+  // returned to the resting view via its own path.
+  if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(status)) return null;
 
   // SDK-only Pause/Resume gating. The interactive substrate is fresh-session-only
   // (no native --resume), so Pause is rendered DISABLED for it and Resume never

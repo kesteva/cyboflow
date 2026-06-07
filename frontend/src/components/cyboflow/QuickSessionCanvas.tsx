@@ -130,7 +130,7 @@ function WorkflowCmdButton({
       <span
         style={{
           marginLeft: 'auto',
-          color: hovered && !disabled ? 'var(--color-interactive-primary)' : 'var(--color-text-tertiary)',
+          color: hovered && !disabled ? 'var(--color-phase-execute)' : 'var(--color-text-tertiary)',
         }}
       >
         ▸
@@ -162,6 +162,9 @@ export function QuickSessionCanvas({
 
   useEffect(() => {
     let cancelled = false;
+    // Clear any prior error before refetching so a stale message never lingers
+    // once the list resolves (mirrors useLaunchWorkflow's setError(null)).
+    setListError(null);
     trpc.cyboflow.workflows.list
       .query({ projectId })
       .then((rows) => {
@@ -252,11 +255,11 @@ export function QuickSessionCanvas({
         >
           Quick session
         </b>
-        {branch && (
-          <span style={{ color: 'var(--color-text-tertiary)' }} title={branch}>
-            · {branch}
-          </span>
-        )}
+        {/* Calm static status label (design: "· session.live") — the branch is
+            shown in the node sub-line, so it is not repeated here. */}
+        <span style={{ color: 'var(--color-text-tertiary)' }} data-testid="quick-session-header-status">
+          · session.live
+        </span>
         <span
           style={{
             display: 'inline-flex',
@@ -266,19 +269,19 @@ export function QuickSessionCanvas({
             letterSpacing: '0.16em',
             textTransform: 'uppercase',
             fontWeight: 700,
-            color: 'var(--color-interactive-primary)',
-            border: '1px solid var(--color-interactive-primary)',
+            color: 'var(--color-phase-execute)',
+            border: '1px solid var(--color-phase-execute)',
             padding: '1px 7px',
           }}
           data-testid="quick-session-interactive-pill"
         >
           <span
-            className="animate-pulse"
+            className="animate-pulse motion-reduce:animate-none"
             style={{
               width: 5,
               height: 5,
               borderRadius: '50%',
-              background: 'var(--color-interactive-primary)',
+              background: 'var(--color-phase-execute)',
               display: 'inline-block',
             }}
           />
@@ -309,7 +312,7 @@ export function QuickSessionCanvas({
             flexShrink: 0,
             background: 'var(--color-surface-primary)',
             border: '1.4px solid var(--color-text-primary)',
-            outline: '2px solid var(--color-interactive-primary)',
+            outline: '2px solid var(--color-phase-execute)',
             outlineOffset: 2,
           }}
           data-testid="quick-session-node"
@@ -324,7 +327,7 @@ export function QuickSessionCanvas({
             }}
           >
             <span
-              className="animate-pulse"
+              className="animate-pulse motion-reduce:animate-none"
               style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff', display: 'inline-block' }}
             />
             <span
@@ -378,7 +381,7 @@ export function QuickSessionCanvas({
                     <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>
                       +{plus}
                     </span>{' '}
-                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-interactive-primary)' }}>
+                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-phase-execute)' }}>
                       −{minus}
                     </span>
                   </span>
@@ -422,8 +425,10 @@ export function QuickSessionCanvas({
           style={{
             width: 230,
             flexShrink: 0,
-            border: `1.4px dashed ${addHovered ? 'var(--color-interactive-primary)' : 'var(--color-text-disabled)'}`,
-            background: addHovered ? 'var(--color-surface-primary)' : 'rgba(255,255,255,0.4)',
+            border: `1.4px dashed ${addHovered ? 'var(--color-phase-execute)' : 'var(--color-text-disabled)'}`,
+            // Faint translucent "ghost" fill that stays visible across themes
+            // (the design's rgba(255,255,255,.4) vanishes on a dark canvas).
+            background: addHovered ? 'var(--color-surface-primary)' : 'rgba(var(--color-interactive-rgb), 0.06)',
             padding: '18px 16px',
             transition: 'border-color .12s, background .12s',
           }}

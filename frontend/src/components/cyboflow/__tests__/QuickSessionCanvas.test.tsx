@@ -81,6 +81,8 @@ describe('QuickSessionCanvas', () => {
   it('renders the live session node with metrics', () => {
     renderCanvas();
     expect(screen.getByTestId('quick-session-canvas')).toBeInTheDocument();
+    // Header carries the calm static status, not the (redundant) branch.
+    expect(screen.getByTestId('quick-session-header-status')).toHaveTextContent('session.live');
     expect(screen.getByTestId('quick-session-node-model')).toHaveTextContent('sonnet 4.5');
     expect(screen.getByTestId('quick-session-stat-elapsed')).toHaveTextContent('4m 12s');
     expect(screen.getByTestId('quick-session-stat-tokens')).toHaveTextContent('12.4k');
