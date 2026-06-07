@@ -1,3 +1,5 @@
+import type { PermissionMode } from '../../../shared/types/workflows';
+
 export interface Session {
   id: string;
   name: string;
@@ -61,6 +63,14 @@ export interface CreateSessionRequest {
   worktreeTemplate?: string;
   count?: number;
   permissionMode?: 'approve' | 'ignore';
+  /**
+   * Per-session 4-mode agent-permission override (Session Start Wizard step 3 /
+   * quick-session config). DISTINCT from the legacy `permissionMode` above. When
+   * omitted the session inherits the global default. Persisted to
+   * sessions.agent_permission_mode by the create-quick handler. KEEP IN SYNC with
+   * the frontend twin in frontend/src/types/session.ts (request-parity rule).
+   */
+  agentPermissionMode?: PermissionMode;
   projectId?: number;
   folderId?: string;
   baseBranch?: string;

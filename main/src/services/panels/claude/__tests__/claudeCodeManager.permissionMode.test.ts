@@ -402,6 +402,71 @@ describe('ClaudeCodeManager.spawnClaudeCode — quick/legacy session permission 
     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'default' }));
   });
 
+  it('prefers the per-session agent_permission_mode override over the global default', async () => {
+    // A session configured (Wizard step 3 / quick config) with an explicit
+    // 4-mode override. resolveSessionAgentPermissionMode must read it from the
+    // DB row and prefer it over the global default ('auto' here).
+    const sessionManager = {
+      getDbSession: vi.fn(() => ({ id: 's-override', agent_permission_mode: 'acceptEdits' })),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      makeConfigManager('auto'),
+      db,
+    );
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p-ov', 's-override', '/tmp/w', 'go', undefined, false, 'approve');
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'acceptEdits' }));
+  });
+
+  it('ignores an invalid stored agent_permission_mode and falls back to the global default', async () => {
+    const sessionManager = {
+      getDbSession: vi.fn(() => ({ id: 's-bad', agent_permission_mode: 'garbage' })),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      makeConfigManager('auto'),
+      db,
+    );
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p-bad', 's-bad', '/tmp/w', 'go', undefined, false, 'approve');
+
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agentPermissionMode: 'auto' }));
+  });
+
+  it("legacy 'ignore' still wins over a per-session agent_permission_mode override", async () => {
+    const sessionManager = {
+      getDbSession: vi.fn(() => ({ id: 's-ig', permission_mode: 'ignore', agent_permission_mode: 'acceptEdits' })),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      makeConfigManager('auto'),
+      db,
+    );
+    const spawn = spySpawn(mgr);
+
+    await mgr.spawnClaudeCode('p-ig', 's-ig', '/tmp/w', 'go', undefined, false, 'ignore');
+
+    const opts = spawn.mock.calls[0][0] as { agentPermissionMode?: string };
+    expect(opts.agentPermissionMode).toBeUndefined();
+  });
+
   it("restartPanelWithHistory preserves the session's legacy 'ignore' (no clobber by the global default)", async () => {
     // A session that opted into legacy 'ignore' (don't-ask). The restart path
     // must read it and forward it — otherwise spawnClaudeCode would seed the

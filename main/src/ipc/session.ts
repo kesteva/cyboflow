@@ -22,6 +22,7 @@ import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
+import { isPermissionMode } from '../../../shared/types/workflows';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -324,6 +325,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const branchName = request.branchName ?? generateQuickWorktreeBranchName();
       const toolType: 'claude' | 'none' = request.toolType ?? 'claude';
 
+      // Per-session 4-mode agent-permission override (Session Start Wizard step 3 /
+      // quick-session config). Validate the untyped IPC value; an absent/invalid
+      // value leaves the session on the global default (byte-identical to before).
+      const requestedAgentMode = isPermissionMode(request.agentPermissionMode)
+        ? request.agentPermissionMode
+        : undefined;
+
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
@@ -370,7 +378,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // 3. Advance: queued -> starting -> running.
       // 4. Backfill sessions.run_id with the new runId.
       const sentinelWorkflowId = cyboflow.workflowRegistry.ensureQuickWorkflow(targetProject.id);
-      const { runId } = cyboflow.workflowRegistry.createRun(sentinelWorkflowId);
+      // Stamp the chosen 4-mode onto the sentinel run's permission_mode_snapshot too,
+      // so the run row is truthful (the quick PANEL reads the session column below,
+      // but workflow-world tooling that inspects the run sees the right value).
+      const { runId } = cyboflow.workflowRegistry.createRun(
+        sentinelWorkflowId,
+        undefined,
+        undefined,
+        requestedAgentMode,
+      );
 
       const db = databaseService.getDb();
 
@@ -390,6 +406,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Backfill sessions.run_id.
       db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
+
+      // Persist the per-session agent-permission override (migration 021) so the
+      // quick Claude panel spawn (resolveSessionAgentPermissionMode → getDbSession)
+      // and any restart read it. Only written when explicitly chosen — NULL keeps
+      // the session on the global default.
+      if (requestedAgentMode !== undefined) {
+        db.prepare(`UPDATE sessions SET agent_permission_mode = ? WHERE id = ?`).run(
+          requestedAgentMode,
+          session.id,
+        );
+      }
 
       return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath, runId } };
     } catch (error) {

@@ -29,7 +29,7 @@ import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamPar
 import { transitionToAwaitingReview } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
-import type { PermissionMode } from '../../../../../shared/types/workflows';
+import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 
 /**
  * MODEL-ELIGIBILITY GUARD for native auto-mode.
@@ -1221,31 +1221,39 @@ export class ClaudeCodeManager extends AbstractCliManager {
       conversationHistory,
       isResume,
       permissionMode,
-      // Quick/legacy SDK sessions inherit the GLOBAL 4-mode agent permission
-      // default so the Settings control governs them too (not just workflow
-      // runs). resolveHookMode prefers agentPermissionMode over the legacy
-      // 'approve'|'ignore' value, so this is what takes effect. An explicit
-      // legacy 'ignore' (don't-ask) is a stronger statement than the default
-      // and is preserved by leaving agentPermissionMode unset (the legacy
-      // 'ignore' → 'dontAsk' branch in resolveHookMode then governs).
-      // Workflow runs never reach this path (they call spawnCliProcess directly
-      // with agentPermissionMode already set from the run snapshot).
-      agentPermissionMode: this.resolveSessionAgentPermissionMode(permissionMode),
+      // Quick/legacy SDK sessions resolve their 4-mode agent permission from the
+      // per-session override (sessions.agent_permission_mode, migration 021) when
+      // set, else the GLOBAL default — so both the Settings control AND the
+      // Session Start Wizard step-3 / quick-session config govern them (not just
+      // workflow runs). resolveHookMode prefers agentPermissionMode over the
+      // legacy 'approve'|'ignore' value, so this is what takes effect. An explicit
+      // legacy 'ignore' (don't-ask) is a stronger statement and is preserved by
+      // leaving agentPermissionMode unset (the legacy 'ignore' → 'dontAsk' branch
+      // in resolveHookMode then governs). Workflow runs never reach this path
+      // (they call spawnCliProcess directly with agentPermissionMode already set
+      // from the run snapshot).
+      agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
       model
     };
     await this.spawnCliProcess(options);
   }
 
   /**
-   * Resolve the 4-mode agent permission for a quick/legacy SDK session spawn
-   * from the GLOBAL default (Settings → Agent Permission Mode). Returns
-   * undefined when the session explicitly opted into legacy 'ignore' (so the
-   * legacy don't-ask branch is preserved) or when no ConfigManager is wired.
+   * Resolve the 4-mode agent permission for a quick/legacy SDK session spawn.
+   * Precedence: legacy 'ignore' (don't-ask) wins and returns undefined (the
+   * legacy branch is preserved); else the PER-SESSION override
+   * (sessions.agent_permission_mode, migration 021) if set and valid; else the
+   * GLOBAL default (Settings → Agent Permission Mode). Reading the override from
+   * the DB row (not a threaded arg) keeps it restart-safe — continuePanel /
+   * restartPanelWithHistory re-resolve it for free on every respawn.
    */
   private resolveSessionAgentPermissionMode(
+    sessionId: string,
     legacyPermissionMode?: 'approve' | 'ignore',
   ): PermissionMode | undefined {
     if (legacyPermissionMode === 'ignore') return undefined;
+    const stored = this.sessionManager.getDbSession(sessionId)?.agent_permission_mode;
+    if (isPermissionMode(stored)) return stored;
     return this.configManager?.getDefaultAgentPermissionMode();
   }
 

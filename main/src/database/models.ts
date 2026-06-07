@@ -1,3 +1,5 @@
+import type { PermissionMode } from '../../../shared/types/workflows';
+
 export interface Project {
   id: number;
   name: string;
@@ -56,6 +58,13 @@ export interface Session {
   folder_id?: string;
   claude_session_id?: string;
   permission_mode?: 'approve' | 'ignore';
+  /**
+   * Per-session 4-mode agent-permission override (migration 021), DISTINCT from
+   * the legacy `permission_mode` above. NULL → inherit the global default
+   * (Settings → Agent Permission Mode). Read by resolveSessionAgentPermissionMode
+   * on quick/legacy SDK panel spawns; workflow runs use permission_mode_snapshot.
+   */
+  agent_permission_mode?: PermissionMode;
   run_started_at?: string;
   is_main_repo?: boolean;
   display_order?: number;

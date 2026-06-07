@@ -1,4 +1,5 @@
 import type { TextBlock, ToolUseBlock, ToolResultBlock } from '../../../shared/types/claudeStream';
+import type { PermissionMode } from '../../../shared/types/workflows';
 
 // Claude message content types
 /** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
@@ -128,6 +129,13 @@ export interface CreateSessionRequest {
   worktreeTemplate?: string;
   count?: number;
   permissionMode?: 'approve' | 'ignore';
+  /**
+   * Per-session 4-mode agent-permission override (Session Start Wizard step 3 /
+   * quick-session config). DISTINCT from the legacy `permissionMode` above. When
+   * omitted the session inherits the global default. KEEP IN SYNC with the main
+   * twin in main/src/types/session.ts (request-parity rule).
+   */
+  agentPermissionMode?: PermissionMode;
   projectId?: number;
   folderId?: string;
   isMainRepo?: boolean;
