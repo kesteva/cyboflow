@@ -274,7 +274,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
         <button
-          onClick={() => void startQuickSession()}
+          onClick={() => void startQuickSession(permissionMode)}
           disabled={isQuickStarting || isStarting}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"

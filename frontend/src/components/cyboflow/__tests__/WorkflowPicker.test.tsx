@@ -179,7 +179,10 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(quickIndex).toBeGreaterThan(startRunIndex);
   });
 
-  it('Quick Session click calls createQuick with { prompt, projectId } — no toolType or permissionMode', async () => {
+  it('Quick Session click calls createQuick threading the seeded agent permission mode', async () => {
+    // Config empty → the permission selector seeds to the 'default' floor, which
+    // the quick button threads as agentPermissionMode (parity with the wizard).
+    useConfigStore.setState({ config: null });
     render(<WorkflowPicker projectId={1} />);
 
     const quickBtn = await screen.findByTestId('quick-session-button');
@@ -188,7 +191,7 @@ describe('WorkflowPicker — Quick Session button', () => {
     });
 
     expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, agentPermissionMode: 'default' });
   });
 
   it('Quick Session success path creates both Claude and Terminal panels', async () => {
@@ -489,6 +492,24 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
     });
 
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'acceptEdits' }));
+  });
+
+  it('threads a picked per-session override into the Quick Session create', async () => {
+    useConfigStore.setState({ config: { defaultAgentPermissionMode: 'default' } as unknown as AppConfig });
+    render(<WorkflowPicker projectId={1} />);
+
+    const autoBtn = await screen.findByLabelText('Permission mode: Auto');
+    await act(async () => {
+      fireEvent.click(autoBtn);
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ agentPermissionMode: 'auto' }),
+    );
   });
 });
 
