@@ -323,6 +323,24 @@ describe('WorkflowRegistry', () => {
         expect(names).toEqual(['planner', 'sprint']);
       });
     });
+
+    it('excludes foreign/internal flows with an unresolvable empty spec (e.g. task/sprint-init/sprint-finalize leaked via the shared dev DB)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint
+        // Rows another worktree (feat/parallel-sprint) registered into the SHARED
+        // dev DB: unknown names + empty spec → resolveWorkflowDefinition returns
+        // null, so they must not surface as dead "0 steps / 0 phases" picker cards.
+        db.prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json, permission_mode) VALUES
+             ('wf-1-task', 1, 'task', '{}', 'default'),
+             ('wf-1-sprint-init', 1, 'sprint-init', '{}', 'default'),
+             ('wf-1-sprint-finalize', 1, 'sprint-finalize', '{}', 'default')`,
+        ).run();
+
+        const names = registry.listByProject(1).map((r) => r.name).sort();
+        expect(names).toEqual(['planner', 'sprint']);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

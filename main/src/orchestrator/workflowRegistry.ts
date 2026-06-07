@@ -16,7 +16,7 @@ import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isCyboflowWorkflowName } from '../../../shared/types/workflows';
+import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
@@ -344,7 +344,9 @@ export class WorkflowRegistry {
    *
    * Excludes the __quick__ sentinel row — that row is an internal implementation
    * detail for the quick-session pipeline and must never appear in user-facing
-   * workflow pickers (TASK-787 / IDEA-027).
+   * workflow pickers (TASK-787 / IDEA-027). Also hides any row that does not
+   * resolve to a usable definition (empty/unknown spec) — e.g. foreign internal
+   * flows leaked via the shared dev DB — so the picker never shows dead cards.
    */
   listByProject(projectId: number): WorkflowRow[] {
     // Exclude the __quick__ sentinel AND any dropped legacy built-ins
@@ -359,7 +361,14 @@ export class WorkflowRegistry {
        WHERE project_id = ? AND name NOT IN (${placeholders})
        ORDER BY name`,
     );
-    return stmt.all(projectId, ...excluded) as WorkflowRow[];
+    const rows = stmt.all(projectId, ...excluded) as WorkflowRow[];
+    // Belt-and-suspenders beyond the name blocklist: hide any row that does NOT
+    // resolve to a usable definition. Foreign/internal flows that leak in via the
+    // SHARED dev DB (e.g. another worktree's task / sprint-init / sprint-finalize)
+    // carry an empty spec_json and aren't CyboflowWorkflowNames, so they would
+    // otherwise render as dead "0 steps / 0 phases" picker cards. Filtered, not
+    // deleted — they reappear automatically once they carry a real definition.
+    return rows.filter((row) => resolveWorkflowDefinition(row.name, row.spec_json) !== null);
   }
 
   /**
