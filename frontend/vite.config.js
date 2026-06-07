@@ -12,5 +12,9 @@ export default defineConfig({
         assetsDir: 'assets',
         // Copy public files to dist
         copyPublicDir: true
-    }
+    },
+    // NOTE: test config lives in vitest.config.ts (which vitest prefers over this
+    // file). Keeping a `test` block here breaks `tsc -b` in build:frontend because
+    // vite@6's UserConfig has no `test` key and the vitest@2 augmentation targets a
+    // duplicate vite@5 install — see vitest.config.ts for the canonical settings.
 });
