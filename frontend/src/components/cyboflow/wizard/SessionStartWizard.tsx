@@ -270,12 +270,6 @@ export default function SessionStartWizard(): React.JSX.Element {
     setStep(2);
   }, []);
 
-  const handleGoToConfigure = useCallback(() => {
-    // Advance to the config step. Selection is guaranteed non-null by the CTA's
-    // disabled state, but guard anyway.
-    if (selection !== null) setStep(3);
-  }, [selection]);
-
   const handleSelectProject = useCallback((projectId: number) => {
     setSelectedProjectId(projectId);
     setSelection(null);
@@ -454,7 +448,10 @@ export default function SessionStartWizard(): React.JSX.Element {
               <>
                 <QuickSessionCard
                   selected={selection?.kind === 'quick'}
-                  onSelect={() => setSelection({ kind: 'quick' })}
+                  onSelect={() => {
+                    setSelection({ kind: 'quick' });
+                    setStep(3);
+                  }}
                 />
                 <div className="flex items-center gap-3" aria-hidden="true">
                   <span className="h-px flex-1 border-t border-dashed border-border-primary" />
@@ -481,7 +478,14 @@ export default function SessionStartWizard(): React.JSX.Element {
                   selected={
                     selection?.kind === 'workflow' && selection.workflowId === meta.id
                   }
-                  onSelect={() => setSelection({ kind: 'workflow', workflowId: meta.id })}
+                  onSelect={() => {
+                    // Selecting a workflow auto-advances to ③ Configure. The
+                    // initial default pre-selection (in loadWorkflows) only sets
+                    // state — it never calls setStep — so the wizard does NOT
+                    // auto-jump on load; only a user click advances.
+                    setSelection({ kind: 'workflow', workflowId: meta.id });
+                    setStep(3);
+                  }}
                 />
               ))}
             </div>
@@ -556,8 +560,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         )}
       </div>
 
-      {/* ── Sticky CTA (workflow step advances; configure step launches) ── */}
-      {(step === 2 || step === 3) && selectedProjectId !== null && (
+      {/* ── Sticky launch CTA (configure step). Step ② auto-advances on
+            selection, so it has no CTA of its own. ── */}
+      {step === 3 && selectedProjectId !== null && (
         <div className="sticky bottom-0 left-0 right-0 border-t border-border-primary bg-bg-primary/95 px-6 py-3 backdrop-blur">
           <div className="mx-auto flex max-w-[720px] flex-col gap-2">
             {combinedError !== null && combinedError !== undefined && (
@@ -565,27 +570,15 @@ export default function SessionStartWizard(): React.JSX.Element {
                 {combinedError}
               </p>
             )}
-            {step === 2 ? (
-              <button
-                type="button"
-                onClick={handleGoToConfigure}
-                disabled={selection === null}
-                data-testid="wizard-next"
-                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {selection === null ? 'Select a workflow' : 'Next: configure →'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleStart}
-                disabled={selection === null || ctaBusy}
-                data-testid="wizard-cta"
-                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {ctaLabel}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleStart}
+              disabled={selection === null || ctaBusy}
+              data-testid="wizard-cta"
+              className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {ctaLabel}
+            </button>
           </div>
         </div>
       )}

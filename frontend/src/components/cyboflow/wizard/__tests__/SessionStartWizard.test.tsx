@@ -15,7 +15,7 @@
  *      into API.sessions.createQuick.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -102,14 +102,22 @@ async function renderLockedWizard(): Promise<void> {
     useNavigationStore.setState({ wizardOpts: { lockProjectId: 1, allowQuick: true } });
   });
   render(<SessionStartWizard />);
-  // Wait for the workflow list to resolve (pre-selects 'sprint' → enables Next).
-  await waitFor(() => expect(screen.getByTestId('wizard-next')).not.toBeDisabled());
+  // Wait for the workflow list to resolve (the row becomes clickable).
+  await screen.findByTestId('workflow-list-row');
 }
 
-/** Advance ② → ③. */
-async function goToConfigure(): Promise<void> {
+/** Click the workflow row → auto-advances to ③ Configure. */
+async function selectWorkflowAndConfigure(): Promise<void> {
   await act(async () => {
-    fireEvent.click(screen.getByTestId('wizard-next'));
+    fireEvent.click(screen.getByTestId('workflow-list-row'));
+  });
+  await screen.findByTestId('wizard-step3');
+}
+
+/** Click the quick card → auto-advances to ③ Configure. */
+async function selectQuickAndConfigure(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('quick-session-card'));
   });
   await screen.findByTestId('wizard-step3');
 }
@@ -136,15 +144,18 @@ afterEach(() => {
 // Step navigation
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — step ③ navigation', () => {
-  it('opens on ② Workflow with a "Next: configure" CTA', async () => {
+  it('opens on ② Workflow without auto-advancing the default pre-selection', async () => {
     await renderLockedWizard();
-    expect(screen.getByTestId('wizard-next')).toHaveTextContent(/next: configure/i);
+    // Even though 'sprint' is pre-selected, the wizard must NOT jump to ③ on load.
+    expect(screen.getByTestId('workflow-list-row')).toBeInTheDocument();
     expect(screen.queryByTestId('wizard-step3')).toBeNull();
+    // No launch CTA on ② — it lives on ③.
+    expect(screen.queryByTestId('wizard-cta')).toBeNull();
   });
 
-  it('advances ② → ③ and back', async () => {
+  it('auto-advances ② → ③ on workflow selection, and supports back', async () => {
     await renderLockedWizard();
-    await goToConfigure();
+    await selectWorkflowAndConfigure();
     expect(screen.getByTestId('wizard-step3')).toBeInTheDocument();
     // The launch CTA now lives on ③.
     expect(screen.getByTestId('wizard-cta')).toBeInTheDocument();
@@ -153,7 +164,7 @@ describe('SessionStartWizard — step ③ navigation', () => {
       fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
     });
     expect(screen.queryByTestId('wizard-step3')).toBeNull();
-    expect(screen.getByTestId('wizard-next')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-list-row')).toBeInTheDocument();
   });
 });
 
@@ -163,7 +174,7 @@ describe('SessionStartWizard — step ③ navigation', () => {
 describe('SessionStartWizard — step ③ adaptive controls', () => {
   it('shows substrate + blueprint editor for a WORKFLOW selection', async () => {
     await renderLockedWizard();
-    await goToConfigure();
+    await selectWorkflowAndConfigure();
     expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
@@ -174,11 +185,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 
   it('hides substrate + blueprint editor for a QUICK selection', async () => {
     await renderLockedWizard();
-    // Pick the quick card on ②.
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-session-card'));
-    });
-    await goToConfigure();
+    await selectQuickAndConfigure();
 
     expect(screen.queryByLabelText('Select CLI substrate')).toBeNull();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
@@ -195,7 +202,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 describe('SessionStartWizard — step ③ launch threading', () => {
   it('threads default substrate + permission into a workflow launch', async () => {
     await renderLockedWizard();
-    await goToConfigure();
+    await selectWorkflowAndConfigure();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
@@ -215,7 +222,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 
   it('threads an explicit per-run substrate + permission override', async () => {
     await renderLockedWizard();
-    await goToConfigure();
+    await selectWorkflowAndConfigure();
 
     await act(async () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
@@ -237,7 +244,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });
     });
     await renderLockedWizard();
-    await goToConfigure();
+    await selectWorkflowAndConfigure();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
@@ -248,10 +255,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 
   it('threads the chosen agentPermissionMode into a quick-session launch', async () => {
     await renderLockedWizard();
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('quick-session-card'));
-    });
-    await goToConfigure();
+    await selectQuickAndConfigure();
 
     await act(async () => {
       fireEvent.click(screen.getByLabelText("Permission mode: Don't ask"));
