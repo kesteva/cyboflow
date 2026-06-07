@@ -40,6 +40,9 @@ importers:
       trpc-electron:
         specifier: 0.1.2
         version: 0.1.2(patch_hash=38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@37.6.0)
+      uuid:
+        specifier: ^13.0.0
+        version: 13.0.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76
