@@ -46,6 +46,14 @@ export interface WorkflowCanvasProps {
    * the canvas robust on its own).
    */
   paused?: boolean;
+  /**
+   * The run's raw lifecycle status. When it is a terminal self-completion
+   * ('completed' / 'failed'), the meta row renders a static outcome pill (green /
+   * red) so the finished state reads clearly while the operator decides to "End
+   * workflow" (return to the session's resting view). Ignored while running /
+   * paused (those pills take precedence).
+   */
+  status?: string;
 }
 
 /** Last path segment of a worktree path, for a compact "folder" chip. */
@@ -70,6 +78,7 @@ export function WorkflowCanvas({
   tokenCount,
   isRunning = false,
   paused = false,
+  status,
 }: WorkflowCanvasProps) {
   // A paused run is, by definition, not actively running — suppress the running
   // pill and the token animation regardless of the isRunning prop so the canvas
@@ -285,6 +294,32 @@ export function WorkflowCanvas({
               }}
             />
             running
+          </span>
+        ) : status === 'completed' || status === 'failed' ? (
+          <span
+            style={{
+              padding: '2px 8px',
+              border: `1px solid ${status === 'completed' ? 'var(--color-status-success)' : 'var(--color-status-error)'}`,
+              color: status === 'completed' ? 'var(--color-status-success)' : 'var(--color-status-error)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.18em',
+              fontSize: 9,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+            }}
+            data-testid={`workflow-canvas-${status}-pill`}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: status === 'completed' ? 'var(--color-status-success)' : 'var(--color-status-error)',
+                display: 'inline-block',
+              }}
+            />
+            {status}
           </span>
         ) : null}
       </div>
