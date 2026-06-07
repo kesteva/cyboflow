@@ -84,13 +84,13 @@ describe('RunActionBar', () => {
   };
 
   it('renders nothing when there is no active run', () => {
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
   });
 
   it('renders the Cancel button for an active, non-terminal run', () => {
     activate({ status: 'running' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
     expect(screen.getByTestId('run-action-cancel')).toBeInTheDocument();
   });
@@ -99,19 +99,38 @@ describe('RunActionBar', () => {
     'shows Cancel for non-terminal status %s',
     (status) => {
       activate({ status });
-      render(<RunActionBar onCancel={vi.fn()} />);
+      render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
       expect(screen.getByTestId('run-action-cancel')).toBeInTheDocument();
     },
   );
 
   it.each(['canceled', 'failed', 'completed'])(
-    'hides the bar for terminal status %s',
+    'shows the End-workflow gate (not the run controls) for terminal status %s',
     (status) => {
       activate({ status });
-      render(<RunActionBar onCancel={vi.fn()} />);
-      expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
+      render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
+      expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
+      expect(screen.getByTestId('run-action-end')).toBeInTheDocument();
+      // The git-neutral run controls no longer apply once terminal.
+      expect(screen.queryByTestId('run-action-cancel')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('run-action-pause')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('run-action-resume')).not.toBeInTheDocument();
     },
   );
+
+  it('clicking End workflow calls onEndWorkflow', () => {
+    activate({ status: 'completed' });
+    const onEndWorkflow = vi.fn();
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={onEndWorkflow} />);
+    fireEvent.click(screen.getByTestId('run-action-end'));
+    expect(onEndWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT show the End-workflow gate for a non-terminal run', () => {
+    activate({ status: 'running' });
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
+    expect(screen.queryByTestId('run-action-end')).not.toBeInTheDocument();
+  });
 
   it('renders nothing when the active run is not present in the store', () => {
     // activeRunId set but no matching row in runsByProject (e.g. legacy run).
@@ -119,14 +138,14 @@ describe('RunActionBar', () => {
       useActiveRunsStore.setState({ runsByProject: {} });
       useCyboflowStore.getState().setActiveRun('run-missing');
     });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
   });
 
   it('clicking Cancel calls onCancel', () => {
     activate({ status: 'running' });
     const onCancel = vi.fn();
-    render(<RunActionBar onCancel={onCancel} />);
+    render(<RunActionBar onCancel={onCancel} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-cancel'));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
@@ -139,7 +158,7 @@ describe('RunActionBar', () => {
     'shows an ENABLED Pause for an sdk run in status %s',
     (status) => {
       activate({ status, substrate: 'sdk' });
-      render(<RunActionBar onCancel={vi.fn()} />);
+      render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
       const pause = screen.getByTestId('run-action-pause');
       expect(pause).toBeInTheDocument();
       expect(pause).not.toBeDisabled();
@@ -150,14 +169,14 @@ describe('RunActionBar', () => {
     'hides Pause for an sdk run that is not pausable (status %s)',
     (status) => {
       activate({ status, substrate: 'sdk' });
-      render(<RunActionBar onCancel={vi.fn()} />);
+      render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
       expect(screen.queryByTestId('run-action-pause')).not.toBeInTheDocument();
     },
   );
 
   it('renders Pause DISABLED for an interactive run (SDK-only)', () => {
     activate({ status: 'running', substrate: 'interactive' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     const pause = screen.getByTestId('run-action-pause');
     expect(pause).toBeInTheDocument();
     expect(pause).toBeDisabled();
@@ -166,14 +185,14 @@ describe('RunActionBar', () => {
 
   it('clicking a disabled (interactive) Pause does NOT call the pause route', () => {
     activate({ status: 'running', substrate: 'interactive' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-pause'));
     expect(pauseMutate).not.toHaveBeenCalled();
   });
 
   it('clicking Pause calls runs.pause with the active runId', async () => {
     activate({ status: 'running', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-pause'));
     await waitFor(() => {
       expect(pauseMutate).toHaveBeenCalledWith({ runId: 'run-1' });
@@ -184,7 +203,7 @@ describe('RunActionBar', () => {
   it('a benign noOp pause result does NOT surface an error', async () => {
     pauseMutate.mockResolvedValue({ noOp: true, reason: 'not_pausable' });
     activate({ status: 'running', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-pause'));
     await waitFor(() => {
       expect(pauseMutate).toHaveBeenCalled();
@@ -195,7 +214,7 @@ describe('RunActionBar', () => {
   it('a rejected pause promise surfaces an error', async () => {
     pauseMutate.mockRejectedValue(new Error('Network error'));
     activate({ status: 'running', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-pause'));
     await waitFor(() => {
       expect(mockShowError).toHaveBeenCalledWith(
@@ -210,7 +229,7 @@ describe('RunActionBar', () => {
 
   it('shows Resume only for a paused sdk run (and no Pause)', () => {
     activate({ status: 'paused', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     expect(screen.getByTestId('run-action-resume')).toBeInTheDocument();
     expect(screen.queryByTestId('run-action-pause')).not.toBeInTheDocument();
   });
@@ -219,14 +238,14 @@ describe('RunActionBar', () => {
     'hides Resume for non-paused status %s',
     (status) => {
       activate({ status, substrate: 'sdk' });
-      render(<RunActionBar onCancel={vi.fn()} />);
+      render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
       expect(screen.queryByTestId('run-action-resume')).not.toBeInTheDocument();
     },
   );
 
   it('clicking Resume calls runs.resume with the active runId', async () => {
     activate({ status: 'paused', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-resume'));
     await waitFor(() => {
       expect(resumeMutate).toHaveBeenCalledWith({ runId: 'run-1' });
@@ -237,7 +256,7 @@ describe('RunActionBar', () => {
   it('a benign noOp resume result does NOT surface an error', async () => {
     resumeMutate.mockResolvedValue({ noOp: true, reason: 'not_paused' });
     activate({ status: 'paused', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-resume'));
     await waitFor(() => {
       expect(resumeMutate).toHaveBeenCalled();
@@ -248,7 +267,7 @@ describe('RunActionBar', () => {
   it('a rejected resume promise surfaces an error', async () => {
     resumeMutate.mockRejectedValue(new Error('boom'));
     activate({ status: 'paused', substrate: 'sdk' });
-    render(<RunActionBar onCancel={vi.fn()} />);
+    render(<RunActionBar onCancel={vi.fn()} onEndWorkflow={vi.fn()} />);
     fireEvent.click(screen.getByTestId('run-action-resume'));
     await waitFor(() => {
       expect(mockShowError).toHaveBeenCalledWith(

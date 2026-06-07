@@ -19,11 +19,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useLandingStore } from '../../stores/landingStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
@@ -46,6 +48,7 @@ import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
 import { RunActionBar } from './RunActionBar';
 import { RunCancelDialog } from './RunCancelDialog';
+import { RunEndDialog } from './RunEndDialog';
 import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
@@ -65,6 +68,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     projectId !== null && activeRunId !== null
       ? runsByProject[projectId]?.find((r) => r.id === activeRunId)
       : undefined;
+
+  // Repo (project) name for the resting-view session node sub-line. Resolved
+  // from the cross-project landing store, which loads the project list on init.
+  const projectName = useLandingStore((s) =>
+    projectId === null ? '' : (s.projects.find((p) => p.id === projectId)?.name ?? ''),
+  );
 
   // Session-hosted runs (migration 019): the launch path calls setActiveRun(runId)
   // before the run's parent session is known, so selectedSessionId starts null —
@@ -148,7 +157,23 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // Run-scoped git-neutral Cancel (Phase 4a) — separate from the session
   // close-out above. Opened from RunActionBar; mounts RunCancelDialog.
   const [isCancelOpen, setIsCancelOpen] = useState(false);
+  // End-workflow confirm — the human gate that returns a finished (completed /
+  // failed) run's centre pane to the session's resting QuickSessionCanvas.
+  const [isEndOpen, setIsEndOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Return the centre pane to the session's resting view (QuickSessionCanvas):
+  // drop the active-run overlay while preserving its parent session selection
+  // (clearActiveRun does NOT touch selectedSessionId), so the effectiveSession
+  // branch re-surfaces. Refresh the rail so the now-terminal run un-pins. Shared
+  // by the Cancel success path and the End-workflow confirm — every workflow
+  // exit is human-gated (Cancel dialog / RunEndDialog).
+  const returnToRestingSession = useCallback(() => {
+    useCyboflowStore.getState().clearActiveRun();
+    if (projectId !== null) {
+      void useActiveRunsStore.getState().refresh(projectId);
+    }
+  }, [projectId]);
 
   const handleActionSuccess = useCallback((message: string) => {
     setToastMessage(message);
@@ -218,7 +243,10 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             RUN grouping (with its own trailing divider) clearly separated from
             the SESSION close-out (Merge / PR / Dismiss). RunActionBar self-hides
             when there is no active, non-terminal run selected. */}
-        <RunActionBar onCancel={() => setIsCancelOpen(true)} />
+        <RunActionBar
+          onCancel={() => setIsCancelOpen(true)}
+          onEndWorkflow={() => setIsEndOpen(true)}
+        />
 
         <SessionLifecycleActionBar
           onMerge={() => setIsMergeOpen(true)}
@@ -251,6 +279,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     // PauseCircle badge (Phase 4b).
                     isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
                     paused={activeRun?.status === 'paused'}
+                    // Surfaces a static completed/failed outcome pill once the
+                    // run self-terminates, while the operator decides to End it.
+                    status={activeRun?.status}
                   />
                 </div>
               )}
@@ -259,7 +290,23 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               </div>
             </>
           ) : effectiveSession ? (
-            <SessionProvider session={effectiveSession} projectName="">
+            <SessionProvider session={effectiveSession} projectName={projectName}>
+              {/* Resting view — a worktree-backed session with NO active run
+                  (a fresh quick session, or one a finished run handed back).
+                  QuickSessionCanvas fills the top plane (mirroring the run's
+                  WorkflowCanvas slot) so the layout never collapses; the chat /
+                  terminal panel surface stays below. The bare main-repo session
+                  keeps its panels-only layout (no worktree node to show). */}
+              {!effectiveSession.isMainRepo && projectId !== null && (
+                <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
+                  <QuickSessionCanvas
+                    session={effectiveSession}
+                    projectId={projectId}
+                    projectName={projectName}
+                    onBrowseAll={() => setIsPickerOpen(true)}
+                  />
+                </div>
+              )}
               <PanelTabBar
                 panels={sessionPanels}
                 activePanel={currentActivePanel}
@@ -365,16 +412,34 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       )}
 
       {/* Run-scoped git-neutral Cancel (Phase 4a). Mounted whenever a run is
-          active — the dialog itself self-gates on isCancelOpen. onSuccess closes
-          the dialog ONLY: Cancel is git-neutral, so the run goes terminal and
-          activeRunsStore reacts via onRunStatusChanged (the RunActionBar
-          self-hides). The session is NOT cleared — it persists. */}
+          active — the dialog itself self-gates on isCancelOpen. Cancel is
+          git-neutral (the session + worktree persist); on success we return the
+          centre pane to the session's resting QuickSessionCanvas. */}
       {activeRunId !== null && (
         <RunCancelDialog
           isOpen={isCancelOpen}
           onClose={() => setIsCancelOpen(false)}
           runId={activeRunId}
-          onSuccess={() => setIsCancelOpen(false)}
+          onSuccess={() => {
+            setIsCancelOpen(false);
+            returnToRestingSession();
+          }}
+        />
+      )}
+
+      {/* End-workflow confirm — the human gate for a run that reached a terminal
+          status on its own (completed / failed). Confirming drops the run
+          overlay and returns to the session's resting QuickSessionCanvas; it
+          touches no backend state (the run is already terminal). */}
+      {activeRunId !== null && (
+        <RunEndDialog
+          isOpen={isEndOpen}
+          onClose={() => setIsEndOpen(false)}
+          status={activeRun?.status}
+          onConfirm={() => {
+            setIsEndOpen(false);
+            returnToRestingSession();
+          }}
         />
       )}
 

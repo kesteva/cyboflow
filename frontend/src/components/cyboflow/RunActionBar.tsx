@@ -1,4 +1,4 @@
-import { Square, Pause, Play } from 'lucide-react';
+import { Square, Pause, Play, Flag } from 'lucide-react';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useErrorStore } from '../../stores/errorStore';
@@ -16,6 +16,13 @@ interface RunActionBarProps {
    * bar unmounts, but the dialog lives in CyboflowRoot).
    */
   onCancel: () => void;
+  /**
+   * Open the "End workflow" confirm — the human gate that drops the centre pane
+   * back to the session's resting view (QuickSessionCanvas) once a run has
+   * reached a terminal status on its OWN (completed / failed). Distinct from
+   * Cancel, which has its own confirm + already returns to the resting view.
+   */
+  onEndWorkflow: () => void;
 }
 
 /**
@@ -46,7 +53,7 @@ interface RunActionBarProps {
  * activeRunsStore's onRunStatusChanged subscription, so the controls update
  * reactively on pause/resume/cancel — NO optimistic local state.
  */
-export function RunActionBar({ onCancel }: RunActionBarProps) {
+export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
 
@@ -67,10 +74,31 @@ export function RunActionBar({ onCancel }: RunActionBarProps) {
   }
 
   // Hide entirely when the run isn't in the store (e.g. a legacy parentless run
-  // not surfaced here) or has already reached a terminal status — there is
-  // nothing to act on. ('paused' is NON-terminal, so the bar stays mounted.)
+  // not surfaced here).
   if (status === undefined) return null;
-  if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(status)) return null;
+
+  // A run that has reached a terminal status on its OWN (completed / failed —
+  // Cancel returns to the resting view via its own path) gets the explicit "End
+  // workflow" gate: the human-confirmed step that drops the centre pane back to
+  // the session's resting QuickSessionCanvas. The git-neutral run controls
+  // (Pause / Resume / Cancel) no longer apply once terminal.
+  if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(status)) {
+    return (
+      <div className="flex items-center gap-1.5" data-testid="run-action-bar">
+        <span className="text-xs font-medium uppercase tracking-wide text-text-muted">Run</span>
+        <button
+          data-testid="run-action-end"
+          onClick={onEndWorkflow}
+          className="inline-flex items-center gap-1 rounded border border-border-primary px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+          title="End this workflow and return to the session (its worktree and diff are preserved)"
+        >
+          <Flag size={14} />
+          End workflow
+        </button>
+        <div className="mx-2 h-4 w-px bg-border-primary" />
+      </div>
+    );
+  }
 
   // SDK-only Pause/Resume gating. The interactive substrate is fresh-session-only
   // (no native --resume), so Pause is rendered DISABLED for it and Resume never

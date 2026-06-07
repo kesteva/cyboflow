@@ -117,6 +117,8 @@ vi.mock('../../../utils/api', () => ({
   API: {
     sessions: {
       getOrCreateMainRepoSession: vi.fn().mockResolvedValue({ success: true, data: undefined }),
+      // usePanelSurface resolves a selected quick session via API.sessions.get.
+      get: vi.fn().mockResolvedValue({ success: true, data: undefined }),
       createQuick: vi.fn().mockResolvedValue({
         success: true,
         data: { jobId: 'job-1', sessionId: 'sess-qs-1', worktreePath: '/tmp/qs' },
@@ -161,6 +163,15 @@ vi.mock('../../../hooks/useQuickSession', () => ({
     isStarting: null,
     error: null,
   })),
+}));
+
+// Stub QuickSessionCanvas — its internals (live metrics, workflow catalogue,
+// launch path) are covered by QuickSessionCanvas.test.tsx. Here we only verify
+// CyboflowRoot mounts it in the resting-session branch.
+vi.mock('../QuickSessionCanvas', () => ({
+  QuickSessionCanvas: (props: { projectId: number }) => (
+    <div data-testid="quick-session-canvas" data-project-id={props.projectId} />
+  ),
 }));
 
 // Import after mocks so vi.mock hoisting is in effect
@@ -675,11 +686,35 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
     expect(screen.queryByTestId('session-action-create-pr')).not.toBeInTheDocument();
   });
 
-  it('hides the RunActionBar when the run is terminal (canceled)', () => {
-    activateRun({ status: 'canceled' });
+  it('shows the End-workflow gate (not Cancel) when a run self-terminates (completed)', () => {
+    activateRun({ status: 'completed' });
     render(<CyboflowRoot projectId={1} />);
 
-    expect(screen.queryByTestId('run-action-bar')).not.toBeInTheDocument();
+    expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('run-action-end')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-action-cancel')).not.toBeInTheDocument();
+  });
+
+  it('clicking End workflow opens RunEndDialog; confirming drops the run overlay', async () => {
+    activateRun({ status: 'completed' });
+    render(<CyboflowRoot projectId={1} />);
+
+    expect(screen.queryByText('End this workflow?')).not.toBeInTheDocument();
+    const endTrigger = screen.getByTestId('run-action-end');
+    fireEvent.click(endTrigger);
+    expect(screen.getByText('End this workflow?')).toBeInTheDocument();
+
+    // Two buttons read 'End workflow' (the action-bar trigger + the ConfirmDialog
+    // confirm). The trigger carries the run-action-end testid, so click the other.
+    const confirmBtn = screen
+      .getAllByRole('button', { name: 'End workflow' })
+      .find((b) => b !== endTrigger);
+    await act(async () => {
+      fireEvent.click(confirmBtn!);
+    });
+
+    // returnToRestingSession() cleared the active run overlay.
+    expect(useCyboflowStore.getState().activeRunId).toBeNull();
   });
 
   it('clicking Cancel run opens the RunCancelDialog (git-neutral confirm)', () => {
@@ -711,5 +746,66 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
 
     const cancelMock = (trpc.cyboflow.runs as unknown as { cancel: { mutate: ReturnType<typeof vi.fn> } }).cancel.mutate;
     expect(cancelMock).toHaveBeenCalledWith({ runId: run.id });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resting-session canvas — QuickSessionCanvas fills the top plane for a
+// worktree-backed session with NO active run (a fresh quick session, or one a
+// finished run handed back). The bare main-repo session keeps panels-only.
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — resting-session canvas', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: {} });
+    });
+  });
+
+  it('mounts QuickSessionCanvas above the panel surface for a non-main-repo session with no run', async () => {
+    const session = makeQuickSession();
+    // usePanelSurface resolves the selected quick session via API.sessions.get.
+    vi.mocked(API.sessions.get).mockResolvedValue({ success: true, data: session });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('quick-session-canvas')).toBeInTheDocument();
+    });
+    // The chat / terminal panel surface stays below.
+    expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
+    // Not the run overlay.
+    expect(screen.queryByTestId('workflow-canvas')).not.toBeInTheDocument();
+  });
+
+  it('does NOT mount QuickSessionCanvas for the bare main-repo session', async () => {
+    vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({
+      success: true,
+      data: {
+        id: 'sess-main-x',
+        name: 'main-repo',
+        projectId: 1,
+        status: 'ready',
+        isMainRepo: true,
+        worktreePath: '/repo/main',
+        prompt: '',
+        output: [],
+        jsonMessages: [],
+        createdAt: '',
+      },
+    });
+
+    render(<CyboflowRoot projectId={1} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('quick-session-canvas')).not.toBeInTheDocument();
   });
 });
