@@ -33,15 +33,15 @@
     "build:frontend": "pnpm run --filter frontend build",
     "build:main": "pnpm run --filter main build",
     "build:electron": "electron-builder --publish never",
-    "build:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish never",
+    "build:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never",
     "build:mac:universal": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never",
     "build:mac:x64": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --x64 --publish never",
     "build:mac:arm64": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --arm64 --publish never",
-    "build:mac:ci": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish never",
+    "build:mac:ci": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never",
     "inject-build-info": "node scripts/inject-build-info.js",
-    "release:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish always",
+    "release:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish always",
     "release:mac:universal": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish always",
-    "canary:mac": "node scripts/prepare-canary.js && CANARY_BUILD=true pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --publish always --config.releaseInfo.releaseNotes=\"Canary build from main branch\"",
+    "canary:mac": "node scripts/prepare-canary.js && CANARY_BUILD=true pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish always --config.releaseInfo.releaseNotes=\"Canary build from main branch\"",
     "preview": "pnpm run --filter frontend preview",
     "lint": "pnpm run -r lint",
     "typecheck": "pnpm run -r typecheck",
@@ -120,8 +120,7 @@
       "notarize": true,
       "target": [
         {
-          "target": "default",
-          "arch": "universal"
+          "target": "default"
         }
       ],
       "artifactName": "${productName}-${version}-macOS-${arch}.${ext}",
