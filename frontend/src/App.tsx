@@ -113,6 +113,16 @@ function App() {
   // returns an unsubscribe used as the cleanup).
   useEffect(() => useLandingStore.getState().init(), []);
 
+  // Init the backlog store at the app-shell level (scoped to the active
+  // project) so the rail badge shows the real pending-task count on load —
+  // not 0 until BacklogPane first mounts on click. init() is idempotent for
+  // the same projectId, so BacklogPane's own init no-ops; the returned
+  // unsubscribe is the cleanup, and it re-runs on project switch.
+  useEffect(() => {
+    if (activeProjectId === null) return;
+    return useBacklogStore.getState().init(activeProjectId);
+  }, [activeProjectId]);
+
   // Load config on app startup
   useEffect(() => {
     fetchConfig();
