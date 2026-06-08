@@ -16,11 +16,15 @@
  *   - quick: agent-permission override + launch summary (substrate is a no-op for
  *     quick panels, and there is no workflow to edit, so both are omitted).
  *
- * Launch paths (both fire from step ③):
+ * Launch paths (all fire from step ③):
  *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
  *     permissionMode) → setActiveRun → goToSession. The Planner ('planner') is
  *     gated behind {@link IdeaPickerModal}; the chosen idea id is threaded as
  *     runs.start.mutate({ ideaId }).
+ *   - sprint: gated behind {@link TaskBatchPickerModal} — a sprint is a
+ *     SESSION-LESS batch of parallel task runs over one integration branch, NOT a
+ *     single direct run, so it fires `trpc.cyboflow.runs.startBatch.mutate` with
+ *     the multi-selected task ids and navigates home (no session to nest under).
  *   - quick: the {@link useQuickSession} hook — it creates the session + both
  *     panels (passing the chosen agentPermissionMode) and calls
  *     setActiveQuickSession itself.
@@ -43,6 +47,7 @@ import { useQuickSession } from '../../../hooks/useQuickSession';
 import { useAgentPermissionMode } from '../../../hooks/useAgentPermissionMode';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
 import { IdeaPickerModal } from '../IdeaPickerModal';
+import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
@@ -55,6 +60,7 @@ import { QuickSessionCard } from './QuickSessionCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,6 +159,11 @@ export default function SessionStartWizard(): React.JSX.Element {
   // Planner pre-launch idea gate.
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
+
+  // Sprint pre-launch task-batch gate. A sprint is a session-less batch of
+  // parallel task runs (NOT a single run), so its launch goes through the batch
+  // picker → startBatch, mirroring the Planner idea gate above.
+  const [batchPickerOpen, setBatchPickerOpen] = useState(false);
 
   // Launch state.
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -329,6 +340,39 @@ export default function SessionStartWizard(): React.JSX.Element {
     [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
   );
 
+  // Sprint batch launch — SESSION-LESS (no ensureSessionForLaunch). Fires
+  // startBatch with the multi-selected task ids and the substrate-derived cap,
+  // then navigates home: a batch spans many parallel `task` runs over one
+  // integration branch with a single review at finalize, so there is no single
+  // session to nest under / navigate into. Mirrors WorkflowPicker.launchBatch.
+  const launchBatch = useCallback(
+    async (taskIds: string[]): Promise<void> => {
+      if (startInFlightRef.current) return;
+      if (selectedProjectId === null) return;
+      startInFlightRef.current = true;
+      setLaunchError(null);
+      setIsLaunching(true);
+      try {
+        await trpc.cyboflow.runs.startBatch.mutate({
+          workflowId: 'sprint',
+          projectId: selectedProjectId,
+          substrate,
+          taskIds,
+          concurrency: SPRINT_BATCH_CAP,
+        });
+        useNavigationStore.getState().setActiveProjectId(selectedProjectId);
+        setToast(`Launching /sprint batch (${taskIds.length} tasks) on ${banner.name}`);
+        useNavigationStore.getState().goHome();
+      } catch (err: unknown) {
+        setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint batch');
+        startInFlightRef.current = false;
+      } finally {
+        setIsLaunching(false);
+      }
+    },
+    [selectedProjectId, substrate, banner.name],
+  );
+
   const handleStart = useCallback(() => {
     if (selection === null || startInFlightRef.current) return;
 
@@ -346,6 +390,14 @@ export default function SessionStartWizard(): React.JSX.Element {
       setIdeaPickerOpen(true);
       return;
     }
+    if (meta?.name === 'sprint') {
+      // Gate behind the task batch picker — a sprint launches a session-less
+      // batch of parallel task runs, not a single run. Do NOT flip the latch yet
+      // (opening the picker stays freely cancellable).
+      setLaunchError(null);
+      setBatchPickerOpen(true);
+      return;
+    }
     void launchRun(selection.workflowId);
   }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode]);
 
@@ -356,6 +408,15 @@ export default function SessionStartWizard(): React.JSX.Element {
       void launchRun(pendingWorkflowId, ideaId);
     },
     [pendingWorkflowId, launchRun],
+  );
+
+  const handleBatchPicked = useCallback(
+    (taskIds: string[]) => {
+      setBatchPickerOpen(false);
+      if (taskIds.length === 0) return;
+      void launchBatch(taskIds);
+    },
+    [launchBatch],
   );
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
@@ -603,6 +664,17 @@ export default function SessionStartWizard(): React.JSX.Element {
           projectId={selectedProjectId}
           onClose={() => setIdeaPickerOpen(false)}
           onPicked={handleIdeaPicked}
+        />
+      )}
+
+      {/* ── Sprint task-batch gate ── */}
+      {batchPickerOpen && selectedProjectId !== null && (
+        <TaskBatchPickerModal
+          isOpen
+          projectId={selectedProjectId}
+          substrate={substrate}
+          onClose={() => setBatchPickerOpen(false)}
+          onPicked={handleBatchPicked}
         />
       )}
 

@@ -34,11 +34,21 @@ vi.mock('../../../../trpc/client', () => ({
             branchName: 'run/run-test-001',
           }),
         },
+        // Sprint launches a session-less batch via startBatch (gated behind the
+        // task batch picker), not runs.start.
+        startBatch: { mutate: vi.fn().mockResolvedValue({ batchId: 'batch-test-001' }) },
+      },
+      // The batch picker reads the effective substrate to size its cap N.
+      substrates: {
+        resolveEffective: { query: vi.fn().mockResolvedValue({ substrate: 'sdk' }) },
       },
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([
-            // Sprint is the default → pre-selected on open (direct launch path).
+            // Sprint is the DEFAULT_WORKFLOW_NAME → pre-selected on open. Clicking
+            // the CTA opens the task batch picker (Sprint is batch-gated); the
+            // launch-threading describe below overrides this to a non-gated
+            // 'custom' flow to exercise the DIRECT runs.start path.
             { id: 'wf-1', project_id: 1, name: 'sprint', spec_json: null, permission_mode: 'default', created_at: '' },
           ]),
         },
@@ -73,6 +83,17 @@ vi.mock('../../../../utils/ensureSessionForLaunch', () => ({
   ensureSessionForLaunch: vi.fn().mockResolvedValue('session-ensured-001'),
 }));
 
+// TaskBatchPickerModal — stubbed to a button that reports a fixed selection, so
+// the wizard's batch-gate WIRING (open → onPicked → startBatch → goHome) is
+// tested in isolation. The modal's own internals are covered by its test file.
+vi.mock('../../TaskBatchPickerModal', () => ({
+  TaskBatchPickerModal: ({ onPicked }: { onPicked: (ids: string[]) => void }) => (
+    <button data-testid="mock-batch-pick" onClick={() => onPicked(['IDEA-1', 'IDEA-2'])}>
+      pick tasks
+    </button>
+  ),
+}));
+
 // API wrapper — projects (banner) + sessions.createQuick (quick launch).
 vi.mock('../../../../utils/api', () => ({
   API: {
@@ -92,14 +113,39 @@ import { useNavigationStore } from '../../../../stores/navigationStore';
 import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
 import type { AppConfig } from '../../../../types/config';
+import { SPRINT_BATCH_CAP } from '../../../../../../shared/types/sprintBatch';
+import type { WorkflowRow } from '../../../../../../shared/types/workflows';
 
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
+const mockStartBatch = vi.mocked(trpc.cyboflow.runs.startBatch.mutate);
+const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
+
+/** A non-gated custom workflow row (neither planner nor sprint → direct launch). */
+const CUSTOM_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'custom',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+};
+/** The Sprint built-in row (batch-gated). */
+const SPRINT_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'sprint',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+};
 
 /** Render the wizard pinned to project 1 with quick offered, and wait for load. */
 async function renderLockedWizard(): Promise<void> {
   act(() => {
-    useNavigationStore.setState({ wizardOpts: { lockProjectId: 1, allowQuick: true } });
+    useNavigationStore.setState({ view: 'wizard', wizardOpts: { lockProjectId: 1, allowQuick: true } });
   });
   render(<SessionStartWizard />);
   // Wait for the workflow list to resolve (the row becomes clickable).
@@ -129,6 +175,7 @@ beforeEach(() => {
     useConfigStore.setState({ config: null });
   });
   mockRunStart.mockClear();
+  mockStartBatch.mockClear();
   mockCreateQuick.mockClear();
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -200,6 +247,12 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 // Launch threading
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — step ③ launch threading', () => {
+  // These tests exercise the DIRECT runs.start path, so use a non-gated custom
+  // flow (the default 'sprint' is batch-gated and would open the picker instead).
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+  });
+
   it('threads default substrate + permission into a workflow launch', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
@@ -268,5 +321,58 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 1, agentPermissionMode: 'dontAsk' }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sprint batch gate (feat/parallel-sprint) — Sprint is NOT a direct run: the CTA
+// opens the task batch picker, and a pick fires runs.startBatch (session-less),
+// never runs.start. Mirrors the Planner idea gate.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Sprint batch gate', () => {
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+  });
+
+  it('opens the task batch picker (not a direct run) when Sprint is launched', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The picker is shown; no run/batch has been launched yet (picker is
+    // freely cancellable — the in-flight latch has NOT flipped).
+    expect(screen.getByTestId('mock-batch-pick')).toBeInTheDocument();
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockStartBatch).not.toHaveBeenCalled();
+  });
+
+  it('fires startBatch (session-less) with the picked tasks + cap, never runs.start', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-batch-pick'));
+    });
+
+    expect(mockStartBatch).toHaveBeenCalledOnce();
+    expect(mockStartBatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'sprint',
+        projectId: 1,
+        substrate: 'sdk',
+        taskIds: ['IDEA-1', 'IDEA-2'],
+        concurrency: SPRINT_BATCH_CAP,
+      }),
+    );
+    // A batch is session-less — the single-run path must NOT fire.
+    expect(mockRunStart).not.toHaveBeenCalled();
+    // Navigated back home (no session to nest a batch under).
+    expect(useNavigationStore.getState().view).toBe('home');
   });
 });
