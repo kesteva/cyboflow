@@ -9,6 +9,7 @@ import { router } from './trpc';
 import { runsRouter } from './routers/runs';
 import { approvalsRouter } from './routers/approvals';
 import { workflowsRouter } from './routers/workflows';
+import { dynamicWorkflowsRouter } from './routers/dynamicWorkflows';
 import { eventsRouter } from './routers/events';
 import { filesRouter } from './routers/files';
 import { healthRouter } from './routers/health';
@@ -21,6 +22,7 @@ import { substratesRouter } from './routers/substrates';
 export const appRouter = router({
   cyboflow: router({
     approvals: approvalsRouter,
+    dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
     files: filesRouter,
     health: healthRouter,

@@ -19,6 +19,7 @@ import type { MergedPermissionRules } from '../../../orchestrator/permissionRule
 import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../../../orchestrator/permissionModeMapper';
 import { ReviewItemRouter, ReviewItemError } from '../../../orchestrator/reviewItemRouter';
 import type { ReviewItemCreate } from '../../../orchestrator/reviewItemRouter';
+import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
 import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
@@ -401,6 +402,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const sink = new RawEventsSink(this.db, this.logger);
       sink.attachToRouter(router, runId);
       this.pipelines.set(panelId, { router, sink, runId });
+
+      // Passive dynamic-workflow detection: watch this run's normalized event
+      // stream for Workflow-tool launches. Fail-soft when the tracker singleton
+      // is not initialized (unit tests / early boot).
+      DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
 
       // Abort controller for cancellation.
       const abortController = new AbortController();
@@ -1094,6 +1100,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private cleanupPipeline(panelId: string): void {
     const pl = this.pipelines.get(panelId);
     if (!pl) return;
+    // Stop dynamic-workflow detection/tailing for the run before sink disposal.
+    DynamicWorkflowTracker.tryGetInstance()?.detachRun(pl.runId);
     pl.sink.dispose(pl.runId);
     pl.router.clearRun(pl.runId);
     this.pipelines.delete(panelId);

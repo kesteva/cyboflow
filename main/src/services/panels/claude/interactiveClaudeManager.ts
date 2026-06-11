@@ -11,6 +11,7 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
+import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
@@ -619,6 +620,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     sink.attachToRouter(router, runId);
     this.pipelines.set(panelId, { router, sink, runId });
 
+    // Passive dynamic-workflow detection: watch this run's normalized event
+    // stream for Workflow-tool launches. Fail-soft when the tracker singleton
+    // is not initialized (unit tests / early boot).
+    DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+
     // Install the PreToolUse `'*'` shell-approval hook into the worktree's
     // default `.claude/settings.json` BEFORE `claude` launches (TASK-819), so the
     // live interactive REPL gates tool calls for human review. The writer is
@@ -1167,6 +1173,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Dispose the pipeline (router + sink) for the run.
     const pipeline = this.pipelines.get(panelId);
     if (pipeline) {
+      // Stop dynamic-workflow detection/tailing for the run before sink disposal.
+      DynamicWorkflowTracker.tryGetInstance()?.detachRun(pipeline.runId);
       pipeline.sink.dispose(pipeline.runId);
       pipeline.router.clearRun(pipeline.runId);
       this.pipelines.delete(panelId);

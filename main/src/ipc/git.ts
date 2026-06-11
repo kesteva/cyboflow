@@ -7,6 +7,7 @@ import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
 import { panelEventBus } from '../services/panelEventBus';
 import { PanelEventType, ToolPanelType, PanelEvent } from '../../../shared/types/panels';
+import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
@@ -1055,6 +1056,15 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
       stampMergedOutcomeForSession(sessionId);
 
+      // Auto-resolve any open dynamic-workflow review items for this session —
+      // the merge IS the human's close-out action. Fire-and-forget: a resolve
+      // failure must never fail the merge itself.
+      void DynamicWorkflowTracker.tryGetInstance()
+        ?.resolveReviewItemsForSession(sessionId, 'user')
+        .catch((err: unknown) => {
+          console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
+        });
+
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately
       if (session.projectId !== undefined) {
@@ -1148,6 +1158,15 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
       stampMergedOutcomeForSession(sessionId);
+
+      // Auto-resolve any open dynamic-workflow review items for this session —
+      // the merge IS the human's close-out action. Fire-and-forget: a resolve
+      // failure must never fail the merge itself.
+      void DynamicWorkflowTracker.tryGetInstance()
+        ?.resolveReviewItemsForSession(sessionId, 'user')
+        .catch((err: unknown) => {
+          console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
+        });
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately

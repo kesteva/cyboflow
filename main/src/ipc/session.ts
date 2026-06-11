@@ -25,6 +25,7 @@ import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 import { isPermissionMode } from '../../../shared/types/workflows';
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
+import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -502,6 +503,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       } catch (stampError) {
         console.error(`[Main] Failed to stamp dismissed outcome for session ${sessionId}:`, stampError);
       }
+
+      // Auto-resolve any open dynamic-workflow review items for this session —
+      // dismissing the session IS the human's close-out action. Fire-and-forget:
+      // a resolve failure must never fail the dismiss itself.
+      void DynamicWorkflowTracker.tryGetInstance()
+        ?.resolveReviewItemsForSession(sessionId, 'user')
+        .catch((err: unknown) => {
+          console.warn(`[IPC:session] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
+        });
 
       // Add the archive message to session output
       sessionManager.addSessionOutput(sessionId, {

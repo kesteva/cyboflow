@@ -30,6 +30,7 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
+import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
@@ -571,6 +572,12 @@ async function initializeServices() {
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
   ReviewItemRouter.initialize(cyboflowDb);
   HumanStepManager.initialize(cyboflowDb);
+
+  // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
+  // The CLI managers attach it to each run's EventRouter pipeline via
+  // tryGetInstance(); it creates completion review items through
+  // ReviewItemRouter.getInstance(), so it MUST initialize after the router.
+  DynamicWorkflowTracker.initialize(cyboflowDb, { logger: cyboflowLogger });
 
   // Concrete publisher: adapts BrowserWindow.webContents.send to the
   // StreamEventPublisher interface.  This is the only place in the codebase
