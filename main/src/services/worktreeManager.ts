@@ -24,9 +24,10 @@ const execAsync = promisify(exec);
 /**
  * Typed, identifiable error thrown by {@link WorktreeManager.mergeWorktreeToBranch}
  * when rebasing a per-task run branch onto the integration branch hits a conflict
- * (or the integration update is not a fast-forward). The SprintBatchScheduler
- * catches THIS specific class to mark the batch task `failed` without crashing the
- * batch — distinguishing a real merge conflict from any other launch/IO failure.
+ * (or the integration update is not a fast-forward). The retired scheduler-model
+ * sprint caught THIS specific class to mark a batch task `failed` without crashing
+ * the batch — distinguishing a real merge conflict from any other launch/IO
+ * failure. Preserved with the merge primitives for future callers.
  */
 export class MergeConflictError extends Error {
   readonly gitOutput: string;

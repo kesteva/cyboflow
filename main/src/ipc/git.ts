@@ -10,6 +10,8 @@ import { PanelEventType, ToolPanelType, PanelEvent } from '../../../shared/types
 import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
+import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
+import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
@@ -96,6 +98,76 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }
     } catch (error) {
       console.error('[Git] Failed to emit git operation event:', error);
+    }
+  };
+
+  // Sprint close-out on session merge (feat/parallel-sprint, single-run lane
+  // model). A sprint run executes in the SESSION worktree; merging the session
+  // to main IS the sprint's merge close-out. For every batch-linked run hosted
+  // by the merged session: each lane whose status is 'integrated' moves its task
+  // to the done stage via the TaskChangeRouter chokepoint (mirrors
+  // recomputeTaskExecutionStage's outcome='merged' arm: board position 9, kind
+  // 'execution-stage', actor 'orchestrator'), then the batch is marked
+  // 'completed'. Entirely fail-soft: a task-side or batch-side failure is
+  // logged and NEVER affects the merge result (the git operation already
+  // succeeded). Lanes that are failed/blocked/queued are deliberately left
+  // alone — their tasks revert/stay per the normal stage rules.
+  const finalizeSprintLanesOnSessionMerge = async (sessionId: string): Promise<void> => {
+    try {
+      const db = databaseService.getDb();
+      const batchRuns = db
+        .prepare('SELECT id, batch_id FROM workflow_runs WHERE session_id = ? AND batch_id IS NOT NULL')
+        .all(sessionId) as Array<{ id: string; batch_id: string }>;
+      if (batchRuns.length === 0) return;
+
+      const laneStore = SprintLaneStore.getInstance();
+      const taskRouter = TaskChangeRouter.getInstance();
+
+      for (const run of batchRuns) {
+        const lanes = laneStore.listLanes(run.batch_id);
+        for (const lane of lanes) {
+          if (lane.status !== 'integrated') continue;
+          try {
+            const task = db
+              .prepare('SELECT id, project_id, board_id, stage_id FROM tasks WHERE id = ?')
+              .get(lane.taskId) as
+              | { id: string; project_id: number; board_id: string; stage_id: string }
+              | undefined;
+            if (!task) continue;
+            // DONE_POSITION = 9 — same stage resolution as TaskChangeRouter.
+            // recomputeTaskExecutionStage's outcome='merged' arm.
+            const doneStage = db
+              .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+              .get(task.board_id, 9) as { id: string } | undefined;
+            if (!doneStage || doneStage.id === task.stage_id) continue;
+            await taskRouter.applyChange(task.project_id, {
+              actor: 'orchestrator',
+              entityType: 'task',
+              taskId: lane.taskId,
+              stageId: doneStage.id,
+              kind: 'execution-stage',
+            });
+          } catch (taskError) {
+            console.error(
+              `[IPC:git] sprint close-out: failed to move task ${lane.taskId} to done (continuing):`,
+              taskError
+            );
+          }
+        }
+        try {
+          laneStore.markBatchTerminal(run.batch_id, 'completed');
+        } catch (batchError) {
+          console.error(
+            `[IPC:git] sprint close-out: failed to mark batch ${run.batch_id} completed (continuing):`,
+            batchError
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        `[IPC:git] sprint close-out after session merge failed for session ${sessionId} (merge unaffected):`,
+        error
+      );
     }
   };
 
@@ -955,6 +1027,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         mainBranch
       });
 
+      // Sprint close-out (feat/parallel-sprint): integrated lanes → done stage,
+      // batch → completed. Fail-soft — never affects the merge result.
+      await finalizeSprintLanesOnSessionMerge(sessionId);
+
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately
       if (session.projectId !== undefined) {
@@ -1041,6 +1117,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         data: successMessage,
         timestamp: new Date()
       });
+
+      // Sprint close-out (feat/parallel-sprint): integrated lanes → done stage,
+      // batch → completed. Fail-soft — never affects the merge result.
+      await finalizeSprintLanesOnSessionMerge(sessionId);
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately

@@ -797,6 +797,189 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
 });
 
 // ---------------------------------------------------------------------------
+// feat/parallel-sprint: getPrompt seed-tasks injection (single-run lane model)
+// ---------------------------------------------------------------------------
+
+import type { SprintLaneTaskIdsLike } from '../runExecutor';
+
+/** Build a RunExecutor with the sprint-lane task-id reader in the 12th slot. */
+function makeSprintExecutor(
+  spawner: ClaudeSpawnerLike,
+  registry: WorkflowRegistryLike,
+  reader: WorkflowPromptReaderLike,
+  ideaReader?: IdeaBodyReaderLike,
+  laneTaskIds?: SprintLaneTaskIdsLike,
+): RunExecutor {
+  return new RunExecutor(
+    spawner,
+    registry,
+    makeSpyLogger(),
+    reader,
+    undefined, // lifecycleTransitions
+    undefined, // publisher
+    undefined, // db
+    undefined, // source
+    undefined, // stepEmitter
+    undefined, // taskStageDeriver
+    ideaReader, // ideaBodyReader (11th arg)
+    laneTaskIds, // sprintLaneTaskIds (12th arg)
+  );
+}
+
+describe('RunExecutor.getPrompt — sprint seed-tasks injection (feat/parallel-sprint)', () => {
+  const sprintReader = () =>
+    makeStubReader({ '/fake/sprint.md': { prompt: 'SPRINT BODY', systemPromptAppend: '' } });
+
+  it('prepends a `# Sprint tasks` block (count line + per-task `## <ref>: <title>` sections) when run.batch_id resolves lanes', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({
+      't-1': { type: 'task', title: 'First task', summary: 'Sum 1', body: 'Body 1', scope: null, ref: 'TASK-1' },
+      't-2': { type: 'task', title: 'Second task', summary: null, body: null, scope: null, ref: 'TASK-2' },
+    });
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: vi.fn().mockReturnValue(['t-1', 't-2']) };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Sprint tasks')).toBe(true);
+    expect(prompt).toContain('This sprint covers 2 tasks');
+    expect(prompt).toContain('## TASK-1: First task');
+    expect(prompt).toContain('Sum 1');
+    expect(prompt).toContain('Body 1');
+    expect(prompt).toContain('## TASK-2: Second task');
+    // The base prompt is preserved after the injected block.
+    expect(prompt).toContain('SPRINT BODY');
+    expect(prompt.indexOf('# Sprint tasks')).toBeLessThan(prompt.indexOf('SPRINT BODY'));
+    expect(laneTaskIds.listLaneTaskIds).toHaveBeenCalledWith('batch-1');
+  });
+
+  it('falls back to the raw task id in the heading when ref is absent', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({
+      't-noref': { type: 'task', title: 'Refless task', summary: null, body: null, scope: null },
+    });
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: () => ['t-noref'] };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toContain('## t-noref: Refless task');
+  });
+
+  it('skips an unresolvable task id fail-soft and still renders the rest', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({
+      't-ok': { type: 'task', title: 'Good task', summary: null, body: 'Body', scope: null, ref: 'TASK-9' },
+      // 't-missing' resolves to null
+    });
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: () => ['t-missing', 't-ok'] };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt).toContain('## TASK-9: Good task');
+    expect(prompt).toContain('This sprint covers 1 task.');
+    expect(prompt).not.toContain('t-missing');
+  });
+
+  it('returns the base prompt verbatim when the run has no batch_id', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no batch_id
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({});
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: vi.fn().mockReturnValue([]) };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('SPRINT BODY');
+    expect(laneTaskIds.listLaneTaskIds).not.toHaveBeenCalled();
+  });
+
+  it('returns the base prompt verbatim when the lane listing throws (fail-soft)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-broken' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({});
+    const laneTaskIds: SprintLaneTaskIdsLike = {
+      listLaneTaskIds: () => {
+        throw new Error('boom');
+      },
+    };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('SPRINT BODY');
+  });
+
+  it('returns the base prompt verbatim when no sprintLaneTaskIds reader is injected', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), makeIdeaReader({}));
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('SPRINT BODY');
+  });
+
+  it('a pending nudge wins — the resumed turn does NOT re-send the seed-tasks block', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', batch_id: 'batch-1', claude_session_id: 'sess-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const ideaReader = makeIdeaReader({
+      't-1': { type: 'task', title: 'First task', summary: null, body: 'Body 1', scope: null, ref: 'TASK-1' },
+    });
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: vi.fn().mockReturnValue(['t-1']) };
+    const executor = makeSprintExecutor(spawner, registry, sprintReader(), ideaReader, laneTaskIds);
+
+    executor.setPendingNudge(run.id, 'the nudge');
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('the nudge');
+    expect(spawnedPrompt(spawner)).not.toContain('# Sprint tasks');
+    expect(laneTaskIds.listLaneTaskIds).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Migration 018 (Piece C): getPrompt nudge branch + resumeSessionId threading
 // ---------------------------------------------------------------------------
 

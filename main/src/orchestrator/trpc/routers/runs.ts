@@ -24,8 +24,9 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
-import type { SprintBatchProgress } from '../../../../../shared/types/sprintBatch';
-import { SPRINT_BATCH_CAP, SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
+import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
+import { sprintLaneEvents, sprintLaneChannel } from '../../sprintLaneStore';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -184,14 +185,18 @@ export interface RunLauncherLike {
    * `sessionId` hosts the run inside an existing session's worktree (session<->run
    * restructure, Phase 1 / migration 019); `requestedPermissionMode` carries the
    * user's per-run agent-permission choice (WorkflowPicker) down to the resolver's
-   * highest-precedence `requestedMode` rung in WorkflowRegistry.createRun. All are
-   * OPTIONAL — when substrate is omitted the run falls through the resolver ladder
-   * to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no link is
-   * recorded; when sessionId is omitted the run creates its own dedicated worktree
-   * (legacy path); when requestedPermissionMode is omitted the permission ladder
-   * falls through to frontmatter → global default → 'default'.
+   * highest-precedence `requestedMode` rung in WorkflowRegistry.createRun;
+   * `baseBranch` cuts the run's dedicated worktree branch off a non-default tip;
+   * `seedTaskIds` (feat/parallel-sprint, single-run lane model) seeds the
+   * per-task lanes of a session-hosted `sprint` run — only valid when the
+   * workflow's name === 'sprint'. All are OPTIONAL — when substrate is omitted
+   * the run falls through the resolver ladder to DEFAULT_SUBSTRATE ('sdk'); when
+   * taskId / ideaId are omitted no link is recorded; when sessionId is omitted
+   * the run creates its own dedicated worktree (legacy path); when
+   * requestedPermissionMode is omitted the permission ladder falls through to
+   * frontmatter → global default → 'default'.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[]): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -226,29 +231,22 @@ export function setStartRunDeps(deps: StartRunDeps): void {
 }
 
 // ---------------------------------------------------------------------------
-// sprint-batch dependency bag (feat/parallel-sprint, P3)
+// sprint-lane dependency bag (feat/parallel-sprint, single-run lane model)
 //
-// Backs cyboflow.runs.startBatch + cyboflow.runs.batchProgress. Injected at boot
-// by main/src/index.ts via setSprintBatchDeps() after the SprintBatchScheduler is
-// constructed. Until wired the mutations throw METHOD_NOT_SUPPORTED — same stub
-// pattern as the other dep-bags.
+// Backs cyboflow.runs.sprintLanes. Injected at boot by main/src/index.ts via
+// setSprintLaneDeps() after SprintLaneStore.initialize. Until wired the query
+// throws METHOD_NOT_SUPPORTED — same stub pattern as the other dep-bags.
 // ---------------------------------------------------------------------------
 
-/** Narrow slice of SprintBatchScheduler the runs router calls. */
-export interface SprintBatchDeps {
-  createBatch(input: {
-    projectId: number;
-    substrate: CliSubstrate;
-    taskIds: string[];
-    concurrency?: number;
-  }): Promise<{ batchId: string }>;
-  batchProgress(batchId: string): SprintBatchProgress | null;
+/** Narrow slice of SprintLaneStore the runs router reads. */
+export interface SprintLaneDeps {
+  listLanes(batchId: string): SprintLaneRow[];
 }
 
-let sprintBatchDeps: SprintBatchDeps | null = null;
+let sprintLaneDeps: SprintLaneDeps | null = null;
 
-export function setSprintBatchDeps(deps: SprintBatchDeps): void {
-  sprintBatchDeps = deps;
+export function setSprintLaneDeps(deps: SprintLaneDeps): void {
+  sprintLaneDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +643,13 @@ export const runsRouter = router({
       // stamped immutably onto workflow_runs.permission_mode_snapshot. When omitted
       // the run inherits the global default — byte-identical to before.
       permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
+      // Optional sprint seed tasks (feat/parallel-sprint, single-run lane model).
+      // When supplied, the launcher creates the batch + per-task lane rows via
+      // SprintLaneStore.createForRun and stamps workflow_runs.batch_id. Only
+      // valid for the 'sprint' workflow (the launcher enforces this); the
+      // substrate-keyed selection cap N is enforced here (defense in depth — the
+      // picker also enforces it client-side).
+      taskIds: z.array(z.string().min(1)).optional(),
     }))
     .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -660,18 +665,33 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
+      // Substrate-keyed sprint selection cap (defense in depth — the batch
+      // picker also enforces it client-side). Keyed off the REQUESTED substrate
+      // (or the 'sdk' default) — the resolver ladder can only land on the same
+      // value when one is requested explicitly.
+      if (input.taskIds !== undefined) {
+        const capSubstrate: CliSubstrate = input.substrate ?? 'sdk';
+        const max = SPRINT_BATCH_MAX_TASKS[capSubstrate];
+        if (input.taskIds.length > max) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `too many tasks for the ${capSubstrate} substrate: ${input.taskIds.length} > ${max}`,
+          });
+        }
+      }
       // Forward the per-run substrate choice (IDEA-013), native-task link
       // (migration 014), planner seed idea (migration 017), session host
-      // (Phase 1 / migration 019), and per-run agent permission override
-      // (WorkflowPicker). When ALL are omitted, call the legacy 2-arg shape so the
-      // resolver ladder owns the substrate/permission decisions and the
-      // SDK-default call site stays byte-identical (zero-behavior-change floor);
-      // otherwise pass all (any may be undefined, which the launcher treats as
-      // "no link / no host / resolver default").
+      // (Phase 1 / migration 019), per-run agent permission override
+      // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint). When ALL
+      // are omitted, call the legacy 2-arg shape so the resolver ladder owns the
+      // substrate/permission decisions and the SDK-default call site stays
+      // byte-identical (zero-behavior-change floor); otherwise pass all (any may
+      // be undefined, which the launcher treats as "no link / no host / resolver
+      // default"). baseBranch is never sent over IPC — undefined placeholder.
       const { runId, worktreePath, branchName } =
-        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined && input.permissionMode === undefined
+        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined && input.permissionMode === undefined && input.taskIds === undefined
           ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
-          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId, input.permissionMode);
+          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId, input.permissionMode, undefined, input.taskIds);
       return { runId, worktreePath, branchName };
     }),
 
@@ -1427,68 +1447,58 @@ export const runsRouter = router({
     }),
 
   /**
-   * Launch a parallel-sprint BATCH (feat/parallel-sprint, P3). Creates the
-   * sprint_batches row + one sprint_batch_tasks per selected task, cuts the
-   * integration branch, and launches the single sprint-init run (dependency
-   * analysis). The substrate-keyed selection cap N is enforced here (defense in
-   * depth — the picker also enforces it client-side) and again inside
-   * createBatch. Returns the new batch id.
+   * Read the per-task lanes of a sprint run (feat/parallel-sprint, single-run
+   * lane model). Resolves the run's batch_id from workflow_runs; a run with no
+   * batch (non-sprint, or a sprint launched without seed tasks) returns [].
+   * Lane rows come from SprintLaneStore.listLanes via the injected dep-bag.
    *
-   * Standalone-typecheck invariant: the SprintBatchScheduler is injected via
-   * setSprintBatchDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   * Standalone-typecheck invariant: the SprintLaneStore slice is injected via
+   * setSprintLaneDeps(); until wired the query throws METHOD_NOT_SUPPORTED.
    */
-  startBatch: protectedProcedure
-    .input(
-      z.object({
-        workflowId: z.literal('sprint'),
-        projectId: z.number().int().positive(),
-        substrate: z.enum(['sdk', 'interactive']).optional(),
-        taskIds: z.array(z.string().min(1)).min(1),
-        concurrency: z.number().int().positive().max(SPRINT_BATCH_CAP).optional(),
-      }),
-    )
-    .mutation(async ({ input }): Promise<{ batchId: string }> => {
-      if (!sprintBatchDeps) {
+  sprintLanes: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ ctx, input }): SprintLaneRow[] => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      if (!sprintLaneDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
-          message: 'sprint-batch dependencies not wired yet. Call setSprintBatchDeps() at boot.',
+          message: 'sprint-lane dependencies not wired yet. Call setSprintLaneDeps() at boot.',
         });
       }
-      const substrate: CliSubstrate = input.substrate ?? 'sdk';
-      const max = SPRINT_BATCH_MAX_TASKS[substrate];
-      if (input.taskIds.length > max) {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: `too many tasks for the ${substrate} substrate: ${input.taskIds.length} > ${max}`,
-        });
-      }
-      return sprintBatchDeps.createBatch({
-        projectId: input.projectId,
-        substrate,
-        taskIds: input.taskIds,
-        concurrency: input.concurrency,
-      });
+      const row = ctx.db
+        .prepare('SELECT batch_id FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { batch_id: string | null } | undefined;
+      if (!row || !row.batch_id) return [];
+      return sprintLaneDeps.listLanes(row.batch_id);
     }),
 
   /**
-   * Read aggregate progress for a sprint batch (feat/parallel-sprint, P3). A
-   * small poll-friendly snapshot ({total, queued, running, integrated, failed,
-   * status}) for the picker / progress UI; the reactive subscription lands in a
-   * later phase. Throws NOT_FOUND when the batch id is unknown.
+   * Subscribe to lane-change events for a specific sprint run (feat/parallel-
+   * sprint, single-run lane model). Modeled on onStepTransition above. Events
+   * are emitted by SprintLaneStore on the per-run `sprint-lane-<runId>` channel
+   * after every lane write, so the channel name itself scopes delivery — no
+   * additional runId filtering is required.
+   *
+   * No throttle — lane transitions are infrequent boundary events (unlike
+   * high-throughput stream output) and must not be coalesced.
    */
-  batchProgress: protectedProcedure
-    .input(z.object({ batchId: z.string().min(1) }))
-    .query(({ input }): SprintBatchProgress => {
-      if (!sprintBatchDeps) {
-        throw new TRPCError({
-          code: 'METHOD_NOT_SUPPORTED',
-          message: 'sprint-batch dependencies not wired yet. Call setSprintBatchDeps() at boot.',
-        });
+  onSprintLaneChanged: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .subscription(async function* ({ input, signal }): AsyncGenerator<SprintLaneChangedEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<SprintLaneChangedEvent>(
+        sprintLaneEvents,
+        sprintLaneChannel(input.runId),
+        abortSignal,
+      );
+      for await (const ev of source) {
+        if (ev.runId !== input.runId) continue;
+        yield ev;
       }
-      const progress = sprintBatchDeps.batchProgress(input.batchId);
-      if (!progress) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: `batch ${input.batchId} not found` });
-      }
-      return progress;
     }),
 });

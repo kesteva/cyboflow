@@ -56,7 +56,32 @@ export interface IdeaBodyReaderLike {
     summary: string | null;
     body: string | null;
     scope: string | null;
+    /**
+     * Display ref (e.g. 'TASK-123'). OPTIONAL so pre-existing stubs/adapters
+     * that predate the sprint seed-tasks block keep compiling; when absent the
+     * seed-tasks renderer falls back to the raw entity id.
+     */
+    ref?: string | null;
   } | null;
+}
+
+/**
+ * Narrow slice of SprintLaneStore needed by getPrompt to resolve which task ids
+ * a sprint run's batch covers (feat/parallel-sprint, single-run lane model).
+ * Wired from main/src/index.ts as a thin adapter over
+ * SprintLaneStore.listLanes — injected as an interface (not the singleton) to
+ * preserve the standalone-typecheck invariant + test ergonomics.
+ */
+export interface SprintLaneTaskIdsLike {
+  listLaneTaskIds(batchId: string): string[];
+  /**
+   * OPTIONAL terminal close-out: when the sprint run reaches a terminal
+   * failed/canceled phase, deriveTaskStageForPhase marks the run's batch
+   * 'failed' so the lane substrate never strands a non-terminal batch. (The
+   * 'completed' close-out lives in the session-merge path in
+   * main/src/ipc/git.ts.) Optional so prompt-only stubs stay minimal.
+   */
+  markBatchTerminal?(batchId: string, status: 'completed' | 'failed'): void;
 }
 
 /**
@@ -292,6 +317,15 @@ export class RunExecutor {
      * (zero-behavior-change floor). Participates in NO stage derivation.
      */
     private readonly ideaBodyReader?: IdeaBodyReaderLike,
+    /**
+     * Optional sprint-lane task-id reader (feat/parallel-sprint, migration 022).
+     * When injected and a run carries a `batch_id`, getPrompt() prepends a
+     * `# Sprint tasks` block (one section per seeded task, resolved fail-soft
+     * via ideaBodyReader) to the sprint's MAIN prompt. When absent, or when the
+     * run has no batch_id, getPrompt() returns the base prompt verbatim
+     * (zero-behavior-change floor). Participates in NO stage derivation.
+     */
+    private readonly sprintLaneTaskIds?: SprintLaneTaskIdsLike,
   ) {}
 
   /**
@@ -638,6 +672,18 @@ export class RunExecutor {
       return Promise.resolve(RESUME_CONTINUE_PROMPT);
     }
 
+    // Sprint seed-tasks injection (feat/parallel-sprint, single-run lane model).
+    // When the run carries a batch_id, prepend a `# Sprint tasks` block (one
+    // section per seeded lane task) to the sprint's MAIN prompt. Checked AFTER
+    // the nudge/resume branches (a resumed conversation already holds the seeds
+    // and must NOT receive them again) and ahead of the seed-idea branch (a
+    // sprint run never carries a seed_idea_id, so order is mostly academic).
+    // Fail-soft on every miss → fall through to the base prompt unchanged.
+    const seedTasksBlock = this.buildSeedTasksBlock(runId);
+    if (seedTasksBlock) {
+      return Promise.resolve(`# Sprint tasks\n\n${seedTasksBlock}\n\n${prompt}`);
+    }
+
     // Piece A — seed-idea injection. Read the run via the already-held registry
     // (no WorkflowRegistryLike widening). Fail-soft on every miss: null run /
     // null seed_idea_id / sentinel runId / no reader / unresolved or empty body
@@ -686,6 +732,59 @@ export class RunExecutor {
     if (summary !== '') parts.push(summary);
     if (body !== '') parts.push(body);
     return parts.join('\n\n');
+  }
+
+  /**
+   * Resolve the `# Sprint tasks` block body for a sprint run's batch_id
+   * (feat/parallel-sprint, single-run lane model).
+   *
+   * Returns null (so getPrompt falls through) when: no sprintLaneTaskIds reader
+   * or no ideaBodyReader is injected, the run is missing or carries no batch_id,
+   * the lane listing throws/returns no ids, or NO seeded task resolves to usable
+   * content. Each task renders as `## <ref ?? id>: <title>` + summary + body
+   * (present fields only — same style as buildSeedIdeaBlock); an individual task
+   * that fails to resolve is skipped fail-soft so one bad id never sinks the
+   * whole sprint prompt.
+   */
+  private buildSeedTasksBlock(runId: string): string | null {
+    if (!this.sprintLaneTaskIds || !this.ideaBodyReader) return null;
+    const run = this.registry.getRunById(runId);
+    const batchId = run?.batch_id ?? null;
+    if (!batchId) return null;
+
+    let taskIds: string[];
+    try {
+      taskIds = this.sprintLaneTaskIds.listLaneTaskIds(batchId);
+    } catch (err) {
+      this.logger.warn(`RunExecutor.buildSeedTasksBlock: lane listing failed for batch ${batchId} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+    if (taskIds.length === 0) return null;
+
+    const sections: string[] = [];
+    for (const taskId of taskIds) {
+      try {
+        const task = this.ideaBodyReader.read(taskId);
+        if (!task) continue;
+        const title = task.title?.trim() ?? '';
+        const summary = task.summary?.trim() ?? '';
+        const body = task.body?.trim() ?? '';
+        if (title === '' && summary === '' && body === '') continue;
+
+        const refOrId = task.ref?.trim() || taskId;
+        const parts: string[] = [title !== '' ? `## ${refOrId}: ${title}` : `## ${refOrId}`];
+        if (summary !== '') parts.push(summary);
+        if (body !== '') parts.push(body);
+        sections.push(parts.join('\n\n'));
+      } catch (err) {
+        // Fail-soft per id — one unresolvable task never sinks the sprint prompt.
+        this.logger.warn(`RunExecutor.buildSeedTasksBlock: could not resolve task ${taskId} for batch ${batchId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (sections.length === 0) return null;
+
+    const intro = `This sprint covers ${sections.length} task${sections.length === 1 ? '' : 's'}. Execute ALL of them.`;
+    return [intro, ...sections].join('\n\n');
   }
 
   /**
@@ -864,6 +963,25 @@ export class RunExecutor {
 
     try {
       const run = this.registry.getRunById(runId);
+
+      // Sprint batch close-out (feat/parallel-sprint, single-run lane model):
+      // a sprint run that dies terminally (failed/canceled) must not strand its
+      // batch in a non-terminal status. Fail-soft and BEFORE the task_id
+      // early-return — sprint runs carry batch_id but usually no task_id. The
+      // 'completed' close-out is the session-merge path (main/src/ipc/git.ts).
+      if ((phase === 'failed' || phase === 'canceled') && run?.batch_id && this.sprintLaneTaskIds?.markBatchTerminal) {
+        try {
+          this.sprintLaneTaskIds.markBatchTerminal(run.batch_id, 'failed');
+        } catch (batchErr) {
+          this.logger.warn('[RunExecutor] sprint batch terminal close-out failed (fail-soft)', {
+            runId,
+            batchId: run.batch_id,
+            phase,
+            error: batchErr instanceof Error ? batchErr.message : String(batchErr),
+          });
+        }
+      }
+
       const taskId = run?.task_id ?? null;
       if (!taskId) return;
 

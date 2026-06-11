@@ -352,10 +352,11 @@ describe('cyboflow.runs.start', () => {
 
       // With an ideaId present, start calls the full-form launch — substrate +
       // taskId undefined, ideaId in the 5th slot, sessionId (6th) +
-      // requestedPermissionMode (7th) undefined — so the launcher writes
-      // workflow_runs.seed_idea_id directly (no stage derivation).
+      // requestedPermissionMode (7th) + baseBranch (8th) + seedTaskIds (9th)
+      // undefined — so the launcher writes workflow_runs.seed_idea_id directly
+      // (no stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -386,10 +387,10 @@ describe('cyboflow.runs.start', () => {
 
       // With a sessionId present, start calls the full-form launch — substrate +
       // taskId + ideaId undefined, sessionId in the 6th slot, requestedPermissionMode
-      // (7th) undefined — so the launcher hosts the run inside the session's
-      // existing worktree.
+      // (7th) + baseBranch (8th) + seedTaskIds (9th) undefined — so the launcher
+      // hosts the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -421,9 +422,9 @@ describe('cyboflow.runs.start', () => {
       // With only permissionMode present, start leaves the legacy 2-arg shape (the
       // all-undefined check now includes permissionMode) and calls the full-form
       // launch — substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto'
-      // in the 7th slot.
+      // in the 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto');
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -1780,15 +1781,15 @@ describe('cyboflow.runs.getPhaseState', () => {
       `INSERT INTO workflow_runs
          (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id)
        VALUES (?, ?, 1, '/tmp/test', 'failed', '{}', ?)`,
-    ).run(runId, workflowId, 'implement');
+    ).run(runId, workflowId, 'execute-tasks');
 
     const adapter = dbAdapter(db);
     const caller = appRouter.createCaller(createContext({ db: adapter }));
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
 
-    const implementStep = result.stepStates.find((s) => s.stepId === 'implement');
-    expect(implementStep, 'implement step not found in stepStates').toBeDefined();
-    expect(implementStep!.status).toBe('done');
+    const executeStep = result.stepStates.find((s) => s.stepId === 'execute-tasks');
+    expect(executeStep, 'execute-tasks step not found in stepStates').toBeDefined();
+    expect(executeStep!.status).toBe('done');
   });
 
   it('(g) canceled run: current step returns status=done not running', async () => {

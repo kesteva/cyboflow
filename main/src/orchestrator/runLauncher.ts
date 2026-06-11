@@ -91,6 +91,21 @@ export interface TaskStageDeriverLike {
   recomputeTaskExecutionStage(taskId: string): Promise<void>;
 }
 
+/**
+ * Narrow slice of SprintLaneStore needed to seed the per-task lanes of a
+ * session-hosted `sprint` run at launch (feat/parallel-sprint, single-run lane
+ * model). Injected as an interface (not `SprintLaneStore.getInstance()`) to
+ * preserve the standalone-typecheck invariant and constructor-injection test
+ * ergonomics; the boot wiring in main/src/index.ts passes the singleton in.
+ */
+export interface SprintLanesLike {
+  createForRun(
+    projectId: number,
+    substrate: CliSubstrate,
+    taskIds: string[],
+  ): { batchId: string };
+}
+
 export class RunLauncher {
   constructor(
     private readonly db: DatabaseLike,
@@ -113,6 +128,14 @@ export class RunLauncher {
      * task derivation is silently skipped — backward-compatible.
      */
     private readonly taskStageDeriver?: TaskStageDeriverLike,
+    /**
+     * Optional sprint-lane store (feat/parallel-sprint, migration 022). When
+     * injected AND a launch is given `seedTaskIds`, the launcher creates the
+     * batch + per-task lane rows via the SprintLaneStore chokepoint and stamps
+     * `workflow_runs.batch_id`. When absent, launching with seedTaskIds throws —
+     * the lanes are load-bearing for the sprint orchestrator agent.
+     */
+    private readonly sprintLanes?: SprintLanesLike,
   ) {
     // Legacy-bridge collaborators are required only when no runExecutor is
     // supplied.  Under the SDK substrate, the PreToolUse hook gates permissions
@@ -185,16 +208,33 @@ export class RunLauncher {
     // createDeterministicWorktree (which already supports the 4th baseBranch arg).
     // Ignored for session-hosted runs (they reuse the session worktree).
     baseBranch?: string,
-    // Parallel-sprint (feat/parallel-sprint, P4). When supplied, the run is
-    // stamped onto this batch (`workflow_runs.batch_id`) so the
-    // SprintBatchScheduler can route its runStatusEvents back to the batch.
-    // A direct workflow_runs write — NOT routed through the task chokepoint.
-    batchId?: string,
+    // Parallel-sprint (feat/parallel-sprint, single-run lane model). When
+    // supplied, the run is a session-hosted `sprint` run seeded with these task
+    // ids: the launcher creates the batch + per-task lane rows via
+    // SprintLaneStore.createForRun and stamps `workflow_runs.batch_id`. ONLY
+    // valid when the workflow's name === 'sprint' — any other workflow throws.
+    seedTaskIds?: string[],
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
+
+    // Sprint seed-task validation — BEFORE createRun so an invalid request never
+    // leaves a half-created run row behind.
+    if (seedTaskIds !== undefined) {
+      if (workflow.name !== 'sprint') {
+        throw new Error(
+          `RunLauncher.launch: seedTaskIds is only valid for the 'sprint' workflow (got '${workflow.name}')`,
+        );
+      }
+      if (seedTaskIds.length < 1) {
+        throw new Error('RunLauncher.launch: seedTaskIds must contain at least one task id');
+      }
+      if (!this.sprintLanes) {
+        throw new Error('RunLauncher.launch: seedTaskIds supplied but no sprintLanes store is wired');
+      }
+    }
 
     // One-running-at-a-time guard for SESSION-HOSTED runs: a session may own many
     // runs over its lifetime but only ONE may be in flight at a time. Checked
@@ -223,7 +263,7 @@ export class RunLauncher {
       }
     }
 
-    const { runId, permissionMode } = this.workflowRegistry.createRun(workflowId, substrate, sessionId, requestedPermissionMode);
+    const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(workflowId, substrate, sessionId, requestedPermissionMode);
 
     try {
       const { worktreePath, branchName } = sessionId
@@ -281,11 +321,18 @@ export class RunLauncher {
           .run(ideaId, runId);
       }
 
-      // Parallel-sprint batch link (feat/parallel-sprint, P4 / migration 020).
-      // A direct workflow_runs write — the SprintBatchScheduler reads batch_id to
-      // route this run's runStatusEvents back to the owning batch. Stamped at
-      // launch so the link exists before the first status event can fire.
-      if (batchId) {
+      // Parallel-sprint lane seeding (feat/parallel-sprint, migration 022).
+      // Create the batch + per-task lane rows via the SprintLaneStore chokepoint
+      // (using the run's RESOLVED substrate from createRun, never the raw
+      // request), then stamp `workflow_runs.batch_id` — a direct workflow_runs
+      // write, NOT routed through the task chokepoint. Stamped at launch so the
+      // link exists before the first cyboflow_update_sprint_task report.
+      if (seedTaskIds && seedTaskIds.length > 0 && this.sprintLanes) {
+        const { batchId } = this.sprintLanes.createForRun(
+          workflow.project_id,
+          resolvedSubstrate,
+          seedTaskIds,
+        );
         this.db
           .prepare('UPDATE workflow_runs SET batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(batchId, runId);

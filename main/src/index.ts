@@ -34,8 +34,8 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setSprintBatchDeps } from './orchestrator/trpc/routers/runs';
-import { SprintBatchScheduler } from './orchestrator/sprintBatchScheduler';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -102,10 +102,6 @@ let orchestrator: Orchestrator | null = null;
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
-// Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Module-scoped so
-// the app.whenReady() wiring block can subscribe it to runStatusEvents + inject
-// its deps after recoverActiveStateOrphans runs.
-let sprintBatchScheduler: SprintBatchScheduler;
 // Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
@@ -551,6 +547,15 @@ async function initializeServices() {
   // cyboflow.tasks.onTaskChanged subscription (no bridge needed here).
   const taskChangeRouter = TaskChangeRouter.initialize(cyboflowDb);
 
+  // Sprint-lane write chokepoint (feat/parallel-sprint, migrations 022 + 023).
+  // The single serialized writer for `sprint_batches`/`sprint_batch_tasks`;
+  // injected (structurally, as narrow slices) into RunLauncher (createForRun at
+  // sprint launch), RunExecutor (lane task ids for the `# Sprint tasks` prompt
+  // block), and the runs-router lane dep-bag below. The cyboflow_update_sprint_task
+  // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CLAUDE.md
+  // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
+  const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
+
   // Unified review-inbox write chokepoint (migration 016 / P3) + the human-gate
   // run-pause manager (P4). ReviewItemRouter is the single serialized writer for
   // `review_items`; the reviewItems tRPC router + the report-finding MCP handler
@@ -755,6 +760,7 @@ async function initializeServices() {
             summary: item.summary,
             body: item.body,
             scope: item.scope,
+            ref: item.ref,
           }
         : null;
     },
@@ -772,6 +778,13 @@ async function initializeServices() {
     stepTransitionEmitter,
     taskChangeRouter,
     ideaBodyReader,
+    // Sprint-lane task-id reader (feat/parallel-sprint): getPrompt resolves the
+    // batch's seeded task ids to render the `# Sprint tasks` block. Thin adapter
+    // over SprintLaneStore.listLanes — keeps RunExecutor on a narrow interface.
+    {
+      listLaneTaskIds: (batchId) => sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId),
+      markBatchTerminal: (batchId, status) => sprintLaneStore.markBatchTerminal(batchId, status),
+    },
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
@@ -804,50 +817,14 @@ async function initializeServices() {
     runExecutor,
     runQueues,
     taskChangeRouter,
+    // Sprint-lane store slice (feat/parallel-sprint, single-run lane model):
+    // launch() with seedTaskIds creates the batch + per-task lane rows and
+    // stamps workflow_runs.batch_id. Narrow adapter over the singleton.
+    {
+      createForRun: (projectId, substrate, taskIds) =>
+        sprintLaneStore.createForRun(projectId, substrate, taskIds),
+    },
   );
-
-  // Parallel-sprint batch scheduler (feat/parallel-sprint, P5). Constructed here
-  // where every collaborator is in scope; subscribed to runStatusEvents +
-  // rehydrated in the app.whenReady() block (after recoverActiveStateOrphans).
-  // The launcher adapter forwards baseBranch (per-task runs branch off the CURRENT
-  // integration tip) + batchId (stamps workflow_runs.batch_id); the worktree
-  // adapter exposes mergeWorktreeToBranch (per-task integration merge) +
-  // mergeWorktreeToMain (finalize integration→main merge) + worktree/branch cleanup.
-  sprintBatchScheduler = new SprintBatchScheduler({
-    db: cyboflowDb,
-    logger: cyboflowLogger,
-    runLauncher: {
-      // The scheduler's BatchRunLauncherLike is sprint-focused (…, sessionId,
-      // baseBranch, batchId) and never sets a per-run agent-permission mode — it
-      // inherits the global default. Bridge to the real 9-param launcher by
-      // passing `undefined` for the requestedPermissionMode slot between sessionId
-      // and baseBranch (added by the agent-permission-mode work on main).
-      launch: (workflowId, projectPath, substrate, taskId, ideaId, sessionId, baseBranch, batchId) =>
-        runLauncher.launch(workflowId, projectPath, substrate, taskId, ideaId, sessionId, undefined, baseBranch, batchId),
-    },
-    worktreeManager: {
-      getProjectMainBranch: (projectPath) => worktreeManager.getProjectMainBranch(projectPath),
-      createBranchRef: (projectPath, branchName, baseBranch) =>
-        worktreeManager.createBranchRef(projectPath, branchName, baseBranch),
-      mergeWorktreeToBranch: (projectPath, worktreePath, targetBranch) =>
-        worktreeManager.mergeWorktreeToBranch(projectPath, worktreePath, targetBranch),
-      mergeWorktreeToMain: (projectPath, worktreePath, mainBranch) =>
-        worktreeManager.mergeWorktreeToMain(projectPath, worktreePath, mainBranch),
-      removeWorktreeByPath: (projectPath, worktreePath) =>
-        worktreeManager.removeWorktreeByPath(projectPath, worktreePath),
-      deleteBranch: (projectPath, branchName, opts) =>
-        worktreeManager.deleteBranch(projectPath, branchName, opts),
-    },
-    taskStageDeriver: {
-      recomputeTaskExecutionStage: (taskId) => taskChangeRouter.recomputeTaskExecutionStage(taskId),
-    },
-    projectResolver: {
-      getProjectById: (projectId) => {
-        const p = sessionManager.getProjectById(projectId);
-        return p ? { path: p.path } : undefined;
-      },
-    },
-  });
 
   // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
   const socketPath = orchSocketServer.getSocketPath();
@@ -1122,17 +1099,13 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] runs.start deps wired');
 
-    // Parallel-sprint batch scheduler (feat/parallel-sprint, P3). Wire the
-    // startBatch / batchProgress tRPC deps, then start() — which subscribes the
-    // scheduler to runStatusEvents and rehydrates any non-terminal batch. Started
-    // AFTER recoverActiveStateOrphans (above) so a crashed in-flight per-task run
-    // is already `failed` when rehydrate reconciles it.
-    setSprintBatchDeps({
-      createBatch: (batchInput) => sprintBatchScheduler.createBatch(batchInput),
-      batchProgress: (batchId) => sprintBatchScheduler.batchProgress(batchId),
+    // Sprint-lane read dep (feat/parallel-sprint, single-run lane model). Backs
+    // cyboflow.runs.sprintLanes; the singleton was initialized in
+    // initializeServices() right after TaskChangeRouter.
+    setSprintLaneDeps({
+      listLanes: (batchId) => SprintLaneStore.getInstance().listLanes(batchId),
     });
-    sprintBatchScheduler.start(runStatusEvents);
-    console.log('[Main] sprint-batch scheduler started + deps wired');
+    console.log('[Main] runs.sprintLanes deps wired');
 
     // Piece C — idle-chat nudge. Uses the SAME `db` DatabaseLike adapter +
     // `runQueues` + `loggerLike` as the cancelAndRestart wiring above, plus the

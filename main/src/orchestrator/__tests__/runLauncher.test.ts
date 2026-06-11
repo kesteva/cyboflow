@@ -1096,6 +1096,165 @@ describe('RunLauncher.launch ideaId seed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// RunLauncher.launch — seedTaskIds (feat/parallel-sprint, single-run lane model)
+//
+// A session-less variant is used for simplicity: the seed path is independent
+// of whether the run is session-hosted. The sprint-lane store is a narrow spy
+// (SprintLanesLike) — no real sprint_batches tables are needed.
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
+  /**
+   * Build a launcher whose registry seeds a queued run row (createRun returns
+   * the RESOLVED substrate, mirroring the real registry) plus a sprint-lane spy.
+   * `workflowName` controls the sprint-only guard.
+   */
+  function makeSprintFixture(db: Database.Database, tmpDir: string, workflowName: string, opts?: { omitSprintLanes?: boolean }) {
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/sprint.md', 'default')",
+    ).run(seedWorkflowId, workflowName);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+      ).run(cannedRunId, seedWorkflowId, 1);
+      // Mirror the real registry: the RESOLVED substrate is returned (request
+      // wins; floor 'sdk').
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+    });
+
+    const fakeRegistry = {
+      getById: (id: string) =>
+        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+
+    const fakeWorktree = {
+      createDeterministicWorktree: vi.fn().mockResolvedValue({
+        worktreePath: cannedWorktreePath,
+        branchName: cannedBranchName,
+        baseCommit: 'abc123',
+        baseBranch: 'HEAD',
+      }),
+    } as unknown as WorktreeManager;
+
+    const createForRunSpy = vi.fn((_projectId: number, _substrate: CliSubstrate, _taskIds: string[]) => ({
+      batchId: 'batch-test-1',
+    }));
+
+    const launcher = new RunLauncher(
+      adapter,
+      fakeRegistry,
+      fakeWorktree,
+      logger,
+      fakeMcpConfigWriter,
+      fakeOrchSocketProvider,
+      fakeBridgeScriptResolver,
+      fakeNodeResolver,
+      undefined, // publisher
+      undefined, // runExecutor
+      undefined, // runQueueRegistry
+      undefined, // taskStageDeriver
+      opts?.omitSprintLanes ? undefined : { createForRun: createForRunSpy }, // sprintLanes (13th arg)
+    );
+
+    return { launcher, workflowId: seedWorkflowId, cannedRunId, createRunSpy, createForRunSpy };
+  }
+
+  it('creates the lanes via createForRun (project_id + RESOLVED substrate + taskIds) and stamps batch_id', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
+
+      await launcher.launch(
+        workflowId,
+        tmpDir,
+        'interactive',
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // requestedPermissionMode
+        undefined, // baseBranch
+        ['TASK-1', 'TASK-2'], // seedTaskIds
+      );
+
+      // createForRun receives the workflows row's project_id and the run's
+      // RESOLVED substrate (returned by createRun), not the raw request only.
+      expect(createForRunSpy).toHaveBeenCalledTimes(1);
+      expect(createForRunSpy).toHaveBeenCalledWith(1, 'interactive', ['TASK-1', 'TASK-2']);
+
+      const row = db
+        .prepare('SELECT batch_id FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { batch_id: string | null };
+      expect(row.batch_id).toBe('batch-test-1');
+    });
+  });
+
+  it('rejects seedTaskIds for a non-sprint workflow BEFORE creating a run row', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, createRunSpy, createForRunSpy } = makeSprintFixture(db, tmpDir, 'planner');
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, undefined, undefined, undefined, ['TASK-1']),
+      ).rejects.toThrow(/seedTaskIds is only valid for the 'sprint' workflow/);
+
+      // The guard fires before createRun — no half-created run row.
+      expect(createRunSpy).not.toHaveBeenCalled();
+      expect(createForRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects an empty seedTaskIds array', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, createRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, undefined, undefined, undefined, []),
+      ).rejects.toThrow(/at least one task id/);
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects seedTaskIds when no sprintLanes store is wired', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, createRunSpy } = makeSprintFixture(db, tmpDir, 'sprint', { omitSprintLanes: true });
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, undefined, undefined, undefined, ['TASK-1']),
+      ).rejects.toThrow(/no sprintLanes store is wired/);
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('does not touch the lane store and leaves batch_id null when seedTaskIds is omitted', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
+
+      await launcher.launch(workflowId, tmpDir);
+
+      expect(createForRunSpy).not.toHaveBeenCalled();
+      const row = db
+        .prepare('SELECT batch_id FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { batch_id: string | null };
+      expect(row.batch_id).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RunLauncher.launch — session-hosted runs (session<->run restructure, Phase 1)
 //
 // When a sessionId is supplied, the run executes inside that session's EXISTING
