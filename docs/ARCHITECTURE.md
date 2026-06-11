@@ -299,6 +299,9 @@ implementations wired today:
 - `cyboflow.runs.getStuckInspection` — diagnostic data for a stuck run (stuck reason,
   pending approval payload, latest raw_events rows). Delegates to
   `getStuckInspectionHandler` in `main/src/orchestrator/inspectorQueries.ts`.
+- `cyboflow.runs.sprintLanes` / `cyboflow.runs.onSprintLaneChanged` — sprint lane rows for a
+  run + the per-run lane push subscription (backed by `SprintLaneStore`, injected via
+  `setSprintLaneDeps()`; see "Sprint lanes" under Data Model).
 - `cyboflow.health.mcpServer` — point-in-time MCP server health snapshot.
 - `cyboflow.approvals.listPending` — list all pending approvals across runs.
 - `cyboflow.approvals.approve`, `cyboflow.approvals.reject` — resolve an in-flight
@@ -463,6 +466,20 @@ orchestrator from run lifecycle); the rest are `asserted`.
   - **human_task** — manual to-do; `blocking` per item. Triage can resolve / dismiss / promote
     a finding to a real task (minted through `TaskChangeRouter`).
 
+#### Sprint lanes (migrations 022 + 023)
+
+A multi-task **sprint** is ONE session-hosted `sprint` run seeded with N task ids: the
+launcher creates a `sprint_batches` row plus one **lane** per task in `sprint_batch_tasks`
+and stamps `workflow_runs.batch_id`. The orchestrator agent fans out per-task subagents in
+the shared session worktree (max 5 concurrent) and reports per-task progress
+(status + `current_step_id`) through the `cyboflow_update_sprint_task` MCP tool. These are
+NOT entity-model tables — they have their own single write chokepoint, **`SprintLaneStore`**
+(`main/src/orchestrator/sprintLaneStore.ts`), and never route through `TaskChangeRouter`
+(board-stage derivation of the underlying tasks still does). Lane status `'integrated'`
+means "task complete + committed in the session worktree"; the session Merge close-out moves
+integrated lanes' tasks to Done and marks the batch terminal. See
+`docs/parallel-sprint-design.md` for the full architecture.
+
 #### Migration file list
 
 Migration files present today under `main/src/database/migrations/`: `003_add_tool_panels.sql`,
@@ -471,7 +488,11 @@ Migration files present today under `main/src/database/migrations/`: `003_add_to
 `010_questions.sql`, `011_workflow_step_tracking.sql`, `012_quick_workflow_sentinel.sql`,
 `013_workflow_run_substrate.sql`, `014_native_tasks.sql` (board + the unified-`tasks` model +
 satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_events` + the
-12th `Decomposed` stage), and `016_review_items.sql` (the unified inbox). 015 and 016 are
+12th `Decomposed` stage), `016_review_items.sql` (the unified inbox),
+`017_run_seed_idea.sql`, `018_run_claude_session.sql`, `019_workflow_run_session_id.sql`,
+`020_workflow_run_paused_status.sql`, `021_session_agent_permission_mode.sql`,
+`022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`), and
+`023_sprint_lane_step.sql` (lane `current_step_id`). 015 and 016 are
 forward-only with no backfill (no prod data existed); the destructive DROP+recreate in 015 is
 intentional and safe.
 
