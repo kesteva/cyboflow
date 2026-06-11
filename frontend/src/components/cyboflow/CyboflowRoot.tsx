@@ -19,6 +19,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { RunBottomPane } from './RunBottomPane';
@@ -263,26 +264,38 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             <>
               {phaseState.definition !== null && (
                 <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
-                  <WorkflowCanvas
-                    definition={phaseState.definition}
-                    currentStepId={phaseState.currentStepId}
-                    runLabel={activeRunId}
-                    folderPath={activeRun?.worktree_path}
-                    branchName={activeRun?.branch_name}
-                    // Reflect the run's ACTUAL lifecycle status, not phaseState
-                    // load state (which is always "loaded, no error" once ready
-                    // and so pinned the badge to RUNNING even after the run
-                    // rested in awaiting_review). activeRun.status now stays
-                    // fresh via activeRunsStore's onRunStatusChanged subscription.
-                    // A paused run is at rest: isRunning is already false for it,
-                    // and the `paused` prop swaps the running pill for the amber
-                    // PauseCircle badge (Phase 4b).
-                    isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
-                    paused={activeRun?.status === 'paused'}
-                    // Surfaces a static completed/failed outcome pill once the
-                    // run self-terminates, while the operator decides to End it.
-                    status={activeRun?.status}
-                  />
+                  {activeRun?.batch_id != null ? (
+                    // Parallel sprint run (workflow_runs.batch_id stamped at
+                    // launch) — the center pane shows the per-task swim lanes
+                    // instead of the generic phase canvas. The right rail's
+                    // SprintLanesPanel stays as-is.
+                    <SprintSwimlaneCanvas
+                      runId={activeRunId}
+                      phaseState={phaseState}
+                      sprintStatus={activeRun?.status}
+                    />
+                  ) : (
+                    <WorkflowCanvas
+                      definition={phaseState.definition}
+                      currentStepId={phaseState.currentStepId}
+                      runLabel={activeRunId}
+                      folderPath={activeRun?.worktree_path}
+                      branchName={activeRun?.branch_name}
+                      // Reflect the run's ACTUAL lifecycle status, not phaseState
+                      // load state (which is always "loaded, no error" once ready
+                      // and so pinned the badge to RUNNING even after the run
+                      // rested in awaiting_review). activeRun.status now stays
+                      // fresh via activeRunsStore's onRunStatusChanged subscription.
+                      // A paused run is at rest: isRunning is already false for it,
+                      // and the `paused` prop swaps the running pill for the amber
+                      // PauseCircle badge (Phase 4b).
+                      isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
+                      paused={activeRun?.status === 'paused'}
+                      // Surfaces a static completed/failed outcome pill once the
+                      // run self-terminates, while the operator decides to End it.
+                      status={activeRun?.status}
+                    />
+                  )}
                 </div>
               )}
               <div className="flex-1 overflow-hidden">

@@ -757,6 +757,57 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Sprint swim-lane canvas (feat/parallel-sprint) — a run with a non-null
+// batch_id (stamped at launch on a seeded sprint run) mounts
+// SprintSwimlaneCanvas in the center pane INSTEAD of WorkflowCanvas; non-batch
+// runs keep WorkflowCanvas. The global tRPC mock above already stubs
+// sprintLanes / onSprintLaneChanged (useSprintLanes resolves an empty batch).
+// ---------------------------------------------------------------------------
+
+describe('CyboflowRoot — sprint swim-lane canvas (feat/parallel-sprint)', () => {
+  afterEach(() => {
+    act(() => {
+      useCyboflowStore.getState().clearActiveRun();
+      useCyboflowStore.getState().clearActiveQuickSession();
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: {} });
+    });
+  });
+
+  const activateRun = (overrides: Record<string, unknown> = {}) => {
+    const run = makeActiveRun(overrides);
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useActiveRunsStore.setState({ runsByProject: { 1: [run] } });
+      useCyboflowStore.getState().setActiveRun(run.id);
+    });
+    return run;
+  };
+
+  it('mounts SprintSwimlaneCanvas instead of WorkflowCanvas for a batch run', async () => {
+    activateRun({ status: 'running', workflowName: 'sprint', batch_id: 'batch-1' });
+    render(<CyboflowRoot projectId={1} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sprint-swimlane-canvas')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('workflow-canvas')).not.toBeInTheDocument();
+    // The run pane is unchanged below the canvas.
+    expect(screen.getByTestId('run-bottom-pane-tab-chat')).toBeInTheDocument();
+  });
+
+  it('keeps WorkflowCanvas for a non-batch run (batch_id null)', async () => {
+    activateRun({ status: 'running', batch_id: null });
+    render(<CyboflowRoot projectId={1} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-canvas')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('sprint-swimlane-canvas')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Resting-session canvas — QuickSessionCanvas fills the top plane for a
 // worktree-backed session with NO active run (a fresh quick session, or one a
 // finished run handed back). The bare main-repo session keeps panels-only.

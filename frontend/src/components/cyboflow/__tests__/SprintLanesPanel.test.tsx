@@ -56,6 +56,8 @@ const LANES: SprintLaneRow[] = [
     currentStepId: 'write-tests',
     ref: 'TASK-1',
     title: 'Implement the thing',
+    attempts: 0,
+    blockedByRefs: [],
     updatedAt: '2026-06-11T00:00:00Z',
   },
   {
@@ -66,6 +68,8 @@ const LANES: SprintLaneRow[] = [
     currentStepId: null,
     ref: null,
     title: null,
+    attempts: 0,
+    blockedByRefs: [],
     updatedAt: '2026-06-11T00:00:00Z',
   },
 ];
@@ -149,6 +153,7 @@ describe('SprintLanesPanel', () => {
         taskId: 'task-uuid-2',
         status: 'integrated',
         currentStepId: null,
+        attempts: 0,
         timestamp: '2026-06-11T00:01:00Z',
       });
     });

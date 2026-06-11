@@ -92,7 +92,8 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
             const idx = prev.lanes.findIndex((l) => l.taskId === event.taskId);
             if (idx === -1) {
               // Event arrived before the snapshot listed this lane — create a
-              // bare row (ref/title resolve on the next snapshot).
+              // bare row (ref/title/blockedByRefs resolve on the next snapshot;
+              // blockedByRefs is a read-side join, so events never carry it).
               return {
                 ...prev,
                 lanes: [
@@ -104,6 +105,8 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
                     currentStepId: event.currentStepId,
                     ref: null,
                     title: null,
+                    attempts: event.attempts,
+                    blockedByRefs: [],
                     updatedAt: event.timestamp,
                   },
                 ],
@@ -115,6 +118,7 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
               ...lanes[idx],
               status: event.status,
               currentStepId: event.currentStepId,
+              attempts: event.attempts,
               updatedAt: event.timestamp,
             };
             return { ...prev, lanes, error: null };

@@ -108,6 +108,10 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // substrate. Folded in here so every includeSubstrate consumer (listRunsHandler
     // + runs.list) resolves the column. Additive — never widens GATE_SCHEMA.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    // Migration 022 (sprint lanes): listRunsHandler's SELECT also projects
+    // batch_id (the swimlane-canvas switch keys off it). Same read-model
+    // surface, same opt-in flag. Additive — never widens GATE_SCHEMA.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
