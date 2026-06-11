@@ -629,11 +629,13 @@ describe('McpQueryHandler', () => {
       const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
       // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
       // 014 (unified tasks + run->task columns + seed) -> 015 (entity-model
-      // rebuild: ideas/epics/tasks + entity_events + 12th stage).
+      // rebuild: ideas/epics/tasks + entity_events + 12th stage) -> 024
+      // (archived_at columns + position-11 stage removal).
       taskDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1179,6 +1181,7 @@ describe('McpQueryHandler', () => {
       reviewDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       return reviewDb;
     }
 
@@ -1524,6 +1527,7 @@ describe('mcp-report-step does not pause on human steps', () => {
     gateDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     return gateDb;
   }
 
@@ -1622,6 +1626,7 @@ describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () 
     seedDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     seedDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     seedDb.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     return seedDb;
   }
 

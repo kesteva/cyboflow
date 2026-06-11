@@ -2,7 +2,7 @@
  * Integration tests for the orchestrator tRPC reviewItems router (P2).
  *
  * Exercises the live reviewItemsRouter procedures via createCaller, using an
- * in-memory SQLite DB built from projects + migrations 006/011/014/015/016 (so
+ * in-memory SQLite DB built from projects + migrations 006/011/014/015/016/024 (so
  * boards/board_stages/task_ref_counters/tasks/entity_events/review_items all
  * exist), the dbAdapter fixture, and the real ReviewItemRouter + TaskChangeRouter
  * singletons (reset between tests).
@@ -35,7 +35,7 @@ import { HumanStepManager } from '../../../humanStepManager';
 import type { DatabaseLike } from '../../../types';
 
 // ---------------------------------------------------------------------------
-// Test DB: projects + 006 + 011 + 014 + 015 + 016.
+// Test DB: projects + 006 + 011 + 014 + 015 + 016 + 024.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -58,6 +58,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   return db;
 }
 

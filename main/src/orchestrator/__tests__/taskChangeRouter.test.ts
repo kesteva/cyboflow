@@ -17,24 +17,35 @@
  *  - decomposition: moving an idea to Decomposed (position 12) emits action
  *    'decomposed' and leaves children unchanged.
  *  - recomputeTaskExecutionStage aggregation over runs (done / indev / merge / revert).
- *  - taskChangeEvents emits on 'task-project-<id>'; the emitted item carries the
- *    body/scope/lineage fields.
+ *  - taskChangeEvents emits on BOTH 'task-project-<id>' AND the cross-project
+ *    TASK_ALL_CHANNEL; the emitted item carries the body/scope/lineage fields
+ *    plus archived_at + stage_position.
+ *  - archive-in-place (migration 024): the `archived` toggle stamps/clears
+ *    archived_at (kind 'archived'/'unarchived', version bump, action 'updated');
+ *    archiving is guarded by non-terminal runs (non-orchestrator), unarchiving
+ *    never is.
+ *  - applyDelete: cascade idea -> epics -> tasks (deduped), entity_events
+ *    purge, pre-delete snapshots on the 'deleted' emits (both channels),
+ *    active-run guard over the cascade, leaf deletes leave siblings/parents
+ *    intact, best-effort review_items dismissal (failures swallowed).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  TASK_ALL_CHANNEL,
   TaskChangeRouter,
   taskChangeEvents,
   taskProjectChannel,
 } from '../taskChangeRouter';
+import { ReviewItemRouter } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { DatabaseLike } from '../types';
 import type { TaskChangedEvent } from '../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + 006 + 011 + 014 + 015, default board seeded.
+// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 024, default board seeded.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -53,11 +64,14 @@ function buildDb(): Database.Database {
 
   const migDir = join(__dirname, '..', '..', 'database', 'migrations');
   // 006 (workflow_runs base) -> 011 (current_step_id) -> 014 (unified tasks) ->
-  // 015 (entity-model rebuild: ideas/epics/tasks + entity_events + 12th stage).
+  // 015 (entity-model rebuild: ideas/epics/tasks + entity_events + 12th stage) ->
+  // 016 (review_items inbox) -> 024 (archive-in-place archived_at + drop stage 11).
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   return db;
 }
 
@@ -90,6 +104,7 @@ function eventCount(db: Database.Database, type: string, id: string): number {
 describe('TaskChangeRouter (3-table entity model)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
     taskChangeEvents.removeAllListeners();
   });
 
@@ -557,12 +572,14 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   // emit + projection
   // -------------------------------------------------------------------------
 
-  it('emits TaskChangedEvent carrying body/scope/lineage on task-project-<id>', async () => {
+  it('emits TaskChangedEvent carrying body/scope/lineage + archived_at/stage_position on BOTH channels', async () => {
     const db = buildDb();
     const router = TaskChangeRouter.initialize(dbAdapter(db));
 
     const events: TaskChangedEvent[] = [];
+    const allEvents: TaskChangedEvent[] = [];
     taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+    taskChangeEvents.on(TASK_ALL_CHANNEL, (e: TaskChangedEvent) => allEvents.push(e));
 
     const { taskId } = await router.applyChange(1, {
       actor: 'user',
@@ -578,6 +595,345 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     expect(events[0].task.scope).toBe('small');
     expect(events[0].task.originating_idea_id).toBeNull();
     expect(events[0].task.id).toBe(taskId);
+    // Archive-in-place + cross-project bucketing fields on the projection.
+    expect(events[0].task.archived_at).toBeNull();
+    expect(events[0].task.stage_position).toBe(1); // idea type-default stage
+
+    // The SAME event object also went out on the cross-project channel.
+    expect(allEvents).toHaveLength(1);
+    expect(allEvents[0]).toBe(events[0]);
+  });
+
+  // -------------------------------------------------------------------------
+  // archive-in-place (migration 024)
+  // -------------------------------------------------------------------------
+
+  describe('archive-in-place', () => {
+    it('archived=true stamps archived_at, bumps version, kind=archived, action stays updated', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      const actions: string[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => actions.push(e.action));
+
+      await router.applyChange(1, { actor: 'user', taskId, archived: true });
+
+      const row = db
+        .prepare('SELECT archived_at, stage_id, version FROM tasks WHERE id = ?')
+        .get(taskId) as { archived_at: string | null; stage_id: string; version: number };
+      expect(row.archived_at).not.toBeNull();
+      expect(row.stage_id).toBe(stageId(5)); // NOT a stage move — the column is untouched
+      expect(row.version).toBe(2);
+      expect(actions).toEqual(['updated']);
+
+      const ev = db
+        .prepare(
+          "SELECT kind, changes_json FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(taskId) as { kind: string; changes_json: string };
+      expect(ev.kind).toBe('archived');
+      const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0].field).toBe('archived_at');
+      expect(deltas[0].from).toBeNull();
+      expect(typeof deltas[0].to).toBe('string');
+    });
+
+    it('archived=false clears archived_at with kind=unarchived (and a version bump)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      await router.applyChange(1, { actor: 'user', taskId, archived: true });
+
+      await router.applyChange(1, { actor: 'user', taskId, archived: false });
+
+      const row = db
+        .prepare('SELECT archived_at, version FROM epics WHERE id = ?')
+        .get(taskId) as { archived_at: string | null; version: number };
+      expect(row.archived_at).toBeNull();
+      expect(row.version).toBe(3);
+
+      const ev = db
+        .prepare(
+          "SELECT kind FROM entity_events WHERE entity_type = 'epic' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(taskId) as { kind: string };
+      expect(ev.kind).toBe('unarchived');
+    });
+
+    it('a no-op toggle (already in the requested state) writes nothing', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      await router.applyChange(1, { actor: 'user', taskId, archived: false }); // already unarchived
+      const row = db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskId) as { version: number };
+      expect(row.version).toBe(1);
+      expect(eventCount(db, 'task', taskId)).toBe(1); // only the create event
+    });
+
+    it('archiving a task with a non-terminal run is rejected for non-orchestrator actors', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedRunForTask(db, { taskId, runId: 'run-1', status: 'running' });
+
+      await expect(router.applyChange(1, { actor: 'user', taskId, archived: true })).rejects.toMatchObject({
+        code: 'active_runs',
+      });
+      await expect(
+        router.applyChange(1, { actor: 'agent:executor', taskId, archived: true }),
+      ).rejects.toMatchObject({ code: 'active_runs' });
+
+      // The orchestrator is exempt (it owns run teardown).
+      await router.applyChange(1, { actor: 'orchestrator', taskId, archived: true });
+      const row = db.prepare('SELECT archived_at FROM tasks WHERE id = ?').get(taskId) as {
+        archived_at: string | null;
+      };
+      expect(row.archived_at).not.toBeNull();
+    });
+
+    it('UNarchiving is never guarded, even with an active run', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      await router.applyChange(1, { actor: 'orchestrator', taskId, archived: true });
+      seedRunForTask(db, { taskId, runId: 'run-1', status: 'running' });
+
+      await router.applyChange(1, { actor: 'user', taskId, archived: false });
+      const row = db.prepare('SELECT archived_at FROM tasks WHERE id = ?').get(taskId) as {
+        archived_at: string | null;
+      };
+      expect(row.archived_at).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // applyDelete — hard delete + cascade
+  // -------------------------------------------------------------------------
+
+  describe('applyDelete', () => {
+    /**
+     * Seed an idea family: the idea, one epic originating from it, one task
+     * under that epic (ALSO carrying originating_idea_id — exercises dedup),
+     * and one direct task on the idea. The follow-on auto-decompose of the
+     * idea is allowed to settle before returning.
+     */
+    async function seedFamily(router: TaskChangeRouter): Promise<{
+      ideaId: string;
+      epicId: string;
+      epicTaskId: string;
+      directTaskId: string;
+    }> {
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Idea' });
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'Epic',
+        originatingIdeaId: idea.taskId,
+      });
+      const epicTask = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Epic task',
+        parentEpicId: epic.taskId,
+        originatingIdeaId: idea.taskId,
+      });
+      const directTask = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Direct task',
+        originatingIdeaId: idea.taskId,
+      });
+      await router._queueForProject(1).onIdle();
+      return {
+        ideaId: idea.taskId,
+        epicId: epic.taskId,
+        epicTaskId: epicTask.taskId,
+        directTaskId: directTask.taskId,
+      };
+    }
+
+    function rowCount(db: Database.Database, table: string, id: string): number {
+      return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number }).n;
+    }
+
+    it('idea delete cascades epics + tasks (direct AND via epics, deduped) and purges entity_events', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+
+      const { taskId, deletedIds } = await router.applyDelete(1, { actor: 'user', taskId: ideaId });
+
+      expect(taskId).toBe(ideaId);
+      // Deduped: the epic task is reachable BOTH directly and via the epic.
+      expect(deletedIds).toHaveLength(4);
+      expect(new Set(deletedIds)).toEqual(new Set([ideaId, epicId, epicTaskId, directTaskId]));
+
+      expect(rowCount(db, 'ideas', ideaId)).toBe(0);
+      expect(rowCount(db, 'epics', epicId)).toBe(0);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
+      expect(rowCount(db, 'tasks', directTaskId)).toBe(0);
+
+      // entity_events purged for EVERY deleted entity (incl. the idea's
+      // create + auto-decompose rows).
+      expect(eventCount(db, 'idea', ideaId)).toBe(0);
+      expect(eventCount(db, 'epic', epicId)).toBe(0);
+      expect(eventCount(db, 'task', epicTaskId)).toBe(0);
+      expect(eventCount(db, 'task', directTaskId)).toBe(0);
+    });
+
+    it('epic delete cascades its child tasks only (idea + direct task survive)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+
+      const { deletedIds } = await router.applyDelete(1, { actor: 'user', taskId: epicId });
+
+      expect(new Set(deletedIds)).toEqual(new Set([epicId, epicTaskId]));
+      expect(rowCount(db, 'epics', epicId)).toBe(0);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+      expect(rowCount(db, 'tasks', directTaskId)).toBe(1);
+    });
+
+    it('deleting a leaf task leaves siblings + parent epic intact', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+
+      const { deletedIds } = await router.applyDelete(1, { actor: 'user', taskId: epicTaskId });
+
+      expect(deletedIds).toEqual([epicTaskId]);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
+      expect(eventCount(db, 'task', epicTaskId)).toBe(0);
+      // Siblings + lineage survive untouched.
+      expect(rowCount(db, 'tasks', directTaskId)).toBe(1);
+      expect(rowCount(db, 'epics', epicId)).toBe(1);
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+    });
+
+    it("emits action='deleted' with pre-delete snapshots on BOTH channels, root last", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+
+      const events: TaskChangedEvent[] = [];
+      const allEvents: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+      taskChangeEvents.on(TASK_ALL_CHANNEL, (e: TaskChangedEvent) => allEvents.push(e));
+
+      await router.applyDelete(1, { actor: 'user', taskId: ideaId });
+
+      expect(events).toHaveLength(4);
+      expect(events.every((e) => e.action === 'deleted')).toBe(true);
+      // Children first, root last (the cascade order).
+      expect(events[events.length - 1].taskId).toBe(ideaId);
+      expect(new Set(events.map((e) => e.taskId))).toEqual(
+        new Set([ideaId, epicId, epicTaskId, directTaskId]),
+      );
+
+      // The snapshots were taken BEFORE deletion — full read-model items even
+      // though the rows are gone now.
+      const ideaEvent = events.find((e) => e.taskId === ideaId);
+      expect(ideaEvent?.task.title).toBe('Idea');
+      expect(ideaEvent?.task.type).toBe('idea');
+      expect(ideaEvent?.task.stage_position).toBe(12); // auto-decomposed before delete
+      const taskEvent = events.find((e) => e.taskId === epicTaskId);
+      expect(taskEvent?.task.parent_epic_id).toBe(epicId);
+
+      // Mirrored 1:1 on the cross-project channel.
+      expect(allEvents).toHaveLength(4);
+      expect(allEvents.map((e) => e.taskId)).toEqual(events.map((e) => e.taskId));
+    });
+
+    it("blocked ('active_runs') by a non-terminal run on a cascade task — nothing is deleted", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { ideaId, epicId, epicTaskId, directTaskId } = await seedFamily(router);
+      seedRunForTask(db, { taskId: epicTaskId, runId: 'run-1', status: 'running' });
+
+      await expect(router.applyDelete(1, { actor: 'user', taskId: ideaId })).rejects.toMatchObject({
+        code: 'active_runs',
+      });
+
+      // Whole cascade intact — the guard fires before any DELETE.
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+      expect(rowCount(db, 'epics', epicId)).toBe(1);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(1);
+      expect(rowCount(db, 'tasks', directTaskId)).toBe(1);
+
+      // A terminal run unblocks the delete.
+      db.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-1'").run();
+      const { deletedIds } = await router.applyDelete(1, { actor: 'user', taskId: ideaId });
+      expect(deletedIds).toHaveLength(4);
+    });
+
+    it('deleting a missing entity rejects with not_found', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      await expect(router.applyDelete(1, { actor: 'user', taskId: 'tsk_missing' })).rejects.toMatchObject({
+        code: 'not_found',
+      });
+    });
+
+    it('pending review_items linked to deleted entities are dismissed via ReviewItemRouter', async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const reviewRouter = ReviewItemRouter.initialize(adapter);
+      const { ideaId, epicTaskId } = await seedFamily(router);
+
+      // One pending item on the root idea, one on a cascade task.
+      const onIdea = await reviewRouter.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'decision',
+        title: 'Pick a direction',
+        entityType: 'idea',
+        entityId: ideaId,
+      });
+      const onTask = await reviewRouter.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'finding',
+        title: 'Found a thing',
+        entityType: 'task',
+        entityId: epicTaskId,
+      });
+
+      await router.applyDelete(1, { actor: 'user', taskId: ideaId });
+
+      for (const id of [onIdea.reviewItemId, onTask.reviewItemId]) {
+        const row = db
+          .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+          .get(id) as { status: string; resolution: string | null };
+        expect(row.status).toBe('dismissed');
+        expect(row.resolution).toBe('entity deleted');
+      }
+    });
+
+    it('review-item dismissal failures are swallowed (uninitialized router) — the delete still succeeds', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // ReviewItemRouter deliberately NOT initialized — getInstance() throws.
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      db.prepare(
+        `INSERT INTO review_items (id, project_id, entity_type, entity_id, kind, title)
+         VALUES ('rvw_orphan', 1, 'task', ?, 'finding', 'Linked finding')`,
+      ).run(taskId);
+
+      const { deletedIds } = await router.applyDelete(1, { actor: 'user', taskId });
+      expect(deletedIds).toEqual([taskId]);
+      expect(rowCount(db, 'tasks', taskId)).toBe(0);
+
+      // The dismissal was attempted and failed silently — the item is untouched.
+      const row = db.prepare("SELECT status FROM review_items WHERE id = 'rvw_orphan'").get() as {
+        status: string;
+      };
+      expect(row.status).toBe('pending');
+    });
   });
 
   // -------------------------------------------------------------------------

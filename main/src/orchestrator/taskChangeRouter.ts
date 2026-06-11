@@ -2,11 +2,20 @@
  * TaskChangeRouter — the SINGLE write chokepoint for native ENTITY state.
  *
  * INVARIANT: every entity-state write (GUI tRPC, orchestrator lifecycle, run
- * close-out, MCP agent tools) routes through applyChange. Nothing UPDATEs
- * `ideas` / `epics` / `tasks` directly. Each applyChange atomically (1) mutates
- * the correct entity table and (2) appends a per-field delta row to
+ * close-out, MCP agent tools) routes through applyChange (create / update /
+ * archive toggle) or applyDelete (hard delete + cascade). Nothing UPDATEs or
+ * DELETEs `ideas` / `epics` / `tasks` directly. Each applyChange atomically
+ * (1) mutates the correct entity table and (2) appends a per-field delta row to
  * `entity_events(entity_type, entity_id)`, then emits a TaskChangedEvent after
- * commit.
+ * commit — on BOTH the per-project channel and the cross-project
+ * TASK_ALL_CHANNEL (the all-projects board subscribes once).
+ *
+ * ARCHIVE-IN-PLACE (migration 024): archiving is NOT a stage move. The
+ * `archived` toggle on TaskChange stamps/clears `archived_at` on the row; the
+ * entity keeps its current stage/column and visibility is a client concern.
+ * Hard delete (applyDelete) cascades idea -> epics -> tasks (children first),
+ * purges the entities' entity_events rows, and best-effort dismisses pending
+ * review_items linked to the deleted entities via ReviewItemRouter.
  *
  * ENTITY-AWARE (migration 015): the unified `tasks` table is split into three
  * tables — ideas / epics / tasks. Table identity IS the discriminator, so the
@@ -28,6 +37,7 @@
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import PQueue from 'p-queue';
+import { ReviewItemRouter } from './reviewItemRouter';
 import type { DatabaseLike } from './types';
 import type {
   BacklogTaskItem,
@@ -44,7 +54,10 @@ import type {
 // pinned contract, to avoid file contention with the events router. The tRPC
 // subscription bridges this emitter via eventToAsyncIterable.
 //
-// Emit key format: 'task-project-' + projectId.
+// Every event is emitted on TWO keys: the per-project channel
+// ('task-project-' + projectId) AND the cross-project TASK_ALL_CHANNEL
+// ('task-all') — the all-projects board subscribes to the latter once instead
+// of one subscription per project.
 // ---------------------------------------------------------------------------
 
 export const taskChangeEvents = new EventEmitter();
@@ -53,6 +66,9 @@ export const taskChangeEvents = new EventEmitter();
 export function taskProjectChannel(projectId: number): string {
   return `task-project-${projectId}`;
 }
+
+/** The cross-project channel every event is ALSO emitted on (all-projects board). */
+export const TASK_ALL_CHANNEL = 'task-all';
 
 // ---------------------------------------------------------------------------
 // Entity-table descriptor map — the SINGLE place that knows table identity,
@@ -147,6 +163,13 @@ export interface TaskChange {
   parentEpicId?: string | null;
   /** Set/clear the originating idea (epics + tasks; null clears). */
   originatingIdeaId?: string | null;
+  /**
+   * Archive-in-place toggle (migration 024): true stamps `archived_at = now`,
+   * false clears it. NOT a stage move — the entity keeps its stage/column.
+   * Archiving a task with a non-terminal run is rejected ('active_runs') for
+   * non-orchestrator actors; UNarchiving is never guarded.
+   */
+  archived?: boolean;
   /** Optimistic-concurrency guard. If provided and != current version -> concurrency conflict. */
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
@@ -194,6 +217,7 @@ interface EntityDbRow {
   scope: IdeaScope | null;
   priority: Priority;
   repo: string | null;
+  archived_at: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -365,6 +389,37 @@ export class TaskChangeRouter {
       stageId: decomposedStageId,
       kind: 'decomposed',
     });
+  }
+
+  /**
+   * PERMANENTLY delete an entity and its cascade, atomically.
+   *
+   * Cascade set (children first):
+   *   idea -> epics(originating_idea_id) + tasks(originating_idea_id)
+   *           + tasks(parent_epic_id IN those epics), deduped;
+   *   epic -> tasks(parent_epic_id);
+   *   task -> itself.
+   *
+   * Guard: for non-orchestrator actors, ANY cascade task with a non-terminal
+   * run rejects the whole delete ('active_runs') — nothing is deleted.
+   *
+   * One transaction deletes each entity's entity_events rows then the entity
+   * row, children first (no event row survives — the entity is gone). Post
+   * commit: pending review_items linked to deleted entities are dismissed
+   * best-effort via ReviewItemRouter (ALL failures swallowed), then a
+   * TaskChangedEvent { action: 'deleted', task: <pre-delete snapshot> } is
+   * emitted per deleted entity on BOTH channels.
+   *
+   * Deliberately NOT exposed to MCP agents — GUI/tRPC + orchestrator only.
+   */
+  async applyDelete(
+    projectId: number,
+    opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
+  ): Promise<{ taskId: string; deletedIds: string[] }> {
+    return (await this.getProjectQueue(projectId).add(() => this.runDelete(projectId, opts))) as {
+      taskId: string;
+      deletedIds: string[];
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -561,6 +616,8 @@ export class TaskChangeRouter {
       const deltas: FieldDelta[] = [];
       const sets: string[] = [];
       const params: unknown[] = [];
+      /** Default event kind for the archive toggle ('archived'|'unarchived'); change.kind still wins. */
+      let archiveKind: string | null = null;
 
       // ----- stage move -----
       if (change.stageId !== undefined && change.stageId !== current.stage_id) {
@@ -583,6 +640,23 @@ export class TaskChangeRouter {
         // the flow. Surface the distinct 'decomposed' action so the UI can react.
         action =
           type === 'idea' && targetStage.position === DECOMPOSED_POSITION ? 'decomposed' : 'stageMoved';
+      }
+
+      // ----- archive toggle (archive-in-place, migration 024) -----
+      if (change.archived !== undefined && change.archived !== (current.archived_at !== null)) {
+        // ACTIVE-RUN GUARD: archiving a task with a non-terminal run is rejected
+        // for user/agent actors (mirrors the stage-move guard — archiving hides
+        // the card while the orchestrator still drives it). UNarchiving is never
+        // guarded, and the orchestrator is exempt.
+        if (change.archived && change.actor !== 'orchestrator' && this.hasNonTerminalRun(taskId)) {
+          throw new TaskChangeError('active_runs', 'cancel active runs first');
+        }
+        const archivedAt = change.archived ? now : null;
+        sets.push('archived_at = ?');
+        params.push(archivedAt);
+        deltas.push({ field: 'archived_at', from: current.archived_at, to: archivedAt });
+        // action stays 'updated' (not a stage move); only the event kind specializes.
+        archiveKind = change.archived ? 'archived' : 'unarchived';
       }
 
       // ----- re-parent (tasks only) -----
@@ -674,7 +748,15 @@ export class TaskChangeRouter {
       params.push(taskId);
       this.db.prepare(`UPDATE ${desc.table} SET ${sets.join(', ')} WHERE id = ?`).run(...params);
 
-      const ev = this.insertEvent(type, taskId, change.kind ?? action, change.actor, change.runId ?? null, deltas, now);
+      const ev = this.insertEvent(
+        type,
+        taskId,
+        change.kind ?? archiveKind ?? action,
+        change.actor,
+        change.runId ?? null,
+        deltas,
+        now,
+      );
       eventId = ev.id;
       eventSeq = ev.seq;
     });
@@ -682,6 +764,151 @@ export class TaskChangeRouter {
 
     this.emitChange(projectId, resolvedType, taskId, action);
     return { taskId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  // --------------------------------------------------------------------------
+  // Delete path
+  // --------------------------------------------------------------------------
+
+  private async runDelete(
+    projectId: number,
+    opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
+  ): Promise<{ taskId: string; deletedIds: string[] }> {
+    const located = this.locateEntity(projectId, opts.taskId, opts.entityType);
+    if (!located) {
+      throw new TaskChangeError('not_found', `entity ${opts.taskId} not found for project ${projectId}`);
+    }
+
+    // Cascade set, children first (tasks -> epics -> root) so the txn below can
+    // delete in array order without tripping the lineage FKs' ON DELETE SET NULL.
+    const cascade = this.collectDeleteCascade(projectId, located.type, opts.taskId);
+
+    // ACTIVE-RUN GUARD over the WHOLE cascade: a single task with a non-terminal
+    // run rejects the delete (the orchestrator is exempt — it owns run teardown).
+    if (opts.actor !== 'orchestrator') {
+      for (const entity of cascade) {
+        if (entity.type === 'task' && this.hasNonTerminalRun(entity.id)) {
+          throw new TaskChangeError('active_runs', `task ${entity.id} has an active run — cancel it first`);
+        }
+      }
+    }
+
+    // Snapshot every entity BEFORE deletion — the 'deleted' emit carries the
+    // last-known read-model item (the row is unreadable after commit).
+    const snapshots = cascade.map((entity) => ({
+      ...entity,
+      snapshot: this.buildBacklogTaskItem(entity.type, entity.id),
+    }));
+
+    const txn = this.db.transaction(() => {
+      for (const entity of cascade) {
+        this.db
+          .prepare('DELETE FROM entity_events WHERE entity_type = ? AND entity_id = ?')
+          .run(entity.type, entity.id);
+        this.db.prepare(`DELETE FROM ${describe(entity.type).table} WHERE id = ?`).run(entity.id);
+      }
+    });
+    (txn as () => void)();
+
+    // Post-commit, best-effort: dismiss pending review_items linked to the
+    // deleted entities (single-writer respected — through ReviewItemRouter).
+    await this.dismissReviewItemsForDeleted(projectId, opts.actor, opts.runId ?? null, cascade);
+
+    // Post-commit: one 'deleted' event per entity, pre-delete snapshot attached.
+    for (const { id, snapshot } of snapshots) {
+      if (!snapshot) continue; // vanished before the snapshot read — nothing to broadcast
+      this.broadcast(projectId, { projectId, taskId: id, action: 'deleted', task: snapshot });
+    }
+
+    return { taskId: opts.taskId, deletedIds: cascade.map((e) => e.id) };
+  }
+
+  /**
+   * Collect the delete cascade for a root entity, ordered children first
+   * (tasks, then epics, then the root). Task ids reachable BOTH directly
+   * (originating_idea_id) and via a cascade epic (parent_epic_id) are deduped.
+   */
+  private collectDeleteCascade(
+    projectId: number,
+    rootType: TaskType,
+    rootId: string,
+  ): Array<{ type: TaskType; id: string }> {
+    const taskIds = new Set<string>();
+    const epicIds: string[] = [];
+
+    if (rootType === 'idea') {
+      const epics = this.db
+        .prepare('SELECT id FROM epics WHERE originating_idea_id = ? AND project_id = ?')
+        .all(rootId, projectId) as Array<{ id: string }>;
+      epicIds.push(...epics.map((r) => r.id));
+
+      const directTasks = this.db
+        .prepare('SELECT id FROM tasks WHERE originating_idea_id = ? AND project_id = ?')
+        .all(rootId, projectId) as Array<{ id: string }>;
+      for (const r of directTasks) taskIds.add(r.id);
+
+      if (epicIds.length > 0) {
+        const placeholders = epicIds.map(() => '?').join(',');
+        const epicTasks = this.db
+          .prepare(`SELECT id FROM tasks WHERE parent_epic_id IN (${placeholders})`)
+          .all(...epicIds) as Array<{ id: string }>;
+        for (const r of epicTasks) taskIds.add(r.id);
+      }
+    } else if (rootType === 'epic') {
+      const childTasks = this.db
+        .prepare('SELECT id FROM tasks WHERE parent_epic_id = ? AND project_id = ?')
+        .all(rootId, projectId) as Array<{ id: string }>;
+      for (const r of childTasks) taskIds.add(r.id);
+    }
+    // rootType === 'task': no children — the cascade is the task itself.
+
+    return [
+      ...[...taskIds].map((id) => ({ type: 'task' as TaskType, id })),
+      ...epicIds.map((id) => ({ type: 'epic' as TaskType, id })),
+      { type: rootType, id: rootId },
+    ];
+  }
+
+  /**
+   * Dismiss pending review_items soft-linked to the deleted entities through
+   * the ReviewItemRouter chokepoint (status 'dismissed', resolution 'entity
+   * deleted'). STRICTLY best-effort: every failure is swallowed — including an
+   * uninitialized ReviewItemRouter singleton (unit tests) and per-item triage
+   * errors — because the entity delete has already committed and must not be
+   * reported as failed.
+   */
+  private async dismissReviewItemsForDeleted(
+    projectId: number,
+    actor: TaskActor,
+    runId: string | null,
+    deleted: Array<{ type: TaskType; id: string }>,
+  ): Promise<void> {
+    try {
+      const reviewRouter = ReviewItemRouter.getInstance();
+      for (const entity of deleted) {
+        const pending = this.db
+          .prepare(
+            `SELECT id FROM review_items
+              WHERE project_id = ? AND status = 'pending' AND entity_type = ? AND entity_id = ?`,
+          )
+          .all(projectId, entity.type, entity.id) as Array<{ id: string }>;
+        for (const row of pending) {
+          try {
+            await reviewRouter.applyReviewItem(projectId, {
+              op: 'dismiss',
+              actor,
+              reviewItemId: row.id,
+              resolution: 'entity deleted',
+              runId,
+            });
+          } catch {
+            // Best-effort per item — a failed dismissal must not block the rest.
+          }
+        }
+      }
+    } catch {
+      // Best-effort overall — swallow EVERYTHING (incl. uninitialized singleton).
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -720,8 +947,8 @@ export class TaskChangeRouter {
     const scope = desc.hasScope ? 'scope' : 'NULL AS scope';
     const row = this.db
       .prepare(
-        `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, version,
-                created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}
+        `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
+                version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
@@ -925,8 +1152,13 @@ export class TaskChangeRouter {
   private emitChange(projectId: number, type: TaskType, taskId: string, action: TaskChangeAction): void {
     const task = this.buildBacklogTaskItem(type, taskId);
     if (!task) return; // deleted between commit and emit — nothing to broadcast
-    const event: TaskChangedEvent = { projectId, taskId, action, task };
+    this.broadcast(projectId, { projectId, taskId, action, task });
+  }
+
+  /** Emit one event on BOTH the per-project channel and the cross-project TASK_ALL_CHANNEL. */
+  private broadcast(projectId: number, event: TaskChangedEvent): void {
     taskChangeEvents.emit(taskProjectChannel(projectId), event);
+    taskChangeEvents.emit(TASK_ALL_CHANNEL, event);
   }
 
   /**
@@ -984,7 +1216,9 @@ export class TaskChangeRouter {
       scope: row.scope,
       board_id: row.board_id,
       stage_id: row.stage_id,
+      archived_at: row.archived_at,
       version: row.version,
+      stage_position: stage?.position ?? 0,
       inFlow,
       awaitingReview,
       isDone,
