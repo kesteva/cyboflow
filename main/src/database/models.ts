@@ -232,6 +232,7 @@ export interface BoardStageRow {
 /**
  * `ideas` row (migration 015). Table identity is the discriminator — NO `type`
  * and NO lineage column. `scope` is the nullable size hint set at idea-spec time.
+ * `archived_at` (migration 024) is the archive-in-place stamp: NULL = active.
  */
 export interface IdeaRow {
   id: string;
@@ -248,11 +249,13 @@ export interface IdeaRow {
   version: number;
   created_at: string;
   updated_at: string;
+  archived_at: string | null; // 024 ALTER appends — archive-in-place stamp
 }
 
 /**
  * `epics` row (migration 015). Same base as IdeaRow minus `scope`, plus the
- * `originating_idea_id` lineage FK->ideas(id).
+ * `originating_idea_id` lineage FK->ideas(id). `archived_at` (migration 024)
+ * is the archive-in-place stamp: NULL = active.
  */
 export interface EpicRow {
   id: string;
@@ -269,13 +272,15 @@ export interface EpicRow {
   version: number;
   created_at: string;
   updated_at: string;
+  archived_at: string | null; // 024 ALTER appends — archive-in-place stamp
 }
 
 /**
  * `tasks` row (migration 015). Same base, plus the execution-entry capture
  * (`entry_stage_id`) and both lineage FKs: `parent_epic_id` (FK->epics) and
  * `originating_idea_id` (FK->ideas, set for the small-idea branch that skips
- * epics).
+ * epics). `archived_at` (migration 024) is the archive-in-place stamp:
+ * NULL = active.
  */
 export interface TaskRow {
   id: string;
@@ -294,6 +299,7 @@ export interface TaskRow {
   version: number;
   created_at: string;
   updated_at: string;
+  archived_at: string | null; // 024 ALTER appends — archive-in-place stamp
 }
 
 export interface TaskRefCounterRow {

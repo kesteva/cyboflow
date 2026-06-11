@@ -1,9 +1,11 @@
 /**
- * Shared types for the native entity backlog (3-table model, migration 015).
+ * Shared types for the native entity backlog (3-table model, migration 015;
+ * archive-in-place `archived_at` added by migration 024).
  *
  * SINGLE SOURCE OF TRUTH: the SQL columns in
- * main/src/database/migrations/015_entity_model_rebuild.sql, the DB row
- * interfaces in main/src/database/models.ts (IdeaRow/EpicRow/TaskRow), and the
+ * main/src/database/migrations/015_entity_model_rebuild.sql (+ the
+ * 024_archive_in_place.sql ALTERs), the DB row interfaces in
+ * main/src/database/models.ts (IdeaRow/EpicRow/TaskRow), and the
  * chokepoint output in main/src/orchestrator/taskChangeRouter.ts must all match
  * these shapes field-for-field. entitySchemaParity.test.ts pins each row
  * interface <-> its table.
@@ -97,8 +99,12 @@ export interface BacklogTaskItem {
   scope: IdeaScope | null;
   board_id: string;
   stage_id: string;
+  /** ISO timestamp when the item was archived in place; null = not archived. */
+  archived_at: string | null;
   version: number;
   // derived overlays (computed on read):
+  /** The position of the item's current stage on its board (cross-project bucketing key). */
+  stage_position: number;
   inFlow: FlowOverlay[]; // MULTIPLE — parallel runs supported
   awaitingReview: boolean;
   isDone: boolean;

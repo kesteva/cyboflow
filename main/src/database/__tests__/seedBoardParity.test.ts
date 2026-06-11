@@ -2,8 +2,9 @@
  * seedBoardParity — the P1 ATOMICITY cross-check.
  *
  * Asserts that database.ts seedDefaultBoard (invoked via createProject) produces
- * a board whose 12 stages are FIELD-FOR-FIELD identical to the migration-driven
- * seed (014 stages 1..11 + 015 position-12 'Decomposed'). If the two ever drift,
+ * a board whose 11 stages are FIELD-FOR-FIELD identical to the migration-driven
+ * seed (014 stages 1..11 + 015 position-12 'Decomposed' MINUS the position-11
+ * 'Archived' stage removed by 024 archive-in-place). If the two ever drift,
  * createProject() would seed a different board than a migrated DB and brick boot
  * — this test is the guard that keeps them locked together.
  */
@@ -33,7 +34,7 @@ function stageRows(db: Database.Database, boardId: string): StageRow[] {
     .all(boardId) as StageRow[];
 }
 
-/** Build a migration-only DB (006 -> 011 -> 014 -> 015) with project 1 seeded. */
+/** Build a migration-only DB (006 -> 011 -> 014 -> 015 -> 024) with project 1 seeded. */
 function buildMigrationDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -53,25 +54,27 @@ function buildMigrationDb(): Database.Database {
     '011_workflow_step_tracking.sql',
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
+    '024_archive_in_place.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
   return db;
 }
 
-describe('seedDefaultBoard <-> migration 015 seed parity', () => {
+describe('seedDefaultBoard <-> migrated (014+015+024) seed parity', () => {
   let tmpDbDir: string;
 
   afterEach(() => {
     if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
   });
 
-  it('createProject seeds the SAME 12 stages as the 014+015 migration seed', () => {
-    // (1) Migration-driven board for project 1.
+  it('createProject seeds the SAME 11 stages as the 014+015+024 migration seed', () => {
+    // (1) Migration-driven board for project 1 (024 removes position 11).
     const migDb = buildMigrationDb();
     const migStages = stageRows(migDb, 'board-1-default');
     migDb.close();
-    expect(migStages).toHaveLength(12);
+    expect(migStages).toHaveLength(11);
+    expect(migStages.map((s) => s.position)).not.toContain(11);
 
     // (2) seedDefaultBoard-driven board via DatabaseService.createProject. The
     //     service runs all migrations on initialize(); createProject then calls
@@ -83,7 +86,7 @@ describe('seedDefaultBoard <-> migration 015 seed parity', () => {
     const project = svc.createProject('Parity Proj', join(tmpDbDir, 'repo'));
     const seededStages = stageRows(svc.getDb(), `board-${project.id}-default`);
 
-    expect(seededStages).toHaveLength(12);
+    expect(seededStages).toHaveLength(11);
     // Field-for-field equality of the ordered stage rows (id is deterministic and
     // board-scoped, so it is excluded; every other column must match exactly).
     expect(seededStages).toEqual(migStages);

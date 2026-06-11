@@ -1657,23 +1657,28 @@ export class DatabaseService {
     if (!project) {
       throw new Error('Failed to create project');
     }
-    // Seed the default board + 12 stages for the new project (migrations 014 + 015).
+    // Seed the default board + 11 stages for the new project (migrations 014 + 015,
+    // minus the position-11 'Archived' stage removed by migration 024).
     this.seedDefaultBoard(project.id);
     return project;
   }
 
   /**
-   * Seed the default board and its 12 canonical stages for a project.
+   * Seed the default board and its 11 canonical stages for a project
+   * (positions 1..10 + 12 — NO position 11).
    *
    * Mirrors the seed blocks in migration 014_native_tasks.sql (stages 1..11) +
-   * migration 015_entity_model_rebuild.sql (position 12 'Decomposed') — the
-   * migrations seed all EXISTING projects; this seeds each NEW project on
-   * creation. Uses deterministic ids + INSERT OR IGNORE so it is idempotent and
-   * safe to call more than once. Wrapped in a single transaction.
+   * migration 015_entity_model_rebuild.sql (position 12 'Decomposed') MINUS the
+   * position-11 'Archived' stage that migration 024 removed (archive-in-place:
+   * archiving stamps `archived_at` on the entity row instead of moving it to a
+   * stage). The migrations seed + migrate all EXISTING projects; this seeds
+   * each NEW project on creation. Uses deterministic ids + INSERT OR IGNORE so
+   * it is idempotent and safe to call more than once. Wrapped in a single
+   * transaction.
    *
    * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
-   * MUST stay field-for-field in sync with migrations 014 + 015's seed blocks.
-   * The cross-check test asserts seedDefaultBoard === the 015 12-stage seed.
+   * MUST stay field-for-field in sync with the post-024 migrated board state.
+   * The cross-check test asserts seedDefaultBoard === the migrated 11-stage seed.
    */
   seedDefaultBoard(projectId: number): void {
     const boardId = `board-${projectId}-default`;
@@ -1689,7 +1694,7 @@ export class DatabaseService {
       [8, 'Ready to merge', 'oklch(0.64 0.13 120)', 'Checks green · awaiting merge', 'derived', 0, 0],
       [9, 'Done', 'oklch(0.56 0.13 152)', 'Merged & archived', 'asserted', 1, 0],
       [10, "Won't do", 'oklch(0.55 0.02 30)', 'Decided not to pursue', 'asserted', 1, 1],
-      [11, 'Archived', 'oklch(0.50 0.01 0)', 'Parked / cleaned up', 'asserted', 1, 1],
+      // position 11 ('Archived') intentionally absent — removed by migration 024.
       [12, 'Decomposed', 'oklch(0.52 0.04 300)', 'Idea retired · children carry the flow', 'asserted', 1, 0],
     ];
 

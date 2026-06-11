@@ -1,6 +1,7 @@
 /**
  * entitySchemaParity — pins the 3 entity row interfaces + EntityEventRow against
- * their SQL columns (migration 015_entity_model_rebuild.sql).
+ * their SQL columns (migration 015_entity_model_rebuild.sql + the archived_at
+ * column added by 024_archive_in_place.sql).
  *
  * Each table is introspected INDEPENDENTLY via PRAGMA table_info, then compared
  * to the explicit key list of its row interface. Listing the keys explicitly
@@ -45,12 +46,14 @@ function buildDb(): Database.Database {
 
   const migDir = join(__dirname, '..', 'migrations');
   // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
-  // 014 (unified tasks) -> 015 (entity-model rebuild) -> 016 (review_items).
+  // 014 (unified tasks) -> 015 (entity-model rebuild) -> 016 (review_items) ->
+  // 024 (archived_at archive-in-place stamp).
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   return db;
 }
 
@@ -58,7 +61,7 @@ function columnsOf(db: Database.Database, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as TableInfoRow[]).map((r) => r.name).sort();
 }
 
-describe('entity schema parity (migration 015)', () => {
+describe('entity schema parity (migrations 015 + 024)', () => {
   it('IdeaRow field names match the `ideas` columns exactly', () => {
     const db = buildDb();
     const ideaRowKeys: Array<keyof IdeaRow> = [
@@ -76,6 +79,7 @@ describe('entity schema parity (migration 015)', () => {
       'version',
       'created_at',
       'updated_at',
+      'archived_at',
     ];
     expect([...ideaRowKeys].sort()).toEqual(columnsOf(db, 'ideas'));
     db.close();
@@ -98,6 +102,7 @@ describe('entity schema parity (migration 015)', () => {
       'version',
       'created_at',
       'updated_at',
+      'archived_at',
     ];
     expect([...epicRowKeys].sort()).toEqual(columnsOf(db, 'epics'));
     db.close();
@@ -122,6 +127,7 @@ describe('entity schema parity (migration 015)', () => {
       'version',
       'created_at',
       'updated_at',
+      'archived_at',
     ];
     expect([...taskRowKeys].sort()).toEqual(columnsOf(db, 'tasks'));
     db.close();
