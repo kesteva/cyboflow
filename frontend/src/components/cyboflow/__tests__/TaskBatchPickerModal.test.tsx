@@ -150,6 +150,34 @@ describe('TaskBatchPickerModal — filter correctness', () => {
     expect(screen.getByLabelText('Select TASK-INFLIGHT')).toBeDisabled();
     expect(screen.getByLabelText('Select TASK-BLOCKED')).not.toBeDisabled();
   });
+
+  it('includes tasks nested under an epic (backlog returns epic-children NESTED, not top-level)', async () => {
+    await renderOpen([
+      makeItem({ id: 'TASK-TOP', ref: 'TASK-TOP' }),
+      makeItem({
+        id: 'EPIC-1',
+        ref: 'EPIC-1',
+        type: 'epic',
+        children: [
+          makeItem({ id: 'TASK-CHILD', ref: 'TASK-CHILD', parent_epic_id: 'EPIC-1' }),
+          makeItem({
+            id: 'TASK-CHILD-DONE',
+            ref: 'TASK-CHILD-DONE',
+            parent_epic_id: 'EPIC-1',
+            isDone: true,
+          }),
+        ],
+      }),
+    ]);
+
+    // Epic-owned task surfaces alongside the top-level one; the epic row itself
+    // and its done child stay excluded.
+    expect(screen.getByTestId('task-batch-picker-item-TASK-TOP')).toBeInTheDocument();
+    expect(screen.getByTestId('task-batch-picker-item-TASK-CHILD')).toBeInTheDocument();
+    expect(screen.queryByTestId('task-batch-picker-item-EPIC-1')).toBeNull();
+    expect(screen.queryByTestId('task-batch-picker-item-TASK-CHILD-DONE')).toBeNull();
+    expect(screen.getByLabelText('Select TASK-CHILD')).not.toBeDisabled();
+  });
 });
 
 // ---------------------------------------------------------------------------

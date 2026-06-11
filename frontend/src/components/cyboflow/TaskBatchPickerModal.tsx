@@ -72,10 +72,13 @@ export function TaskBatchPickerModal({
     trpc.cyboflow.tasks.list
       .query({ projectId })
       .then((rows) => {
-        // The list returns ALL entities; keep only NON-done tasks. In-flight
-        // tasks are kept (rendered disabled) so the user sees why they can't be
-        // batched; done tasks / ideas / epics are dropped entirely.
-        const batchable = rows.filter((r) => r.type === 'task' && !r.isDone);
+        // The list returns ALL entities NESTED — tasks with a parent epic live
+        // under that epic's `children`, not at the top level. Flatten epics
+        // first so epic-owned tasks are batchable too, then keep only NON-done
+        // tasks. In-flight tasks are kept (rendered disabled) so the user sees
+        // why they can't be batched; done tasks / ideas / epics are dropped.
+        const flattened = rows.flatMap((r) => (r.type === 'epic' ? (r.children ?? []) : [r]));
+        const batchable = flattened.filter((r) => r.type === 'task' && !r.isDone);
         setTasks(batchable);
         // Prune any prior selection that is no longer eligible.
         setSelectedIds((prev) => {
