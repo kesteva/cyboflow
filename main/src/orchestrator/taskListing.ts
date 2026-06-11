@@ -352,25 +352,26 @@ export interface DependencyOverlay {
  * `{ blockedBy: [], relatedTo: [], readyToWork: true }` (no blockers ⇒ ready).
  *
  * @param db        - Narrow DatabaseLike interface.
- * @param projectId - Project whose tasks' dependency edges to load.
+ * @param projectId - Project whose tasks' dependency edges to load, or null to
+ *                    load edges across ALL projects (the all-projects board).
  */
 function loadProjectDependencyOverlays(
   db: DatabaseLike,
-  projectId: number,
+  projectId: number | null,
 ): Map<string, DependencyOverlay> {
-  const rows = db
-    .prepare(
-      `SELECT d.task_id, d.depends_on_task_id, d.kind,
-              dep.ref   AS dep_ref,
-              dep.title AS dep_title,
-              s.position AS dep_position
-         FROM task_dependencies d
-         JOIN tasks t   ON t.id = d.task_id
-         JOIN tasks dep ON dep.id = d.depends_on_task_id
-         LEFT JOIN board_stages s ON s.id = dep.stage_id
-        WHERE t.project_id = ?`,
-    )
-    .all(projectId) as DependencyEdgeRow[];
+  const scoped = projectId !== null;
+  const stmt = db.prepare(
+    `SELECT d.task_id, d.depends_on_task_id, d.kind,
+            dep.ref   AS dep_ref,
+            dep.title AS dep_title,
+            s.position AS dep_position
+       FROM task_dependencies d
+       JOIN tasks t   ON t.id = d.task_id
+       JOIN tasks dep ON dep.id = d.depends_on_task_id
+       LEFT JOIN board_stages s ON s.id = dep.stage_id
+      ${scoped ? 'WHERE t.project_id = ?' : ''}`,
+  );
+  const rows = (scoped ? stmt.all(projectId) : stmt.all()) as DependencyEdgeRow[];
 
   return foldDependencyRows(rows);
 }
