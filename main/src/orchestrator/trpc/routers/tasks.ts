@@ -2,20 +2,26 @@
  * cyboflow.tasks sub-router.
  *
  * Provides the typed tRPC contract for the renderer's backlogStore:
- *   - list           : query        -> BacklogTaskItem[] (project backlog, epic-nested + on-read overlays)
+ *   - list           : query        -> BacklogTaskItem[] (backlog, epic-nested + on-read overlays;
+ *                                       projectId null = ALL projects)
  *   - get            : query        -> BacklogTaskItem | null (single task, epic-nested)
- *   - boardsForProject : query      -> Board[] (board + ordered stages, so the UI gets its columns)
+ *   - boardsForProject : query      -> Board[] (board + ordered stages; projectId null = ALL boards)
  *   - create         : mutation     -> { taskId } (TaskChangeRouter.applyChange, no taskId)
  *   - update         : mutation     -> { taskId } (TaskChangeRouter.applyChange, field updates)
  *   - setStage       : mutation     -> { taskId } (TaskChangeRouter.applyChange, stage move)
- *   - onTaskChanged  : subscription -> TaskChangedEvent (project-scoped, bridges taskChangeEvents)
+ *   - archive        : mutation     -> { taskId } (TaskChangeRouter.applyChange, archived toggle —
+ *                                       stamps/clears archived_at IN PLACE, no stage move)
+ *   - delete         : mutation     -> { taskId } (TaskChangeRouter.applyDelete, hard delete + cascade)
+ *   - onTaskChanged  : subscription -> TaskChangedEvent (projectId null bridges TASK_ALL_CHANNEL,
+ *                                       a number bridges that project's channel)
  *
  * AUTHORITY + active-run guard + parent validation + optimistic concurrency all
- * live ENTIRELY in the chokepoint (TaskChangeRouter.applyChange). This router is
- * a thin wrapper: the mutations forward {actor:'user', ...} and surface
- * TaskChangeError.code to the client — it does NOT re-implement validation
- * (foundation note #6). Derived stages (positions 7/8) reject any non-orchestrator
- * actor, so a user setStage onto an execution stage maps to code:'forbidden_stage'.
+ * live ENTIRELY in the chokepoint (TaskChangeRouter.applyChange / applyDelete).
+ * This router is a thin wrapper: the mutations forward {actor:'user', ...} and
+ * surface TaskChangeError.code to the client — it does NOT re-implement
+ * validation (foundation note #6). Derived stages (positions 7/8) reject any
+ * non-orchestrator actor, so a user setStage onto an execution stage maps to
+ * code:'forbidden_stage'.
  *
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
@@ -29,6 +35,7 @@ import {
   TaskChangeError,
   taskChangeEvents,
   taskProjectChannel,
+  TASK_ALL_CHANNEL,
 } from '../../taskChangeRouter';
 import { selectProjectBacklog, selectTaskById, boardsForProject } from '../../taskListing';
 import { eventToAsyncIterable } from './events';
@@ -75,16 +82,18 @@ const scopeSchema = z.enum(['small', 'large']);
 
 export const tasksRouter = router({
   /**
-   * List the full backlog for a project — top-level items with epics nesting
-   * their child tasks, each carrying on-read overlays (inFlow / awaitingReview /
-   * isDone). Delegates to selectProjectBacklog in taskListing.ts so the query is
-   * shared with the parity test — no inline SQL here.
+   * List the full backlog — top-level items with epics nesting their child
+   * tasks, each carrying on-read overlays (inFlow / awaitingReview / isDone).
+   * `projectId: null` lists ALL projects (the cross-project board); a number
+   * scopes to that project. Delegates to selectProjectBacklog in taskListing.ts
+   * so the query is shared with the parity test — no inline SQL here. Archived
+   * items are always included (visibility is a client concern).
    *
    * Returns BacklogTaskItem[] so the inferred AppRouter type carries the full
    * UI-visible shape (including the derived overlays) to the renderer.
    */
   list: protectedProcedure
-    .input(z.object({ projectId: z.number().int().positive() }))
+    .input(z.object({ projectId: z.number().int().positive().nullable() }))
     .query(async ({ input, ctx }): Promise<BacklogTaskItem[]> => {
       if (!ctx.db) {
         throw new TRPCError({
@@ -112,12 +121,14 @@ export const tasksRouter = router({
     }),
 
   /**
-   * List the project's boards with their ordered stages, so the UI can render
-   * one Kanban column per stage. SQLite booleans are normalized to real
-   * booleans inside boardsForProject.
+   * List boards with their ordered stages, so the UI can render one Kanban
+   * column per stage. `projectId: null` returns EVERY project's boards
+   * (ordered project_id, is_default DESC) for the cross-project board; a number
+   * scopes to that project. SQLite booleans are normalized to real booleans
+   * inside boardsForProject.
    */
   boardsForProject: protectedProcedure
-    .input(z.object({ projectId: z.number().int().positive() }))
+    .input(z.object({ projectId: z.number().int().positive().nullable() }))
     .query(async ({ input, ctx }): Promise<Board[]> => {
       if (!ctx.db) {
         throw new TRPCError({
@@ -252,24 +263,89 @@ export const tasksRouter = router({
     }),
 
   /**
-   * Subscribe to task-changed notifications for a single project.
+   * Toggle archive-in-place on an entity (migration 024). Forwards to
+   * TaskChangeRouter.applyChange with the `archived` flag as actor='user':
+   * true stamps `archived_at = now`, false clears it — the item KEEPS its
+   * current stage/column (no stage move; the terminal "Archived" stage no
+   * longer exists). The chokepoint guards archiving on a task with a
+   * non-terminal run -> code:'active_runs' (TRPCError 'CONFLICT'); unarchive
+   * is never guarded. `expectedVersion` drives optimistic concurrency.
+   */
+  archive: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        taskId: z.string().min(1),
+        archived: z.boolean(),
+        expectedVersion: z.number().int().optional(),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ taskId: string }> => {
+      try {
+        const { taskId } = await TaskChangeRouter.getInstance().applyChange(input.projectId, {
+          actor: 'user',
+          taskId: input.taskId,
+          archived: input.archived,
+          ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+        });
+        return { taskId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * PERMANENTLY delete an entity and its cascade (idea -> epics + tasks;
+   * epic -> child tasks). Forwards to TaskChangeRouter.applyDelete as
+   * actor='user'; the chokepoint owns the cascade computation, entity_events
+   * purge, best-effort review_items dismissal, and the 'deleted' emits. Any
+   * cascade task with a non-terminal run rejects the whole delete ->
+   * code:'active_runs' (TRPCError 'CONFLICT'). Deliberately NOT exposed to MCP
+   * agents — this tRPC procedure (GUI) and the orchestrator are the only callers.
+   */
+  delete: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        taskId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ taskId: string }> => {
+      try {
+        const { taskId } = await TaskChangeRouter.getInstance().applyDelete(input.projectId, {
+          actor: 'user',
+          taskId: input.taskId,
+        });
+        return { taskId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Subscribe to task-changed notifications.
    *
    * Bridges the module-level `taskChangeEvents` EventEmitter (exported from
-   * taskChangeRouter.ts, NOT events.ts) on the project-scoped channel
-   * taskProjectChannel(projectId) = 'task-project-<projectId>'. The chokepoint
-   * emits a TaskChangedEvent on that channel after every committed change
-   * (created / updated / stageMoved). The store applies the event to its
-   * in-memory backlog without a full re-fetch.
+   * taskChangeRouter.ts, NOT events.ts). `projectId: null` bridges the
+   * cross-project TASK_ALL_CHANNEL ('task-all') — the all-projects board
+   * subscribes ONCE and filters client-side; a number bridges the
+   * project-scoped channel taskProjectChannel(projectId) =
+   * 'task-project-<projectId>' (unchanged). The chokepoint emits every
+   * committed change (created / updated / stageMoved / deleted) on BOTH
+   * channels; the per-event projectId is carried on the TaskChangedEvent
+   * payload, so a TASK_ALL_CHANNEL consumer can still scope per event.
    *
    * No throttle: task mutations are user/orchestrator-gated and each must surface.
    */
   onTaskChanged: protectedProcedure
-    .input(z.object({ projectId: z.number().int().positive() }))
+    .input(z.object({ projectId: z.number().int().positive().nullable() }))
     .subscription(async function* ({ input, signal }): AsyncGenerator<TaskChangedEvent> {
       const abortSignal = signal ?? new AbortController().signal;
+      const channel =
+        input.projectId === null ? TASK_ALL_CHANNEL : taskProjectChannel(input.projectId);
       const source = eventToAsyncIterable<TaskChangedEvent>(
         taskChangeEvents,
-        taskProjectChannel(input.projectId),
+        channel,
         abortSignal,
       );
       for await (const ev of source) {
