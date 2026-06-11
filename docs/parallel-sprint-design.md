@@ -21,7 +21,8 @@ normal session **Merge** close-out.
 Per-task progress is persisted as **lanes** — `sprint_batch_tasks` rows
 (migration 022, repurposed) written exclusively through the new
 `cyboflow_update_sprint_task` MCP tool → `SprintLaneStore` chokepoint — and
-rendered as structured lanes in the run progress rail.
+rendered as swim lanes in the center pane (`SprintSwimlaneCanvas`, §7) plus a
+compact summary in the run progress rail (`SprintLanesPanel`).
 
 **N = 1 degenerates cleanly:** a single-task sprint is just a sprint with one
 lane. Nothing about the flow, the data model, or the UI changes.
@@ -107,7 +108,11 @@ skipped so the DAG stays acyclic).
 - Each task runs the per-task subagent chain `implement → write-tests →
   code-review → task-verify → visual-verify(optional)`, with prose-driven
   loopbacks (failing tests / blocking review defects / verify FAIL re-delegate
-  to `cyboflow-implement`, up to 3 verify retries).
+  to `cyboflow-implement`, up to 3 verify retries). On every implement
+  re-delegation the orchestrator includes `attempt: <n>` (2 on the first
+  re-delegate, 3 on the second) in the **same** `cyboflow_update_sprint_task`
+  call that moves the lane's `current_step` back to `implement` — this feeds
+  the lane's `attempts` counter (§5).
 - **On task success:** ONE atomic git commit for that task's changes
   (referencing the task ref), lane → `integrated`, task → board stage 8
   ("Ready to merge") via `cyboflow_set_task_stage`.
@@ -128,7 +133,7 @@ the session from the UI (§7).
 
 ## 5. Lanes — data model + chokepoint
 
-### Persistence (migrations 022 + 023)
+### Persistence (migrations 022 + 023 + 025)
 
 Migration `022_sprint_batches.sql` is **immutable** and retained from the
 superseded design; its tables are repurposed as the lane substrate:
@@ -140,7 +145,12 @@ superseded design; its tables are repurposed as the lane substrate:
 - **`sprint_batch_tasks`** — one **lane** per seeded task:
   `status IN ('queued','running','integrated','failed','blocked')` plus
   `current_step_id` (added by migration `023_sprint_lane_step.sql`, same
-  duplicate-column idempotency pattern as 022).
+  duplicate-column idempotency pattern as 022) plus `attempts INTEGER NOT NULL
+  DEFAULT 0` (migration `025_sprint_lane_attempts.sql`, same pattern). The
+  attempts counter tracks the per-task implement→verify retry loop: **0 = first
+  pass** (the UI renders nothing); the orchestrator reports `attempt: N`
+  (2, 3, …) via `cyboflow_update_sprint_task` when it re-delegates implement
+  after a task-verify FAIL or a blocking review defect.
 - **`workflow_runs.batch_id`** — the soft run→batch link, stamped once by
   `RunLauncher` (no UPDATE path afterwards).
 
@@ -165,13 +175,20 @@ through the entity chokepoint.
 
 - `createForRun(projectId, substrate, taskIds)` — one txn, batch + queued
   lanes; dedupes ids; rejects an empty selection (`bad_request`).
-- `updateLane({ runId, batchId, taskId, status?, currentStepId? })` — validates
-  the status domain + step vocabulary + at-least-one-field
-  (`SprintLaneError` `'bad_request'` / `'lane_not_found'`), stamps
-  `integrated_at` on `'integrated'`, then emits a `SprintLaneChangedEvent` on
+- `updateLane({ runId, batchId, taskId, status?, currentStepId?, attempt? })` —
+  validates the status domain + step vocabulary + at-least-one-field
+  (`SprintLaneError` `'bad_request'` / `'lane_not_found'`); `attempt` must be
+  an integer >= 1 (`bad_request` otherwise) and is written verbatim to the
+  `attempts` column. Stamps `integrated_at` on `'integrated'`, then emits a
+  `SprintLaneChangedEvent` — carrying the row's current `attempts` — on
   `sprintLaneEvents` channel `sprintLaneChannel(runId)` (`'sprint-lane-<runId>'`).
 - `listLanes(batchId)` — lanes in insertion order, `ref`/`title` resolved
-  fail-soft via LEFT JOIN on `tasks` (null when missing).
+  fail-soft via LEFT JOIN on `tasks` (null when missing). Each `SprintLaneRow`
+  also carries **`blockedByRefs: string[]`** — display refs (task ref, falling
+  back to the raw task id) of the lane's IN-BATCH blocking prerequisites
+  (`task_dependencies` `kind='blocking'`) whose own lane in the SAME batch is
+  not yet `'integrated'`; `[]` when none. Computed on read via one extra query
+  (`blockedByRefsForBatch`) — **NOT stored**.
 - `markBatchTerminal(batchId, 'completed' | 'failed')` — status-guarded: only a
   non-terminal batch transitions; a late second call is a logged no-op.
 
@@ -180,7 +197,11 @@ through the entity chokepoint.
 Registered in `cyboflowMcpServer.ts`, handled in `mcpQueryHandler.ts`
 (`handleUpdateSprintTask`). Input: `task_id` (required) plus at least one of
 `status` (the `SprintBatchTaskStatus` enum) / `current_step` (the
-`SPRINT_LANE_STEP_IDS` enum). The handler resolves the run context with the
+`SPRINT_LANE_STEP_IDS` enum), and optionally `attempt` (integer >= 1, validated
+in the `CallTool` case like the other args; passed through to `updateLane`,
+which writes it verbatim to the `attempts` column — the at-least-one rule on
+`status`/`current_step` is unchanged MCP-side). Success data includes the
+lane's current `attempts`. The handler resolves the run context with the
 same guards as the other task-scoped writes, then requires the calling run's
 `workflow_runs.batch_id` to be non-null — a run without a batch (quick session,
 planner, a sprint launched without seed tasks) is rejected with
@@ -200,10 +221,32 @@ carries over unchanged from the previous design.
 `run.batch_id` → `SprintLaneStore.listLanes`, `[]` for a batch-less run; dep-bag
 injected via `setSprintLaneDeps` at boot) and `cyboflow.runs.onSprintLaneChanged`
 (subscription bridging `sprintLaneEvents` / `sprintLaneChannel(runId)` via
-`eventToAsyncIterable`, modeled on `onStepTransition`). The frontend
-`SprintLanesPanel` renders the lanes as a structured per-task progress rail
-alongside the run's step timeline — one row per lane showing ref/title, status,
-and the current per-task step.
+`eventToAsyncIterable`, modeled on `onStepTransition`; the event payload carries
+the lane's current `attempts`).
+
+**Center pane — `SprintSwimlaneCanvas` (the "Swim lanes" view).** For
+batch-carrying runs the center pane replaces the generic `WorkflowCanvas` with
+a per-task swim-lane canvas:
+
+- **One lane per task**, each rendering the 5 lane-step cards (`implement →
+  write-tests → code-review → task-verify → visual-verify`) with live per-step
+  status driven by the lane's `current_step_id` + `status`.
+- **Lane chips** map lane state to a single badge: `integrated` → **MERGED**;
+  `running` → **RUNNING**; `failed` → **ESCALATED** (failed lanes surface at
+  the human gate by design); status `'blocked'` OR (`queued` AND
+  `blockedByRefs.length > 0`) → **BLOCKED** "waiting on \<refs\>"; `queued`
+  otherwise → **QUEUED** "waiting for worker slot".
+- **Attempt loop edge:** a running lane with `attempts >= 2` draws a dashed
+  loop edge back to its implement card, labeled "ATTEMPT n/3"; an integrated
+  lane with `attempts >= 2` shows "n attempts"; a failed lane shows
+  "3/3 failed". `attempts === 0` (first pass) renders nothing.
+- **Layout:** the collapsed plan card sits left of the lanes; the verify
+  column (sprint-verify → sprint-review → human-review) plus the merge-gate
+  bar sit right.
+
+The right-rail `SprintLanesPanel` **remains** as the compact summary — one row
+per lane showing ref/title, status, and the current per-task step — alongside
+the run's step timeline.
 
 **Merge close-out = the normal session Merge.** When the user merges the
 session (`sessions:squash-and-rebase-to-main` or `sessions:rebase-to-main`,
@@ -230,9 +273,12 @@ early-return, since sprint runs carry `batch_id` but usually no `task_id`).
   The shared-worktree + file-overlap-serialization model ships first; the
   `worktreeManager` merge primitives (`mergeWorktreeToBranch`,
   `createBranchRef`, …) built for the superseded design are retained for this.
-- **Richer lane log streaming** — lanes currently carry status + current step
-  only; streaming each subagent's transcript tail into its lane (per-lane log
-  panes) is deferred.
+- **Richer lane log streaming** — lanes currently carry status, current step,
+  and the attempts counter only; streaming each subagent's transcript tail into
+  its lane (per-lane log panes) is deferred.
+- **Per-lane rev counter** — the per-task commit sha is not captured (lanes
+  record that a task was committed via `'integrated'`, not *which* commit); a
+  per-lane "rev" pointer for the swim-lanes canvas is deferred.
 
 ---
 
