@@ -687,7 +687,8 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
       {
         id: 'TASK-1', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Do a thing', summary: null,
         body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
-        scope: null, board_id: 'b', stage_id: 'ready', version: 1, inFlow: [], awaitingReview: false,
+        scope: null, board_id: 'b', stage_id: 'ready', archived_at: null, version: 1,
+        stage_position: 6, inFlow: [], awaitingReview: false,
         isDone: false, readyToWork: true, created_at: '', updated_at: '',
       },
     ]);

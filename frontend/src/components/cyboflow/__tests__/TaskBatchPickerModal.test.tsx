@@ -43,7 +43,9 @@ function makeItem(overrides: Partial<BacklogTaskItem>): BacklogTaskItem {
     scope: null,
     board_id: 'board-1',
     stage_id: 'ready',
+    archived_at: null,
     version: 1,
+    stage_position: 6,
     inFlow: [],
     awaitingReview: false,
     isDone: false,
@@ -117,6 +119,7 @@ describe('TaskBatchPickerModal — filter correctness', () => {
     await renderOpen([
       makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
       makeItem({ id: 'TASK-DONE', ref: 'TASK-DONE', isDone: true }),
+      makeItem({ id: 'TASK-ARCHIVED', ref: 'TASK-ARCHIVED', archived_at: '2026-06-11T20:43:34Z' }),
       makeItem({ id: 'IDEA-1', ref: 'IDEA-1', type: 'idea' }),
       makeItem({ id: 'EPIC-1', ref: 'EPIC-1', type: 'epic' }),
       makeItem({
@@ -137,8 +140,9 @@ describe('TaskBatchPickerModal — filter correctness', () => {
     expect(screen.getByTestId('task-batch-picker-item-TASK-BLOCKED')).toBeInTheDocument();
     expect(screen.getByTestId('task-batch-picker-item-TASK-INFLIGHT')).toBeInTheDocument();
 
-    // Excluded entirely: done task, idea, epic.
+    // Excluded entirely: done task, archived-in-place task, idea, epic.
     expect(screen.queryByTestId('task-batch-picker-item-TASK-DONE')).toBeNull();
+    expect(screen.queryByTestId('task-batch-picker-item-TASK-ARCHIVED')).toBeNull();
     expect(screen.queryByTestId('task-batch-picker-item-IDEA-1')).toBeNull();
     expect(screen.queryByTestId('task-batch-picker-item-EPIC-1')).toBeNull();
 

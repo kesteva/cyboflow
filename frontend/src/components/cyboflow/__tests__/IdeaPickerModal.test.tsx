@@ -53,6 +53,12 @@ const ITEMS: BacklogTaskItem[] = [
   makeItem({ id: 'IDEA-2', ref: 'IDEA-2', title: 'Done idea', isDone: true }),
   makeItem({ id: 'EPIC-1', ref: 'EPIC-1', title: 'An epic', type: 'epic' }),
   makeItem({ id: 'IDEA-3', ref: 'IDEA-3', title: 'Second idea' }),
+  makeItem({
+    id: 'IDEA-4',
+    ref: 'IDEA-4',
+    title: 'Archived idea',
+    archived_at: '2026-06-11T20:43:34Z',
+  }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -95,7 +101,8 @@ describe('IdeaPickerModal — pick existing', () => {
     const { onPicked } = await renderOpen();
 
     const select = (await screen.findByLabelText('Select idea')) as HTMLSelectElement;
-    // Only the two open ideas (IDEA-1, IDEA-3) — not the done idea or the epic.
+    // Only the two open ideas (IDEA-1, IDEA-3) — not the done idea, the
+    // archived-in-place idea, or the epic.
     const optionValues = Array.from(select.options).map((o) => o.value);
     expect(optionValues).toEqual(['IDEA-1', 'IDEA-3']);
 

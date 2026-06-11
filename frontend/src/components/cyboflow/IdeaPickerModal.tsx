@@ -45,9 +45,12 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
       .query({ projectId })
       .then((rows) => {
         // The list returns ALL entities; `type` is a synthesized discriminator.
-        // Filter to open ideas only — Sprint operates on decomposed tasks, so an
-        // idea that is done/decomposed is not a valid planner seed.
-        const openIdeas = rows.filter((r) => r.type === 'idea' && !r.isDone);
+        // Filter to open, NON-archived ideas only (archive-in-place, migration
+        // 024) — Sprint operates on decomposed tasks, so an idea that is
+        // done/decomposed/archived is not a valid planner seed.
+        const openIdeas = rows.filter(
+          (r) => r.type === 'idea' && !r.isDone && r.archived_at === null,
+        );
         setIdeas(openIdeas);
         setSelectedId((prev) => {
           if (prev !== null && openIdeas.some((i) => i.id === prev)) return prev;
