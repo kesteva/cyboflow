@@ -2,11 +2,11 @@
  * TaskCard / TaskChildren — the card (Kanban) and the inner task body shared by
  * both Kanban cards and List rows.
  *
- * A card shows: type tag, priority tag, FlowMarker(s) (multiple when parallel
- * runs), ReviewMarker, DoneFlag, the display ref; the title; the summary; and a
- * footer with project chip (All-projects view), repo, compact "Nm ago", and the
- * per-card "Run" action. Epics show an expand control ("N tasks") that reveals
- * nested {@link TaskChildren}.
+ * A card shows: a project chip row (All-projects view only, above the tag
+ * pills); type tag, priority tag, FlowMarker(s) (multiple when parallel runs),
+ * ReviewMarker, DoneFlag, the display ref; the title; the summary; and a
+ * footer with repo, compact "Nm ago", and the per-card "Run" action. Epics
+ * show an expand control ("N tasks") that reveals nested {@link TaskChildren}.
  *
  * Archive-in-place: an archived item (`archived_at` stamped) only reaches a card
  * while the header Archived toggle is on — it then renders dimmed (opacity-60)
@@ -55,7 +55,7 @@ function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | nul
   );
 }
 
-/** Footer: project chip (All-projects view) · repo · time · Edit · Run. */
+/** Footer: repo · time · Edit · Run. */
 function CardFooter({
   task,
   onRun,
@@ -64,19 +64,9 @@ function CardFooter({
   now,
 }: TaskBodyProps & { onEdit: (e: React.MouseEvent) => void }): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
-  // Read the project filter straight from the store (CardActionsMenu precedent)
-  // so the chip needs no prop-drilling through the Kanban/List card tree. The
-  // chip only appears in the cross-project view (filter = All AND >1 project).
-  const filterProjectId = useBacklogStore((s) => s.filterProjectId);
-  const projects = useBacklogStore((s) => s.projects);
-  const projectName =
-    filterProjectId === null && projects.length > 1
-      ? projects.find((p) => p.id === task.project_id)?.name ?? null
-      : null;
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
       <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-text-tertiary">
-        {projectName !== null && <ProjectChip name={projectName} />}
         {task.repo && <span className="truncate font-medium">{task.repo}</span>}
         <span className="flex-shrink-0">{compactAgo(task.created_at, now)}</span>
       </div>
@@ -147,6 +137,15 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
   // Archive-in-place: archived items only render while the header Archived
   // toggle is on — dim the whole body and badge it next to the type tag.
   const archived = isArchived(task);
+  // Read the project filter straight from the store (CardActionsMenu precedent)
+  // so the chip needs no prop-drilling through the Kanban/List card tree. The
+  // chip only appears in the cross-project view (filter = All AND >1 project).
+  const filterProjectId = useBacklogStore((s) => s.filterProjectId);
+  const projects = useBacklogStore((s) => s.projects);
+  const projectName =
+    filterProjectId === null && projects.length > 1
+      ? projects.find((p) => p.id === task.project_id)?.name ?? null
+      : null;
 
   // Guard the Edit click from bubbling into the epic-expand toggle / card body.
   const handleEdit = (e: React.MouseEvent): void => {
@@ -159,6 +158,13 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
       className={`flex flex-col gap-1.5 ${archived ? 'opacity-60' : ''}`}
       data-archived={archived ? 'true' : 'false'}
     >
+      {/* Project chip row — its own line ABOVE the tag pills (All-projects view only). */}
+      {projectName !== null && (
+        <div className="flex items-center">
+          <ProjectChip name={projectName} />
+        </div>
+      )}
+
       {/* Tag header row */}
       <div className="flex flex-wrap items-center gap-1.5">
         <TypeTag type={task.type} />
