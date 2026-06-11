@@ -3,9 +3,9 @@
  *
  * This is the single orchestrating component for the landing experience. It
  * reads the aggregated cross-project signals (projects, the review_items inbox,
- * the real-time approval queue, and active runs), derives the coarse
- * {@link HomeState}, and renders the matching arrangement of the now-existing
- * leaf components. Each leaf is self-contained and reads its own slice of the
+ * the real-time approval queue, active runs, and passively detected dynamic
+ * workflows), derives the coarse {@link HomeState}, and renders the matching
+ * arrangement of the now-existing leaf components. Each leaf is self-contained and reads its own slice of the
  * stores — LandingHome only owns the state derivation, the layout shell, and
  * the optional `focusQueue` scroll-into-view behaviour.
  *
@@ -27,6 +27,7 @@ import {
   useAggregatedRuns,
 } from '../../stores/landingStore';
 import { useReviewQueueStore, useReviewQueueView } from '../../stores/reviewQueueStore';
+import { useDynamicWorkflowStore, useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
 import { classifyRun, deriveHomeState } from '../../utils/homeClassify';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import { EmptyState } from './EmptyState';
@@ -79,11 +80,23 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // Grouped approval view → blocking subset (age-thresholded) for the count.
   const { blocking: blockingApprovalItems } = useReviewQueueView();
 
-  // Run-activity splits.
-  const activeCount = useMemo(
+  // Dynamic-workflow store — idempotent init (the same discard-the-return
+  // pattern landingStore uses for activeRunsStore.init) so every landing visit
+  // is subscribed to passively detected dynamic workflows.
+  useEffect(() => {
+    useDynamicWorkflowStore.getState().init();
+  }, []);
+  const activeDynamicWorkflows = useActiveDynamicWorkflows();
+
+  // Run-activity splits. Sessions with a detected dynamic workflow in flight
+  // count as activity too: the `__quick__` sentinel runs backing quick sessions
+  // are filtered out of activeRunsStore, so without this the home would claim
+  // 'caught-up' while a dynamic workflow is running.
+  const activeRunCount = useMemo(
     () => runs.filter((run) => classifyRun(run.status) === 'active').length,
     [runs],
   );
+  const activeCount = activeRunCount + activeDynamicWorkflows.length;
 
   // Idle projects: projects with no active OR blocked run in flight.
   const idleCount = useMemo(() => {
