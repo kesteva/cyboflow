@@ -69,6 +69,14 @@ export interface CancelRunDeps {
    */
   emitRunStatusChanged: (runId: string, status: 'canceled') => void;
   /**
+   * Close the run's sprint-lane batch when the canceled run carries a batch_id
+   * (single-run parallel sprint). Backed by SprintLaneStore.markBatchTerminal —
+   * status-guarded, so an already-terminal batch is a no-op. Optional + fail-soft:
+   * a missing dep or a throw never blocks the cancel (the run is the source of
+   * truth; the batch row is observability).
+   */
+  markBatchTerminal?: (batchId: string, status: 'canceled') => void;
+  /**
    * Optional structured logger. When provided, a rejection from `stopLiveRun` is
    * logged as a `[cancelRun]` entry before the handler proceeds to the DB write
    * (the run is conceptually canceled regardless of kill success). When omitted,
@@ -91,6 +99,7 @@ export type CancelRunResult =
 
 interface CancelRunRow {
   status: string;
+  batch_id: string | null;
 }
 
 // Terminal statuses — cancel is an idempotent no-op on these (double-cancel).
@@ -134,6 +143,7 @@ export async function cancelRunHandler(
     clearPendingApprovalsForRun,
     clearPendingQuestionsForRun,
     emitRunStatusChanged,
+    markBatchTerminal,
     logger,
   } = deps;
 
@@ -146,7 +156,7 @@ export async function cancelRunHandler(
   // running agent simply ignored Cancel until it finished on its own). The abort
   // MUST pre-empt the in-flight run from OUTSIDE the queue.
   const row = db
-    .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+    .prepare('SELECT status, batch_id FROM workflow_runs WHERE id = ?')
     .get(runId) as CancelRunRow | undefined;
 
   if (!row) {
@@ -218,7 +228,23 @@ export async function cancelRunHandler(
     return { success: true as const };
   });
 
+  // Batch close-out (single-run parallel sprint): a canceled batch run must not
+  // strand its sprint_batches row non-terminal. Fail-soft AFTER the write — the
+  // run row is canonical; the batch row is observability.
+  const settled = result as CancelRunResult;
+  if ('success' in settled && row.batch_id) {
+    try {
+      markBatchTerminal?.(row.batch_id, 'canceled');
+    } catch (err: unknown) {
+      logger?.error('[cancelRun] markBatchTerminal failed — batch row left as-is', {
+        runId,
+        batchId: row.batch_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // p-queue returns undefined only if the task returns undefined; ours always
   // returns a value, so this cast is safe.
-  return result as CancelRunResult;
+  return settled;
 }

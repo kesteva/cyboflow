@@ -383,7 +383,7 @@ export class SprintLaneStore {
    * second call is a logged no-op, mirroring the old scheduler's guarded
    * UPDATEs). Stamps completed_at alongside.
    */
-  markBatchTerminal(batchId: string, status: 'completed' | 'failed'): void {
+  markBatchTerminal(batchId: string, status: 'completed' | 'failed' | 'canceled'): void {
     const now = new Date().toISOString();
     const result = this.db
       .prepare(

@@ -112,8 +112,8 @@ describe('WorkflowRegistry', () => {
     // createRun now also writes workflow_runs.session_id (session<->run
     // restructure, Phase 1 / migration 019); layer the additive ALTER on top.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-    // getRunById also projects batch_id (sprint lanes, migration 022).
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
+    // batch_id (sprint lanes, migration 022) comes from the fixture's
+    // includeWorkflowRunTaskColumns block — no manual ALTER needed here.
     logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });

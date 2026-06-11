@@ -35,5 +35,13 @@ export interface AppServices {
   cyboflow: {
     workflowRegistry: WorkflowRegistry;
     runLauncher: RunLauncher;
+    /**
+     * Cancel every NON-terminal workflow run hosted on the session (git-neutral
+     * — same path as runs.cancel: stops the live agent, settles pending
+     * approvals/questions, closes a sprint run's lane batch). Called by the
+     * sessions:delete (Dismiss) handler BEFORE archiving so dismissing a session
+     * never strands a live run in the rail / review queue.
+     */
+    cancelHostedRuns: (sessionId: string) => Promise<void>;
   };
 } 

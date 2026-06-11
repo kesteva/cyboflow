@@ -367,3 +367,87 @@ describe('cancelRunHandler (git-neutral run Cancel — Phase 4a)', () => {
     expect(wt.worktree_path).toBe('/tmp/test');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Sprint-lane batch close-out (single-run parallel sprint)
+// ---------------------------------------------------------------------------
+
+describe('cancelRunHandler — sprint-lane batch close-out', () => {
+  let db: Database.Database;
+  let spy: OrderSpy;
+  let runQueues: RunQueueRegistry;
+
+  beforeEach(() => {
+    db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    spy = makeOrderSpy();
+    runQueues = new RunQueueRegistry();
+    vi.clearAllMocks();
+  });
+
+  function stampBatch(runId: string, batchId: string): void {
+    db.prepare('UPDATE workflow_runs SET batch_id = ? WHERE id = ?').run(batchId, runId);
+  }
+
+  it('calls markBatchTerminal(batchId, canceled) exactly once after a successful cancel of a batch run', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    stampBatch(runId, 'batch-1');
+    const markBatchTerminal = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      markBatchTerminal,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(markBatchTerminal).toHaveBeenCalledTimes(1);
+    expect(markBatchTerminal).toHaveBeenCalledWith('batch-1', 'canceled');
+  });
+
+  it('does NOT call markBatchTerminal for a run without batch_id', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const markBatchTerminal = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      markBatchTerminal,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(markBatchTerminal).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call markBatchTerminal on an already-terminal noOp (double-cancel)', async () => {
+    const { runId } = seedRun(db, { status: 'canceled' });
+    stampBatch(runId, 'batch-1');
+    const markBatchTerminal = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      markBatchTerminal,
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+    expect(markBatchTerminal).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft: an omitted dep cancels fine; a throwing dep never fails the cancel', async () => {
+    // Omitted dep — batch run still cancels.
+    const first = seedRun(db, { status: 'running', id: 'run-no-dep' });
+    stampBatch(first.runId, 'batch-a');
+    const omitted = await cancelRunHandler(first.runId, makeDeps(db, spy, runQueues));
+    expect(omitted).toEqual({ success: true });
+
+    // Throwing dep — cancel still succeeds and the run row is canceled.
+    const second = seedRun(db, { status: 'running', id: 'run-throwing-dep' });
+    stampBatch(second.runId, 'batch-b');
+    const markBatchTerminal = vi.fn(() => {
+      throw new Error('store offline');
+    });
+    const result = await cancelRunHandler(second.runId, {
+      ...makeDeps(db, spy, runQueues),
+      markBatchTerminal,
+    });
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, second.runId).status).toBe('canceled');
+  });
+});

@@ -43,6 +43,8 @@ import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath'
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import { approvalEvents, questionEvents, runStatusEvents } from './orchestrator/trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
+import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
+import { cancelRunHandler } from './orchestrator/cancelRunHandler';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
@@ -111,6 +113,11 @@ let orchestratorHealth: OrchestratorHealth;
 // initializeServices(); the in-function usages (RunExecutor source/spawner +
 // pty-output fan-in) read the same instance.
 let substrateFacade: SubstrateDispatchFacade;
+// Session Dismiss → cancel hosted runs. Declared at module scope because the
+// services bag (initializeServices) defers to it while the REAL implementation
+// is assigned in app.whenReady()'s orchestrator wiring block (it needs
+// substrateFacade + the routers). A pre-boot call is a logged no-op.
+let cancelHostedRunsImpl: ((sessionId: string) => Promise<void>) | null = null;
 
 // Service instances
 let configManager: ConfigManager;
@@ -893,7 +900,17 @@ async function initializeServices() {
     getMainWindow: () => mainWindow,
     logger,
     archiveProgressManager,
-    cyboflow: { workflowRegistry, runLauncher },
+    cyboflow: {
+      workflowRegistry,
+      runLauncher,
+      cancelHostedRuns: (sessionId: string): Promise<void> => {
+        if (!cancelHostedRunsImpl) {
+          logger?.warn(`[Main] cancelHostedRuns called before orchestrator boot — skipped for session ${sessionId}`);
+          return Promise.resolve();
+        }
+        return cancelHostedRunsImpl(sessionId);
+      },
+    },
   };
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
@@ -1040,7 +1057,7 @@ app.whenReady().then(async () => {
     // module-level `runStatusEvents` 'changed' channel the lifecycleTransitions
     // adapter uses, so the rail / action-bar (activeRunsStore) reacts to a cancel.
     // The bag has NO worktree collaborator — cancel never touches git.
-    setCancelRunDeps({
+    const cancelRunDepsBag = {
       db,
       runQueues,
       stopLiveRun: (runId: string) => substrateFacade.abort(runId),
@@ -1048,11 +1065,44 @@ app.whenReady().then(async () => {
         ApprovalRouter.getInstance().clearPendingForRun(runId),
       clearPendingQuestionsForRun: (runId: string) =>
         QuestionRouter.getInstance().clearPendingForRun(runId),
-      emitRunStatusChanged: (runId, status) =>
+      emitRunStatusChanged: (runId: string, status: 'canceled') =>
         runStatusEvents.emit('changed', { runId, status }),
+      // Batch close-out (single-run parallel sprint): cancelling a sprint batch
+      // run flips its sprint_batches row terminal too, so the lane substrate
+      // never strands non-terminal.
+      markBatchTerminal: (batchId: string, status: 'canceled') =>
+        SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
       logger: loggerLike,
-    });
+    };
+    setCancelRunDeps(cancelRunDepsBag);
     console.log('[Main] runs.cancel deps wired');
+
+    // Session Dismiss → cancel hosted runs (consumed by sessions:delete via the
+    // services bag). Every NON-terminal run on the session goes through the SAME
+    // git-neutral cancelRunHandler as the runs.cancel mutation — settling pending
+    // approvals/questions (no orphaned review-queue items), stopping the live
+    // agent, and closing a sprint run's lane batch. Per-run fail-soft: one bad
+    // run must not block dismissing the session.
+    cancelHostedRunsImpl = async (sessionId: string): Promise<void> => {
+      const rows = db
+        .prepare(
+          `SELECT id FROM workflow_runs
+            WHERE session_id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+        )
+        .all(sessionId) as Array<{ id: string }>;
+      for (const row of rows) {
+        try {
+          await cancelRunHandler(row.id, cancelRunDepsBag);
+        } catch (err: unknown) {
+          loggerLike.error('[Main] session dismiss: cancel of hosted run failed', {
+            sessionId,
+            runId: row.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    };
+    console.log('[Main] session-dismiss hosted-run cancel wired');
 
     // Phase 4b — SDK-only Pause/Resume. Pause is the NON-terminal twin of Cancel:
     // it stops the active SDK turn (via the SAME substrateFacade.abort kill seam)

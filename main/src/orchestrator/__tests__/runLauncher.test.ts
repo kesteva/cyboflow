@@ -1110,7 +1110,8 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
    * `workflowName` controls the sprint-only guard.
    */
   function makeSprintFixture(db: Database.Database, tmpDir: string, workflowName: string, opts?: { omitSprintLanes?: boolean }) {
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
+    // batch_id (sprint lanes, migration 022) now comes from the shared fixture's
+    // includeWorkflowRunTaskColumns block — no manual ALTER here.
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 

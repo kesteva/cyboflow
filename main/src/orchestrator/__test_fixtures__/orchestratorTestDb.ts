@@ -93,6 +93,16 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
   const db = new Database(':memory:');
   db.pragma(options?.disableForeignKeys ? 'foreign_keys = OFF' : 'foreign_keys = ON');
   db.exec(GATE_SCHEMA);
+  // Migration 022 (sprint lanes): batch_id is projected by BOTH read-model
+  // surfaces (listRunsHandler/runs.list via includeSubstrate) AND the row-level
+  // readers (getRunById / cancelRunHandler via includeWorkflowRunTaskColumns).
+  // Idempotent add so passing both flags never double-ALTERs.
+  let batchIdAdded = false;
+  const addBatchIdColumnOnce = (): void => {
+    if (batchIdAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
+    batchIdAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -111,7 +121,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // Migration 022 (sprint lanes): listRunsHandler's SELECT also projects
     // batch_id (the swimlane-canvas switch keys off it). Same read-model
     // surface, same opt-in flag. Additive — never widens GATE_SCHEMA.
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
+    addBatchIdColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -143,6 +153,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT');
     // Migration 018: idle-chat nudge SDK conversation id.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    // Migration 022 (sprint lanes): getRunById + cancelRunHandler project batch_id.
+    addBatchIdColumnOnce();
   }
   return db;
 }

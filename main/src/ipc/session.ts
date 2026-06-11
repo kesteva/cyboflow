@@ -467,6 +467,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Session is already archived' };
       }
 
+      // Dismissing a session must not strand its hosted workflow runs: cancel
+      // every non-terminal run FIRST (git-neutral — stops the live agent and
+      // settles pending approvals/questions so no orphaned review-queue items;
+      // a sprint run's lane batch is closed too). Fail-soft: a cancel failure
+      // must not block the archive.
+      try {
+        await cyboflow.cancelHostedRuns(sessionId);
+      } catch (cancelError) {
+        console.error(`[Main] Failed to cancel hosted runs for session ${sessionId}:`, cancelError);
+      }
+
       // Add a message to session output about archiving
       const timestamp = new Date().toLocaleTimeString();
       let archiveMessage = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[44m\x1b[37m 📦 ARCHIVING SESSION \x1b[0m\r\n`;
