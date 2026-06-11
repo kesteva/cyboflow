@@ -9,10 +9,14 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockLaunch, mockListQuery } = vi.hoisted(() => ({
-  mockLaunch: vi.fn(),
-  mockListQuery: vi.fn(),
-}));
+const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession } = vi.hoisted(
+  () => ({
+    mockLaunch: vi.fn(),
+    mockListQuery: vi.fn(),
+    mockDynamicInit: vi.fn(),
+    mockUseDynamicForSession: vi.fn(),
+  }),
+);
 
 vi.mock('../../../hooks/useSessionMetrics', () => ({
   useSessionMetrics: () => ({
@@ -51,8 +55,16 @@ vi.mock('../TaskBatchPickerModal', () => ({
     ) : null,
 }));
 
+// Detected dynamic workflows — the store has its own unit test; here it is
+// stubbed so the canvas's init call + panel stack are observable in isolation.
+vi.mock('../../../stores/dynamicWorkflowStore', () => ({
+  useDynamicWorkflowStore: { getState: () => ({ init: mockDynamicInit }) },
+  useDynamicWorkflowsForSession: mockUseDynamicForSession,
+}));
+
 import { QuickSessionCanvas } from '../QuickSessionCanvas';
 import type { Session } from '../../../types/session';
+import type { DynamicWorkflowRunState } from '../../../../../shared/types/dynamicWorkflows';
 
 const SESSION = {
   id: 's1',
@@ -81,9 +93,29 @@ function renderCanvas(onBrowseAll = vi.fn()) {
   );
 }
 
+function makeDynamicWorkflow(
+  overrides: Partial<DynamicWorkflowRunState> = {},
+): DynamicWorkflowRunState {
+  return {
+    wfRunId: 'wf_a',
+    taskId: 'w1',
+    runId: 'run-1',
+    sessionId: 's1',
+    projectId: 3,
+    sessionName: 'tester-mctest',
+    name: 'refactor-blitz',
+    phases: [{ title: 'Plan' }],
+    agents: [],
+    status: 'running',
+    startedAt: '2026-06-11T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockListQuery.mockResolvedValue(WORKFLOWS);
+  mockUseDynamicForSession.mockReturnValue([]);
 });
 
 describe('QuickSessionCanvas', () => {
@@ -141,5 +173,32 @@ describe('QuickSessionCanvas', () => {
     renderCanvas(onBrowseAll);
     fireEvent.click(screen.getByTestId('quick-session-browse-all'));
     expect(onBrowseAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('inits the dynamic-workflow store and hides the stack when the session has none', async () => {
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-sprint'));
+    expect(mockDynamicInit).toHaveBeenCalled();
+    expect(mockUseDynamicForSession).toHaveBeenCalledWith('s1');
+    expect(screen.queryByTestId('quick-session-dynamic-workflows')).not.toBeInTheDocument();
+  });
+
+  it('renders detected dynamic workflows above the canvas, most recent first', async () => {
+    // The selector hook owns the desc sort; the canvas renders in given order.
+    mockUseDynamicForSession.mockReturnValue([
+      makeDynamicWorkflow({ wfRunId: 'wf_new', name: 'newest-flow' }),
+      makeDynamicWorkflow({ wfRunId: 'wf_old', name: 'older-flow', status: 'completed' }),
+    ]);
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-sprint'));
+
+    const stack = screen.getByTestId('quick-session-dynamic-workflows');
+    expect(stack).toBeInTheDocument();
+    const panels = screen.getAllByTestId(/^dynamic-workflow-panel-/);
+    expect(panels.map((p) => p.getAttribute('data-testid'))).toEqual([
+      'dynamic-workflow-panel-wf_new',
+      'dynamic-workflow-panel-wf_old',
+    ]);
+    expect(panels[0]).toHaveTextContent('newest-flow');
   });
 });

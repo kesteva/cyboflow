@@ -29,6 +29,11 @@ import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+import {
+  useDynamicWorkflowStore,
+  useDynamicWorkflowsForSession,
+} from '../../stores/dynamicWorkflowStore';
+import { DynamicWorkflowPanel } from './DynamicWorkflowPanel';
 import type { Session } from '../../types/session';
 
 interface QuickSessionCanvasProps {
@@ -154,6 +159,17 @@ export function QuickSessionCanvas({
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId);
+
+  // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
+  // launched by THIS session's agent — rendered prominently above the picker.
+  // init() is the store's idempotent singleton bootstrap (the landing home
+  // calls it too); deliberately NOT torn down on unmount — the subscription is
+  // shared across consumers (same treatment landingStore gives
+  // useActiveRunsStore.init()).
+  useEffect(() => {
+    useDynamicWorkflowStore.getState().init();
+  }, []);
+  const dynamicWorkflows = useDynamicWorkflowsForSession(session.id);
 
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -308,6 +324,28 @@ export function QuickSessionCanvas({
           interactive
         </span>
       </div>
+
+      {/* ── Detected dynamic workflows — most recent first, ABOVE the picker ─── */}
+      {dynamicWorkflows.length > 0 && (
+        <div
+          style={{
+            flexShrink: 0,
+            maxHeight: '55%',
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            padding: '10px 12px',
+            borderBottom: '1px solid var(--color-border-primary)',
+            background: 'var(--color-bg-secondary)',
+          }}
+          data-testid="quick-session-dynamic-workflows"
+        >
+          {dynamicWorkflows.map((wf) => (
+            <DynamicWorkflowPanel key={wf.wfRunId} state={wf} />
+          ))}
+        </div>
+      )}
 
       {/* ── Canvas body — 24px graph-paper grid, single node → edge → add ────── */}
       <div
