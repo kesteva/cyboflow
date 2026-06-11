@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, ReactNode, CSSProperties } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, ReactNode, CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../../utils/cn';
 
 export interface DropdownItem {
@@ -49,12 +50,8 @@ const widthClasses = {
   full: 'w-full',
 };
 
-const positionClasses = {
-  'bottom-left': 'left-0 top-full mt-2',
-  'bottom-right': 'right-0 top-full mt-2',
-  'top-left': 'left-0 bottom-full mb-2',
-  'top-right': 'right-0 bottom-full mb-2',
-};
+/** Gap between the trigger and the menu (the old mt-2/mb-2), in px. */
+const MENU_GAP = 8;
 
 const variantStyles = {
   default: 'text-text-secondary hover:bg-interactive/10 hover:text-text-primary hover:shadow-[inset_0_1px_2px_rgba(0,0,0,0.05)]',
@@ -87,6 +84,9 @@ export function Dropdown({
 }: DropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [actualPosition, setActualPosition] = useState<'bottom-left' | 'bottom-right' | 'top-left' | 'top-right'>('bottom-right');
+  // Fixed viewport coordinates for the PORTALED menu (computed from the trigger
+  // rect). null until measured — the menu only renders once coords are known.
+  const [menuCoords, setMenuCoords] = useState<CSSProperties | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -127,12 +127,58 @@ export function Dropdown({
     }
   }, [isOpen, position]);
 
-  // Handle click outside
+  // Compute the menu's fixed viewport coords from the trigger rect. The menu is
+  // PORTALED to document.body (see render) so it cannot inherit ancestor visual
+  // context (e.g. the archived-card opacity-60 dim) — which means it cannot use
+  // trigger-relative absolute positioning either. Layout effect so the first
+  // paint already has coords (no flicker).
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setMenuCoords(null);
+      return;
+    }
+    const el = dropdownRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const coords: CSSProperties = {};
+    if (actualPosition.includes('bottom')) {
+      coords.top = rect.bottom + MENU_GAP;
+    } else {
+      coords.bottom = window.innerHeight - rect.top + MENU_GAP;
+    }
+    if (actualPosition.includes('right')) {
+      coords.right = window.innerWidth - rect.right;
+    } else {
+      coords.left = rect.left;
+    }
+    setMenuCoords(coords);
+  }, [isOpen, actualPosition]);
+
+  // A fixed-position menu detaches from its trigger when anything scrolls or
+  // the window resizes — close it (standard menu behavior) rather than chase
+  // the trigger. Capture-phase scroll so overflow containers (the board) count.
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const closeOnViewportChange = () => handleClose();
+    window.addEventListener('resize', closeOnViewportChange);
+    document.addEventListener('scroll', closeOnViewportChange, true);
+    return () => {
+      window.removeEventListener('resize', closeOnViewportChange);
+      document.removeEventListener('scroll', closeOnViewportChange, true);
+    };
+  }, [isOpen]);
+
+  // Handle click outside — the menu lives in a body portal, so "inside" means
+  // inside the trigger wrapper OR inside the portaled menu panel.
   useEffect(() => {
     if (!isOpen) return;
 
     const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && event.target && event.target instanceof Node && !dropdownRef.current.contains(event.target)) {
+      if (!(event.target instanceof Node)) return;
+      const inTrigger = dropdownRef.current?.contains(event.target) ?? false;
+      const inMenu = contentRef.current?.contains(event.target) ?? false;
+      if (!inTrigger && !inMenu) {
         handleClose();
       }
     };
@@ -180,12 +226,14 @@ export function Dropdown({
         {trigger}
       </div>
 
-      {/* Dropdown Menu */}
-      {isOpen && (
+      {/* Dropdown Menu — PORTALED to document.body so ancestor visual context
+          (opacity dims, overflow clipping, transforms) cannot affect it.
+          Positioned with fixed viewport coords computed from the trigger rect. */}
+      {isOpen && menuCoords !== null && createPortal(
         <div
           ref={contentRef}
           className={cn(
-            'absolute z-50',
+            'fixed z-50',
             'bg-surface-primary rounded-md shadow-dropdown-elevated',
             'border border-border-subtle/60',
             'backdrop-blur-sm',
@@ -195,12 +243,12 @@ export function Dropdown({
             'ring-1 ring-border-secondary/30 dark:ring-white/5',
             // Match pill button radius exactly
             'overflow-hidden',
-            positionClasses[actualPosition],
             widthClasses[width],
             menuClassName
           )}
           style={{
             ...style,
+            ...menuCoords,
             // Add subtle inner glow for depth
             boxShadow: 'var(--shadow-dropdown-elevated), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
           }}
@@ -311,7 +359,8 @@ export function Dropdown({
                 </>
               )}
             </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
