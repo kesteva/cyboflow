@@ -59,8 +59,11 @@ function App() {
   const showBacklog = useNavigationStore((s) => s.backlogOpen);
   const toggleBacklog = useNavigationStore((s) => s.toggleBacklog);
   const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
-  // Non-done task count drives the backlog rail badge (mirrors the review count).
-  const backlogCount = useBacklogStore((s) => s.tasks.filter((t) => !t.isDone).length);
+  // Non-done, non-archived task count drives the backlog rail badge (mirrors the
+  // review count). Cross-project by design — the board is the overall view now.
+  const backlogCount = useBacklogStore(
+    (s) => s.tasks.filter((t) => !t.isDone && t.archived_at === null).length,
+  );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { sessions, isLoaded } = useSessionStore();

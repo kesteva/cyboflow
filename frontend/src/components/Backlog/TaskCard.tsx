@@ -4,8 +4,15 @@
  *
  * A card shows: type tag, priority tag, FlowMarker(s) (multiple when parallel
  * runs), ReviewMarker, DoneFlag, the display ref; the title; the summary; and a
- * footer with repo, compact "Nm ago", and the per-card "Run" action. Epics show
- * an expand control ("N tasks") that reveals nested {@link TaskChildren}.
+ * footer with project chip (All-projects view), repo, compact "Nm ago", and the
+ * per-card "Run" action. Epics show an expand control ("N tasks") that reveals
+ * nested {@link TaskChildren}.
+ *
+ * Archive-in-place: an archived item (`archived_at` stamped) only reaches a card
+ * while the header Archived toggle is on — it then renders dimmed (opacity-60)
+ * with an ArchivedChip next to its type tag. Children arrive PRE-FILTERED from
+ * filterTasks (archived children already dropped, childCount recomputed), so
+ * the card renders `task.children` as given — it never refetches/refilters.
  *
  * Read-only: no drag-and-drop. The breathing-glow on an in-flight card honours
  * prefers-reduced-motion (motion-reduce:* variants in the marker + ring).
@@ -16,8 +23,9 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Play, Loader2, Pencil } from 'lucide-react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
-import { TypeTag, PriorityTag, FlowMarker, ReviewMarker, DoneFlag } from './markers';
-import { compactAgo } from './backlogSelectors';
+import { useBacklogStore } from '../../stores/backlogStore';
+import { TypeTag, PriorityTag, ArchivedChip, ProjectChip, FlowMarker, ReviewMarker, DoneFlag } from './markers';
+import { compactAgo, isArchived } from './backlogSelectors';
 import { CardActionsMenu } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
@@ -47,7 +55,7 @@ function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | nul
   );
 }
 
-/** Footer: repo · time · Edit · Run. */
+/** Footer: project chip (All-projects view) · repo · time · Edit · Run. */
 function CardFooter({
   task,
   onRun,
@@ -56,9 +64,19 @@ function CardFooter({
   now,
 }: TaskBodyProps & { onEdit: (e: React.MouseEvent) => void }): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
+  // Read the project filter straight from the store (CardActionsMenu precedent)
+  // so the chip needs no prop-drilling through the Kanban/List card tree. The
+  // chip only appears in the cross-project view (filter = All AND >1 project).
+  const filterProjectId = useBacklogStore((s) => s.filterProjectId);
+  const projects = useBacklogStore((s) => s.projects);
+  const projectName =
+    filterProjectId === null && projects.length > 1
+      ? projects.find((p) => p.id === task.project_id)?.name ?? null
+      : null;
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
       <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-text-tertiary">
+        {projectName !== null && <ProjectChip name={projectName} />}
         {task.repo && <span className="truncate font-medium">{task.repo}</span>}
         <span className="flex-shrink-0">{compactAgo(task.created_at, now)}</span>
       </div>
@@ -126,6 +144,9 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
   const [editorOpen, setEditorOpen] = useState(false);
   const isEpic = task.type === 'epic';
   const childCount = task.childCount ?? task.children?.length ?? 0;
+  // Archive-in-place: archived items only render while the header Archived
+  // toggle is on — dim the whole body and badge it next to the type tag.
+  const archived = isArchived(task);
 
   // Guard the Edit click from bubbling into the epic-expand toggle / card body.
   const handleEdit = (e: React.MouseEvent): void => {
@@ -134,10 +155,14 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className={`flex flex-col gap-1.5 ${archived ? 'opacity-60' : ''}`}
+      data-archived={archived ? 'true' : 'false'}
+    >
       {/* Tag header row */}
       <div className="flex flex-wrap items-center gap-1.5">
         <TypeTag type={task.type} />
+        {archived && <ArchivedChip />}
         <PriorityTag priority={task.priority} />
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
@@ -186,7 +211,11 @@ interface TaskChildrenProps {
   now: number;
 }
 
-/** Nested child tasks of an expanded epic. */
+/**
+ * Nested child tasks of an expanded epic. Rendered exactly as given — archived
+ * children were already dropped (and childCount recomputed) by filterTasks
+ * upstream when the Archived toggle is off.
+ */
 export function TaskChildren({ tasks, onRun, launchingTaskId, now }: TaskChildrenProps): React.JSX.Element {
   return (
     <ul className="mt-1.5 flex flex-col gap-1.5" data-testid="task-children">

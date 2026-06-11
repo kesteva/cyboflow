@@ -574,7 +574,16 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // ---------------------------------------------------------------------------
 
   const handleProjectClick = async (project: Project) => {
-    const { navigateToProject, closeHumanReview } = useNavigationStore.getState();
+    const { backlogOpen, navigateToProject, closeHumanReview, setActiveProjectId } = useNavigationStore.getState();
+    // Task board open: clicking a project narrows the board's project filter
+    // and keeps the board on screen — navigateToProject would close it.
+    if (backlogOpen) {
+      setActiveProjectId(project.id);
+      // Lazy import keeps the backlog store out of the rail's eager module graph.
+      const { useBacklogStore } = await import('../stores/backlogStore');
+      useBacklogStore.getState().setFilterProject(project.id);
+      return;
+    }
     // Picking a project leaves the human-review overview for that project's surface.
     closeHumanReview();
     navigateToProject(project.id);

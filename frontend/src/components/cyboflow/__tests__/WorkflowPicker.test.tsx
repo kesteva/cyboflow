@@ -542,8 +542,8 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
         body: 'prose', priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
-        scope: null, board_id: 'b', stage_id: 'idea', version: 1, inFlow: [], awaitingReview: false,
-        isDone: false, created_at: '', updated_at: '',
+        scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
       },
     ]);
 

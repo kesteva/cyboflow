@@ -1,48 +1,26 @@
 /**
  * Component tests for ArchiveConfirmDialog — the per-card "Archive" confirm.
  *
- * Covers: confirming archives via setStage to the board's Archived stage (with
- * expectedVersion) and closes; a rejecting archive surfaces the friendly error;
- * a board with no Archived stage disables the action.
+ * Covers: confirming archives IN PLACE via tasks.archive {archived:true}
+ * (with expectedVersion) and closes; a rejecting archive surfaces the friendly
+ * error and keeps the dialog open; the copy explains the in-place semantics
+ * (keeps its column, hidden behind the Archived toggle, reversible via
+ * Unarchive).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import type { BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
+import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 
-const { mockSetStage } = vi.hoisted(() => ({
-  mockSetStage: vi.fn().mockResolvedValue({ taskId: 'tsk_1' }),
+const { mockArchive } = vi.hoisted(() => ({
+  mockArchive: vi.fn(),
 }));
 
 vi.mock('../../../trpc/client', () => ({
-  trpc: { cyboflow: { tasks: { setStage: { mutate: mockSetStage } } } },
+  trpc: { cyboflow: { tasks: { archive: { mutate: mockArchive } } } },
 }));
 
 import { ArchiveConfirmDialog } from '../ArchiveConfirmDialog';
-
-function stage(position: number, label: string, opts: Partial<BoardStage> = {}): BoardStage {
-  return {
-    id: opts.id ?? `s-${position}`,
-    label,
-    color_oklch: 'oklch(0.5 0.1 0)',
-    hint: null,
-    position,
-    write_policy: opts.write_policy ?? 'asserted',
-    is_terminal: opts.is_terminal ?? false,
-    hidden_by_default: opts.hidden_by_default ?? false,
-  };
-}
-
-function board(stages: BoardStage[]): Board {
-  return { id: 'board-1', project_id: 7, name: 'Default', kind: 'default', is_default: true, stages };
-}
-
-function boardWithArchive(): Board {
-  return board([
-    stage(1, 'Idea'),
-    stage(11, 'Archived', { id: 's-arch', is_terminal: true, hidden_by_default: true }),
-  ]);
-}
 
 function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
   return {
@@ -60,7 +38,9 @@ function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     scope: null,
     board_id: 'board-1',
     stage_id: 's-1',
+    archived_at: null,
     version: 4,
+    stage_position: 1,
     inFlow: [],
     awaitingReview: false,
     isDone: false,
@@ -71,48 +51,43 @@ function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
 }
 
 beforeEach(() => {
-  mockSetStage.mockClear();
-  mockSetStage.mockResolvedValue({ taskId: 'tsk_1' });
+  mockArchive.mockReset().mockResolvedValue({ taskId: 'tsk_1' });
 });
 
 describe('ArchiveConfirmDialog', () => {
   it('renders nothing when closed', () => {
-    render(
-      <ArchiveConfirmDialog task={makeTask()} board={boardWithArchive()} isOpen={false} onClose={vi.fn()} />,
-    );
+    render(<ArchiveConfirmDialog task={makeTask()} isOpen={false} onClose={vi.fn()} />);
     expect(screen.queryByTestId('archive-confirm-dialog')).not.toBeInTheDocument();
   });
 
-  it('archives via setStage to the Archived stage and closes on success', async () => {
+  it('archives in place via tasks.archive (with expectedVersion) and closes on success', async () => {
     const onClose = vi.fn();
-    render(<ArchiveConfirmDialog task={makeTask()} board={boardWithArchive()} isOpen onClose={onClose} />);
+    render(<ArchiveConfirmDialog task={makeTask()} isOpen onClose={onClose} />);
     fireEvent.click(screen.getByTestId('archive-confirm-button'));
-    await waitFor(() => expect(mockSetStage).toHaveBeenCalledTimes(1));
-    expect(mockSetStage).toHaveBeenCalledWith({
+    await waitFor(() => expect(mockArchive).toHaveBeenCalledTimes(1));
+    expect(mockArchive).toHaveBeenCalledWith({
       projectId: 7,
       taskId: 'tsk_1',
-      stageId: 's-arch',
+      archived: true,
       expectedVersion: 4,
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
+  it('explains the in-place semantics: keeps its column, Archived toggle, Unarchive', () => {
+    render(<ArchiveConfirmDialog task={makeTask()} isOpen onClose={vi.fn()} />);
+    const body = screen.getByTestId('archive-confirm-dialog');
+    expect(body).toHaveTextContent(/keeps its current column/i);
+    expect(body).toHaveTextContent(/toggle Archived in the header/i);
+    expect(body).toHaveTextContent(/Unarchive/);
+  });
+
   it('shows the friendly error and stays open when archiving is rejected', async () => {
-    mockSetStage.mockRejectedValueOnce(new Error('active_runs: cancel active runs first'));
+    mockArchive.mockRejectedValueOnce(new Error('active_runs: cancel active runs first'));
     const onClose = vi.fn();
-    render(<ArchiveConfirmDialog task={makeTask()} board={boardWithArchive()} isOpen onClose={onClose} />);
+    render(<ArchiveConfirmDialog task={makeTask()} isOpen onClose={onClose} />);
     fireEvent.click(screen.getByTestId('archive-confirm-button'));
     expect(await screen.findByRole('alert')).toHaveTextContent(/active run/i);
     expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it('disables the action and never calls setStage when the board has no Archived stage', () => {
-    render(
-      <ArchiveConfirmDialog task={makeTask()} board={board([stage(1, 'Idea')])} isOpen onClose={vi.fn()} />,
-    );
-    const btn = screen.getByTestId('archive-confirm-button');
-    expect(btn).toBeDisabled();
-    fireEvent.click(btn);
-    expect(mockSetStage).not.toHaveBeenCalled();
   });
 });

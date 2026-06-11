@@ -2,8 +2,12 @@
  * BacklogPane render tests.
  *
  * The backlogStore is mocked (mirrors ReviewQueueView.test.tsx) so we render
- * against a fixed task/board snapshot without a live tRPC connection. The trpc
- * client is mocked for the run-launch + create paths.
+ * against a fixed task/board/project snapshot without a live tRPC connection.
+ * The trpc client is mocked for the run-launch + create paths.
+ *
+ * The mock mirrors the GLOBAL store shape: cross-project tasks/boards/projects,
+ * no-arg init(), in-memory filterProjectId, and archive-in-place (`archived_at`
+ * stamp + `stage_position` bucketing — no Archived stage exists).
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
@@ -14,21 +18,34 @@ import type { BacklogTaskItem, Board, BoardStage } from '../../../../shared/type
 // Mutable store snapshot shared with the mock factory.
 // ---------------------------------------------------------------------------
 
+interface MockProjectRef {
+  id: number;
+  name: string;
+}
+
+let mockLoaded = true;
 let mockTasks: BacklogTaskItem[] = [];
 let mockBoards: Board[] = [];
+let mockProjects: MockProjectRef[] = [];
+let mockFilterProjectId: number | null = null;
 let mockLayout: 'kanban' | 'list' = 'kanban';
 let mockShowArchived = false;
 const mockInit = vi.fn(() => () => {});
+const mockSetFilterProject = vi.fn((id: number | null) => { mockFilterProjectId = id; });
 const mockSetLayout = vi.fn((m: 'kanban' | 'list') => { mockLayout = m; });
 const mockToggleArchived = vi.fn(() => { mockShowArchived = !mockShowArchived; });
 
 function snapshot() {
   return {
+    loaded: mockLoaded,
     tasks: mockTasks,
     boards: mockBoards,
+    projects: mockProjects,
+    filterProjectId: mockFilterProjectId,
     layoutMode: mockLayout,
     showArchived: mockShowArchived,
     connectionStatus: 'connected' as const,
+    setFilterProject: mockSetFilterProject,
     setLayoutMode: mockSetLayout,
     toggleShowArchived: mockToggleArchived,
     init: mockInit,
@@ -82,6 +99,8 @@ function stage(position: number, id: string, label: string, opts: Partial<BoardS
   };
 }
 
+// Archive-in-place: the board has NO Archived stage (migration 024 removed
+// position 11) — archived items keep their column and carry `archived_at`.
 const STAGES: BoardStage[] = [
   stage(1, 's-idea', 'Idea', { hint: 'Raw input captured' }),
   stage(6, 's-ready', 'Ready for development', { hint: 'Approved · queued' }),
@@ -89,10 +108,13 @@ const STAGES: BoardStage[] = [
   stage(8, 's-merge', 'Ready to merge', { write_policy: 'derived' }),
   stage(9, 's-done', 'Done', { is_terminal: true }),
   stage(10, 's-wont', "Won't do", { is_terminal: true, hidden_by_default: true }),
-  stage(11, 's-arch', 'Archived', { is_terminal: true, hidden_by_default: true }),
   // Idea-only terminal column (migration 015 position 12) — visible by default.
   stage(12, 's-decomposed', 'Decomposed', { is_terminal: true }),
 ];
+
+const POSITION_BY_STAGE_ID: Record<string, number> = Object.fromEntries(
+  STAGES.map((s) => [s.id, s.position]),
+);
 
 const BOARD: Board = {
   id: 'board-1-default',
@@ -103,10 +125,23 @@ const BOARD: Board = {
   stages: STAGES,
 };
 
+// A second project's board — IDENTICAL stage positions (every project seeds the
+// same board), distinct stage ids. Exercises the cross-project position unify.
+const BOARD_P2: Board = {
+  id: 'board-2-default',
+  project_id: 2,
+  name: 'Default',
+  kind: 'default',
+  is_default: true,
+  stages: STAGES.map((s) => ({ ...s, id: s.id.replace('s-', 's2-') })),
+};
+
+const PROJECTS: MockProjectRef[] = [{ id: 1, name: 'Alpha' }];
+
 function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: string }): BacklogTaskItem {
   return {
     id: overrides.id,
-    project_id: 1,
+    project_id: overrides.project_id ?? 1,
     type: overrides.type ?? 'task',
     ref: overrides.ref ?? 'TASK-001',
     title: overrides.title ?? 'A task',
@@ -117,9 +152,11 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     parent_epic_id: overrides.parent_epic_id ?? null,
     originating_idea_id: overrides.originating_idea_id ?? null,
     scope: overrides.scope ?? null,
-    board_id: 'board-1-default',
+    board_id: overrides.board_id ?? 'board-1-default',
     stage_id: overrides.stage_id,
+    archived_at: overrides.archived_at ?? null,
     version: 1,
+    stage_position: overrides.stage_position ?? POSITION_BY_STAGE_ID[overrides.stage_id] ?? 0,
     inFlow: overrides.inFlow ?? [],
     awaitingReview: overrides.awaitingReview ?? false,
     isDone: overrides.isDone ?? false,
@@ -132,11 +169,15 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
 }
 
 beforeEach(() => {
+  mockLoaded = true;
   mockTasks = [];
   mockBoards = [BOARD];
+  mockProjects = [...PROJECTS];
+  mockFilterProjectId = null;
   mockLayout = 'kanban';
   mockShowArchived = false;
   mockInit.mockClear();
+  mockSetFilterProject.mockClear();
   mockSetLayout.mockClear();
   mockToggleArchived.mockClear();
   mockStart.mockClear();
@@ -149,15 +190,25 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('BacklogPane', () => {
-  it('renders EmptyBacklogView when no project is active', () => {
+  it('renders EmptyBacklogView only when loaded with zero projects', () => {
+    mockProjects = [];
     render(<BacklogPane projectId={null} />);
     expect(screen.getByTestId('empty-backlog')).toBeInTheDocument();
-    expect(mockInit).not.toHaveBeenCalled();
   });
 
-  it('calls init(projectId) on mount', () => {
+  it('does NOT show EmptyBacklogView before the global load resolves', () => {
+    mockLoaded = false;
+    mockProjects = [];
+    mockBoards = [];
+    render(<BacklogPane projectId={null} />);
+    expect(screen.queryByTestId('empty-backlog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('backlog-loading')).toBeInTheDocument();
+  });
+
+  it('calls the no-arg global init() once on mount', () => {
     render(<BacklogPane projectId={1} />);
-    expect(mockInit).toHaveBeenCalledWith(1);
+    expect(mockInit).toHaveBeenCalledTimes(1);
+    expect(mockInit).toHaveBeenCalledWith();
   });
 
   it('renders the header title and counts line', () => {
@@ -176,11 +227,12 @@ describe('BacklogPane', () => {
     expect(counts).toHaveTextContent('done');
   });
 
-  it('renders one Kanban column per visible stage (hidden stages excluded)', () => {
+  it('renders one Kanban column per visible unified stage (hidden stages excluded)', () => {
     render(<BacklogPane projectId={1} />);
     const columns = screen.getAllByTestId('kanban-column');
-    // 6 visible stages (positions 1,6,7,8,9,12); 10 & 11 are hidden_by_default.
-    // Position 12 (Decomposed) is terminal but visible by default.
+    // 6 visible stages (positions 1,6,7,8,9,12); 10 is hidden_by_default and
+    // the Archived stage no longer exists. Position 12 (Decomposed) is
+    // terminal but visible by default.
     expect(columns).toHaveLength(6);
     expect(screen.queryByText("Won't do")).not.toBeInTheDocument();
     expect(screen.getByText('Decomposed')).toBeInTheDocument();
@@ -189,8 +241,8 @@ describe('BacklogPane', () => {
   it('reveals hidden stages when the show-archived toggle is on', () => {
     mockShowArchived = true;
     render(<BacklogPane projectId={1} />);
-    // 8 stages: the 6 visible + Won't do + Archived.
-    expect(screen.getAllByTestId('kanban-column')).toHaveLength(8);
+    // 7 stages: the 6 visible + Won't do (Archived is no longer a stage).
+    expect(screen.getAllByTestId('kanban-column')).toHaveLength(7);
     expect(screen.getByText("Won't do")).toBeInTheDocument();
   });
 
@@ -217,6 +269,97 @@ describe('BacklogPane', () => {
     expect(counts).toHaveTextContent('epics');
     expect(counts).toHaveTextContent('ideas');
   });
+
+  // -- Project filter ---------------------------------------------------------
+
+  it('labels the project filter trigger with the current selection', () => {
+    mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
+    const { unmount } = render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('project-filter-trigger')).toHaveTextContent('All projects');
+    unmount();
+    mockFilterProjectId = 2;
+    render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('project-filter-trigger')).toHaveTextContent('Beta');
+  });
+
+  it('selecting a project in the dropdown calls setFilterProject', () => {
+    mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
+    render(<BacklogPane projectId={1} />);
+    // Menu items are queried by ROLE: the trigger's accessible name is its
+    // aria-label ("Filter by project"), so the item names stay unambiguous.
+    fireEvent.click(screen.getByTestId('project-filter-trigger'));
+    fireEvent.click(screen.getByRole('button', { name: 'Beta' }));
+    expect(mockSetFilterProject).toHaveBeenCalledWith(2);
+    fireEvent.click(screen.getByTestId('project-filter-trigger'));
+    fireEvent.click(screen.getByRole('button', { name: 'All projects' }));
+    expect(mockSetFilterProject).toHaveBeenCalledWith(null);
+  });
+
+  it('narrows the board and counts to the filtered project', () => {
+    mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
+    // Project 2 has its own board row (identical positions) — the filter must
+    // pick ITS stages once narrowed.
+    mockBoards = [BOARD, BOARD_P2];
+    mockFilterProjectId = 2;
+    mockTasks = [
+      task({ id: 't-a', stage_id: 's-ready', project_id: 1, title: 'Alpha task' }),
+      task({ id: 't-b', stage_id: 's2-ready', stage_position: 6, project_id: 2, board_id: 'board-2-default', title: 'Beta task' }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    expect(screen.getByText('Beta task')).toBeInTheDocument();
+    expect(screen.queryByText('Alpha task')).not.toBeInTheDocument();
+    expect(screen.getByTestId('backlog-counts')).toHaveTextContent('1');
+  });
+
+  it('shows a project chip on cards in All mode with >1 project, and hides it when filtered', () => {
+    mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
+    mockTasks = [task({ id: 't-b', stage_id: 's-ready', project_id: 2, title: 'Beta task' })];
+    const { unmount } = render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('project-chip')).toHaveTextContent('Beta');
+    unmount();
+    mockFilterProjectId = 2;
+    render(<BacklogPane projectId={1} />);
+    expect(screen.queryByTestId('project-chip')).not.toBeInTheDocument();
+  });
+
+  it('hides the project chip with a single project even in All mode', () => {
+    mockTasks = [task({ id: 't1', stage_id: 's-ready' })];
+    render(<BacklogPane projectId={1} />);
+    expect(screen.queryByTestId('project-chip')).not.toBeInTheDocument();
+  });
+
+  // -- Archive in place -------------------------------------------------------
+
+  it('hides archived cards by default and reveals them dimmed with an Archived chip', () => {
+    mockTasks = [
+      task({ id: 't1', stage_id: 's-ready', title: 'Active item' }),
+      task({ id: 'a1', stage_id: 's-ready', title: 'Archived item', archived_at: '2026-01-02T00:00:00.000Z' }),
+    ];
+    const { unmount } = render(<BacklogPane projectId={1} />);
+    expect(screen.queryByText('Archived item')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('archived-chip')).not.toBeInTheDocument();
+    unmount();
+    mockShowArchived = true;
+    render(<BacklogPane projectId={1} />);
+    // The archived card renders IN ITS COLUMN (Ready for development), dimmed.
+    const card = screen.getByText('Archived item').closest('[data-archived]');
+    expect(card).toHaveAttribute('data-archived', 'true');
+    expect(card).toHaveClass('opacity-60');
+    expect(within(card as HTMLElement).getByTestId('archived-chip')).toBeInTheDocument();
+    // The active sibling stays undimmed and unbadged.
+    const active = screen.getByText('Active item').closest('[data-archived]');
+    expect(active).toHaveAttribute('data-archived', 'false');
+  });
+
+  it('labels the Archived toggle with the archived count', () => {
+    mockTasks = [
+      task({ id: 'a1', stage_id: 's-ready', archived_at: '2026-01-02T00:00:00.000Z' }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('show-archived-toggle')).toHaveTextContent('Archived (1)');
+  });
+
+  // -- Overlays / layout / actions (unchanged behavior) ------------------------
 
   it('renders MULTIPLE FlowMarkers for a task with parallel runs', () => {
     mockTasks = [
@@ -276,15 +419,16 @@ describe('BacklogPane', () => {
     expect(screen.getAllByTestId('list-group')).toHaveLength(1);
   });
 
-  it('launches a run for a task via the per-card Run action (passes taskId)', async () => {
-    mockTasks = [task({ id: 'tsk_run', stage_id: 's-ready' })];
+  it('launches a run in the TASK own project (not the pane prop)', async () => {
+    mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
+    mockTasks = [task({ id: 'tsk_run', stage_id: 's-ready', project_id: 2 })];
     render(<BacklogPane projectId={1} />);
     await act(async () => {
       fireEvent.click(screen.getByTestId('task-run-button'));
     });
     // Allow the workflows.list + runs.start promise chain to settle.
     await vi.waitFor(() => expect(mockStart).toHaveBeenCalled());
-    expect(mockStart).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'tsk_run', projectId: 1, workflowId: 'wf-1', sessionId: 'sess-backlog' }));
+    expect(mockStart).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'tsk_run', projectId: 2, workflowId: 'wf-1', sessionId: 'sess-backlog' }));
   });
 
   it('opens the New task dialog from the + New affordance', () => {
@@ -293,7 +437,8 @@ describe('BacklogPane', () => {
     expect(screen.getByText('New backlog item')).toBeInTheDocument();
   });
 
-  it('renders a loading placeholder when no board is available yet', () => {
+  it('renders a loading placeholder until the global sync resolves', () => {
+    mockLoaded = false;
     mockBoards = [];
     render(<BacklogPane projectId={1} />);
     expect(screen.getByTestId('backlog-loading')).toBeInTheDocument();

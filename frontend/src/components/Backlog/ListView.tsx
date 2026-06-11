@@ -1,7 +1,9 @@
 /**
- * ListView — one group per NON-EMPTY visible stage, each group a stack of
- * full-width list rows. Mirrors the Kanban content but in a vertical layout.
- * Read-only (no drag-and-drop).
+ * ListView — one group per NON-EMPTY visible unified stage, each group a stack
+ * of full-width list rows. Buckets arrive pre-built (filterTasks ->
+ * unifiedStages -> bucketByStage, collapsed by stage POSITION across project
+ * boards) and mirror the Kanban content in a vertical layout. Read-only (no
+ * drag-and-drop).
  */
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { StageBucket } from './backlogSelectors';

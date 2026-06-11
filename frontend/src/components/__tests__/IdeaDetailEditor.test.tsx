@@ -49,6 +49,8 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     scope: null,
     board_id: 'board-1',
     stage_id: 's-idea',
+    archived_at: null,
+    stage_position: 1,
     version: 3,
     inFlow: [],
     awaitingReview: false,

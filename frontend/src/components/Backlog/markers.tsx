@@ -2,6 +2,9 @@
  * Small presentational marks rendered on backlog cards / list rows:
  *   - TypeTag      (idea | epic | task)
  *   - PriorityTag  (P0 | P1 | P2)
+ *   - ArchivedChip (neutral "Archived" — archive-in-place items, only visible
+ *                  while the header Archived toggle is on)
+ *   - ProjectChip  (project name — cross-project "All projects" view only)
  *   - FlowMarker   (terracotta pulsing dot + "agent · session") — MULTIPLE per
  *                  card when a task has parallel runs (inFlow.length > 1)
  *   - ReviewMarker (gold person glyph "Awaiting review")
@@ -45,6 +48,39 @@ export function PriorityTag({ priority }: { priority: Priority }): React.JSX.Ele
       title={`Priority ${priority}`}
     >
       {priority}
+    </span>
+  );
+}
+
+/**
+ * "Archived" chip for an archive-in-place item (`archived_at` stamped; the item
+ * keeps its column). Rendered next to the TypeTag, and only ever visible while
+ * the header Archived toggle reveals archived cards (which also dim).
+ */
+export function ArchivedChip(): React.JSX.Element {
+  return (
+    <span
+      className="eyebrow rounded-[3px] border border-border-primary bg-bg-tertiary px-1.5 py-px text-text-tertiary"
+      title="Archived — hidden unless the Archived toggle is on"
+      data-testid="archived-chip"
+    >
+      Archived
+    </span>
+  );
+}
+
+/**
+ * Project-name chip shown on cards in the cross-project "All projects" view
+ * (filter set to All AND more than one project) so cards stay attributable.
+ */
+export function ProjectChip({ name }: { name: string }): React.JSX.Element {
+  return (
+    <span
+      className="inline-flex max-w-[140px] rounded-full border border-border-primary bg-bg-tertiary px-2 py-px text-[10px] font-semibold text-text-tertiary"
+      title={`Project: ${name}`}
+      data-testid="project-chip"
+    >
+      <span className="truncate">{name}</span>
     </span>
   );
 }

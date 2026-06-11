@@ -1,7 +1,10 @@
 /**
- * KanbanView — one column per VISIBLE stage. Each column shows a color bar
- * (the stage's oklch hue), the stage label, its task count, and the hint.
- * Empty columns render a dashed placeholder. Read-only (no drag-and-drop).
+ * KanbanView — one column per VISIBLE unified stage. Buckets arrive pre-built
+ * (filterTasks -> unifiedStages -> bucketByStage): cross-project boards are
+ * collapsed by stage POSITION, so each column's `stage` is the representative
+ * stage row for that position. Each column shows a color bar (the stage's
+ * oklch hue), the stage label, its task count, and the hint. Empty columns
+ * render a dashed placeholder. Read-only (no drag-and-drop).
  */
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { StageBucket } from './backlogSelectors';
