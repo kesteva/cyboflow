@@ -16,7 +16,7 @@ import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isCyboflowWorkflowName, isInternalWorkflowName, resolveWorkflowDefinition, CYBOFLOW_WORKFLOW_NAMES } from '../../../shared/types/workflows';
+import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
@@ -349,15 +349,11 @@ export class WorkflowRegistry {
    * flows leaked via the shared dev DB — so the picker never shows dead cards.
    */
   listByProject(projectId: number): WorkflowRow[] {
-    // Exclude the __quick__ sentinel, any dropped legacy built-ins
-    // (soloflow/compound/prune) that linger in a pre-refactor project DB, AND the
-    // scheduler-internal parallel-sprint flows (task/sprint-init/sprint-finalize,
-    // `internal: true`). All must never appear in the user-facing picker.
-    // Filtered, not deleted, to preserve the workflow_runs FK for historical runs.
-    // The internal set is derived from WORKFLOW_DEFINITIONS via
-    // isInternalWorkflowName so it can never drift from the definitions.
-    const internalNames = CYBOFLOW_WORKFLOW_NAMES.filter(isInternalWorkflowName);
-    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES, ...internalNames];
+    // Exclude the __quick__ sentinel and any dropped legacy built-ins
+    // (soloflow/compound/prune) that linger in a pre-refactor project DB — none
+    // may appear in the user-facing picker. Filtered, not deleted, to preserve
+    // the workflow_runs FK for historical runs.
+    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
     const placeholders = excluded.map(() => '?').join(', ');
     const stmt = this.db.prepare(
       `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
@@ -367,11 +363,12 @@ export class WorkflowRegistry {
     );
     const rows = stmt.all(projectId, ...excluded) as WorkflowRow[];
     // Belt-and-suspenders beyond the name blocklist: hide any row that does NOT
-    // resolve to a usable definition. Foreign/internal flows that leak in via the
-    // SHARED dev DB (e.g. another worktree's task / sprint-init / sprint-finalize)
-    // carry an empty spec_json and aren't CyboflowWorkflowNames, so they would
-    // otherwise render as dead "0 steps / 0 phases" picker cards. Filtered, not
-    // deleted — they reappear automatically once they carry a real definition.
+    // resolve to a usable definition. Stale rows from the retired scheduler-era
+    // flows (a worktree's task / sprint-init / sprint-finalize, possibly leaked
+    // via the SHARED dev DB) carry an empty spec_json and aren't
+    // CyboflowWorkflowNames, so they would otherwise render as dead
+    // "0 steps / 0 phases" picker cards. Filtered, not deleted — they reappear
+    // automatically once they carry a real definition.
     return rows.filter((row) => resolveWorkflowDefinition(row.name, row.spec_json) !== null);
   }
 
@@ -495,7 +492,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, outcome, base_branch, base_sha, steps_snapshot_json, substrate, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, outcome, base_branch, base_sha, steps_snapshot_json, substrate, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

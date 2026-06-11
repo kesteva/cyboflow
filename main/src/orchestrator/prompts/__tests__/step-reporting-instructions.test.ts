@@ -65,17 +65,14 @@ describe('buildStepReportingAppend', () => {
   // -------------------------------------------------------------------------
   // sprint — ordered ids
   // -------------------------------------------------------------------------
-  it('emits the sprint flat step ids in order from implement to human-review', () => {
+  it('emits the sprint flat step ids in order from analyze-dependencies to human-review', () => {
     const def = resolveWorkflowDefinition('sprint', '{}');
     const append = buildStepReportingAppend(def);
 
     expect(append).toContain('cyboflow_report_step');
     expectInOrder(append, [
-      '`implement`',
-      '`write-tests`',
-      '`code-review`',
-      '`task-verify`',
-      '`visual-verify`',
+      '`analyze-dependencies`',
+      '`execute-tasks`',
       '`sprint-verify`',
       '`sprint-review`',
       '`human-review`',

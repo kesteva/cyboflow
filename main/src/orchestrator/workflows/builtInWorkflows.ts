@@ -1,19 +1,15 @@
 /**
- * builtInWorkflows — the in-repo, self-contained source of cyboflow's built-in
- * workflows: the two user-facing flows (Planner + Sprint) PLUS the three
- * scheduler-internal parallel-sprint flows (task / sprint-init / sprint-finalize).
- *
- * All five are seeded as `workflows` rows so the registry has a row to launch by
- * `wf-<projectId>-<name>`; the three internal flows are filtered out of the
- * user-facing picker by `WorkflowRegistry.listByProject` (derived from each
- * definition's `internal: true` flag — see `isInternalWorkflowName`). The
- * internal flows are launched programmatically by the `SprintBatchScheduler`.
+ * builtInWorkflows — the in-repo, self-contained source of cyboflow's two
+ * built-in workflows (Planner + Sprint), both seeded as `workflows` rows so the
+ * registry has a row to launch by `wf-<projectId>-<name>`. A parallel sprint is
+ * a single session-hosted `sprint` run (the orchestrator agent fans out
+ * per-task subagents itself) — there are no scheduler-internal flows.
  *
  * This SEVERS the historical runtime dependency on the SoloFlow plugin cache
  * (`~/.claude/plugins/cache/soloflow/...`). The prompt BODIES now live in this
- * repo as sibling `.md` files (`planner.md`, `sprint.md`, `task.md`,
- * `sprint-init.md`, `sprint-finalize.md`), and `workflow_path` points at them so
- * `WorkflowRegistry.seed()` can read each file's frontmatter `permission_mode`.
+ * repo as sibling `.md` files (`planner.md`, `sprint.md`), and `workflow_path`
+ * points at them so `WorkflowRegistry.seed()` can read each file's frontmatter
+ * `permission_mode`.
  *
  * Path resolution mirrors `database.ts` `runFileBasedMigrations()`: resolve
  * relative to the compiled bundle's `__dirname`. `copy:assets` places the prompt
@@ -29,14 +25,12 @@ import type { WorkflowDescriptor } from '../workflowRegistry';
 import { CYBOFLOW_WORKFLOW_NAMES, type CyboflowWorkflowName } from '../../../../shared/types/workflows';
 
 /**
- * Build the in-repo built-in workflow descriptors (Planner + Sprint + the three
- * internal parallel-sprint flows), each pointing at its sibling prompt `.md`
- * file resolved relative to the compiled bundle.
+ * Build the in-repo built-in workflow descriptors (Planner + Sprint), each
+ * pointing at its sibling prompt `.md` file resolved relative to the compiled
+ * bundle.
  *
  * The returned set is keyed exactly by `CYBOFLOW_WORKFLOW_NAMES` — adding or
- * removing a flow name there is a compile-time tripwire on this map. Internal
- * flows are included here (they need a `workflows` row to launch) but are hidden
- * from the picker by `WorkflowRegistry.listByProject`.
+ * removing a flow name there is a compile-time tripwire on this map.
  */
 export function buildBuiltInWorkflows(): WorkflowDescriptor[] {
   const promptPath = (name: CyboflowWorkflowName): string => join(__dirname, `${name}.md`);

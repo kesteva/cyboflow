@@ -1,11 +1,15 @@
 /**
- * Shared types for the parallel-sprint batch subsystem (feat/parallel-sprint).
+ * Shared types for the parallel-sprint lane subsystem (feat/parallel-sprint).
  *
- * A "sprint batch" runs a set of tasks in parallel over ONE shared integration
- * branch with bounded concurrency and a single human review at finalize. These
- * row types + status unions are consumed by both the main process
- * (SprintBatchScheduler, migration 022) and the renderer (batch picker / progress
- * UI). Keep this file free of Node.js built-ins so it can be imported anywhere.
+ * A "sprint batch" is the lane substrate for ONE session-hosted `sprint` run
+ * seeded with N tasks: the sprint ORCHESTRATOR AGENT fans out per-task
+ * subagents with bounded concurrency in the shared session worktree, and each
+ * task's progress is a "lane" — a `sprint_batch_tasks` row (migration 022)
+ * written through the `SprintLaneStore` chokepoint (driven by the
+ * `cyboflow_update_sprint_task` MCP tool). These row types + status unions are
+ * consumed by both the main process (SprintLaneStore, migration 022) and the
+ * renderer (batch picker / lane progress UI). Keep this file free of Node.js
+ * built-ins so it can be imported anywhere.
  */
 import type { CliSubstrate } from './substrate';
 
@@ -19,17 +23,18 @@ export type SprintBatchStatus =
   | 'canceled';
 
 /**
- * Lifecycle of a single task's membership in a batch, independent of the global
+ * Lifecycle of a single task's lane within a batch, independent of the global
  * board stage:
- *  - queued      — selected, not yet launched.
- *  - running     — a per-task run is in flight.
- *  - integrated  — the per-task run drained clean AND its branch merged into the
- *                  integration branch. This is the "satisfied" state for
+ *  - queued      — selected, not yet picked up by a subagent.
+ *  - running     — a per-task subagent is in flight.
+ *  - integrated  — the task is COMPLETE AND COMMITTED in the shared session
+ *                  worktree. (Historically: merged into a per-batch
+ *                  integration branch; there is no per-task branch/merge in
+ *                  the single-run model.) This is the "satisfied" state for
  *                  dependency gating (NOT global board stage 9).
- *  - failed      — the per-task run failed OR its merge conflicted. Surfaced;
- *                  does not crash the batch.
- *  - blocked     — reserved: a task whose only prereq failed (not auto-set in
- *                  this phase; the scheduler leaves such a task `queued`).
+ *  - failed      — the per-task subagent failed. Surfaced; does not crash the
+ *                  sprint.
+ *  - blocked     — a task whose prereq failed; the orchestrator skips it.
  */
 export type SprintBatchTaskStatus =
   | 'queued'
@@ -47,8 +52,8 @@ export const TERMINAL_BATCH_STATUSES = ['completed', 'failed', 'canceled'] as co
 export type TerminalBatchStatus = (typeof TERMINAL_BATCH_STATUSES)[number];
 
 /**
- * Fixed parallel-agent concurrency. At most this many `task` runs execute
- * simultaneously, regardless of batch size or substrate.
+ * Fixed parallel-agent concurrency. At most this many per-task subagents
+ * execute simultaneously, regardless of batch size or substrate.
  */
 export const SPRINT_BATCH_CAP = 5;
 
@@ -68,7 +73,7 @@ export interface SprintBatchRow {
   project_id: number;
   substrate: CliSubstrate;
   status: SprintBatchStatus;
-  /** 'sprint/<id8>' — created off the project main branch at create. NULL only transiently. */
+  /** Legacy scheduler-model column — always NULL in the single-run lane model (the sprint executes in the session worktree; merge to main is the normal session Merge close-out). */
   integration_branch: string | null;
   /** Project main branch captured at create (triage). */
   base_branch: string | null;
@@ -76,9 +81,9 @@ export interface SprintBatchRow {
   base_sha: string | null;
   /** Bounded concurrency for this batch (defaults to SPRINT_BATCH_CAP). */
   concurrency: number;
-  /** The single sprint-init run that drives dependency analysis (soft link). */
+  /** Legacy scheduler-model column (sprint-init run soft link) — always NULL in the single-run lane model. */
   init_run_id: string | null;
-  /** The single sprint-finalize run (soft link). */
+  /** Legacy scheduler-model column (sprint-finalize run soft link) — always NULL in the single-run lane model. */
   finalize_run_id: string | null;
   error_message: string | null;
   created_at: string;
@@ -86,30 +91,65 @@ export interface SprintBatchRow {
   completed_at: string | null;
 }
 
-/** Row shape of the `sprint_batch_tasks` table (migration 022). */
+/** Row shape of the `sprint_batch_tasks` table (migrations 022 + 023). */
 export interface SprintBatchTaskRow {
   id: number;
   batch_id: string;
   task_id: string;
   status: SprintBatchTaskStatus;
-  /** The per-task run currently/last executing this task (soft link). */
+  /** Legacy scheduler-model column (per-task run soft link) — always NULL in the single-run lane model. */
   run_id: string | null;
-  /** Merge-conflict / run-fail detail when status='failed'. */
+  /** Subagent-fail detail when status='failed'. */
   error_message: string | null;
   integrated_at: string | null;
+  /** The lane step the per-task subagent is currently on (migration 023) — a SprintLaneStepId, or NULL before the first cyboflow_update_sprint_task report. */
+  current_step_id: string | null;
   created_at: string;
   updated_at: string;
 }
 
+// ─── Lane step vocabulary + lane read-model ──────────────────────────────────
+
 /**
- * Read-model for batch progress (cyboflow.runs.batchProgress). A small
- * aggregate the picker / progress UI can poll without loading every row.
+ * The fixed per-task lane step vocabulary the sprint orchestrator's subagents
+ * report through `cyboflow_update_sprint_task` (`current_step` enum). These
+ * are LANE steps inside the single 'execute-tasks' workflow step — NOT
+ * workflow step ids — and mirror the historical per-task sprint pipeline.
  */
-export interface SprintBatchProgress {
-  status: SprintBatchStatus;
-  total: number;
-  queued: number;
-  running: number;
-  integrated: number;
-  failed: number;
+export const SPRINT_LANE_STEP_IDS = [
+  'implement',
+  'write-tests',
+  'code-review',
+  'task-verify',
+  'visual-verify',
+] as const;
+export type SprintLaneStepId = (typeof SPRINT_LANE_STEP_IDS)[number];
+
+/**
+ * Read-model for a single task lane (SprintLaneStore.listLanes /
+ * cyboflow.runs.listLanes). `ref`/`title` are resolved fail-soft from the
+ * `tasks` table (NULL when the task row is missing).
+ */
+export interface SprintLaneRow {
+  batchId: string;
+  taskId: string;
+  status: SprintBatchTaskStatus;
+  currentStepId: string | null;
+  ref: string | null;
+  title: string | null;
+  updatedAt: string;
+}
+
+/**
+ * Event payload emitted by sprintLaneEvents on the per-run
+ * `sprint-lane-<runId>` channel after every lane write. Consumed by the tRPC
+ * lane subscription and the run progress rail.
+ */
+export interface SprintLaneChangedEvent {
+  runId: string;
+  batchId: string;
+  taskId: string;
+  status: SprintBatchTaskStatus;
+  currentStepId: string | null;
+  timestamp: string;
 }

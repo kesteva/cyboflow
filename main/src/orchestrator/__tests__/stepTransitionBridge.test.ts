@@ -84,7 +84,7 @@ describe('resolveInitialStepId', () => {
 
   it('returns stable bare step ids matching the first step of each WORKFLOW_DEFINITIONS entry', () => {
     expect(resolveInitialStepId('planner')).toBe('context');
-    expect(resolveInitialStepId('sprint')).toBe('implement');
+    expect(resolveInitialStepId('sprint')).toBe('analyze-dependencies');
   });
 });
 
@@ -111,11 +111,11 @@ describe('buildStepTransitionEvent — happy path', () => {
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
-    const event = buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
+    const event = buildStepTransitionEvent(runId, 'execute-tasks', 'running', adapter, logger);
 
     expect(event).not.toBeNull();
     expect(event!.runId).toBe(runId);
-    expect(event!.stepId).toBe('implement');
+    expect(event!.stepId).toBe('execute-tasks');
     expect(event!.status).toBe('running');
     expect(typeof event!.timestamp).toBe('string');
 
@@ -123,7 +123,7 @@ describe('buildStepTransitionEvent — happy path', () => {
     expect(emittedEvents).toHaveLength(1);
     expect(emittedEvents[0]).toMatchObject({
       runId,
-      stepId: 'implement',
+      stepId: 'execute-tasks',
       status: 'running',
     });
   });
@@ -142,10 +142,10 @@ describe('buildStepTransitionEvent — happy path', () => {
       dbValueAtEmitTime = row?.current_step_id;
     });
 
-    buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
+    buildStepTransitionEvent(runId, 'execute-tasks', 'running', adapter, logger);
 
     // The DB must have been updated BEFORE the event fired.
-    expect(dbValueAtEmitTime).toBe('implement');
+    expect(dbValueAtEmitTime).toBe('execute-tasks');
   });
 
   it('(c) emit happens AFTER the UPDATE (write-then-emit ordering verified via event listener read)', () => {
@@ -160,11 +160,11 @@ describe('buildStepTransitionEvent — happy path', () => {
         .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
         .get(runId) as { current_step_id: string | null } | undefined;
       // Record whether the DB had the value when the listener fired.
-      callLog.push(row?.current_step_id === 'implement' ? 'db-written-before-emit' : 'db-not-written');
+      callLog.push(row?.current_step_id === 'execute-tasks' ? 'db-written-before-emit' : 'db-not-written');
       callLog.push('emit-fired');
     });
 
-    buildStepTransitionEvent(runId, 'implement', 'done', adapter);
+    buildStepTransitionEvent(runId, 'execute-tasks', 'done', adapter);
 
     expect(callLog[0]).toBe('db-written-before-emit');
     expect(callLog[1]).toBe('emit-fired');
@@ -365,20 +365,20 @@ describe('buildStepTransitionEvent — stepId validation', () => {
   });
 
   it('rejects a built-in stepId that the edit REMOVED from spec_json', () => {
-    // Custom sprint def that keeps only 'implement' — the built-in 'write-tests'
-    // step has been removed by the edit and must now be rejected.
+    // Custom sprint def that keeps only 'analyze-dependencies' — the built-in
+    // 'execute-tasks' step has been removed by the edit and must now be rejected.
     const editedDef: WorkflowDefinition = {
       id: 'sprint',
       phases: [
         {
-          id: 'execute',
-          label: 'Execute',
-          color: '#c96442',
+          id: 'plan',
+          label: 'Plan',
+          color: '#5a4ad6',
           steps: [
             {
-              id: 'implement',
-              name: 'Implement task',
-              agent: 'executor',
+              id: 'analyze-dependencies',
+              name: 'Analyze dependencies',
+              agent: 'dependency-analyzer',
               mcps: [],
               retries: 0,
             },
@@ -389,13 +389,13 @@ describe('buildStepTransitionEvent — stepId validation', () => {
     const sprintFlatStepIds = WORKFLOW_DEFINITIONS.sprint.phases
       .flatMap((p) => p.steps)
       .map((s) => s.id);
-    expect(sprintFlatStepIds).toContain('write-tests');
+    expect(sprintFlatStepIds).toContain('execute-tasks');
 
     const { db, runId } = seedForBridge('sprint', JSON.stringify(editedDef));
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
-    const result = buildStepTransitionEvent(runId, 'write-tests', 'running', adapter, logger);
+    const result = buildStepTransitionEvent(runId, 'execute-tasks', 'running', adapter, logger);
 
     expect(result).toBeNull();
     expect(emittedEvents).toHaveLength(0);
@@ -406,6 +406,6 @@ describe('buildStepTransitionEvent — stepId validation', () => {
     expect(row?.current_step_id).toBeNull();
 
     expect(logger.warn).toHaveBeenCalledOnce();
-    expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('write-tests');
+    expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('execute-tasks');
   });
 });

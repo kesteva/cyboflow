@@ -38,13 +38,7 @@ export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflow
  */
 const INITIAL_STEP_IDS: Record<CyboflowWorkflowName, string> = {
   planner: 'context',
-  sprint:  'implement',
-  // Parallel-sprint internal flows (feat/parallel-sprint). Their first step id is
-  // the first step of their single phase. These flows are launched by the
-  // SprintBatchScheduler, but they still flow through the step-transition bridge.
-  task: 'implement',
-  'sprint-init': 'analyze-dependencies',
-  'sprint-finalize': 'sprint-verify',
+  sprint:  'analyze-dependencies',
 } as const;
 
 /**

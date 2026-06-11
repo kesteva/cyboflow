@@ -351,7 +351,7 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
       expect(promptArg).toBe(`${expectedAppend}\n\n${prompt}`);
       // The instruction names cyboflow_report_step and lists the run's step ids.
       expect(promptArg).toContain('cyboflow_report_step');
-      expect(promptArg).toContain('`implement`');
+      expect(promptArg).toContain('`analyze-dependencies`');
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
@@ -447,10 +447,10 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
 
       // Drive a report_step transition through the SHARED chain (the same
       // buildStepTransitionEvent the SDK path and TASK-802's handleReportStep
-      // call). 'write-tests' is the second flat sprint step — a valid, non-initial
-      // id so prior steps ('implement') must read 'done'.
+      // call). 'execute-tasks' is the second flat sprint step — a valid, non-initial
+      // id so prior steps ('analyze-dependencies') must read 'done'.
       const logger = makeSpyLogger();
-      const advanceTo = 'write-tests';
+      const advanceTo = 'execute-tasks';
       const event = buildStepTransitionEvent(runId, advanceTo, 'running', dbAdapter(db), logger);
 
       // (a) current_step_id was written.
@@ -472,9 +472,9 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
       expect(phase.currentStepId).toBe(advanceTo);
 
       const byId = new Map(phase.stepStates.map((s) => [s.stepId, s.status]));
-      expect(byId.get('implement')).toBe('done');
-      expect(byId.get('write-tests')).toBe('running');
-      expect(byId.get('code-review')).toBe('pending');
+      expect(byId.get('analyze-dependencies')).toBe('done');
+      expect(byId.get('execute-tasks')).toBe('running');
+      expect(byId.get('sprint-verify')).toBe('pending');
 
       // (d) the transcript tail fired ZERO panel events for that advance — the
       // advance is MCP-driven, not stream-derived (stream-independence assertion).
