@@ -594,7 +594,12 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     });
 
     // A session was created for the launch + its default panels bootstrapped.
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    // The click handler's async chain (createQuick → createPanel → runStart)
+    // settles across microtasks, so gate on waitFor rather than asserting
+    // synchronously — a bare expect here races and flakes on slow CI runners.
+    await waitFor(() => {
+      expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    });
     expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
     expect(panelApi.createPanel).toHaveBeenCalledWith({
       sessionId: 'session-quick-001',
