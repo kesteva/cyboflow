@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '../../utils/cn';
 import { X } from 'lucide-react';
 
@@ -99,7 +100,12 @@ export const Modal: React.FC<ModalProps> = ({
     mouseDownTargetRef.current = null;
   };
   
-  return (
+  // PORTAL to document.body: a modal must not be subject to ancestor visual
+  // context (e.g. the archived-card opacity-60 dim, overflow clipping, or a
+  // transform creating a containing block for the fixed overlay). React portals
+  // still bubble synthetic events through the REACT tree, so wrappers like the
+  // card menu's stopPropagation span keep working unchanged.
+  return createPortal(
     <div
       className="fixed inset-0 z-modal-backdrop flex items-center justify-center p-4 overflow-y-auto"
       onMouseDown={handleOverlayMouseDown}
@@ -134,7 +140,8 @@ export const Modal: React.FC<ModalProps> = ({
         )}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };
 
