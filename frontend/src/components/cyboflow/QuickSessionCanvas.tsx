@@ -14,7 +14,8 @@
  * first-class path to promote the session into a structured run. Workflow buttons
  * read the REAL catalogue (cyboflow.workflows.list → planner / sprint), never a
  * hardcoded list; clicking one launches it onto THIS session (Planner via the
- * idea-picker gate). "Browse all" opens the full WorkflowPicker.
+ * idea-picker gate, Sprint via the task-batch picker gate). "Browse all" opens
+ * the full WorkflowPicker.
  */
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { trpc } from '../../trpc/client';
@@ -26,6 +27,8 @@ import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics } from '../../hooks/useSessionMetrics';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
+import { TaskBatchPickerModal } from './TaskBatchPickerModal';
+import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import type { Session } from '../../types/session';
 
 interface QuickSessionCanvasProps {
@@ -157,6 +160,9 @@ export function QuickSessionCanvas({
   // Planner pre-launch idea gate (migration 017): a planner click opens the
   // picker first, then launches with the chosen ideaId.
   const [plannerIdForGate, setPlannerIdForGate] = useState<string | null>(null);
+  // Sprint pre-launch task gate (parallel sprint): a sprint click opens the
+  // multi-task picker first, then launches ONE seeded run with the taskIds.
+  const [sprintIdForGate, setSprintIdForGate] = useState<string | null>(null);
   const [addHovered, setAddHovered] = useState(false);
   const [browseHovered, setBrowseHovered] = useState(false);
 
@@ -196,9 +202,14 @@ export function QuickSessionCanvas({
   const handleWorkflowClick = useCallback(
     (row: WorkflowRow) => {
       if (isLaunching) return;
-      // Planner is idea-gated — open the picker; Sprint (and others) launch directly.
+      // Planner is idea-gated, Sprint is task-batch-gated — open the matching
+      // picker; other workflows launch directly.
       if (row.name === 'planner') {
         setPlannerIdForGate(row.id);
+        return;
+      }
+      if (row.name === 'sprint') {
+        setSprintIdForGate(row.id);
         return;
       }
       void launch(row.id);
@@ -210,9 +221,18 @@ export function QuickSessionCanvas({
     (ideaId: string) => {
       const id = plannerIdForGate;
       setPlannerIdForGate(null);
-      if (id !== null) void launch(id, ideaId);
+      if (id !== null) void launch(id, { ideaId });
     },
     [plannerIdForGate, launch],
+  );
+
+  const handleBatchPicked = useCallback(
+    (taskIds: string[]) => {
+      const id = sprintIdForGate;
+      setSprintIdForGate(null);
+      if (id !== null && taskIds.length > 0) void launch(id, { taskIds });
+    },
+    [sprintIdForGate, launch],
   );
 
   const repo = projectName && projectName.length > 0 ? projectName : session.name;
@@ -504,6 +524,19 @@ export function QuickSessionCanvas({
           projectId={projectId}
           onClose={() => setPlannerIdForGate(null)}
           onPicked={handleIdeaPicked}
+        />
+      )}
+
+      {/* Sprint task-batch gate (parallel sprint) — the canvas fast lane uses
+          DEFAULT_SUBSTRATE (mirrors useLaunchWorkflow), so the picker's cap
+          resolves off the same value the launch will stamp. */}
+      {sprintIdForGate !== null && (
+        <TaskBatchPickerModal
+          isOpen
+          projectId={projectId}
+          substrate={DEFAULT_SUBSTRATE}
+          onClose={() => setSprintIdForGate(null)}
+          onPicked={handleBatchPicked}
         />
       )}
     </div>

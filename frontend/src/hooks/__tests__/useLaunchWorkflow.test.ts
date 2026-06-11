@@ -64,13 +64,29 @@ describe('useLaunchWorkflow', () => {
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-1');
   });
 
-  it('threads ideaId into the mutation when provided (Planner gate)', async () => {
+  it('threads seed.ideaId into the mutation when provided (Planner gate)', async () => {
     const { result } = renderHook(() => useLaunchWorkflow(7));
     await act(async () => {
-      await result.current.launch('wf-planner', 'idea-3');
+      await result.current.launch('wf-planner', { ideaId: 'idea-3' });
     });
     expect(mockStartMutate).toHaveBeenCalledWith(
       expect.objectContaining({ workflowId: 'wf-planner', ideaId: 'idea-3' }),
+    );
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ taskIds: expect.anything() }),
+    );
+  });
+
+  it('threads seed.taskIds into the mutation when provided (Sprint batch gate)', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-sprint', { taskIds: ['task-a', 'task-b'] });
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowId: 'wf-sprint', taskIds: ['task-a', 'task-b'] }),
+    );
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ ideaId: expect.anything() }),
     );
   });
 

@@ -42,6 +42,15 @@ vi.mock('../IdeaPickerModal', () => ({
     ) : null,
 }));
 
+vi.mock('../TaskBatchPickerModal', () => ({
+  TaskBatchPickerModal: (props: { isOpen: boolean; onPicked: (ids: string[]) => void }) =>
+    props.isOpen ? (
+      <button data-testid="mock-pick-tasks" onClick={() => props.onPicked(['task-a', 'task-b'])}>
+        pick tasks
+      </button>
+    ) : null,
+}));
+
 import { QuickSessionCanvas } from '../QuickSessionCanvas';
 import type { Session } from '../../../types/session';
 
@@ -102,12 +111,17 @@ describe('QuickSessionCanvas', () => {
     expect(screen.getByTestId('quick-session-browse-all')).toHaveTextContent('Browse all 2 workflows');
   });
 
-  it('launches Sprint directly (no idea gate)', async () => {
+  it('routes Sprint through the task-batch gate before launching (one seeded run)', async () => {
     renderCanvas();
     await waitFor(() => screen.getByTestId('quick-session-launch-sprint'));
     fireEvent.click(screen.getByTestId('quick-session-launch-sprint'));
-    expect(mockLaunch).toHaveBeenCalledWith('wf-sprint');
+    // Gate opens; launch has NOT fired yet.
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(screen.getByTestId('mock-pick-tasks')).toBeInTheDocument();
     expect(screen.queryByTestId('mock-pick-idea')).not.toBeInTheDocument();
+    // Pick tasks → launch ONE run seeded with the taskIds.
+    fireEvent.click(screen.getByTestId('mock-pick-tasks'));
+    expect(mockLaunch).toHaveBeenCalledWith('wf-sprint', { taskIds: ['task-a', 'task-b'] });
   });
 
   it('routes Planner through the idea-picker gate before launching', async () => {
@@ -119,7 +133,7 @@ describe('QuickSessionCanvas', () => {
     expect(screen.getByTestId('mock-pick-idea')).toBeInTheDocument();
     // Pick an idea → launch with the chosen ideaId.
     fireEvent.click(screen.getByTestId('mock-pick-idea'));
-    expect(mockLaunch).toHaveBeenCalledWith('wf-planner', 'idea-x');
+    expect(mockLaunch).toHaveBeenCalledWith('wf-planner', { ideaId: 'idea-x' });
   });
 
   it('opens the full picker via Browse all', async () => {

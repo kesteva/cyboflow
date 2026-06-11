@@ -13,9 +13,10 @@
  * (DEFAULT_SUBSTRATE + the global Agent-Permission-Mode), since the canvas is a
  * fast lane; the full WorkflowPicker ("Browse all") still offers per-run control.
  *
- * `ideaId` threads the Planner's pre-launch seed idea (migration 017). Planner
- * launches MUST pass one (the canvas opens the IdeaPickerModal first); Sprint
- * passes undefined.
+ * `seed.ideaId` threads the Planner's pre-launch seed idea (migration 017);
+ * `seed.taskIds` threads the Sprint's pre-launch task batch. The canvas opens
+ * the matching picker (IdeaPickerModal / TaskBatchPickerModal) first and MUST
+ * pass the corresponding seed; other workflows launch seedless.
  */
 import { useCallback, useRef, useState } from 'react';
 import { trpc } from '../trpc/client';
@@ -24,9 +25,15 @@ import { useConfigStore } from '../stores/configStore';
 import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
 import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 
+/** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
+export interface LaunchSeed {
+  ideaId?: string;
+  taskIds?: string[];
+}
+
 export interface UseLaunchWorkflowResult {
   /** Fire the launch. Resolves to the new runId, or null on failure. */
-  launch: (workflowId: string, ideaId?: string) => Promise<string | null>;
+  launch: (workflowId: string, seed?: LaunchSeed) => Promise<string | null>;
   isLaunching: boolean;
   error: string | null;
 }
@@ -48,7 +55,7 @@ export function useLaunchWorkflow(
     useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
 
   const launch = useCallback(
-    async (workflowId: string, ideaId?: string): Promise<string | null> => {
+    async (workflowId: string, seed?: LaunchSeed): Promise<string | null> => {
       if (inFlightRef.current) return null;
       inFlightRef.current = true;
       setError(null);
@@ -57,10 +64,19 @@ export function useLaunchWorkflow(
         // Launch INTO the active session (the resting quick session), reusing
         // its worktree — ensureSessionForLaunch returns selectedSessionId when set.
         const sessionId = await ensureSessionForLaunch(projectId);
+        const base = {
+          workflowId,
+          projectId,
+          substrate: DEFAULT_SUBSTRATE,
+          sessionId,
+          permissionMode: globalPermissionMode,
+        };
         const result = await trpc.cyboflow.runs.start.mutate(
-          ideaId === undefined
-            ? { workflowId, projectId, substrate: DEFAULT_SUBSTRATE, sessionId, permissionMode: globalPermissionMode }
-            : { workflowId, projectId, substrate: DEFAULT_SUBSTRATE, sessionId, permissionMode: globalPermissionMode, ideaId },
+          seed?.ideaId !== undefined
+            ? { ...base, ideaId: seed.ideaId }
+            : seed?.taskIds !== undefined
+              ? { ...base, taskIds: seed.taskIds }
+              : base,
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         onLaunched?.(result.runId);
