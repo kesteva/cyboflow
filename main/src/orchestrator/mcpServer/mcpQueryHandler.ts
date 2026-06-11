@@ -56,6 +56,8 @@ import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
+import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
+import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
 import type {
   ReviewItemEntityType,
@@ -120,6 +122,17 @@ export type McpQueryMessage =
       dependsOnTaskId: string;
       /** Edge kind; defaults to 'blocking' at the chokepoint. */
       dependencyKind?: TaskDependencyKind;
+    }
+  | {
+      type: 'mcp-update-sprint-task';
+      requestId: string;
+      runId: string;
+      /** The lane's task id (sprint_batch_tasks.task_id). */
+      taskId: string;
+      /** New lane status; at least one of status/currentStepId must be set. */
+      status?: SprintBatchTaskStatus;
+      /** New lane step (SPRINT_LANE_STEP_IDS); at least one of status/currentStepId must be set. */
+      currentStepId?: SprintLaneStepId;
     }
   | {
       type: 'mcp-report-finding';
@@ -267,6 +280,9 @@ export class McpQueryHandler {
           break;
         case 'mcp-add-task-dependency':
           await this.handleAddTaskDependency(msg, client);
+          break;
+        case 'mcp-update-sprint-task':
+          this.handleUpdateSprintTask(msg, client);
           break;
         case 'mcp-report-finding':
           // NON-BLOCKING: writes its response synchronously after enqueuing the
@@ -906,6 +922,114 @@ export class McpQueryHandler {
       requestId,
       ok: false,
       error: 'task_change_failed',
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Sprint lane write (cyboflow_update_sprint_task)
+  //
+  // Per-task progress for the SINGLE session-hosted sprint run: the sprint
+  // orchestrator agent reports each task's lane status / current step, which
+  // routes through the SprintLaneStore chokepoint (NOT TaskChangeRouter —
+  // sprint_batch_tasks is a non-entity table; see migration 022's header).
+  // The write is keyed by the calling run's workflow_runs.batch_id, stamped at
+  // launch by RunLauncher; a run without a batch (quick session, planner, a
+  // sprint launched without seed tasks) is rejected.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Update one sprint lane's status and/or current step.
+   *
+   * Guards: resolveTaskRunContext (sentinel / missing / terminal run — reused
+   * for parity with the other task-scoped writes), then the run row must carry
+   * a non-null batch_id ('sprint_lane_requires_batch_run'). Lane-level
+   * validation (step vocabulary, status domain, at-least-one-field, unknown
+   * lane) is enforced INSIDE SprintLaneStore.updateLane and surfaces here as
+   * SprintLaneError.code (bad_request | lane_not_found) — DESIGNED rejections,
+   * mapped by writeSprintLaneError (mirrors writeTaskChangeError).
+   */
+  private handleUpdateSprintTask(
+    msg: Extract<McpQueryMessage, { type: 'mcp-update-sprint-task' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    // The lane substrate is keyed by the run's batch (workflow_runs.batch_id,
+    // migration 022 — stamped by RunLauncher when the sprint launches with
+    // seed tasks). Read defensively: a NULL/absent batch is a designed reject.
+    const runRow = this.db
+      .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
+      .get(msg.runId) as { batchId?: unknown } | undefined;
+    const batchId = typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
+    if (!batchId) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'sprint_lane_requires_batch_run',
+      });
+      return;
+    }
+
+    try {
+      const lane = SprintLaneStore.getInstance().updateLane({
+        runId: msg.runId,
+        batchId,
+        taskId: msg.taskId,
+        ...(msg.status !== undefined ? { status: msg.status } : {}),
+        ...(msg.currentStepId !== undefined ? { currentStepId: msg.currentStepId } : {}),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          batch_id: lane.batchId,
+          task_id: lane.taskId,
+          status: lane.status,
+          current_step_id: lane.currentStepId,
+          ref: lane.ref,
+          title: lane.title,
+          updated_at: lane.updatedAt,
+        },
+      });
+    } catch (err) {
+      this.writeSprintLaneError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Surface a lane-store failure as an ok:false response. A SprintLaneError
+   * maps to its discriminated .code (mirrors writeTaskChangeError); anything
+   * else is logged and collapsed to the opaque 'sprint_lane_failed'.
+   */
+  private writeSprintLaneError(client: net.Socket, requestId: string, err: unknown): void {
+    if (err instanceof SprintLaneError) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: err.code,
+      });
+      return;
+    }
+    this.logger?.error('[Cyboflow MCP Query] sprint lane update failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId,
+      ok: false,
+      error: 'sprint_lane_failed',
     });
   }
 

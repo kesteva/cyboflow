@@ -1,0 +1,25 @@
+-- Migration 023: Sprint lane current step (sprint-orchestrator redesign).
+--
+-- The parallel-sprint redesign repurposes migration 022's sprint_batch_tasks
+-- rows as "lanes": per-task progress markers written by the ONE sprint
+-- orchestrator run (via the cyboflow_update_sprint_task MCP tool ->
+-- SprintLaneStore) while its subagents execute tasks in the SHARED session
+-- worktree. Each lane now also tracks WHICH per-task step the executing
+-- subagent is on (implement / write-tests / code-review / task-verify /
+-- visual-verify — the SPRINT_LANE_STEP_IDS vocabulary in
+-- shared/types/sprintBatch.ts), rendered in the run progress rail.
+--
+-- Ownership: sprint_batch_tasks stays a NON-entity-model table (see migration
+-- 022's header) — writes go directly through the SprintLaneStore chokepoint
+-- (main/src/orchestrator/sprintLaneStore.ts), never through TaskChangeRouter.
+--
+-- NOTE: The ALTER TABLE line has no `IF NOT EXISTS` (SQLite ALTER TABLE does
+-- not support it). Re-running this migration raises 'duplicate column name:
+-- current_step_id', which runFileBasedMigrations() in database.ts treats as
+-- the already-applied idempotency signal (same mechanism migrations 013 / 017
+-- / 018 / 019 / 022 rely on).
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() wraps every
+-- file in a this.transaction(...) call.
+
+ALTER TABLE sprint_batch_tasks ADD COLUMN current_step_id TEXT;  -- SprintLaneStepId; NULL until the executor reports

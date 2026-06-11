@@ -293,3 +293,88 @@ describe('cyboflowMcpServer CallTool cyboflow_report_finding validation', () => 
     expect(res['error']).not.toBe('invalid_arguments');
   });
 });
+
+// ---------------------------------------------------------------------------
+// cyboflow_update_sprint_task — declaration + CallTool validation
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer ListTools cyboflow_update_sprint_task', () => {
+  it('declares cyboflow_update_sprint_task with the documented inputSchema', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('cyboflow_update_sprint_task');
+
+    const lane = tools.find((t) => t.name === 'cyboflow_update_sprint_task');
+    expect(lane).toBeDefined();
+    const schema = lane!.inputSchema;
+    expect(schema.required).toEqual(['task_id']);
+    expect(schema.properties['task_id'].type).toBe('string');
+    // Lane status reuses the SprintBatchTaskStatus domain (migration 022 CHECK).
+    expect(schema.properties['status'].enum).toEqual([
+      'queued',
+      'running',
+      'integrated',
+      'failed',
+      'blocked',
+    ]);
+    // The fixed per-task lane step vocabulary (SPRINT_LANE_STEP_IDS).
+    expect(schema.properties['current_step'].enum).toEqual([
+      'implement',
+      'write-tests',
+      'code-review',
+      'task-verify',
+      'visual-verify',
+    ]);
+  });
+
+  it("documents the 'integrated' = committed-in-session-worktree semantics", async () => {
+    const tools = await listTools();
+    const lane = tools.find((t) => t.name === 'cyboflow_update_sprint_task');
+    expect(lane!.description).toContain('session worktree');
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', () => {
+  it('rejects a missing or empty task_id', async () => {
+    expect(await callTool('cyboflow_update_sprint_task', { status: 'running' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_update_sprint_task', { task_id: '', status: 'running' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('rejects an out-of-enum status', async () => {
+    expect(
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', status: 'done' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects an out-of-enum current_step', async () => {
+    expect(
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'deploy' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects a call with NEITHER status nor current_step', async () => {
+    expect(await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation with status only / current_step only and reaches the dispatch path', async () => {
+    // The net mock reports destroyed:true so sendQuery rejects immediately; the
+    // point is that arg validation PASSED (no 'invalid_arguments').
+    const statusOnly = await callTool('cyboflow_update_sprint_task', {
+      task_id: 'tsk_a',
+      status: 'integrated',
+    });
+    expect(statusOnly['error']).not.toBe('invalid_arguments');
+
+    const stepOnly = await callTool('cyboflow_update_sprint_task', {
+      task_id: 'tsk_a',
+      current_step: 'write-tests',
+    });
+    expect(stepOnly['error']).not.toBe('invalid_arguments');
+  });
+});

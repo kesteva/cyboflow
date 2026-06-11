@@ -30,6 +30,7 @@ import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestrator
 import { stepTransitionEvents } from '../../trpc/routers/events';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
+import { SprintLaneStore, sprintLaneEvents } from '../../sprintLaneStore';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -501,17 +502,17 @@ describe('McpQueryHandler', () => {
 
       const { socket, writes } = makeSocketDouble();
       await reportHandler.handleMessage(
-        { type: 'mcp-report-step', requestId: 'rs-2', runId, stepId: 'write-tests', status: 'running' },
+        { type: 'mcp-report-step', requestId: 'rs-2', runId, stepId: 'execute-tasks', status: 'running' },
         socket,
       );
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
-      expect(response.data).toEqual({ step_id: 'write-tests', status: 'running' });
+      expect(response.data).toEqual({ step_id: 'execute-tasks', status: 'running' });
 
-      expect(currentStepId(reportDb, runId)).toBe('write-tests');
+      expect(currentStepId(reportDb, runId)).toBe('execute-tasks');
       expect(emitted).toHaveLength(1);
-      expect(emitted[0]).toMatchObject({ runId, stepId: 'write-tests', status: 'running' });
+      expect(emitted[0]).toMatchObject({ runId, stepId: 'execute-tasks', status: 'running' });
     });
 
     it('defaults status to "running" when omitted', async () => {
@@ -519,13 +520,13 @@ describe('McpQueryHandler', () => {
 
       const { socket, writes } = makeSocketDouble();
       await reportHandler.handleMessage(
-        { type: 'mcp-report-step', requestId: 'rs-3', runId, stepId: 'implement' },
+        { type: 'mcp-report-step', requestId: 'rs-3', runId, stepId: 'analyze-dependencies' },
         socket,
       );
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
-      expect(response.data).toEqual({ step_id: 'implement', status: 'running' });
+      expect(response.data).toEqual({ step_id: 'analyze-dependencies', status: 'running' });
       expect(emitted[0].status).toBe('running');
     });
 
@@ -1694,13 +1695,13 @@ describe('mcp-report-step does not pause on human steps', () => {
 
     const { socket, writes } = makeSocketDouble();
     await gateHandler.handleMessage(
-      { type: 'mcp-report-step', requestId: 'hg-2', runId: 'run-g', stepId: 'implement', status: 'running' },
+      { type: 'mcp-report-step', requestId: 'hg-2', runId: 'run-g', stepId: 'execute-tasks', status: 'running' },
       socket,
     );
 
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(true);
-    expect(response.data).toEqual({ step_id: 'implement', status: 'running' });
+    expect(response.data).toEqual({ step_id: 'execute-tasks', status: 'running' });
 
     const status = (gateDb.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-g') as { status: string })
       .status;
@@ -1865,5 +1866,212 @@ describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () 
     expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
       stage(1),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp-update-sprint-task — sprint lane writes via SprintLaneStore
+// ---------------------------------------------------------------------------
+
+describe('mcp-update-sprint-task (sprint lane writes)', () => {
+  // The handler resolves the calling run's batch (workflow_runs.batch_id,
+  // migration 022) and routes the write through SprintLaneStore, so we need
+  // the entity schema PLUS the sprint-batch tables: 006 -> 011 -> 014 -> 015
+  // (mirrors buildTaskDb above) -> 022 (sprint_batches / sprint_batch_tasks /
+  // workflow_runs.batch_id) -> 023 (sprint_batch_tasks.current_step_id).
+  function buildLaneDb(): Database.Database {
+    const laneDb = new Database(':memory:');
+    laneDb.pragma('foreign_keys = ON');
+    laneDb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    laneDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    laneDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
+    return laneDb;
+  }
+
+  /** Seed a workflows + workflow_runs pair, optionally stamped with a batch_id. */
+  function seedSprintRun(
+    laneDb: Database.Database,
+    opts: { runId: string; batchId?: string | null; status?: string },
+  ): void {
+    laneDb
+      .prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      )
+      .run();
+    laneDb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, batch_id)
+         VALUES (?, 'wf-1', 1, ?, 'execute-tasks', '{"execute-tasks":"executor"}', ?)`,
+      )
+      .run(opts.runId, opts.status ?? 'running', opts.batchId ?? null);
+  }
+
+  let laneDb: Database.Database;
+  let laneHandler: McpQueryHandler;
+
+  beforeEach(() => {
+    laneDb = buildLaneDb();
+    SprintLaneStore.initialize(dbAdapter(laneDb));
+    laneHandler = new McpQueryHandler(dbAdapter(laneDb));
+  });
+
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    sprintLaneEvents.removeAllListeners();
+    laneDb.close();
+  });
+
+  it('happy path: updates the lane via SprintLaneStore and replies with the snake_case lane row', async () => {
+    laneDb
+      .prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+         VALUES ('tsk_a', 1, 'TASK-001', 'First task', 'board-1-default', 'stage-board-1-default-5')`,
+      )
+      .run();
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'mcp-update-sprint-task',
+        requestId: 'us-1',
+        runId: 'run-s',
+        taskId: 'tsk_a',
+        status: 'running',
+        currentStepId: 'implement',
+      },
+      socket,
+    );
+
+    // Wire-protocol contract: newline-delimited framing.
+    expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
+    const response = parseLastWrite(writes);
+    expect(response.type).toBe('mcp-query-response');
+    expect(response.requestId).toBe('us-1');
+    expect(response.ok).toBe(true);
+
+    const data = response.data as {
+      batch_id: string;
+      task_id: string;
+      status: string;
+      current_step_id: string | null;
+      ref: string | null;
+      title: string | null;
+      updated_at: string;
+    };
+    expect(data.batch_id).toBe(batchId);
+    expect(data.task_id).toBe('tsk_a');
+    expect(data.status).toBe('running');
+    expect(data.current_step_id).toBe('implement');
+    expect(data.ref).toBe('TASK-001');
+    expect(data.title).toBe('First task');
+    expect(typeof data.updated_at).toBe('string');
+
+    // The DB row actually changed.
+    const row = laneDb
+      .prepare('SELECT status, current_step_id FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, 'tsk_a') as { status: string; current_step_id: string | null };
+    expect(row.status).toBe('running');
+    expect(row.current_step_id).toBe('implement');
+  });
+
+  it('rejects a run with NULL batch_id with sprint_lane_requires_batch_run (no write)', async () => {
+    seedSprintRun(laneDb, { runId: 'run-nb', batchId: null });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      { type: 'mcp-update-sprint-task', requestId: 'us-2', runId: 'run-nb', taskId: 'tsk_a', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('sprint_lane_requires_batch_run');
+  });
+
+  it("rejects the 'orchestrator' sentinel runId before any DB touch", async () => {
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'mcp-update-sprint-task',
+        requestId: 'us-3',
+        runId: 'orchestrator',
+        taskId: 'tsk_a',
+        status: 'running',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    // Parity with the other task-scoped writes (resolveTaskRunContext).
+    expect(response.error).toBe('task_write_requires_real_run');
+  });
+
+  it('rejects a terminal run with run_not_active', async () => {
+    seedSprintRun(laneDb, { runId: 'run-done', batchId: 'b-any', status: 'completed' });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      { type: 'mcp-update-sprint-task', requestId: 'us-4', runId: 'run-done', taskId: 'tsk_a', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('run_not_active');
+  });
+
+  it('maps a SprintLaneError onto the wire: unknown lane -> lane_not_found', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'mcp-update-sprint-task',
+        requestId: 'us-5',
+        runId: 'run-s',
+        taskId: 'tsk_not_in_batch',
+        status: 'running',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('lane_not_found');
+  });
+
+  it('maps a SprintLaneError onto the wire: no field given -> bad_request', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      { type: 'mcp-update-sprint-task', requestId: 'us-6', runId: 'run-s', taskId: 'tsk_a' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('bad_request');
   });
 });

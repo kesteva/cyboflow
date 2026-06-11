@@ -253,6 +253,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_update_sprint_task',
+        description:
+          "Report per-task progress for THIS sprint run's task lanes (the structured per-task progress rail). The lane is run-bound: the batch is derived from CYBOFLOW_RUN_ID's workflow_runs.batch_id (a run launched without a sprint task batch is rejected with error sprint_lane_requires_batch_run). At least one of status / current_step is required. status='integrated' means the task is complete AND committed in the session worktree. This does NOT move the task on the board (board stages are orchestrator-derived) and does NOT pause the run.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: { type: 'string', description: 'The task id whose lane to update (required; must be in this sprint batch)' },
+            status: {
+              type: 'string',
+              enum: ['queued', 'running', 'integrated', 'failed', 'blocked'],
+              description: "Optional new lane status; 'integrated' = task complete + committed in the session worktree",
+            },
+            current_step: {
+              type: 'string',
+              enum: ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify'],
+              description: 'Optional per-task lane step the executing subagent is on',
+            },
+          },
+          required: ['task_id'],
+        },
+      },
+      {
         name: 'cyboflow_report_finding',
         description:
           'Report a NON-BLOCKING observation, decision, or human action item into THIS project\'s unified review queue (the human-attention inbox). The item is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single review-item chokepoint, and surfaces in the review queue. By default findings are NON-BLOCKING (the run is never paused, status is unchanged, the user is not interrupted); set blocking:true only for items that should gate run resume. This is OBSERVATIONAL — contrast with the PreToolUse approval gate.',
@@ -656,6 +678,80 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id, dependsOnTaskId: depends_on_task_id };
       if (kind !== undefined) queryParams['dependencyKind'] = kind;
       return executeMcpQuery('mcp-add-task-dependency', queryParams);
+    }
+
+    case 'cyboflow_update_sprint_task': {
+      const args = (request.params.arguments ?? {}) as {
+        task_id?: unknown;
+        status?: unknown;
+        current_step?: unknown;
+      };
+      const { task_id, status, current_step } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string' }) },
+          ],
+        };
+      }
+      if (
+        status !== undefined &&
+        status !== 'queued' &&
+        status !== 'running' &&
+        status !== 'integrated' &&
+        status !== 'failed' &&
+        status !== 'blocked'
+      ) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'invalid_arguments',
+                expected: "status: 'queued' | 'running' | 'integrated' | 'failed' | 'blocked' (optional)",
+              }),
+            },
+          ],
+        };
+      }
+      if (
+        current_step !== undefined &&
+        current_step !== 'implement' &&
+        current_step !== 'write-tests' &&
+        current_step !== 'code-review' &&
+        current_step !== 'task-verify' &&
+        current_step !== 'visual-verify'
+      ) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'invalid_arguments',
+                expected:
+                  "current_step: 'implement' | 'write-tests' | 'code-review' | 'task-verify' | 'visual-verify' (optional)",
+              }),
+            },
+          ],
+        };
+      }
+      if (status === undefined && current_step === undefined) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'invalid_arguments',
+                expected: 'at least one of status / current_step',
+              }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { taskId: task_id };
+      if (status !== undefined) queryParams['status'] = status;
+      if (current_step !== undefined) queryParams['currentStepId'] = current_step;
+      return executeMcpQuery('mcp-update-sprint-task', queryParams);
     }
 
     case 'cyboflow_report_finding': {
