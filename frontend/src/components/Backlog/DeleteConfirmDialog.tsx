@@ -68,7 +68,7 @@ export function DeleteConfirmDialog({
         : null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
       <ModalHeader title={`Delete ${task.ref}?`} onClose={onClose} />
       <ModalBody className="space-y-3">
         <div className="flex flex-col gap-2" data-testid="delete-confirm-dialog">

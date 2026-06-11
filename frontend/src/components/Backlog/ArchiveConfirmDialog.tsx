@@ -60,7 +60,7 @@ export function ArchiveConfirmDialog({
   const entityLabel = task.type === 'idea' ? 'idea' : task.type === 'epic' ? 'epic' : 'task';
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
       <ModalHeader title={`Archive ${task.ref}?`} onClose={onClose} />
       <ModalBody className="space-y-3">
         <div className="flex flex-col gap-2" data-testid="archive-confirm-dialog">

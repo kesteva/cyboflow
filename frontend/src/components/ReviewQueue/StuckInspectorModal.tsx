@@ -123,7 +123,7 @@ export const StuckInspectorModal: React.FC<StuckInspectorModalProps> = ({
   }
 
   return (
-    <Modal isOpen onClose={onClose} size="lg">
+    <Modal isOpen onClose={onClose} size="lg" showCloseButton={false}>
       <ModalHeader title="Why is this run stuck?" onClose={onClose} />
       <ModalBody>
         {loading && (

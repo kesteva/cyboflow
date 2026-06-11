@@ -72,7 +72,7 @@ export function StageChangeDialog({
   const target = options.find((s) => s.id === selectedStageId) ?? null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="md">
+    <Modal isOpen={isOpen} onClose={onClose} size="md" showCloseButton={false}>
       <ModalHeader title={`Change stage · ${task.ref}`} onClose={onClose} />
       <ModalBody className="space-y-4">
         <div className="flex flex-col gap-3" data-testid="stage-change-dialog">
