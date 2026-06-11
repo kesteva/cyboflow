@@ -325,6 +325,9 @@ describe('cyboflowMcpServer ListTools cyboflow_update_sprint_task', () => {
       'task-verify',
       'visual-verify',
     ]);
+    // The 1-based implement→verify retry counter (migration 025).
+    expect(schema.properties['attempt'].type).toBe('number');
+    expect(schema.properties['attempt'].description).toContain('re-delegating');
   });
 
   it("documents the 'integrated' = committed-in-session-worktree semantics", async () => {
@@ -362,7 +365,19 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
     });
   });
 
-  it('passes validation with status only / current_step only and reaches the dispatch path', async () => {
+  it('rejects a non-integer or < 1 attempt', async () => {
+    expect(
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'implement', attempt: 0 }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'implement', attempt: 1.5 }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'implement', attempt: '2' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('passes validation with status only / current_step only / attempt alongside and reaches the dispatch path', async () => {
     // The net mock reports destroyed:true so sendQuery rejects immediately; the
     // point is that arg validation PASSED (no 'invalid_arguments').
     const statusOnly = await callTool('cyboflow_update_sprint_task', {
@@ -376,5 +391,12 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
       current_step: 'write-tests',
     });
     expect(stepOnly['error']).not.toBe('invalid_arguments');
+
+    const withAttempt = await callTool('cyboflow_update_sprint_task', {
+      task_id: 'tsk_a',
+      current_step: 'implement',
+      attempt: 2,
+    });
+    expect(withAttempt['error']).not.toBe('invalid_arguments');
   });
 });

@@ -270,6 +270,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify'],
               description: 'Optional per-task lane step the executing subagent is on',
             },
+            attempt: {
+              type: 'number',
+              description: '1-based attempt counter; report when re-delegating implement after a verify failure',
+            },
           },
           required: ['task_id'],
         },
@@ -685,8 +689,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         task_id?: unknown;
         status?: unknown;
         current_step?: unknown;
+        attempt?: unknown;
       };
-      const { task_id, status, current_step } = args;
+      const { task_id, status, current_step, attempt } = args;
       if (typeof task_id !== 'string' || task_id.length === 0) {
         return {
           content: [
@@ -735,6 +740,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (attempt !== undefined && (typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'attempt: integer >= 1 (optional)' }),
+            },
+          ],
+        };
+      }
       if (status === undefined && current_step === undefined) {
         return {
           content: [
@@ -751,6 +766,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id };
       if (status !== undefined) queryParams['status'] = status;
       if (current_step !== undefined) queryParams['currentStepId'] = current_step;
+      if (attempt !== undefined) queryParams['attempt'] = attempt;
       return executeMcpQuery('mcp-update-sprint-task', queryParams);
     }
 

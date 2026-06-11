@@ -91,7 +91,7 @@ export interface SprintBatchRow {
   completed_at: string | null;
 }
 
-/** Row shape of the `sprint_batch_tasks` table (migrations 022 + 023). */
+/** Row shape of the `sprint_batch_tasks` table (migrations 022 + 023 + 025). */
 export interface SprintBatchTaskRow {
   id: number;
   batch_id: string;
@@ -104,6 +104,12 @@ export interface SprintBatchTaskRow {
   integrated_at: string | null;
   /** The lane step the per-task subagent is currently on (migration 023) — a SprintLaneStepId, or NULL before the first cyboflow_update_sprint_task report. */
   current_step_id: string | null;
+  /**
+   * Implement→verify retry counter (migration 025). 0 = first pass (render
+   * nothing); the orchestrator reports attempt N (2, 3, ...) when it
+   * RE-delegates implement after a task-verify FAIL or blocking review defect.
+   */
+  attempts: number;
   created_at: string;
   updated_at: string;
 }
@@ -137,6 +143,22 @@ export interface SprintLaneRow {
   currentStepId: string | null;
   ref: string | null;
   title: string | null;
+  /**
+   * Implement→verify retry counter (migration 025). 0 = first pass (the UI
+   * renders nothing); the orchestrator reports attempt N (2, 3, ...) when it
+   * RE-delegates implement after a task-verify FAIL or blocking review defect.
+   * UI: a running lane with attempts >= 2 shows the dashed loop edge
+   * ("ATTEMPT n/3"); integrated with >= 2 shows "n attempts"; failed shows
+   * "3/3 failed".
+   */
+  attempts: number;
+  /**
+   * Display refs (task ref, falling back to the raw task id) of this lane's
+   * IN-BATCH blocking prerequisites (task_dependencies kind='blocking') whose
+   * own lane in the SAME batch is not yet 'integrated'; [] when none.
+   * Computed on read in listLanes — NOT stored.
+   */
+  blockedByRefs: string[];
   updatedAt: string;
 }
 
@@ -151,5 +173,7 @@ export interface SprintLaneChangedEvent {
   taskId: string;
   status: SprintBatchTaskStatus;
   currentStepId: string | null;
+  /** The lane's current attempts counter (see SprintLaneRow.attempts). */
+  attempts: number;
   timestamp: string;
 }

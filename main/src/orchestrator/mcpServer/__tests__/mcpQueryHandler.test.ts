@@ -1900,6 +1900,7 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
     laneDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '025_sprint_lane_attempts.sql'), 'utf-8'));
     return laneDb;
   }
 
@@ -1972,6 +1973,7 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
       task_id: string;
       status: string;
       current_step_id: string | null;
+      attempts: number;
       ref: string | null;
       title: string | null;
       updated_at: string;
@@ -1980,6 +1982,7 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
     expect(data.task_id).toBe('tsk_a');
     expect(data.status).toBe('running');
     expect(data.current_step_id).toBe('implement');
+    expect(data.attempts).toBe(0);
     expect(data.ref).toBe('TASK-001');
     expect(data.title).toBe('First task');
     expect(typeof data.updated_at).toBe('string');
@@ -1990,6 +1993,61 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
       .get(batchId, 'tsk_a') as { status: string; current_step_id: string | null };
     expect(row.status).toBe('running');
     expect(row.current_step_id).toBe('implement');
+  });
+
+  it('passes attempt through to SprintLaneStore and replies with the updated attempts', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'mcp-update-sprint-task',
+        requestId: 'us-a1',
+        runId: 'run-s',
+        taskId: 'tsk_a',
+        currentStepId: 'implement',
+        attempt: 2,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect((response.data as { attempts: number }).attempts).toBe(2);
+
+    const row = laneDb
+      .prepare('SELECT attempts FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, 'tsk_a') as { attempts: number };
+    expect(row.attempts).toBe(2);
+  });
+
+  it('maps an attempt < 1 onto the wire as bad_request (no write)', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'mcp-update-sprint-task',
+        requestId: 'us-a2',
+        runId: 'run-s',
+        taskId: 'tsk_a',
+        currentStepId: 'implement',
+        attempt: 0,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('bad_request');
+
+    const row = laneDb
+      .prepare('SELECT attempts, current_step_id FROM sprint_batch_tasks WHERE batch_id = ?')
+      .get(batchId) as { attempts: number; current_step_id: string | null };
+    expect(row.attempts).toBe(0);
+    expect(row.current_step_id).toBeNull();
   });
 
   it('rejects a run with NULL batch_id with sprint_lane_requires_batch_run (no write)', async () => {

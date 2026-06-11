@@ -88,6 +88,7 @@ interface LaneDbRow {
   task_id: string;
   status: SprintBatchTaskStatus;
   current_step_id: string | null;
+  attempts: number;
   updated_at: string;
   ref: string | null;
   title: string | null;
@@ -187,11 +188,15 @@ export class SprintLaneStore {
    *
    * Rejections (SprintLaneError):
    *   - 'bad_request'    — neither status nor currentStepId given, status not
-   *                        in the SprintBatchTaskStatus domain, or a non-null
-   *                        currentStepId outside SPRINT_LANE_STEP_IDS.
+   *                        in the SprintBatchTaskStatus domain, a non-null
+   *                        currentStepId outside SPRINT_LANE_STEP_IDS, or an
+   *                        attempt that is not an integer >= 1.
    *   - 'lane_not_found' — no (batch_id, task_id) row.
    *
    * `currentStepId` semantics: undefined = leave unchanged; null = clear.
+   * `attempt` semantics: sets the attempts column verbatim (1-based; the
+   * orchestrator reports 2, 3, ... when re-delegating implement after a
+   * verify failure — see SprintLaneRow.attempts). undefined = leave unchanged.
    * `status='integrated'` stamps integrated_at (task complete + committed in
    * the session worktree). updated_at is always bumped.
    */
@@ -201,11 +206,12 @@ export class SprintLaneStore {
     taskId: string;
     status?: SprintBatchTaskStatus;
     currentStepId?: string | null;
+    attempt?: number;
   }): SprintLaneRow {
-    const { runId, batchId, taskId, status, currentStepId } = args;
+    const { runId, batchId, taskId, status, currentStepId, attempt } = args;
 
-    if (status === undefined && currentStepId === undefined) {
-      throw new SprintLaneError('bad_request', 'updateLane requires at least one of status / currentStepId');
+    if (status === undefined && currentStepId === undefined && attempt === undefined) {
+      throw new SprintLaneError('bad_request', 'updateLane requires at least one of status / currentStepId / attempt');
     }
     if (status !== undefined && !LANE_STATUSES.includes(status)) {
       throw new SprintLaneError('bad_request', `unknown lane status '${String(status)}'`);
@@ -219,6 +225,9 @@ export class SprintLaneStore {
         'bad_request',
         `unknown lane step '${currentStepId}' (expected one of ${SPRINT_LANE_STEP_IDS.join(', ')})`,
       );
+    }
+    if (attempt !== undefined && (!Number.isInteger(attempt) || attempt < 1)) {
+      throw new SprintLaneError('bad_request', `attempt must be an integer >= 1 (got ${String(attempt)})`);
     }
 
     const now = new Date().toISOString();
@@ -245,6 +254,10 @@ export class SprintLaneStore {
         sets.push('current_step_id = ?');
         params.push(currentStepId);
       }
+      if (attempt !== undefined) {
+        sets.push('attempts = ?');
+        params.push(attempt);
+      }
       params.push(existing.id);
       this.db.prepare(`UPDATE sprint_batch_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params);
     });
@@ -262,6 +275,7 @@ export class SprintLaneStore {
       taskId,
       status: lane.status,
       currentStepId: lane.currentStepId,
+      attempts: lane.attempts,
       timestamp: now,
     };
     sprintLaneEvents.emit(sprintLaneChannel(runId), event);
@@ -275,12 +289,13 @@ export class SprintLaneStore {
 
   /**
    * All lanes of a batch in insertion order, with ref/title resolved fail-soft
-   * from the tasks table (LEFT JOIN — null when the task row is missing).
+   * from the tasks table (LEFT JOIN — null when the task row is missing) and
+   * blockedByRefs computed on read (see blockedByRefsForBatch — NOT stored).
    */
   listLanes(batchId: string): SprintLaneRow[] {
     const rows = this.db
       .prepare(
-        `SELECT bt.batch_id, bt.task_id, bt.status, bt.current_step_id, bt.updated_at,
+        `SELECT bt.batch_id, bt.task_id, bt.status, bt.current_step_id, bt.attempts, bt.updated_at,
                 t.ref AS ref, t.title AS title
            FROM sprint_batch_tasks bt
            LEFT JOIN tasks t ON t.id = bt.task_id
@@ -288,24 +303,63 @@ export class SprintLaneStore {
           ORDER BY bt.id ASC`,
       )
       .all(batchId) as LaneDbRow[];
-    return rows.map((row) => this.toLaneRow(row));
+    const blockedBy = this.blockedByRefsForBatch(batchId);
+    return rows.map((row) => this.toLaneRow(row, blockedBy.get(row.task_id) ?? []));
   }
 
   /** One lane (same projection as listLanes), or undefined when absent. */
   private readLane(batchId: string, taskId: string): SprintLaneRow | undefined {
     const row = this.db
       .prepare(
-        `SELECT bt.batch_id, bt.task_id, bt.status, bt.current_step_id, bt.updated_at,
+        `SELECT bt.batch_id, bt.task_id, bt.status, bt.current_step_id, bt.attempts, bt.updated_at,
                 t.ref AS ref, t.title AS title
            FROM sprint_batch_tasks bt
            LEFT JOIN tasks t ON t.id = bt.task_id
           WHERE bt.batch_id = ? AND bt.task_id = ?`,
       )
       .get(batchId, taskId) as LaneDbRow | undefined;
-    return row ? this.toLaneRow(row) : undefined;
+    if (!row) return undefined;
+    const blockedBy = this.blockedByRefsForBatch(batchId);
+    return this.toLaneRow(row, blockedBy.get(row.task_id) ?? []);
   }
 
-  private toLaneRow(row: LaneDbRow): SprintLaneRow {
+  /**
+   * Read-side computation of each lane's IN-BATCH blocking prerequisites:
+   * task_dependencies (kind='blocking') edges whose PREREQUISITE has a lane in
+   * the SAME batch that is not yet 'integrated'. Display refs resolve
+   * fail-soft from the tasks table (fallback to the raw task id). Returns a
+   * blocked-task-id → refs map; tasks without un-integrated in-batch prereqs
+   * are simply absent. Out-of-batch dependencies are ignored — this is lane
+   * gating, not global dependency truth.
+   */
+  private blockedByRefsForBatch(batchId: string): Map<string, string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT dep.task_id AS blocked_task_id,
+                COALESCE(t.ref, dep.depends_on_task_id) AS prereq_ref
+           FROM task_dependencies dep
+           JOIN sprint_batch_tasks pre
+             ON pre.batch_id = ?
+            AND pre.task_id = dep.depends_on_task_id
+            AND pre.status != 'integrated'
+           LEFT JOIN tasks t ON t.id = dep.depends_on_task_id
+          WHERE dep.kind = 'blocking'
+          ORDER BY dep.id ASC`,
+      )
+      .all(batchId) as Array<{ blocked_task_id: string; prereq_ref: string }>;
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      const refs = map.get(row.blocked_task_id);
+      if (refs) {
+        refs.push(row.prereq_ref);
+      } else {
+        map.set(row.blocked_task_id, [row.prereq_ref]);
+      }
+    }
+    return map;
+  }
+
+  private toLaneRow(row: LaneDbRow, blockedByRefs: string[]): SprintLaneRow {
     return {
       batchId: row.batch_id,
       taskId: row.task_id,
@@ -313,6 +367,8 @@ export class SprintLaneStore {
       currentStepId: row.current_step_id,
       ref: row.ref,
       title: row.title,
+      attempts: row.attempts,
+      blockedByRefs,
       updatedAt: row.updated_at,
     };
   }

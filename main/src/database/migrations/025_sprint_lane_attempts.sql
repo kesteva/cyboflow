@@ -1,0 +1,23 @@
+-- Migration 025: Sprint lane attempt counter (swim-lanes canvas).
+--
+-- Each lane (sprint_batch_tasks row, migrations 022 + 023) gains an `attempts`
+-- counter for the per-task implement → verify retry loop: 0 = first pass
+-- (nothing rendered); the sprint orchestrator reports attempt N (2, 3, ...)
+-- via cyboflow_update_sprint_task when it RE-delegates implement after a
+-- task-verify FAIL or a blocking review defect. Rendered by the swim-lanes
+-- canvas as the dashed attempt-loop edge ("ATTEMPT n/3").
+--
+-- Ownership: sprint_batch_tasks stays a NON-entity-model table (see migration
+-- 022's header) — writes go directly through the SprintLaneStore chokepoint
+-- (main/src/orchestrator/sprintLaneStore.ts), never through TaskChangeRouter.
+--
+-- NOTE: The ALTER TABLE line has no `IF NOT EXISTS` (SQLite ALTER TABLE does
+-- not support it). Re-running this migration raises 'duplicate column name:
+-- attempts', which runFileBasedMigrations() in database.ts treats as the
+-- already-applied idempotency signal (same mechanism migrations 013 / 017 /
+-- 018 / 019 / 022 / 023 rely on).
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() wraps every
+-- file in a this.transaction(...) call.
+
+ALTER TABLE sprint_batch_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;  -- 0 = first pass; >= 2 once implement is re-delegated

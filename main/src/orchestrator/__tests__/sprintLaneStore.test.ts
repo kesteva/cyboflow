@@ -18,9 +18,9 @@
  *  6. markBatchTerminal — guarded UPDATE: non-terminal only (a second terminal
  *     flip is a no-op).
  *
- * Uses a migration-backed in-memory DB (006 → 011 → 014 → 015 → 022 → 023),
- * mirroring mcpQueryHandler.test.ts's buildTaskDb so the tasks LEFT JOIN is
- * exercised against the real entity schema.
+ * Uses a migration-backed in-memory DB (006 → 011 → 014 → 015 → 022 → 023 →
+ * 025), mirroring mcpQueryHandler.test.ts's buildTaskDb so the tasks LEFT JOIN
+ * is exercised against the real entity schema.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -62,6 +62,7 @@ function buildLaneDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '025_sprint_lane_attempts.sql'), 'utf-8'));
   return db;
 }
 
@@ -71,6 +72,20 @@ function seedTask(db: Database.Database, id: string, ref: string, title: string)
     `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
      VALUES (?, 1, ?, ?, 'board-1-default', 'stage-board-1-default-5')`,
   ).run(id, ref, title);
+}
+
+/** Insert a task_dependencies edge (both endpoints must be real tasks rows — FK). */
+function seedDependency(
+  db: Database.Database,
+  taskId: string,
+  dependsOnTaskId: string,
+  kind: 'blocking' | 'related' = 'blocking',
+): void {
+  db.prepare('INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, ?)').run(
+    taskId,
+    dependsOnTaskId,
+    kind,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +179,59 @@ describe('SprintLaneStore', () => {
       expect(lanes[1].taskId).toBe('tsk_ghost');
       expect(lanes[1].ref).toBeNull();
       expect(lanes[1].title).toBeNull();
+
+      // Fresh lanes: first pass, no in-batch blockers.
+      expect(lanes[0].attempts).toBe(0);
+      expect(lanes[0].blockedByRefs).toEqual([]);
     });
 
     it('returns an empty array for an unknown batch', () => {
       expect(store.listLanes('no-such-batch')).toEqual([]);
+    });
+
+    it('reports an un-integrated in-batch blocking prereq via its display ref', () => {
+      seedTask(db, 'tsk_pre', 'TASK-001', 'Prereq');
+      seedTask(db, 'tsk_dep', 'TASK-002', 'Dependent');
+      seedDependency(db, 'tsk_dep', 'tsk_pre');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_pre', 'tsk_dep']);
+
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_pre')!.blockedByRefs).toEqual([]);
+      expect(lanes.find((l) => l.taskId === 'tsk_dep')!.blockedByRefs).toEqual(['TASK-001']);
+    });
+
+    it("drops a prereq from blockedByRefs once its lane is 'integrated'", () => {
+      seedTask(db, 'tsk_pre', 'TASK-001', 'Prereq');
+      seedTask(db, 'tsk_dep', 'TASK-002', 'Dependent');
+      seedDependency(db, 'tsk_dep', 'tsk_pre');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_pre', 'tsk_dep']);
+
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_pre', status: 'integrated' });
+
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_dep')!.blockedByRefs).toEqual([]);
+    });
+
+    it('ignores a blocking dependency whose prereq has no lane in this batch', () => {
+      seedTask(db, 'tsk_out', 'TASK-009', 'Outside the batch');
+      seedTask(db, 'tsk_dep', 'TASK-002', 'Dependent');
+      seedDependency(db, 'tsk_dep', 'tsk_out');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_dep']);
+
+      expect(store.listLanes(batchId)[0].blockedByRefs).toEqual([]);
+    });
+
+    it("ignores kind='related' edges (advisory metadata, never gating)", () => {
+      seedTask(db, 'tsk_rel', 'TASK-003', 'Related only');
+      seedTask(db, 'tsk_pre', 'TASK-001', 'Prereq');
+      seedTask(db, 'tsk_dep', 'TASK-002', 'Dependent');
+      seedDependency(db, 'tsk_dep', 'tsk_rel', 'related');
+      seedDependency(db, 'tsk_dep', 'tsk_pre');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_rel', 'tsk_pre', 'tsk_dep']);
+
+      const lanes = store.listLanes(batchId);
+      // 'related' is advisory metadata — it never gates the lane.
+      expect(lanes.find((l) => l.taskId === 'tsk_dep')!.blockedByRefs).toEqual(['TASK-001']);
     });
   });
 
@@ -212,6 +276,45 @@ describe('SprintLaneStore', () => {
 
       const cleared = store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: null });
       expect(cleared.currentStepId).toBeNull();
+    });
+
+    it('writes attempt verbatim onto the attempts column and returns it on the row', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+
+      const lane = store.updateLane({
+        runId: 'run-1',
+        batchId,
+        taskId: 'tsk_a',
+        currentStepId: 'implement',
+        attempt: 2,
+      });
+      expect(lane.attempts).toBe(2);
+
+      const row = db
+        .prepare('SELECT attempts FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, 'tsk_a') as { attempts: number };
+      expect(row.attempts).toBe(2);
+
+      // An attempt-less follow-up write leaves the counter untouched.
+      const next = store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: 'task-verify' });
+      expect(next.attempts).toBe(2);
+    });
+
+    it('rejects a non-integer or < 1 attempt with bad_request (no write)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      for (const attempt of [0, -1, 1.5]) {
+        try {
+          store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', attempt });
+          expect.unreachable('should have thrown');
+        } catch (err) {
+          expect(err).toBeInstanceOf(SprintLaneError);
+          expect((err as SprintLaneError).code).toBe('bad_request');
+        }
+      }
+      const row = db
+        .prepare('SELECT attempts FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { attempts: number };
+      expect(row.attempts).toBe(0);
     });
 
     it("status 'integrated' stamps integrated_at", () => {
@@ -280,7 +383,14 @@ describe('SprintLaneStore', () => {
         received.push(evt);
       });
 
-      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement' });
+      store.updateLane({
+        runId: 'run-1',
+        batchId,
+        taskId: 'tsk_a',
+        status: 'running',
+        currentStepId: 'implement',
+        attempt: 2,
+      });
 
       expect(received).toHaveLength(1);
       expect(received[0]).toMatchObject({
@@ -289,6 +399,7 @@ describe('SprintLaneStore', () => {
         taskId: 'tsk_a',
         status: 'running',
         currentStepId: 'implement',
+        attempts: 2,
       });
       expect(received[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     });

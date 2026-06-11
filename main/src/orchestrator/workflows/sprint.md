@@ -89,7 +89,10 @@ message); as each returns, you continue that task's chain.
 4. **task-verify** → delegate to `cyboflow-task-verify`. Read its `VERDICT`. On
    `FAIL`, re-delegate to `cyboflow-implement` with its `## Fix guidance`, then
    re-verify — up to 3× before marking the lane `failed` and **continuing the other
-   lanes**.
+   lanes**. Whenever you re-delegate implement (task-verify `FAIL` or a blocking
+   review defect), include `attempt: <n>` (2 on the first re-delegate, 3 on the
+   second) in the same `cyboflow_update_sprint_task` call that moves the lane's
+   `current_step` back to `implement`.
 5. **visual-verify** (optional) → when visual verification is enabled, delegate to
    `cyboflow-visual-verify`; otherwise skip. On `VERDICT: FAIL`, loop back to
    `cyboflow-implement` with its `## Visual check` notes, or record a finding via

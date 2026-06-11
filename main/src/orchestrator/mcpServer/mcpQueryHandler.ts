@@ -133,6 +133,8 @@ export type McpQueryMessage =
       status?: SprintBatchTaskStatus;
       /** New lane step (SPRINT_LANE_STEP_IDS); at least one of status/currentStepId must be set. */
       currentStepId?: SprintLaneStepId;
+      /** 1-based attempt counter (integer >= 1) — reported when implement is re-delegated after a verify failure. */
+      attempt?: number;
     }
   | {
       type: 'mcp-report-finding';
@@ -987,6 +989,7 @@ export class McpQueryHandler {
         taskId: msg.taskId,
         ...(msg.status !== undefined ? { status: msg.status } : {}),
         ...(msg.currentStepId !== undefined ? { currentStepId: msg.currentStepId } : {}),
+        ...(msg.attempt !== undefined ? { attempt: msg.attempt } : {}),
       });
       this.writeResponse(client, {
         type: 'mcp-query-response',
@@ -997,6 +1000,7 @@ export class McpQueryHandler {
           task_id: lane.taskId,
           status: lane.status,
           current_step_id: lane.currentStepId,
+          attempts: lane.attempts,
           ref: lane.ref,
           title: lane.title,
           updated_at: lane.updatedAt,
