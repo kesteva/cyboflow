@@ -12,7 +12,19 @@
  * scope / entry columns read back as NULL). The single onTaskChanged channel +
  * single list query are preserved — the renderer still sees one BacklogTaskItem[].
  *
- *  - boardsForProject(db, projectId)  -> Board[]            (board + ordered stages)
+ * PROJECT SCOPE: both list queries take `projectId: number | null` — null means
+ * ALL projects in one flat list (the cross-project "overall" board view); a
+ * number scopes to that project as before. The union's WHERE project_id = ?
+ * clauses are emitted only when scoped, so the positional bind count always
+ * matches the SQL.
+ *
+ * ARCHIVE-IN-PLACE (migration 024): every entity row carries `archived_at`
+ * (NULL = active) and archived rows are ALWAYS returned — visibility is a
+ * client concern (the Archived header toggle). The outer queries LEFT JOIN
+ * board_stages to project `stage_position` (COALESCE(bs.position, 0)), the
+ * cross-project bucketing key for the unified stage columns.
+ *
+ *  - boardsForProject(db, projectId)  -> Board[]            (board + ordered stages; null = all projects)
  *  - selectProjectBacklog(db, projectId) -> BacklogTaskItem[] (UNION + on-read overlays + epic nesting)
  *  - computeTaskOverlay(db, taskRow)  -> { inFlow, awaitingReview, isDone } (per-entity derivation)
  *
@@ -65,7 +77,8 @@ interface BoardStageDbRow {
 /**
  * The unified read row produced by the 3-table UNION. `type` is synthesized as a
  * literal in each SELECT branch; lineage / scope columns absent on a given table
- * are projected as NULL so every branch is shape-identical.
+ * are projected as NULL so every branch is shape-identical. `stage_position` is
+ * NOT a union column — the outer query projects it via LEFT JOIN board_stages.
  */
 interface TaskDbRow {
   id: string;
@@ -82,9 +95,12 @@ interface TaskDbRow {
   scope: 'small' | 'large' | null;
   board_id: string;
   stage_id: string;
+  archived_at: string | null;
   version: number;
   created_at: string;
   updated_at: string;
+  /** Projected by the outer LEFT JOIN onto board_stages; 0 when the stage row is missing. */
+  stage_position: number;
 }
 
 /**
@@ -93,25 +109,44 @@ interface TaskDbRow {
  * column ORDER is fixed and shared by every branch (SQLite unions positionally).
  */
 const UNION_COLUMNS =
-  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, version, created_at, updated_at';
+  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, version, created_at, updated_at';
 
-/** Build the full ideas+epics+tasks UNION subquery for a project, aliased `e`. */
-function entityUnionSql(): string {
+/**
+ * UNION_COLUMNS prefixed with a subquery alias for joined outer SELECTs — the
+ * LEFT JOIN onto board_stages would otherwise make id/board_id ambiguous.
+ */
+function aliasedUnionColumns(alias: string): string {
+  return UNION_COLUMNS.split(', ')
+    .map((column) => `${alias}.${column}`)
+    .join(', ');
+}
+
+/** The per-branch filters entityUnionSql can emit ('' = unscoped, all projects). */
+type EntityUnionFilter = '' | 'WHERE project_id = ?' | 'WHERE id = ?';
+
+/**
+ * Build the full ideas+epics+tasks UNION subquery. The same `filter` is applied
+ * to every branch, so callers bind the SAME value three times for the
+ * parameterized filters and nothing for '' (positional bind discipline — the
+ * bind count must match the emitted SQL).
+ */
+function entityUnionSql(filter: EntityUnionFilter): string {
+  const where = filter === '' ? '' : ` ${filter}`;
   return `
     SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-           board_id, stage_id, version, created_at, updated_at
-      FROM ideas WHERE project_id = ?
+           board_id, stage_id, archived_at, version, created_at, updated_at
+      FROM ideas${where}
     UNION ALL
     SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, version, created_at, updated_at
-      FROM epics WHERE project_id = ?
+           board_id, stage_id, archived_at, version, created_at, updated_at
+      FROM epics${where}
     UNION ALL
     SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
            parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, version, created_at, updated_at
-      FROM tasks WHERE project_id = ?`;
+           board_id, stage_id, archived_at, version, created_at, updated_at
+      FROM tasks${where}`;
 }
 
 interface StageOverlayRow {
@@ -138,18 +173,30 @@ interface RunOverlayRow {
  * shared Board/BoardStage types (number→boolean).
  *
  * @param db        - Narrow DatabaseLike interface (real or test).
- * @param projectId - The project whose boards to list.
+ * @param projectId - The project whose boards to list, or null for EVERY
+ *                    project's boards (ordered project_id ASC, is_default DESC,
+ *                    name ASC — the all-projects board view).
  * @returns Board[] (one default board per project in Phase 0/1), stages ASC.
  */
-export function boardsForProject(db: DatabaseLike, projectId: number): Board[] {
-  const boardRows = db
-    .prepare(
-      `SELECT id, project_id, name, kind, is_default
-         FROM boards
-        WHERE project_id = ?
-        ORDER BY is_default DESC, name ASC`,
-    )
-    .all(projectId) as BoardDbRow[];
+export function boardsForProject(db: DatabaseLike, projectId: number | null): Board[] {
+  const boardRows = (
+    projectId === null
+      ? db
+          .prepare(
+            `SELECT id, project_id, name, kind, is_default
+               FROM boards
+              ORDER BY project_id ASC, is_default DESC, name ASC`,
+          )
+          .all()
+      : db
+          .prepare(
+            `SELECT id, project_id, name, kind, is_default
+               FROM boards
+              WHERE project_id = ?
+              ORDER BY is_default DESC, name ASC`,
+          )
+          .all(projectId)
+  ) as BoardDbRow[];
 
   return boardRows.map((board): Board => {
     const stageRows = db
@@ -217,8 +264,8 @@ function resolveAgentLabel(run: RunOverlayRow): string {
  *   awaitingReview — any run is awaiting_review OR has outcome='pr_open', OR a
  *                    pending approval exists for any of the task's runs.
  *   isDone         — the task's current stage is terminal AND at position 9
- *                    ('done'). The other terminal stages (wont_do/archived) are
- *                    NOT "done".
+ *                    ('done'). The other terminal stages (wont_do/decomposed)
+ *                    are NOT "done".
  *
  * @param db   - Narrow DatabaseLike interface.
  * @param task - The base task row (needs id + stage_id).
@@ -290,7 +337,9 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     scope: row.scope,
     board_id: row.board_id,
     stage_id: row.stage_id,
+    archived_at: row.archived_at,
     version: row.version,
+    stage_position: row.stage_position,
     inFlow,
     awaitingReview,
     isDone,
@@ -309,21 +358,12 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
  */
 export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskItem | null {
   // Try each table by id (table identity is the discriminator). Cheaper than a
-  // full UNION when we only want one row.
+  // full table scan when we only want one row.
   const row =
-    (db.prepare(`SELECT ${UNION_COLUMNS} FROM (
-       SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
-              NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-              board_id, stage_id, version, created_at, updated_at FROM ideas WHERE id = ?
-       UNION ALL
-       SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
-              NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
-              board_id, stage_id, version, created_at, updated_at FROM epics WHERE id = ?
-       UNION ALL
-       SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
-              parent_epic_id, originating_idea_id, NULL AS scope,
-              board_id, stage_id, version, created_at, updated_at FROM tasks WHERE id = ?
-     )`).get(taskId, taskId, taskId) as TaskDbRow | undefined);
+    (db.prepare(`SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
+       FROM (${entityUnionSql('WHERE id = ?')}) e
+       LEFT JOIN board_stages bs ON bs.id = e.stage_id`)
+      .get(taskId, taskId, taskId) as TaskDbRow | undefined);
   if (!row) return null;
 
   const item = projectTaskItem(db, row);
@@ -332,12 +372,14 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
     // Children are always tasks (only `tasks` carries parent_epic_id).
     const childRows = db
       .prepare(
-        `SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
-                parent_epic_id, originating_idea_id, NULL AS scope,
-                board_id, stage_id, version, created_at, updated_at
-           FROM tasks
-          WHERE parent_epic_id = ?
-          ORDER BY created_at ASC, ref ASC`,
+        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+                t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+                t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+                COALESCE(bs.position, 0) AS stage_position
+           FROM tasks t
+           LEFT JOIN board_stages bs ON bs.id = t.stage_id
+          WHERE t.parent_epic_id = ?
+          ORDER BY t.created_at ASC, t.ref ASC`,
       )
       .all(taskId) as TaskDbRow[];
     const children = childRows.map((c) => projectTaskItem(db, c));
@@ -350,29 +392,36 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
 }
 
 /**
- * Return the full backlog for a project as a nested tree:
+ * Return the full backlog as a nested tree:
  *   - Epics carry their child tasks under `children` (ASC by created_at), plus
  *     `childCount` and `pendingTasks` (children not yet done).
- *   - Tasks whose parent epic is in the same project are nested under that epic
+ *   - Tasks whose parent epic is in the result set are nested under that epic
  *     and NOT repeated at the top level.
  *   - Orphan tasks (no parent, or parent missing) + ideas + epics surface at the
  *     top level.
  *
- * Each item carries the on-read overlays (inFlow / awaitingReview / isDone).
+ * Each item carries the on-read overlays (inFlow / awaitingReview / isDone) plus
+ * `stage_position` (LEFT JOIN board_stages). Archived rows (`archived_at` set)
+ * are ALWAYS included — visibility is a client concern.
  *
  * @param db        - Narrow DatabaseLike interface (real or test).
- * @param projectId - The project whose backlog to project.
+ * @param projectId - The project whose backlog to project, or null for ALL
+ *                    projects merged into one list (the overall board view).
  * @returns BacklogTaskItem[] — top-level items, epics nesting their tasks.
  */
-export function selectProjectBacklog(db: DatabaseLike, projectId: number): BacklogTaskItem[] {
+export function selectProjectBacklog(db: DatabaseLike, projectId: number | null): BacklogTaskItem[] {
   // Single UNION across the three entity tables → one BacklogTaskItem[]. The
-  // outer SELECT applies the shared ordering across the merged set.
-  const rows = db
-    .prepare(
-      `SELECT ${UNION_COLUMNS} FROM (${entityUnionSql()})
-        ORDER BY created_at ASC, ref ASC`,
-    )
-    .all(projectId, projectId, projectId) as TaskDbRow[];
+  // outer SELECT joins the stage position and applies the shared ordering
+  // across the merged set. The per-branch project filter is emitted only when
+  // scoped, so the bind count always matches the SQL.
+  const scoped = projectId !== null;
+  const stmt = db.prepare(
+    `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
+       FROM (${entityUnionSql(scoped ? 'WHERE project_id = ?' : '')}) e
+       LEFT JOIN board_stages bs ON bs.id = e.stage_id
+      ORDER BY e.created_at ASC, e.ref ASC`,
+  );
+  const rows = (scoped ? stmt.all(projectId, projectId, projectId) : stmt.all()) as TaskDbRow[];
 
   // First pass: project every row to a BacklogTaskItem keyed by id.
   const itemsById = new Map<string, BacklogTaskItem>();
@@ -390,7 +439,7 @@ export function selectProjectBacklog(db: DatabaseLike, projectId: number): Backl
     if (parentId && parent && parent.type === 'epic') {
       (parent.children ??= []).push(item);
     } else {
-      // No parent, parent missing, or parent isn't an epic in this project ->
+      // No parent, parent missing, or parent isn't an epic in the result set ->
       // surface at the top level so nothing is silently dropped.
       topLevel.push(item);
     }
