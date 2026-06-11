@@ -69,6 +69,11 @@ vi.mock('../../../trpc/client', () => ({
         onStepTransition: {
           subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
+        // Sprint lanes (single-run parallel sprint) — RunRightRail mounts SprintLanesPanel.
+        sprintLanes: { query: vi.fn().mockResolvedValue([]) },
+        onSprintLaneChanged: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
         merge: { mutate: vi.fn().mockResolvedValue({ success: true }) },
         dismiss: { mutate: vi.fn().mockResolvedValue({ success: true }) },
         createPr: {

@@ -184,12 +184,17 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
   });
 
-  it('mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set', () => {
+  it('mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set', async () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-test-rail-001');
     });
 
     render(<RunRightRail phaseState={LOADED_PHASE_STATE} />);
+    // Flush SprintLanesPanel's lane snapshot (global stub resolves []) so the
+    // async state update lands inside act.
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
     expect(screen.getByTestId('phase-section-phase-1')).toBeInTheDocument();

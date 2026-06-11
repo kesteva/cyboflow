@@ -64,7 +64,7 @@ export const DEFAULT_WORKFLOW_NAME = 'sprint';
  */
 const SUBTITLE_BY_NAME: Record<string, string> = {
   planner: 'Idea → epics → tasks (plan + refine, no execute)',
-  sprint: 'Executor ↔ verifier loop → sprint review',
+  sprint: 'Parallel task fan-out → sprint review',
 };
 
 /**

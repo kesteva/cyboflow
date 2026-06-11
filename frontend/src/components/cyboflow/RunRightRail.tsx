@@ -2,8 +2,9 @@
  * RunRightRail — fixed-width right rail in the CyboflowRoot two-column layout.
  *
  * Contains three tabs:
- *   - Workflow Progress (default selected) — live WorkflowProgressTimeline when activeRunId
- *     is non-null; neutral empty state otherwise.
+ *   - Workflow Progress (default selected) — live WorkflowProgressTimeline (plus the
+ *     per-task SprintLanesPanel for sprint runs) when activeRunId is non-null; neutral
+ *     empty state otherwise.
  *   - File Explorer — live SessionFileExplorer (selected session's worktree tree +
  *     read-only viewer) when selectedSessionId is non-null; neutral empty state
  *     otherwise.
@@ -12,6 +13,7 @@
  */
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
+import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -119,6 +121,8 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
           activeRunId !== null ? (
             <div className="h-full overflow-y-auto">
               <WorkflowProgressTimeline runId={activeRunId} phaseState={phaseState} />
+              {/* Per-task sprint lanes — renders nothing for non-sprint runs. */}
+              <SprintLanesPanel runId={activeRunId} />
             </div>
           ) : (
             <div

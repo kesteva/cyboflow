@@ -3,12 +3,13 @@
  * sprint batch (feat/parallel-sprint, P6). Modeled on IdeaPickerModal, but with
  * checkbox multi-select instead of a single <select>.
  *
- * A "sprint batch" executes up to N selected tasks in parallel over one shared
- * integration branch with a single human review at the end (see
- * docs/parallel-sprint-design.md). This modal is the entry point: the user
- * multi-selects the tasks, the chosen substrate drives the selection cap N
- * (15 for sdk, 10 for interactive — SPRINT_BATCH_MAX_TASKS), and onPicked hands
- * the task ids back to WorkflowPicker which calls runs.startBatch.
+ * A "sprint batch" seeds ONE session-hosted sprint run with up to N selected
+ * tasks; the sprint orchestrator agent fans them out as parallel subagents in
+ * the shared session worktree, with a single human review at the end. This
+ * modal is the entry point: the user multi-selects the tasks, the chosen
+ * substrate drives the selection cap N (15 for sdk, 10 for interactive —
+ * SPRINT_BATCH_MAX_TASKS), and onPicked hands the task ids back to the caller
+ * which threads them into runs.start as `taskIds`.
  *
  * Eligibility (rendered + selectable):
  *   - type==='task' && !isDone && inFlow.length===0
@@ -18,7 +19,7 @@
  * executing in another run cannot also join a batch.
  *
  * The cap is enforced client-side here (the launch button disables past N, and
- * over-cap checkboxes disable) AND server-side in runs.startBatch (defense in
+ * over-cap checkboxes disable) AND server-side in runs.start (defense in
  * depth). The effective substrate is read via substrates.resolveEffective so the
  * cap matches exactly what the launch path would stamp.
  */
@@ -26,7 +27,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
-import { SPRINT_BATCH_CAP, SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
 interface TaskBatchPickerModalProps {
@@ -35,7 +36,7 @@ interface TaskBatchPickerModalProps {
   /**
    * The substrate the user chose in WorkflowPicker. The effective substrate is
    * re-resolved through the same resolver ladder the launch path uses so the cap
-   * N matches what runs.startBatch would stamp; this is the requested level.
+   * N matches what runs.start would stamp; this is the requested level.
    */
   substrate: CliSubstrate;
   onClose: () => void;
@@ -106,7 +107,7 @@ export function TaskBatchPickerModal({
       })
       .catch(() => {
         // Fall back to the requested substrate — a failed preview must not block
-        // the picker. The server-side cap in runs.startBatch is the real guard.
+        // the picker. The server-side cap in runs.start is the real guard.
         if (!cancelled) setEffectiveSubstrate(substrate);
       });
     return () => {
@@ -185,7 +186,7 @@ export function TaskBatchPickerModal({
             </button>
           </div>
           <p className="text-xs text-text-tertiary">
-            At most {SPRINT_BATCH_CAP} run in parallel; the rest queue and run as slots free up.
+            At most 5 run in parallel; the rest queue and run as slots free up.
             Dependencies are analyzed automatically so blocked tasks run after their prerequisites.
           </p>
 

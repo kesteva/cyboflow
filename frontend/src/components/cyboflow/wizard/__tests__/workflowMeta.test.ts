@@ -75,8 +75,8 @@ describe('buildWorkflowMeta', () => {
     // to the definitions is caught loudly.
     expect(PLANNER_PHASES).toBe(2);
     expect(PLANNER_STEPS).toBe(6);
-    expect(SPRINT_PHASES).toBe(2);
-    expect(SPRINT_STEPS).toBe(8);
+    expect(SPRINT_PHASES).toBe(3);
+    expect(SPRINT_STEPS).toBe(5);
 
     const planner = meta.find((m) => m.name === 'planner')!;
     const sprint = meta.find((m) => m.name === 'sprint')!;
@@ -91,7 +91,7 @@ describe('buildWorkflowMeta', () => {
     expect(sprint.stepCount).toBe(SPRINT_STEPS);
     expect(sprint.title).toBe('Sprint');
     expect(sprint.slashCommand).toBe('/sprint');
-    expect(sprint.subtitle).toBe('Executor ↔ verifier loop → sprint review');
+    expect(sprint.subtitle).toBe('Parallel task fan-out → sprint review');
   });
 
   it('(b) a custom workflow with a broken/empty spec yields zero counts and a blank subtitle', () => {

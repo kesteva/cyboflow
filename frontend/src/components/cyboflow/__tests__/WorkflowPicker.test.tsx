@@ -32,16 +32,8 @@ vi.mock('../../../trpc/client', () => ({
             branchName: 'run/run-test-001',
           }),
         },
-        // feat/parallel-sprint P6 — the Sprint flow opens the batch picker and
-        // launches via startBatch (session-less). batchProgress backs the badge.
-        startBatch: {
-          mutate: vi.fn().mockResolvedValue({ batchId: 'batch-test-001' }),
-        },
-        batchProgress: {
-          query: vi.fn().mockResolvedValue({
-            status: 'running', total: 2, queued: 1, running: 1, integrated: 0, failed: 0,
-          }),
-        },
+        // feat/parallel-sprint (single-run lane model) — the Sprint flow opens
+        // the batch picker and launches via runs.start({ taskIds }).
       },
       substrates: {
         resolveEffective: { query: vi.fn().mockResolvedValue({ substrate: 'sdk' }) },
@@ -139,7 +131,6 @@ import type { ToolPanel } from '../../../../../shared/types/panels';
 
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
-const mockStartBatch = vi.mocked(trpc.cyboflow.runs.startBatch.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockTasksList = vi.mocked(trpc.cyboflow.tasks.list.query);
 
@@ -420,9 +411,9 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
     // A CUSTOM (non-planner, non-sprint) flow so "Start Run" hits the DIRECT
     // launch path (runs.start). Both built-in flows are now gated behind a
     // pre-launch modal — Planner behind IdeaPickerModal (migration 017) and
-    // Sprint behind the batch picker (feat/parallel-sprint, session-less
-    // startBatch which does NOT thread a per-run permission mode) — so neither
-    // would fire runs.start synchronously on click.
+    // Sprint behind the batch picker (feat/parallel-sprint, single-run lane
+    // model: runs.start({ taskIds })) — so neither would fire runs.start
+    // synchronously on click.
     mockWorkflowsList.mockResolvedValue([
       { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
     ]);
@@ -684,8 +675,8 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
 describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();
-    mockStartBatch.mockClear();
     mockCreateQuick.mockClear();
+    vi.mocked(panelApi.createPanel).mockClear();
     // A single Sprint flow so "Start Run" opens the batch picker (not the direct
     // launch path or the Planner idea gate).
     mockWorkflowsList.mockResolvedValue([
@@ -702,7 +693,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     ]);
   });
 
-  it('opens TaskBatchPickerModal on Start Run and does NOT launch a single run', async () => {
+  it('opens TaskBatchPickerModal on Start Run and does NOT launch a run yet', async () => {
     render(<WorkflowPicker projectId={1} />);
 
     const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
@@ -710,14 +701,15 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
       fireEvent.click(startRunBtn);
     });
 
-    // The batch picker opened; no single run AND no batch started yet.
+    // The batch picker opened; no run started yet (picker is freely cancellable
+    // — the in-flight latch has NOT flipped).
     expect(await screen.findByTestId('task-batch-picker-launch')).toBeInTheDocument();
     expect(mockRunStart).not.toHaveBeenCalled();
-    expect(mockStartBatch).not.toHaveBeenCalled();
   });
 
-  it('threads the selected task ids into runs.startBatch (session-less)', async () => {
-    render(<WorkflowPicker projectId={1} />);
+  it('threads the selected task ids into runs.start (session-hosted single run)', async () => {
+    const onWorkflowStarted = vi.fn();
+    render(<WorkflowPicker projectId={1} onWorkflowStarted={onWorkflowStarted} />);
 
     const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
     await act(async () => {
@@ -733,37 +725,23 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
       fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
     });
 
-    expect(mockStartBatch).toHaveBeenCalledOnce();
-    expect(mockStartBatch).toHaveBeenCalledWith({
-      workflowId: 'sprint',
+    // ONE session-hosted run with the picked ids threaded — same launch shape
+    // as launchRun (ensureSessionForLaunch created 'session-quick-001').
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-sprint',
       projectId: 1,
       substrate: 'sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
       taskIds: ['TASK-1'],
-      concurrency: 5,
     });
-    // A batch is session-less — no per-task run started, no session created.
-    expect(mockRunStart).not.toHaveBeenCalled();
-    expect(mockCreateQuick).not.toHaveBeenCalled();
-  });
-
-  it('renders the batch progress badge after a batch launches', async () => {
-    render(<WorkflowPicker projectId={1} />);
-
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
-    await act(async () => {
-      fireEvent.click(startRunBtn);
+    // Post-launch flow mirrors launchRun: run nested under its session +
+    // onWorkflowStarted fired with the run id.
+    await waitFor(() => {
+      expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     });
-    await screen.findByTestId('task-batch-picker-list');
-    await act(async () => {
-      fireEvent.click(screen.getByLabelText('Select TASK-1'));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
-    });
-
-    const badge = await screen.findByTestId('sprint-batch-progress');
-    expect(badge).toHaveTextContent('2 tasks');
-    expect(badge).toHaveTextContent('1 running');
-    expect(badge).toHaveTextContent('running');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
+    expect(onWorkflowStarted).toHaveBeenCalledWith('run-test-001');
   });
 });

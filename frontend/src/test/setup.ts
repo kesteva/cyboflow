@@ -27,6 +27,10 @@ vi.mock('../trpc/client', () => ({
         readFile: {
           query: vi.fn().mockResolvedValue({ path: '', content: '', size: 0, unviewableReason: null }),
         },
+        // Sprint lanes (single-run lane model) — empty by default so any
+        // component mounting SprintLanesPanel renders nothing.
+        sprintLanes: { query: vi.fn().mockResolvedValue([]) },
+        onSprintLaneChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
       workflows: {
         list: {

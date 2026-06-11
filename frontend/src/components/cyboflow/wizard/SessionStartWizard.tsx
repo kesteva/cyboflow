@@ -21,10 +21,11 @@
  *     permissionMode) → setActiveRun → goToSession. The Planner ('planner') is
  *     gated behind {@link IdeaPickerModal}; the chosen idea id is threaded as
  *     runs.start.mutate({ ideaId }).
- *   - sprint: gated behind {@link TaskBatchPickerModal} — a sprint is a
- *     SESSION-LESS batch of parallel task runs over one integration branch, NOT a
- *     single direct run, so it fires `trpc.cyboflow.runs.startBatch.mutate` with
- *     the multi-selected task ids and navigates home (no session to nest under).
+ *   - sprint: gated behind {@link TaskBatchPickerModal} — a sprint is ONE
+ *     session-hosted run seeded with the multi-selected task ids (single-run
+ *     lane model; the orchestrator agent fans the tasks out as subagents in the
+ *     shared session worktree), so it follows the same runs.start → setActiveRun
+ *     → goToSession path with `taskIds` threaded.
  *   - quick: the {@link useQuickSession} hook — it creates the session + both
  *     panels (passing the chosen agentPermissionMode) and calls
  *     setActiveQuickSession itself.
@@ -60,7 +61,6 @@ import { QuickSessionCard } from './QuickSessionCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
-import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -160,9 +160,9 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
 
-  // Sprint pre-launch task-batch gate. A sprint is a session-less batch of
-  // parallel task runs (NOT a single run), so its launch goes through the batch
-  // picker → startBatch, mirroring the Planner idea gate above.
+  // Sprint pre-launch task-batch gate. A sprint run is seeded with the
+  // multi-selected task ids (single-run lane model), so its launch goes through
+  // the batch picker → runs.start({ taskIds }), mirroring the Planner idea gate.
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
 
   // Launch state.
@@ -340,37 +340,45 @@ export default function SessionStartWizard(): React.JSX.Element {
     [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
   );
 
-  // Sprint batch launch — SESSION-LESS (no ensureSessionForLaunch). Fires
-  // startBatch with the multi-selected task ids and the substrate-derived cap,
-  // then navigates home: a batch spans many parallel `task` runs over one
-  // integration branch with a single review at finalize, so there is no single
-  // session to nest under / navigate into. Mirrors WorkflowPicker.launchBatch.
+  // Sprint launch — ONE session-hosted run seeded with the multi-selected task
+  // ids (single-run lane model). Follows launchRun exactly
+  // (ensureSessionForLaunch → runs.start → setActiveRun → goToSession);
+  // `taskIds` makes the launcher create the lane batch and stamp
+  // workflow_runs.batch_id, and per-task progress renders as lanes in the run
+  // progress rail. Mirrors WorkflowPicker.launchBatch.
   const launchBatch = useCallback(
-    async (taskIds: string[]): Promise<void> => {
+    async (workflowId: string, taskIds: string[]): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
       setLaunchError(null);
       setIsLaunching(true);
       try {
-        await trpc.cyboflow.runs.startBatch.mutate({
-          workflowId: 'sprint',
+        const sessionId = await ensureSessionForLaunch(selectedProjectId);
+        const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
           projectId: selectedProjectId,
+          sessionId,
           substrate,
+          permissionMode,
           taskIds,
-          concurrency: SPRINT_BATCH_CAP,
         });
+        useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
-        setToast(`Launching /sprint batch (${taskIds.length} tasks) on ${banner.name}`);
-        useNavigationStore.getState().goHome();
+
+        const meta = workflowMetas.find((m) => m.id === workflowId);
+        const slash = meta?.slashCommand ?? '/sprint';
+        setToast(`Launching ${slash} (${taskIds.length} tasks) on ${banner.name} ⌥ ${result.branchName}`);
+
+        useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
-        setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint batch');
+        setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint run');
         startInFlightRef.current = false;
       } finally {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, substrate, banner.name],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
   );
 
   const handleStart = useCallback(() => {
@@ -391,9 +399,9 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     if (meta?.name === 'sprint') {
-      // Gate behind the task batch picker — a sprint launches a session-less
-      // batch of parallel task runs, not a single run. Do NOT flip the latch yet
-      // (opening the picker stays freely cancellable).
+      // Gate behind the task batch picker — a sprint launches ONE session-hosted
+      // run seeded with the picked task ids. Do NOT flip the latch yet (opening
+      // the picker stays freely cancellable).
       setLaunchError(null);
       setBatchPickerOpen(true);
       return;
@@ -414,9 +422,12 @@ export default function SessionStartWizard(): React.JSX.Element {
     (taskIds: string[]) => {
       setBatchPickerOpen(false);
       if (taskIds.length === 0) return;
-      void launchBatch(taskIds);
+      // The sprint workflow id is the current selection (handleStart resolved it
+      // before opening the picker, and the modal blocks re-selection meanwhile).
+      if (selection?.kind !== 'workflow') return;
+      void launchBatch(selection.workflowId, taskIds);
     },
-    [launchBatch],
+    [selection, launchBatch],
   );
 
   // ── CTA label / disabled ─────────────────────────────────────────────────

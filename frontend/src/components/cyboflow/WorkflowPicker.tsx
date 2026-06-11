@@ -22,10 +22,8 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
-import { SprintBatchProgressBadge } from './SprintBatchProgressBadge';
 import type { WorkflowRow } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -64,13 +62,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   // idea id is threaded into runs.start.mutate({ ideaId }).
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
 
-  // Sprint pre-launch multi-task selector (feat/parallel-sprint, P6). When the
+  // Sprint pre-launch multi-task selector (feat/parallel-sprint). When the
   // selected workflow is the Sprint, "Start Run" opens this picker first; the
-  // multi-selected task ids are handed to runs.startBatch (NOT runs.start — a
-  // batch is session-less and spans many parallel runs over one integration
-  // branch). The launched batch id is tracked so the progress badge can render.
+  // multi-selected task ids are threaded into runs.start as `taskIds` — ONE
+  // session-hosted run whose orchestrator agent fans the tasks out as subagents
+  // (per-task progress renders as lanes in the run progress rail).
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
-  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
 
   /**
    * Synchronous in-flight latch for "Start Run". The `isStarting` STATE guard is
@@ -172,37 +169,41 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   );
 
   /**
-   * Fire the parallel-sprint batch launch. A batch is SESSION-LESS (no
-   * ensureSessionForLaunch) — it spans many parallel `task` runs over one
-   * integration branch with a single human review at finalize, so it does NOT
-   * nest under a session. The substrate-keyed cap N is enforced both in the
-   * picker and server-side in runs.startBatch (defense in depth). The synchronous
+   * Fire the parallel-sprint launch — ONE session-hosted sprint run seeded with
+   * the multi-selected task ids (single-run lane model). Mirrors launchRun
+   * exactly (ensureSessionForLaunch → runs.start → setActiveRun →
+   * onWorkflowStarted); `taskIds` makes the launcher create the lane batch and
+   * stamp workflow_runs.batch_id. The substrate-keyed cap N is enforced both in
+   * the picker and server-side in runs.start (defense in depth). The synchronous
    * in-flight latch flips HERE (at the real mutate), so opening the picker stays
    * freely cancellable — mirrors launchRun.
    */
   const launchBatch = useCallback(
-    async (taskIds: string[]): Promise<void> => {
+    async (workflowId: string, taskIds: string[]): Promise<void> => {
       if (startInFlightRef.current) return;
       startInFlightRef.current = true;
       setError(null);
       setIsStarting(true);
       try {
-        const result = await trpc.cyboflow.runs.startBatch.mutate({
-          workflowId: 'sprint',
+        const sessionId = await ensureSessionForLaunch(projectId);
+        const result = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
           projectId,
           substrate,
+          sessionId,
+          permissionMode,
           taskIds,
-          concurrency: SPRINT_BATCH_CAP,
         });
-        setActiveBatchId(result.batchId);
+        useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
+        onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Failed to start sprint batch');
+        setError(err instanceof Error ? err.message : 'Failed to start sprint run');
       } finally {
         setIsStarting(false);
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate],
+    [projectId, substrate, permissionMode, onWorkflowStarted],
   );
 
   const handleStartRun = async () => {
@@ -228,9 +229,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
     (taskIds: string[]): void => {
       setBatchPickerOpen(false);
       if (taskIds.length === 0) return;
-      void launchBatch(taskIds);
+      // The sprint workflow id is the current selection (handleStartRun resolved
+      // it before opening the picker; the modal blocks re-selection meanwhile).
+      if (selectedId === null) return;
+      void launchBatch(selectedId, taskIds);
     },
-    [launchBatch],
+    [selectedId, launchBatch],
   );
 
   const handleIdeaPicked = useCallback(
@@ -338,15 +342,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
           substrate={substrate}
           onClose={() => setBatchPickerOpen(false)}
           onPicked={handleBatchPicked}
-        />
-      )}
-
-      {/* Live batch progress — surfaced after a parallel sprint launches, derived
-          from runs.batchProgress + refreshed on the global run-lifecycle signal. */}
-      {activeBatchId !== null && (
-        <SprintBatchProgressBadge
-          batchId={activeBatchId}
-          onDismiss={() => setActiveBatchId(null)}
         />
       )}
 
