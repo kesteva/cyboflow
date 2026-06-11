@@ -31,13 +31,14 @@ describe('built-in workflow bundles', () => {
     assertAgentShape(bundle.agents);
   });
 
-  it('sprint ships its 7 heavy-phase subagents in order (gate stays inline)', () => {
+  it('sprint ships its 8 heavy-phase subagents in order (gate stays inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'sprint.md'));
     // The human-review gate runs inline in the orchestrator — not delegated — so the
     // bundle ships no commands, only subagents.
     expect(bundle.commands).toEqual([]);
     expect(bundle.agents.map((a) => a.name)).toEqual([
       'code-review',
+      'dependency-analyzer',
       'implement',
       'sprint-review',
       'sprint-verify',
