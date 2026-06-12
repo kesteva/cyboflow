@@ -528,6 +528,54 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
     this.logger?.info(`[InteractiveClaudeManager] wrote interactive MCP config: ${configPath}`);
+
+    // cyboflow plumbing must never surface in the user's repo: without an
+    // exclude, .cyboflow/ shows up in the session diff rail and a `git add -A`
+    // (cyboflow's own checkpoint commits use it) would commit it. Use the
+    // WORKTREE-LOCAL exclude file (resolved via `git rev-parse --git-path` —
+    // linked worktrees keep theirs under .git/worktrees/<name>/info/), never
+    // the repo's .gitignore, so the fix itself produces no diff noise.
+    this.ensureWorktreeExcludesCyboflowDir(worktreePath);
+  }
+
+  /**
+   * Append `.cyboflow/` to the worktree's git exclude file if not already
+   * present. Idempotent and fail-soft: a non-git directory (unit-test fixture
+   * dirs) or any git/fs error only logs a warning — the spawn proceeds.
+   * Protected for the test harness subclass.
+   */
+  protected ensureWorktreeExcludesCyboflowDir(worktreePath: string): void {
+    const EXCLUDE_LINE = '.cyboflow/';
+    try {
+      const raw = execSync('git rev-parse --git-path info/exclude', {
+        cwd: worktreePath,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (raw.length === 0) return;
+      // --git-path output may be relative to the worktree root or absolute.
+      const excludePath = path.resolve(worktreePath, raw);
+      let existing = '';
+      try {
+        existing = fs.readFileSync(excludePath, 'utf-8');
+      } catch {
+        /* no exclude file yet — created below */
+      }
+      const hasLine = existing
+        .split('\n')
+        .some((line) => line.trim() === EXCLUDE_LINE || line.trim() === '/.cyboflow/');
+      if (hasLine) return;
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+      const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+      fs.appendFileSync(excludePath, `${sep}${EXCLUDE_LINE}\n`, 'utf-8');
+      this.logger?.info(
+        `[InteractiveClaudeManager] excluded .cyboflow/ via worktree-local ${excludePath}`,
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] could not write worktree exclude for .cyboflow/ (non-git dir?): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

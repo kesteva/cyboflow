@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
+import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -212,6 +213,9 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   callTestCliAvailabilityReal(customPath?: string): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
     // Bypass the override above to exercise the real probe logic.
     return InteractiveClaudeManager.prototype['testCliAvailability'].call(this, customPath);
+  }
+  callEnsureWorktreeExcludes(worktreePath: string): void {
+    (this as unknown as { ensureWorktreeExcludesCyboflowDir(p: string): void }).ensureWorktreeExcludesCyboflowDir(worktreePath);
   }
 }
 
@@ -483,6 +487,60 @@ describe('InteractiveClaudeManager', () => {
       } finally {
         fs.rmSync(wt, { recursive: true, force: true });
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Worktree-local git exclude for .cyboflow/ — keeps cyboflow plumbing
+  // (interactive-mcp.json) out of the session diff and out of `git add -A`
+  // sweeps. Real-git round-trip on a temp repo.
+  // -------------------------------------------------------------------------
+  describe('ensureWorktreeExcludesCyboflowDir', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+    let repo: string;
+
+    beforeEach(() => {
+      db = makeRawEventsDb();
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+      repo = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-exclude-'));
+    });
+
+    afterEach(() => {
+      db.close();
+      fs.rmSync(repo, { recursive: true, force: true });
+      vi.clearAllMocks();
+    });
+
+    it('appends .cyboflow/ to the repo-local info/exclude of a real git checkout', () => {
+      execSync('git init -q', { cwd: repo });
+      mgr.callEnsureWorktreeExcludes(repo);
+      const exclude = fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf-8');
+      expect(exclude.split('\n').map((l) => l.trim())).toContain('.cyboflow/');
+      // The exclude is actually honored: an untracked .cyboflow file is invisible to git.
+      fs.mkdirSync(path.join(repo, '.cyboflow'), { recursive: true });
+      fs.writeFileSync(path.join(repo, '.cyboflow', 'interactive-mcp.json'), '{}', 'utf-8');
+      const status = execSync('git status --porcelain', { cwd: repo, encoding: 'utf-8' });
+      expect(status).not.toContain('.cyboflow');
+    });
+
+    it('is idempotent — a second call appends nothing', () => {
+      execSync('git init -q', { cwd: repo });
+      mgr.callEnsureWorktreeExcludes(repo);
+      const first = fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf-8');
+      mgr.callEnsureWorktreeExcludes(repo);
+      const second = fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf-8');
+      expect(second).toBe(first);
+      expect(second.split('\n').filter((l) => l.trim() === '.cyboflow/')).toHaveLength(1);
+    });
+
+    it('fail-soft on a non-git directory — warns, does not throw', () => {
+      expect(() => mgr.callEnsureWorktreeExcludes(repo)).not.toThrow();
     });
   });
 
