@@ -193,6 +193,11 @@ interface ElectronAPI {
   };
 
   // Configuration — IPCDataResponse so callers can access .data fields directly after success check
+  // Demo-mode tour info (sandbox repo to prefill in the Create Project dialog)
+  demo: {
+    getInfo: () => Promise<IPCDataResponse<{ demoMode: boolean; sandboxPath: string | null; projectName: string }>>;
+  };
+
   config: {
     get: () => Promise<IPCDataResponse<AppConfig>>;
     update: (updates: Record<string, unknown>) => Promise<IPCResponse<void>>;

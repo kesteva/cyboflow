@@ -366,6 +366,14 @@ export class API {
     },
   };
 
+  // Demo mode
+  static demo = {
+    async getInfo() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.demo.getInfo();
+    },
+  };
+
   // Configuration
   static config = {
     async get() {

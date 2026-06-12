@@ -75,6 +75,7 @@ import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTe
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
+import { resetDemoEnvironment } from './services/demo/demoEnvironment';
 
 export let mainWindow: BrowserWindow | null = null;
 
@@ -472,7 +473,23 @@ async function initializeServices() {
   initializeCommitManager(configManager, logger);
 
   // Use the same database path as the original backend
-  const dbPath = configManager.getDatabasePath();
+  let dbPath = configManager.getDatabasePath();
+
+  // Demo-mode boot profile: point the app at a throwaway demo database and
+  // re-materialize the sandbox repo. The real database/repos are never opened.
+  // Fail-soft: if the demo environment cannot be built (e.g. git missing), turn
+  // the flag back off and boot normally rather than blocking startup.
+  if (configManager.isDemoMode()) {
+    try {
+      const demoEnv = resetDemoEnvironment();
+      dbPath = demoEnv.databasePath;
+      logger.info(`[Main] DEMO MODE — using demo database at ${demoEnv.databasePath}, sandbox repo at ${demoEnv.sandboxPath}`);
+    } catch (error) {
+      logger.error('[Main] Demo environment setup failed — disabling demo mode and booting normally', error instanceof Error ? error : undefined);
+      await configManager.updateConfig({ demoMode: false });
+    }
+  }
+
   databaseService = new DatabaseService(dbPath);
   databaseService.initialize();
 

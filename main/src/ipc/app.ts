@@ -1,5 +1,6 @@
 import { IpcMain, shell } from 'electron';
 import type { AppServices } from './types';
+import { getDemoSandboxPath, DEMO_PROJECT_NAME } from '../services/demo/demoEnvironment';
 
 export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app } = services;
@@ -24,6 +25,20 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   });
 
+
+  // Demo-mode tour info — the Create Project dialog prefills the sandbox repo
+  // from this so the user never has to type a path during the demo.
+  ipcMain.handle('demo:get-info', () => {
+    const demoMode = services.configManager.isDemoMode();
+    return {
+      success: true,
+      data: {
+        demoMode,
+        sandboxPath: demoMode ? getDemoSandboxPath() : null,
+        projectName: DEMO_PROJECT_NAME,
+      },
+    };
+  });
 
   // Relaunch the app (used by the Settings demo-mode toggle — demoMode is read
   // once at startup, so flipping it requires a fresh boot). exit(0) skips the

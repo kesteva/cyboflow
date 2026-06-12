@@ -294,6 +294,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Configuration
+  demo: {
+    getInfo: (): Promise<IPCResponse<{ demoMode: boolean; sandboxPath: string | null; projectName: string }>> =>
+      ipcRenderer.invoke('demo:get-info'),
+  },
+
   config: {
     get: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get'),
     update: (updates: UpdateConfigRequest): Promise<IPCResponse> => ipcRenderer.invoke('config:update', updates),
