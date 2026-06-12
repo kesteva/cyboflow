@@ -134,7 +134,7 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     expect(session.runId).toBeNull();
   });
 
-  it("copies substrate='interactive' to substrate; legacy row maps to undefined (migration 025)", () => {
+  it("copies substrate='interactive' to substrate; legacy row maps to undefined (migration 027)", () => {
     // Stamped row (sessions:create-quick with the interactive PTY substrate).
     const stamped = makeDbSession({ substrate: 'interactive' });
     const mgr = new SessionManager(

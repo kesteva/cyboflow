@@ -82,7 +82,7 @@ export interface Session {
   is_quick?: boolean;
   /**
    * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
-   * Written by sessions:create-quick (migration 025); NULL → sdk (legacy).
+   * Written by sessions:create-quick (migration 027); NULL → sdk (legacy).
    */
   substrate?: CliSubstrate;
 }

@@ -8,7 +8,7 @@
  *     onto workflow_runs.substrate and honored by RunExecutor /
  *     SubstrateDispatchFacade.
  *   - Quick sessions: threaded via useQuickSession.start →
- *     CreateSessionRequest.substrate → sessions.substrate (migration 025);
+ *     CreateSessionRequest.substrate → sessions.substrate (migration 027);
  *     'interactive' spawns a PTY-backed quick session (persistent claude REPL).
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the

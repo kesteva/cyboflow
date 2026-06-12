@@ -1,4 +1,4 @@
--- Migration 025: Add nullable substrate to sessions for opt-in interactive
+-- Migration 027: Add nullable substrate to sessions for opt-in interactive
 -- PTY quick sessions (Session Start Wizard substrate picker).
 --
 -- This is the CliSubstrate union ('sdk'|'interactive') from
@@ -9,7 +9,10 @@
 -- the nullable ALTER pattern of migration 021 (sessions.agent_permission_mode).
 --
 -- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
--- this.transaction(...) call, so no explicit BEGIN/COMMIT here. Numbers
--- 022/023 are reserved by the unmerged feat/parallel-sprint branch.
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here. Renumbered
+-- 025 -> 027 on rebase: main owns 025 (sprint lane attempts) and 026
+-- (run_usage/spec_hash). Dev DBs that already applied this file under its old
+-- name re-run it as 027; the runner's duplicate-column tolerance marks it
+-- applied (filename-keyed ledger).
 
 ALTER TABLE sessions ADD COLUMN substrate TEXT;

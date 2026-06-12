@@ -356,7 +356,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentPermissionMode
         : undefined;
 
-      // Opt-in CLI substrate for the quick session (migration 025). Validate the
+      // Opt-in CLI substrate for the quick session (migration 027). Validate the
       // untyped IPC value; an absent/invalid value leaves the run + session on
       // the SDK default (byte-identical to before).
       const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
@@ -463,7 +463,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         );
       }
 
-      // Persist the per-session CLI substrate (migration 025) so the
+      // Persist the per-session CLI substrate (migration 027) so the
       // sessions:input relay branch, frontend substrate gates, and any REPL
       // re-spawn read it. ALWAYS stamp the RESOLVED value from createRun — a
       // request without an explicit substrate can still resolve 'interactive'
@@ -827,7 +827,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const claudePanel = postCreateClaudePanels[0];
       console.log(`[IPC] Using Claude panel ${claudePanel.id} for input to session ${sessionId}`);
 
-      // INTERACTIVE substrate branch (sessions.substrate, migration 025): the
+      // INTERACTIVE substrate branch (sessions.substrate, migration 027): the
       // session's claude lives in a persistent PTY REPL, so a composer turn is
       // RELAYED into the live process — never the SDK manager (whose
       // startPanel/sendInput would spawn a competing SDK conversation). The SDK

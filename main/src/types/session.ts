@@ -35,7 +35,7 @@ export interface Session {
   runId?: string | null;
   /**
    * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
-   * Stamped by sessions:create-quick (sessions.substrate, migration 025);
+   * Stamped by sessions:create-quick (sessions.substrate, migration 027);
    * undefined/NULL → sdk (legacy).
    */
   substrate?: CliSubstrate;
@@ -81,7 +81,7 @@ export interface CreateSessionRequest {
   /**
    * Opt-in CLI substrate for the quick session ('sdk'|'interactive'). When
    * omitted the session runs on the SDK substrate (legacy behavior). Persisted
-   * to sessions.substrate by the create-quick handler (migration 025). KEEP IN
+   * to sessions.substrate by the create-quick handler (migration 027). KEEP IN
    * SYNC with the frontend twin in frontend/src/types/session.ts
    * (request-parity rule, FIND-SPRINT-037-5).
    */
