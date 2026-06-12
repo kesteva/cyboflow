@@ -8,6 +8,7 @@ vi.mock('../../../utils/api', () => ({
       squashAndRebaseToMain: vi.fn(),
       rebaseToMain: vi.fn(),
       delete: vi.fn(),
+      getBranchCommitSubjects: vi.fn(),
     },
   },
 }));
@@ -28,6 +29,11 @@ beforeEach(() => {
   vi.mocked(API.sessions.squashAndRebaseToMain).mockResolvedValue({ success: true });
   vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({ success: true });
   vi.mocked(API.sessions.delete).mockResolvedValue({ success: true });
+  // Prefill probe fires on open; empty subjects = no prefill (tests own the field).
+  vi.mocked(API.sessions.getBranchCommitSubjects).mockResolvedValue({
+    success: true,
+    data: { subjects: [] },
+  });
 });
 
 describe('SessionMergeDialog', () => {

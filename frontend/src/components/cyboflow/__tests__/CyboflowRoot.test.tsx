@@ -134,6 +134,8 @@ vi.mock('../../../utils/api', () => ({
       delete: vi.fn().mockResolvedValue({ success: true }),
       squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true }),
       rebaseToMain: vi.fn().mockResolvedValue({ success: true }),
+      // Merge-dialog prefill probe fires when the dialog opens.
+      getBranchCommitSubjects: vi.fn().mockResolvedValue({ success: true, data: { subjects: [] } }),
       gitPush: vi.fn().mockResolvedValue({ success: true }),
       getRemoteUrl: vi.fn().mockResolvedValue({
         success: true,
