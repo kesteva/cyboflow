@@ -2,6 +2,8 @@ import { Square, Pause, Play, Flag } from 'lucide-react';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useErrorStore } from '../../stores/errorStore';
+import { useReviewQueueStore } from '../../stores/reviewQueueStore';
+import { useAggregatedReviewItems } from '../../stores/landingStore';
 import { trpc } from '../../trpc/client';
 import { TERMINAL_RUN_STATUSES } from '../../../../shared/types/cyboflow';
 
@@ -63,6 +65,12 @@ interface RunActionBarProps {
 export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  // Open-gate probe for the rested-run End-workflow affordance (hooks must run
+  // unconditionally, before the early returns below). A run with a pending
+  // permission approval or a blocking review item is gated — ending it would
+  // silently bypass the gate, so the button hides (the backend rejects too).
+  const approvals = useReviewQueueStore((s) => s.queue);
+  const aggregatedReviewItems = useAggregatedReviewItems();
 
   if (activeRunId === null) return null;
 
@@ -117,6 +125,16 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   const showPause = PAUSABLE_STATUSES.includes(status) && status !== 'paused';
   const showResume = status === 'paused' && isSdk;
 
+  // A RESTED run (clean drain → awaiting_review) with no open gate gets the
+  // End-workflow affordance too: session-hosted runs have no run-scoped
+  // Merge/Dismiss (the session owns git close-out), so without this a finished
+  // Planner had no exit short of Cancel. Confirming completes the run via
+  // runs.end and returns the pane to the resting canvas.
+  const hasOpenGate =
+    approvals.some((a) => a.runId === activeRunId) ||
+    aggregatedReviewItems.some((it) => it.run_id === activeRunId && it.blocking);
+  const showEnd = status === 'awaiting_review' && !hasOpenGate;
+
   // Single-click Pause — the route returns a discriminated union and NEVER throws
   // for not_found / interactive_unsupported / not_pausable / no_session / race
   // (those resolve as the benign { noOp } variant). A resolved promise is always
@@ -148,6 +166,18 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   return (
     <div className="flex items-center gap-1.5" data-testid="run-action-bar">
       <span className="text-xs font-medium uppercase tracking-wide text-text-muted">Run</span>
+
+      {showEnd && (
+        <button
+          data-testid="run-action-end"
+          onClick={onEndWorkflow}
+          className="inline-flex items-center gap-1 rounded border border-border-primary px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+          title="Mark this workflow done and return to the session (its worktree and diff are preserved)"
+        >
+          <Flag size={14} />
+          End workflow
+        </button>
+      )}
 
       {showPause && (
         <button

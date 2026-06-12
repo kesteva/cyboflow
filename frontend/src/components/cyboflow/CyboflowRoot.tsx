@@ -50,6 +50,8 @@ import { SessionDismissDialog } from './SessionDismissDialog';
 import { RunActionBar } from './RunActionBar';
 import { RunCancelDialog } from './RunCancelDialog';
 import { RunEndDialog } from './RunEndDialog';
+import { useErrorStore } from '../../stores/errorStore';
+import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
@@ -441,9 +443,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       )}
 
       {/* End-workflow confirm — the human gate for a run that reached a terminal
-          status on its own (completed / failed). Confirming drops the run
-          overlay and returns to the session's resting QuickSessionCanvas; it
-          touches no backend state (the run is already terminal). */}
+          status on its own (completed / failed) OR rested at awaiting_review
+          with no open gates. For a rested run, confirming first completes it
+          via runs.end (git-neutral; the session keeps the worktree); for an
+          already-terminal run it is pure navigation. Either way the run
+          overlay drops back to the session's resting QuickSessionCanvas. */}
       {activeRunId !== null && (
         <RunEndDialog
           isOpen={isEndOpen}
@@ -451,6 +455,27 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           status={activeRun?.status}
           onConfirm={() => {
             setIsEndOpen(false);
+            if (activeRun?.status === 'awaiting_review') {
+              trpc.cyboflow.runs.end
+                .mutate({ runId: activeRunId })
+                .then((result) => {
+                  if ('noOp' in result && result.reason === 'blocking_items_pending') {
+                    useErrorStore.getState().showError({
+                      title: 'Cannot end workflow',
+                      error: 'This run still has pending review items — resolve them in the Human review queue first.',
+                    });
+                    return;
+                  }
+                  returnToRestingSession();
+                })
+                .catch((err: unknown) => {
+                  useErrorStore.getState().showError({
+                    title: 'End workflow failed',
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                });
+              return;
+            }
             returnToRestingSession();
           }}
         />

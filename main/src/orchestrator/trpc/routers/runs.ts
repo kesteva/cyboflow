@@ -26,7 +26,10 @@ import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
-import { sprintLaneEvents, sprintLaneChannel } from '../../sprintLaneStore';
+import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
+import { countPendingBlockingReviewItems } from '../../reviewItemListing';
+import { ApprovalRouter } from '../../approvalRouter';
+import { QuestionRouter } from '../../questionRouter';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -52,7 +55,7 @@ import {
   type ResumeRunDeps,
   type ResumeRunResult,
 } from '../../resumeRunHandler';
-import { stepTransitionEvents, eventToAsyncIterable } from './events';
+import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
 
 // ---------------------------------------------------------------------------
 // cancelAndRestart dependency bag
@@ -725,6 +728,82 @@ export const runsRouter = router({
         });
       }
       return cancelRunHandler(input.runId, cancelRunDeps);
+    }),
+
+  /**
+   * End a RESTED workflow run as 'completed' — the backend half of the
+   * "End workflow" gate for SESSION-HOSTED runs (whose Merge/PR/Dismiss live on
+   * the SESSION and are blocked by assertNotSessionHosted on the run-scoped
+   * close-outs). A run that finishes its work rests at 'awaiting_review' and
+   * previously had NO exit short of Cancel: this marks it terminal so the
+   * centre pane can return to the session's resting canvas and another
+   * workflow (e.g. a Sprint after a Planner) can start on the SAME session.
+   *
+   * Git-neutral by design: no merge, no worktree removal, no branch delete, no
+   * outcome stamp — the session still owns the worktree lifecycle, and task
+   * stages are left wherever the run's gates put them (a Planner's tasks stay
+   * Ready-for-development; nothing reverts).
+   *
+   * Guards:
+   *   - only an 'awaiting_review' run can be ended (a running/paused run must
+   *     be cancelled or allowed to drain);
+   *   - a run with pending BLOCKING review items cannot be ended — resolve the
+   *     gates first (mirrors aggregate-unblock; prevents silently bypassing an
+   *     open human gate).
+   *
+   * Returns { ended: true } or { noOp: true, reason } — 'not_found' /
+   * 'already_terminal' (idempotent) / 'not_rested' / 'blocking_items_pending'.
+   */
+  end: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { ended: true }
+      | { noOp: true; reason: 'not_found' | 'already_terminal' | 'not_rested' | 'blocking_items_pending' }
+    > => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const db = ctx.db;
+      const run = db
+        .prepare('SELECT status, batch_id AS batchId FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string; batchId?: string | null } | undefined;
+      if (!run?.status) return { noOp: true, reason: 'not_found' };
+      if (['completed', 'failed', 'canceled'].includes(run.status)) {
+        return { noOp: true, reason: 'already_terminal' };
+      }
+      if (run.status !== 'awaiting_review') return { noOp: true, reason: 'not_rested' };
+      if (countPendingBlockingReviewItems(db, input.runId) > 0) {
+        return { noOp: true, reason: 'blocking_items_pending' };
+      }
+
+      const info = db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'awaiting_review'`,
+        )
+        .run(input.runId) as { changes: number };
+      if (info.changes === 0) return { noOp: true, reason: 'already_terminal' }; // concurrent transition won
+
+      // Defensive settles — nothing blocking was pending (guard above), but a
+      // stray non-gating socket must not strand once the run is terminal.
+      try {
+        ApprovalRouter.getInstance().clearPendingForRun(input.runId);
+        QuestionRouter.getInstance().clearPendingForRun(input.runId);
+      } catch {
+        // Routers not initialized (tests) — nothing to clear.
+      }
+      // Sprint batch close-out: a batch-bearing run going terminal must flip its
+      // sprint_batches row terminal too (mirrors cancel's markBatchTerminal).
+      if (run.batchId) {
+        try {
+          SprintLaneStore.getInstance().markBatchTerminal(run.batchId, 'completed');
+        } catch {
+          // Store not initialized (tests) — lane substrate absent.
+        }
+      }
+      runStatusEvents.emit('changed', { runId: input.runId, status: 'completed' });
+      return { ended: true };
     }),
 
   /**
