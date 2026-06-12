@@ -42,8 +42,14 @@ import type {
   QualityFinding,
   StepTokenBucket,
   UsageTrendPoint,
+  WorkflowRevisionStats,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
+// computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
+// with at createRun; hashing the live workflows.spec_json the identical way lets
+// us flag the current revision. It imports only node:crypto (verified), so it
+// respects this module's standalone-typecheck invariant (no electron / service deps).
+import { computeSpecHash } from './specHash';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -1122,4 +1128,103 @@ export function selectUsageTrend(
   return Array.from(byDate.entries())
     .map(([date, agg]) => ({ date, totalTokens: agg.totalTokens, runs: agg.runs }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+// ---------------------------------------------------------------------------
+// 8. selectWorkflowRevisionStats
+// ---------------------------------------------------------------------------
+
+interface WorkflowRevisionStatsRow {
+  specHash: string;
+  firstSeenAt: string;
+  runs: number;
+  mergedRuns: number;
+  failedRuns: number;
+  /** Terminal runs that carry an outcome (merged|dismissed) — the success denominator. */
+  outcomeRuns: number;
+  /** AVG(run_usage.total_tokens) over this revision's materialized rows; SQLite returns null when none. */
+  avgTotalTokens: number | null;
+}
+
+/**
+ * Per-revision run statistics for one workflow's version history (mockup S6).
+ *
+ * For every recorded `workflow_revisions` snapshot of `workflowId`, LEFT JOIN the
+ * `workflow_runs` that froze the SAME `spec_hash` (so a brand-new revision with no
+ * runs yet still surfaces with zeroed counts), then LEFT JOIN `run_usage` to average
+ * each revision's materialized `total_tokens`. Newest revision first (created_at DESC).
+ *
+ *   - runs            = COUNT of runs whose spec_hash matches the revision.
+ *   - mergedRuns      = outcome='merged'.
+ *   - failedRuns      = status='failed'.
+ *   - successRatePct  = merged / (terminal runs with an outcome) * 100, 1dp in TS
+ *                       (0 when no outcome-bearing run — avoids /0). "Terminal with
+ *                       outcome" = outcome IS NOT NULL (merged|dismissed), matching
+ *                       the shared type's denominator note.
+ *   - avgTotalTokens  = mean of the matched runs' materialized run_usage.total_tokens
+ *                       (null when none materialized — historic/in-flight runs).
+ *   - isCurrent       = the revision's hash equals computeSpecHash(workflows.spec_json)
+ *                       (the live spec a new run would freeze). At most one per workflow.
+ *
+ * INVISIBLE BY DESIGN: runs with `spec_hash IS NULL` (every pre-migration-025 run)
+ * match no recorded revision and never appear here — they still count in the
+ * workflow-wide selectWorkflowRunStats aggregate.
+ *
+ * `avgTotalTokens` deliberately reads ONLY the materialized `run_usage` tier (no
+ * raw_events fallback): version-history is a coarse trend, and a revision's runs
+ * are typically already finalized + materialized by the time it has history worth
+ * showing. A run without a materialized row simply does not contribute to the mean.
+ *
+ * @param db         - Narrow DatabaseLike surface.
+ * @param workflowId - The workflow whose revision history is read.
+ */
+export function selectWorkflowRevisionStats(
+  db: DatabaseLike,
+  workflowId: string,
+): WorkflowRevisionStats[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         rev.spec_hash  AS specHash,
+         rev.created_at AS firstSeenAt,
+         COUNT(r.id) AS runs,
+         SUM(CASE WHEN r.outcome = 'merged' THEN 1 ELSE 0 END) AS mergedRuns,
+         SUM(CASE WHEN r.status = 'failed'  THEN 1 ELSE 0 END) AS failedRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         AVG(u.total_tokens) AS avgTotalTokens
+       FROM workflow_revisions rev
+       LEFT JOIN workflow_runs r
+         ON r.workflow_id = rev.workflow_id AND r.spec_hash = rev.spec_hash
+       LEFT JOIN run_usage u ON u.run_id = r.id
+       WHERE rev.workflow_id = ?
+       GROUP BY rev.spec_hash, rev.created_at
+       ORDER BY rev.created_at DESC, rev.id DESC`,
+    )
+    .all(workflowId) as WorkflowRevisionStatsRow[];
+
+  // The live spec a new run would freeze — compare each revision's hash to flag the
+  // current one. Missing workflow row (deleted) → null spec_json → computeSpecHash's
+  // '{}' floor, which simply matches no revision (none was recorded for empty spec).
+  const liveRow = db
+    .prepare(`SELECT spec_json AS specJson FROM workflows WHERE id = ?`)
+    .get(workflowId) as { specJson: string | null } | undefined;
+  const currentHash = computeSpecHash(liveRow?.specJson ?? null);
+
+  return rows.map((row): WorkflowRevisionStats => {
+    const successRatePct =
+      row.outcomeRuns === 0 ? 0 : round1((row.mergedRuns / row.outcomeRuns) * 100);
+    return {
+      workflowId,
+      specHash: row.specHash,
+      firstSeenAt: toIso(row.firstSeenAt) ?? row.firstSeenAt,
+      isCurrent: row.specHash === currentHash,
+      runs: row.runs,
+      mergedRuns: row.mergedRuns,
+      failedRuns: row.failedRuns,
+      successRatePct,
+      // SQLite AVG over zero matched run_usage rows returns null — keep it null.
+      avgTotalTokens:
+        row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
+    };
+  });
 }

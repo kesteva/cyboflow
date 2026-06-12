@@ -24,6 +24,7 @@ import { useMemo } from 'react';
 import { useInsightsStore } from '../../stores/insightsStore';
 import { BarRow } from './charts/BarRow';
 import { Sparkline } from './charts/Sparkline';
+import { VersionHistory } from './VersionHistory';
 import type {
   WorkflowRunStats,
   WorkflowUsageStats,
@@ -120,6 +121,10 @@ export function StatsSection(): React.JSX.Element {
   const workflowUsage = useInsightsStore((s) => s.workflowUsage);
   const stepTokens = useInsightsStore((s) => s.stepTokens);
   const usageTrends = useInsightsStore((s) => s.usageTrends);
+  // `?? {}` tolerates a partial store mock that omits the slice (the live store
+  // always initializes it to {}); without it a non-null busiest workflow would
+  // index into undefined.
+  const revisionHistory = useInsightsStore((s) => s.revisionHistory) ?? {};
 
   const cards = useMemo(
     () => mergeWorkflowCards(workflowStats, workflowUsage),
@@ -143,6 +148,10 @@ export function StatsSection(): React.JSX.Element {
 
   const busiestBuckets = busiest === null ? [] : stepTokens[busiest.workflowId] ?? [];
   const maxBucket = busiestBuckets.reduce((m, b) => Math.max(m, b.totalTokens), 0);
+
+  // Version history for the SAME busiest workflow that drives the token-by-step
+  // panel. Hidden (< 1 revision) when the workflow has no recorded spec revisions.
+  const busiestRevisions = busiest === null ? [] : revisionHistory[busiest.workflowId] ?? [];
 
   return (
     <div data-testid="stats-section">
@@ -176,22 +185,33 @@ export function StatsSection(): React.JSX.Element {
         </div>
       )}
 
-      {busiestBuckets.length > 0 && busiest !== null && (
-        <div className="mt-5" data-testid="stats-token-by-step">
-          <div className="eyebrow mb-2 text-text-tertiary">
-            Token by step · {busiest.workflowName}
-          </div>
-          <div className="space-y-1.5">
-            {busiestBuckets.map((bucket) => (
-              <BarRow
-                key={bucket.stepId}
-                label={bucket.stepId}
-                value={bucket.totalTokens}
-                max={maxBucket}
-                valueLabel={compactTokens(bucket.totalTokens)}
-              />
-            ))}
-          </div>
+      {busiest !== null && (busiestBuckets.length > 0 || busiestRevisions.length > 0) && (
+        <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
+          {busiestBuckets.length > 0 && (
+            <div data-testid="stats-token-by-step">
+              <div className="eyebrow mb-2 text-text-tertiary">
+                Token by step · {busiest.workflowName}
+              </div>
+              <div className="space-y-1.5">
+                {busiestBuckets.map((bucket) => (
+                  <BarRow
+                    key={bucket.stepId}
+                    label={bucket.stepId}
+                    value={bucket.totalTokens}
+                    max={maxBucket}
+                    valueLabel={compactTokens(bucket.totalTokens)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {busiestRevisions.length > 0 && (
+            <VersionHistory
+              workflowName={busiest.workflowName}
+              revisions={busiestRevisions}
+            />
+          )}
         </div>
       )}
     </div>

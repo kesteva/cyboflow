@@ -48,7 +48,9 @@ import {
   selectQualityFindings,
   selectStepTokenBuckets,
   selectUsageTrend,
+  selectWorkflowRevisionStats,
 } from '../insightsQueries';
+import { computeSpecHash } from '../specHash';
 
 // ---------------------------------------------------------------------------
 // Schema + seed helpers
@@ -75,6 +77,7 @@ function createInsightsDb(): Database.Database {
       policy_json TEXT,
       outcome TEXT,
       task_id TEXT,
+      spec_hash TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
       ended_at DATETIME
@@ -117,6 +120,14 @@ function createInsightsDb(): Database.Database {
       resolved_by TEXT,
       resolution TEXT
     );
+    CREATE TABLE workflow_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workflow_id TEXT NOT NULL,
+      spec_hash TEXT NOT NULL,
+      spec_json TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (workflow_id, spec_hash)
+    );
   `);
   return db;
 }
@@ -125,12 +136,14 @@ interface SeedWorkflowOpts {
   id: string;
   name?: string;
   projectId?: number;
+  /** Live spec_json — hashed by selectWorkflowRevisionStats to flag isCurrent. */
+  specJson?: string;
 }
 
 function seedWorkflow(db: Database.Database, opts: SeedWorkflowOpts): void {
   db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name) VALUES (?, ?, ?)`,
-  ).run(opts.id, opts.projectId ?? 1, opts.name ?? opts.id);
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, ?, ?)`,
+  ).run(opts.id, opts.projectId ?? 1, opts.name ?? opts.id, opts.specJson ?? '{}');
 }
 
 interface SeedRunOpts {
@@ -142,22 +155,45 @@ interface SeedRunOpts {
   createdAt?: string;
   startedAt?: string | null;
   endedAt?: string | null;
+  /** Frozen spec_hash (the revision bucket key); null = pre-mig-025 historic run. */
+  specHash?: string | null;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, spec_hash, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
     opts.projectId ?? 1,
     opts.status ?? 'completed',
     opts.outcome ?? null,
+    opts.specHash ?? null,
     opts.createdAt ?? null,
     opts.startedAt ?? null,
     opts.endedAt ?? null,
+  );
+}
+
+interface SeedRevisionOpts {
+  workflowId: string;
+  specHash: string;
+  specJson?: string;
+  createdAt?: string;
+}
+
+/** Insert a migration-025 `workflow_revisions` snapshot row. */
+function seedRevision(db: Database.Database, opts: SeedRevisionOpts): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflow_revisions (workflow_id, spec_hash, spec_json, created_at)
+     VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+  ).run(
+    opts.workflowId,
+    opts.specHash,
+    opts.specJson ?? '{}',
+    opts.createdAt ?? null,
   );
 }
 
@@ -1139,5 +1175,151 @@ describe('selectUsageTrend', () => {
     expect(wide).toHaveLength(1);
     const narrow = selectUsageTrend(dbAdapter(db), { workflowId: null, projectId: null, days: 7 });
     expect(narrow).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. selectWorkflowRevisionStats
+// ---------------------------------------------------------------------------
+
+describe('selectWorkflowRevisionStats', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  it('returns [] when the workflow has no recorded revisions', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    expect(selectWorkflowRevisionStats(dbAdapter(db), 'wf-1')).toEqual([]);
+  });
+
+  it('aggregates runs split across two revisions, newest revision first', () => {
+    const oldSpec = '{"v":1}';
+    const newSpec = '{"v":2}';
+    const oldHash = computeSpecHash(oldSpec);
+    const newHash = computeSpecHash(newSpec);
+    // Live spec is the NEW revision → it is the current one.
+    seedWorkflow(db, { id: 'wf-1', specJson: newSpec });
+    seedRevision(db, {
+      workflowId: 'wf-1',
+      specHash: oldHash,
+      specJson: oldSpec,
+      createdAt: '2026-06-01 00:00:00',
+    });
+    seedRevision(db, {
+      workflowId: 'wf-1',
+      specHash: newHash,
+      specJson: newSpec,
+      createdAt: '2026-06-10 00:00:00',
+    });
+
+    // Old revision: 1 merged + 1 dismissed (2 terminal-with-outcome) + 1 failed
+    // (no outcome) → success = merged(1)/outcome(2) = 50%. failedRuns = 1.
+    seedRun(db, { id: 'o1', workflowId: 'wf-1', status: 'completed', outcome: 'merged', specHash: oldHash });
+    seedRun(db, { id: 'o2', workflowId: 'wf-1', status: 'completed', outcome: 'dismissed', specHash: oldHash });
+    seedRun(db, { id: 'o3', workflowId: 'wf-1', status: 'failed', outcome: null, specHash: oldHash });
+    // New revision: 1 merged of 1 outcome → 100%; runs=1.
+    seedRun(db, { id: 'n1', workflowId: 'wf-1', status: 'completed', outcome: 'merged', specHash: newHash });
+
+    // Materialized usage rows so avgTotalTokens has data.
+    seedRunUsage(db, { runId: 'o1', inputTokens: 100, outputTokens: 100 }); // total 200
+    seedRunUsage(db, { runId: 'o2', inputTokens: 100, outputTokens: 300 }); // total 400 → avg 300
+    seedRunUsage(db, { runId: 'n1', inputTokens: 500, outputTokens: 500 }); // total 1000
+
+    const out = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    expect(out).toHaveLength(2);
+
+    // Newest revision first.
+    const [newest, oldest] = out;
+    expect(newest.specHash).toBe(newHash);
+    expect(oldest.specHash).toBe(oldHash);
+
+    // Newest revision (live) is current; older is not.
+    expect(newest.isCurrent).toBe(true);
+    expect(oldest.isCurrent).toBe(false);
+
+    // Newest: 1 run, all merged of 1 outcome → 100%, avg 1000 tokens.
+    expect(newest.runs).toBe(1);
+    expect(newest.mergedRuns).toBe(1);
+    expect(newest.failedRuns).toBe(0);
+    expect(newest.successRatePct).toBe(100);
+    expect(newest.avgTotalTokens).toBe(1000);
+
+    // Oldest: 3 runs, 1 merged of 2 outcome → 50%, failedRuns 1, avg over the
+    // TWO materialized rows (o1=200, o2=400; o3 unmaterialized) = 300.
+    expect(oldest.runs).toBe(3);
+    expect(oldest.mergedRuns).toBe(1);
+    expect(oldest.failedRuns).toBe(1);
+    expect(oldest.successRatePct).toBe(50);
+    expect(oldest.avgTotalTokens).toBe(300);
+  });
+
+  it('rounds successRatePct to 1dp and reports 0 when no run carries an outcome', () => {
+    const spec = '{"x":1}';
+    const hash = computeSpecHash(spec);
+    seedWorkflow(db, { id: 'wf-1', specJson: spec });
+    seedRevision(db, { workflowId: 'wf-1', specHash: hash, specJson: spec });
+    // 1 merged of 3 outcome-bearing runs → 33.33..% → 33.3.
+    seedRun(db, { id: 'a', workflowId: 'wf-1', outcome: 'merged', specHash: hash });
+    seedRun(db, { id: 'b', workflowId: 'wf-1', outcome: 'dismissed', specHash: hash });
+    seedRun(db, { id: 'c', workflowId: 'wf-1', outcome: 'dismissed', specHash: hash });
+
+    const [rev] = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    expect(rev.successRatePct).toBe(33.3);
+  });
+
+  it('reports successRatePct 0 and avgTotalTokens null for a revision with no runs', () => {
+    const spec = '{"fresh":1}';
+    const hash = computeSpecHash(spec);
+    // Live spec matches this revision → current, even with zero runs.
+    seedWorkflow(db, { id: 'wf-1', specJson: spec });
+    seedRevision(db, { workflowId: 'wf-1', specHash: hash, specJson: spec });
+
+    const [rev] = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    expect(rev.runs).toBe(0);
+    expect(rev.mergedRuns).toBe(0);
+    expect(rev.failedRuns).toBe(0);
+    expect(rev.successRatePct).toBe(0);
+    expect(rev.avgTotalTokens).toBeNull();
+    expect(rev.isCurrent).toBe(true);
+  });
+
+  it('makes spec_hash=NULL (pre-mig-025) runs INVISIBLE — they belong to no revision', () => {
+    const spec = '{"y":1}';
+    const hash = computeSpecHash(spec);
+    seedWorkflow(db, { id: 'wf-1', specJson: spec });
+    seedRevision(db, { workflowId: 'wf-1', specHash: hash, specJson: spec });
+    // One run on the revision, one historic (null spec_hash).
+    seedRun(db, { id: 'r-on-rev', workflowId: 'wf-1', outcome: 'merged', specHash: hash });
+    seedRun(db, { id: 'r-historic', workflowId: 'wf-1', outcome: 'merged', specHash: null });
+
+    const [rev] = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    // The historic run does not inflate the revision's run count.
+    expect(rev.runs).toBe(1);
+  });
+
+  it('flags isCurrent false for every revision when the live spec moved on to an unrecorded hash', () => {
+    const oldSpec = '{"a":1}';
+    const oldHash = computeSpecHash(oldSpec);
+    // Live spec is a THIRD spec whose hash was never recorded as a revision.
+    seedWorkflow(db, { id: 'wf-1', specJson: '{"a":3}' });
+    seedRevision(db, { workflowId: 'wf-1', specHash: oldHash, specJson: oldSpec });
+
+    const [rev] = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    expect(rev.isCurrent).toBe(false);
+  });
+
+  it('scopes strictly to the requested workflow', () => {
+    const specA = '{"wf":"a"}';
+    const specB = '{"wf":"b"}';
+    seedWorkflow(db, { id: 'wf-a', specJson: specA });
+    seedWorkflow(db, { id: 'wf-b', specJson: specB });
+    seedRevision(db, { workflowId: 'wf-a', specHash: computeSpecHash(specA), specJson: specA });
+    seedRevision(db, { workflowId: 'wf-b', specHash: computeSpecHash(specB), specJson: specB });
+
+    const out = selectWorkflowRevisionStats(dbAdapter(db), 'wf-a');
+    expect(out).toHaveLength(1);
+    expect(out[0].specHash).toBe(computeSpecHash(specA));
+    expect(out[0].workflowId).toBe('wf-a');
   });
 });

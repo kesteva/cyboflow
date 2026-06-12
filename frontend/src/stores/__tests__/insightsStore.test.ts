@@ -24,6 +24,7 @@ import type {
   QualityFinding,
   StepTokenBucket,
   UsageTrendPoint,
+  WorkflowRevisionStats,
 } from '../../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ let mockReviewSummaryQuery: ReturnType<typeof vi.fn>;
 let mockQualityFindingsQuery: ReturnType<typeof vi.fn>;
 let mockStepTokensQuery: ReturnType<typeof vi.fn>;
 let mockUsageTrendQuery: ReturnType<typeof vi.fn>;
+let mockRevisionHistoryQuery: ReturnType<typeof vi.fn>;
 let mockReviewItemsListQuery: ReturnType<typeof vi.fn>;
 let mockProjectsGetAll: ReturnType<typeof vi.fn>;
 
@@ -59,6 +61,7 @@ vi.mock('../../trpc/client', () => ({
         qualityFindings: { get query() { return mockQualityFindingsQuery; } },
         stepTokens: { get query() { return mockStepTokensQuery; } },
         usageTrend: { get query() { return mockUsageTrendQuery; } },
+        revisionHistory: { get query() { return mockRevisionHistoryQuery; } },
       },
       reviewItems: {
         list: { get query() { return mockReviewItemsListQuery; } },
@@ -177,6 +180,19 @@ const STEP_BUCKET: StepTokenBucket[] = [
 const TREND_POINTS: UsageTrendPoint[] = [
   { date: '2026-06-05', totalTokens: 500, runs: 1 },
 ];
+const REVISION_HISTORY: WorkflowRevisionStats[] = [
+  {
+    workflowId: 'wf-sprint',
+    specHash: 'feedface0000',
+    firstSeenAt: '2026-06-05T00:00:00.000Z',
+    isCurrent: true,
+    runs: 2,
+    mergedRuns: 2,
+    failedRuns: 0,
+    successRatePct: 100,
+    avgTotalTokens: 1200,
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Fresh-module store loader: re-import insightsStore so its closure-private
@@ -200,6 +216,7 @@ beforeEach(() => {
   mockQualityFindingsQuery = vi.fn().mockResolvedValue([makeFinding('q1')]);
   mockStepTokensQuery = vi.fn().mockResolvedValue(STEP_BUCKET);
   mockUsageTrendQuery = vi.fn().mockResolvedValue(TREND_POINTS);
+  mockRevisionHistoryQuery = vi.fn().mockResolvedValue(REVISION_HISTORY);
   mockReviewItemsListQuery = vi.fn().mockResolvedValue([
     makeReviewItem({ id: 'f1', kind: 'finding', status: 'pending' }),
   ]);
@@ -294,6 +311,9 @@ describe('init()', () => {
     // per-workflow detail keyed by workflowId for the single run workflow.
     expect(s.stepTokens['wf-sprint']).toEqual(STEP_BUCKET);
     expect(s.usageTrends['wf-sprint']).toEqual(TREND_POINTS);
+    // revisionHistory rides the same per-workflow fan-out, keyed by workflowId.
+    expect(s.revisionHistory['wf-sprint']).toEqual(REVISION_HISTORY);
+    expect(mockRevisionHistoryQuery).toHaveBeenCalledWith({ workflowId: 'wf-sprint' });
   });
 
   it('passes projectId=null (cross-project) to the insights queries by default', async () => {

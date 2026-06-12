@@ -21,6 +21,8 @@
  *                       most-recently-run workflows to bound fan-out.
  *   - usageTrend      — per-workflow time-bucketed sparkline points, keyed by
  *                       workflowId. Same 6-workflow cap.
+ *   - revisionHistory — per-workflow per-spec_hash run stats (version history),
+ *                       keyed by workflowId. Same 6-workflow cap / fan-out.
  *
  * `pendingFindings` is the kind='finding', status='pending' subset of the review
  * inbox, fetched via `cyboflow.reviewItems.list` (NOT the insights router). The
@@ -64,6 +66,7 @@ import type {
   UsageTrendPoint,
   ReviewItemSummary,
   QualityFinding,
+  WorkflowRevisionStats,
 } from '../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,8 @@ export interface InsightsState {
   stepTokens: Record<string, StepTokenBucket[]>;
   /** Time-bucketed usage trend points, keyed by workflowId. */
   usageTrends: Record<string, UsageTrendPoint[]>;
+  /** Per-spec_hash revision run stats (version history), keyed by workflowId. */
+  revisionHistory: Record<string, WorkflowRevisionStats[]>;
 
   /**
    * Bootstrap the insights dashboard: first fetch (loading=true) for the current
@@ -266,15 +271,16 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     // A newer fetch superseded us — drop everything we computed.
     if (generation !== fetchGeneration) return;
 
-    // -- Phase 2: per-workflow stepTokens + usageTrend for the capped set,
-    // derived from whichever workflowStats we just got (or the prior slice when
-    // the workflowStats query failed). Keyed by workflowId.
+    // -- Phase 2: per-workflow stepTokens + usageTrend + revisionHistory for the
+    // capped set, derived from whichever workflowStats we just got (or the prior
+    // slice when the workflowStats query failed). All keyed by workflowId; the
+    // revisionHistory fan-out rides the SAME cap as stepTokens/usageTrend.
     const statsForFanout = workflowStats ?? get().workflowStats;
     const fanoutWorkflows = selectFanoutWorkflows(statsForFanout);
 
     const detail = await Promise.all(
       fanoutWorkflows.map(async (wf) => {
-        const [steps, trend] = await Promise.all([
+        const [steps, trend, revisions] = await Promise.all([
           safe(
             `stepTokens:${wf.workflowId}`,
             trpc.cyboflow.insights.stepTokens.query({ workflowId: wf.workflowId }),
@@ -286,8 +292,12 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
               projectId,
             }),
           ),
+          safe(
+            `revisionHistory:${wf.workflowId}`,
+            trpc.cyboflow.insights.revisionHistory.query({ workflowId: wf.workflowId }),
+          ),
         ]);
-        return { workflowId: wf.workflowId, steps, trend };
+        return { workflowId: wf.workflowId, steps, trend, revisions };
       }),
     );
 
@@ -297,9 +307,13 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     // query keeps its stale entry rather than dropping the workflow.
     const stepTokens: Record<string, StepTokenBucket[]> = { ...get().stepTokens };
     const usageTrends: Record<string, UsageTrendPoint[]> = { ...get().usageTrends };
-    for (const { workflowId, steps, trend } of detail) {
+    const revisionHistory: Record<string, WorkflowRevisionStats[]> = {
+      ...get().revisionHistory,
+    };
+    for (const { workflowId, steps, trend, revisions } of detail) {
       if (steps !== undefined) stepTokens[workflowId] = steps;
       if (trend !== undefined) usageTrends[workflowId] = trend;
+      if (revisions !== undefined) revisionHistory[workflowId] = revisions;
     }
 
     // Commit: every slice that resolved replaces its prior value; an undefined
@@ -313,6 +327,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       pendingFindings: pendingFindings ?? prev.pendingFindings,
       stepTokens,
       usageTrends,
+      revisionHistory,
       error: firstError,
     });
   };
@@ -338,6 +353,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     pendingFindings: [],
     stepTokens: {},
     usageTrends: {},
+    revisionHistory: {},
 
     init: async () => {
       // Closure-private guard makes init idempotent even before the async fetch

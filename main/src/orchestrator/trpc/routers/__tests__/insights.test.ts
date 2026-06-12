@@ -26,6 +26,7 @@ import type {
   QualityFinding,
   StepTokenBucket,
   UsageTrendPoint,
+  WorkflowRevisionStats,
 } from '../../../../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -45,6 +46,7 @@ vi.mock('../../../insightsQueries', () => ({
   selectQualityFindings: vi.fn(),
   selectStepTokenBuckets: vi.fn(),
   selectUsageTrend: vi.fn(),
+  selectWorkflowRevisionStats: vi.fn(),
 }));
 
 // Imported AFTER vi.mock is hoisted so the router (and these handles) bind to the
@@ -470,5 +472,56 @@ describe('cyboflow.insights.usageTrend', () => {
     await expect(
       caller.cyboflow.insights.usageTrend({ workflowId: '', projectId: 1 }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// revisionHistory
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.insights.revisionHistory', () => {
+  const revisions: WorkflowRevisionStats[] = [
+    {
+      workflowId: 'wf-1',
+      specHash: 'abc1234deadbeef',
+      firstSeenAt: '2026-06-10T00:00:00.000Z',
+      isCurrent: true,
+      runs: 4,
+      mergedRuns: 3,
+      failedRuns: 1,
+      successRatePct: 75,
+      avgTotalTokens: 1800,
+    },
+  ];
+
+  it('forwards workflowId and returns the revisions verbatim', async () => {
+    mocked('selectWorkflowRevisionStats').mockReturnValue(revisions);
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.revisionHistory({ workflowId: 'wf-1' });
+
+    expect(result).toBe(revisions);
+    expect(insightsQueries.selectWorkflowRevisionStats).toHaveBeenCalledWith(fakeDb, 'wf-1');
+  });
+
+  it('rejects an empty workflowId without calling the helper', async () => {
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    await expect(
+      caller.cyboflow.insights.revisionHistory({ workflowId: '' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+    expect(insightsQueries.selectWorkflowRevisionStats).not.toHaveBeenCalled();
+  });
+
+  it('throws PRECONDITION_FAILED when ctx.db is missing', async () => {
+    mocked('selectWorkflowRevisionStats').mockReturnValue(revisions);
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(
+      caller.cyboflow.insights.revisionHistory({ workflowId: 'wf-1' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+    expect(insightsQueries.selectWorkflowRevisionStats).not.toHaveBeenCalled();
   });
 });

@@ -96,6 +96,49 @@ export interface UsageTrendPoint {
   runs: number;
 }
 
+/**
+ * Per-revision run statistics for one workflow's version history (mockup S6).
+ *
+ * A "revision" is a distinct `spec_json` snapshot of a workflow, content-addressed
+ * by its `spec_hash` (sha256 of the exact spec text — see specHash.ts/computeSpecHash)
+ * and recorded in the migration-025 `workflow_revisions` table. Runs are bucketed
+ * by the `workflow_runs.spec_hash` frozen at run creation, so each revision's stats
+ * cover ONLY the runs that executed that precise spec text — even after the live
+ * `spec_json` is later edited into a newer revision.
+ *
+ * Runs created before migration 025 carry `spec_hash = NULL` and are therefore
+ * INVISIBLE here by design (they belong to no recorded revision); they still count
+ * in the workflow-wide {@link WorkflowRunStats} aggregate.
+ */
+export interface WorkflowRevisionStats {
+  workflowId: string;
+  /** sha256 hex of this revision's spec_json (the bucket key). */
+  specHash: string;
+  /** ISO-8601 timestamp the revision was first recorded (workflow_revisions.created_at). */
+  firstSeenAt: string;
+  /**
+   * True when this revision's hash equals the hash of the workflow's CURRENT live
+   * `spec_json` (computeSpecHash over `workflows.spec_json`) — i.e. the revision a
+   * new run would execute right now. At most one revision per workflow is current.
+   */
+  isCurrent: boolean;
+  /** Total runs that froze this spec_hash. */
+  runs: number;
+  /** Runs with outcome='merged'. */
+  mergedRuns: number;
+  /** Runs with status='failed'. */
+  failedRuns: number;
+  /**
+   * merged / (terminal runs with an outcome) * 100, rounded to 1dp; 0 when no
+   * terminal-with-outcome run exists. "Terminal with outcome" = a run that reached
+   * a merged/dismissed disposition — the denominator excludes still-running and
+   * outcome-unstamped runs so a half-finished revision is not penalized.
+   */
+  successRatePct: number;
+  /** Mean total_tokens over this revision's materialized run_usage rows; null when none. */
+  avgTotalTokens: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Review-queue summary (mockup section 01 counters)
 // ---------------------------------------------------------------------------

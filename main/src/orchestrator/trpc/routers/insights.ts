@@ -10,6 +10,7 @@
  *   - qualityFindings  : query -> QualityFinding[]      (kind='finding' rows joined to runs)
  *   - stepTokens       : query -> StepTokenBucket[]     (tokens attributed per workflow step)
  *   - usageTrend       : query -> UsageTrendPoint[]     (time-bucketed sparkline points)
+ *   - revisionHistory  : query -> WorkflowRevisionStats[] (per-spec_hash run stats, newest-first)
  *
  * Every procedure is a thin wrapper over a pure SELECT helper in
  * `../../insightsQueries` — this router owns ONLY zod input validation + the
@@ -40,6 +41,7 @@ import type {
   QualityFinding,
   StepTokenBucket,
   UsageTrendPoint,
+  WorkflowRevisionStats,
 } from '../../../../../shared/types/insights';
 import {
   selectWorkflowRunStats,
@@ -49,6 +51,7 @@ import {
   selectQualityFindings,
   selectStepTokenBuckets,
   selectUsageTrend,
+  selectWorkflowRevisionStats,
 } from '../../insightsQueries';
 
 // ---------------------------------------------------------------------------
@@ -217,5 +220,18 @@ export const insightsRouter = router({
         projectId: input.projectId,
         days: input.days,
       });
+    }),
+
+  /**
+   * Per-revision (per-spec_hash) run statistics for one workflow's version
+   * history (mockup S6), newest revision first. `workflowId` is required — this
+   * is a per-workflow drill-down. Runs frozen before migration 025 (spec_hash
+   * NULL) are invisible by design; see selectWorkflowRevisionStats.
+   */
+  revisionHistory: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .query(({ ctx, input }): WorkflowRevisionStats[] => {
+      const db = requireDb(ctx.db, 'revisionHistory');
+      return selectWorkflowRevisionStats(db, input.workflowId);
     }),
 });
