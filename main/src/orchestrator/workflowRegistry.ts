@@ -20,6 +20,7 @@ import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shar
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import { resolveSubstrate } from './substrateResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
+import { computeSpecHash } from './specHash';
 
 // ---------------------------------------------------------------------------
 // Descriptor types
@@ -238,15 +239,27 @@ export class WorkflowRegistry {
    * schema (`workflowDefinitionSchema`) before calling this — the registry does
    * NOT re-validate, it only serialises.
    *
+   * Also INSERT-OR-IGNOREs a `workflow_revisions` snapshot for the new spec
+   * (migration 026) so a run later stamped with this edit's `spec_hash` resolves
+   * to its spec. UNIQUE(workflow_id, spec_hash) makes re-saving the SAME spec
+   * idempotent — only a distinct edit adds a revision row.
+   *
    * Throws if no row matches `workflowId` (0 rows updated).
    */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void {
+    const specJson = JSON.stringify(definition);
     const stmt = this.db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?');
-    const tx = this.db.transaction(() => stmt.run(JSON.stringify(definition), workflowId));
-    const result = tx();
-    if (result.changes === 0) {
-      throw new Error(`WorkflowRegistry.updateSpec: workflow ${workflowId} not found`);
-    }
+    const tx = this.db.transaction(() => {
+      const result = stmt.run(specJson, workflowId);
+      if (result.changes === 0) {
+        throw new Error(`WorkflowRegistry.updateSpec: workflow ${workflowId} not found`);
+      }
+      // Snapshot the NEW spec as a revision so the (workflow_id, spec_hash) pair
+      // is resolvable forever. UNIQUE(workflow_id, spec_hash) makes re-saving the
+      // SAME spec a no-op (INSERT OR IGNORE) — only a distinct edit adds a row.
+      this.recordRevision(workflowId, specJson);
+    });
+    tx();
   }
 
   /**
@@ -273,8 +286,33 @@ export class WorkflowRegistry {
     const stmt = this.db.prepare("UPDATE workflows SET spec_json = '{}' WHERE id = ?");
     const tx = this.db.transaction(() => {
       stmt.run(workflowId);
+      // Snapshot the reset-to-'{}' spec as a revision (same idempotent path as
+      // updateSpec). UNIQUE(workflow_id, spec_hash) means a workflow reset back to
+      // an empty spec it already carried adds no duplicate row.
+      this.recordRevision(workflowId, '{}');
     });
     tx();
+  }
+
+  /**
+   * INSERT OR IGNORE a `workflow_revisions` snapshot for the workflow's current
+   * spec text (migration 026), so every `spec_hash` that has ever run — or been
+   * saved by an edit — is resolvable to its exact spec even after the live
+   * `spec_json` moves on. Called by createRun (at freeze time) and by the edit
+   * paths (updateSpec / resetSpec).
+   *
+   * Idempotency: the `UNIQUE(workflow_id, spec_hash)` constraint makes a re-save
+   * of an already-snapshotted spec a silent no-op, so callers need not pre-check.
+   * Must run INSIDE the caller's transaction (it does not open its own).
+   */
+  private recordRevision(workflowId: string, specJson: string): void {
+    const specHash = computeSpecHash(specJson);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO workflow_revisions (workflow_id, spec_hash, spec_json)
+         VALUES (?, ?, ?)`,
+      )
+      .run(workflowId, specHash, specJson);
   }
 
   /**
@@ -424,6 +462,12 @@ export class WorkflowRegistry {
    * The substrate is resolved ONCE here and is immutable for the run lifetime —
    * there is intentionally no UPDATE path. IDEA-013 / TASK-806.
    *
+   * Freezes the workflow's CURRENT spec onto the run as `spec_hash` (sha256 of
+   * spec_json; migration 026) following the SAME no-UPDATE discipline as
+   * substrate, and INSERT-OR-IGNOREs a `workflow_revisions` snapshot for that
+   * hash so the frozen address always resolves to its spec text — even for a
+   * spec that only ever ran and was never explicitly saved via the editor.
+   *
    * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL:
    * when supplied it links the run to the owning chat session at INSERT time so a
    * session can own many runs over its lifetime. When omitted the column stays
@@ -472,13 +516,27 @@ export class WorkflowRegistry {
       env: process.env,
     });
 
+    // Freeze the workflow's CURRENT spec onto the run as a content address
+    // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
+    // is immutable for the run lifetime — there is no UPDATE path. It lets
+    // Insights bucket runs by the exact workflow revision they executed even
+    // after the live spec_json is later edited.
+    const specHash = computeSpecHash(workflow.spec_json);
+
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, session_id)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, session_id, spec_hash)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate, sessionId ?? null);
+      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate, sessionId ?? null, specHash);
+      // Ensure the frozen hash is always resolvable to its spec: snapshot a
+      // revision for the spec we just stamped. INSERT OR IGNORE keyed on
+      // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
+      // ran the same spec before (or was explicitly edited to it) adds no row —
+      // but a spec that ONLY ever ran (never saved via the editor) still gets a
+      // revision row here, so historic spec text is never lost.
+      this.recordRevision(workflowId, workflow.spec_json ?? '{}');
     });
 
     createTx();

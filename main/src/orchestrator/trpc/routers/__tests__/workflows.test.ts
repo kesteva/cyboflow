@@ -57,6 +57,23 @@ function createWorkflowTestDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
+  // spec-capture (migration 025): WorkflowRegistry.updateSpec / resetSpec now
+  // INSERT-OR-IGNORE a workflow_revisions snapshot (and createRun freezes
+  // workflow_runs.spec_hash). Layer both additive shapes on top of
+  // REGISTRY_SCHEMA — same convention as workflowRegistry.test.ts (the fixture
+  // stays a frozen subset; tests layer what the code under test writes).
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+  db.exec(`
+    CREATE TABLE workflow_revisions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      workflow_id TEXT NOT NULL,
+      spec_hash   TEXT NOT NULL,
+      spec_json   TEXT NOT NULL,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (workflow_id, spec_hash),
+      FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+    )
+  `);
   return db;
 }
 

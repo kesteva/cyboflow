@@ -22,6 +22,7 @@ import type Database from 'better-sqlite3';
 import { writeFileSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type WorkflowConfigProvider } from '../workflowRegistry';
+import { computeSpecHash } from '../specHash';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
@@ -112,8 +113,24 @@ describe('WorkflowRegistry', () => {
     // createRun now also writes workflow_runs.session_id (session<->run
     // restructure, Phase 1 / migration 019); layer the additive ALTER on top.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
-    // batch_id (sprint lanes, migration 022) comes from the fixture's
+// batch_id (sprint lanes, migration 022) comes from the fixture's
     // includeWorkflowRunTaskColumns block — no manual ALTER needed here.
+    // spec-capture (migration 026): createRun freezes workflow_runs.spec_hash and
+    // INSERT-OR-IGNOREs a workflow_revisions snapshot; updateSpec / resetSpec also
+    // snapshot. Layer both additive shapes on top of GATE_SCHEMA (mirrors the
+    // migration's ALTER + CREATE TABLE; never widens GATE_SCHEMA).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec(`
+      CREATE TABLE workflow_revisions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id TEXT NOT NULL,
+        spec_hash   TEXT NOT NULL,
+        spec_json   TEXT NOT NULL,
+        created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (workflow_id, spec_hash),
+        FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+      )
+    `);
     logger = makeSpyLogger();
     registry = new WorkflowRegistry(dbAdapter(db), logger);
   });
@@ -713,6 +730,125 @@ describe('WorkflowRegistry', () => {
         }
       }
     });
+
+    // ───── spec_hash freeze + workflow_revisions snapshot (spec-capture / migration 025) ─────
+
+    it("stamps spec_hash = computeSpecHash(workflow.spec_json) onto the run row (frozen at creation)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'spec-hash-stamp.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface SpecRow { id: string; spec_json: string }
+        const wf = db.prepare('SELECT id, spec_json FROM workflows WHERE name = ?').get('planner') as SpecRow;
+        const { runId } = registry.createRun(wf.id);
+
+        interface HashRow { spec_hash: string | null }
+        const row = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
+        // Seeded rows carry the '{}' default; the stamped hash matches it exactly.
+        expect(row.spec_hash).toBe(computeSpecHash(wf.spec_json));
+        expect(row.spec_hash).toBe(computeSpecHash('{}'));
+      });
+    });
+
+    it("reflects an edited spec_json in the run's frozen spec_hash", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'spec-hash-edited.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const edited = makeDefinition('planner');
+        registry.updateSpec(workflowId, edited);
+
+        const { runId } = registry.createRun(workflowId);
+
+        interface HashRow { spec_hash: string | null }
+        const row = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
+        // The frozen hash is the EDITED spec's hash, not the empty default.
+        expect(row.spec_hash).toBe(computeSpecHash(JSON.stringify(edited)));
+        expect(row.spec_hash).not.toBe(computeSpecHash('{}'));
+      });
+    });
+
+    it("INSERT-OR-IGNOREs a workflow_revisions snapshot for the run's frozen spec", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'spec-hash-revision.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface SpecRow { id: string; spec_json: string }
+        const wf = db.prepare('SELECT id, spec_json FROM workflows WHERE name = ?').get('sprint') as SpecRow;
+        registry.createRun(wf.id);
+
+        interface RevRow { workflow_id: string; spec_hash: string; spec_json: string }
+        const rev = db
+          .prepare('SELECT workflow_id, spec_hash, spec_json FROM workflow_revisions WHERE workflow_id = ?')
+          .get(wf.id) as RevRow | undefined;
+        expect(rev).toBeDefined();
+        expect(rev!.spec_hash).toBe(computeSpecHash(wf.spec_json));
+        expect(rev!.spec_json).toBe(wf.spec_json);
+      });
+    });
+
+    it("snapshots the spec of a workflow that ONLY ever ran (never explicitly edited)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // A freshly-seeded workflow carries the '{}' default and was never saved
+        // via the editor. createRun must still record its revision so the frozen
+        // hash is resolvable to its spec text.
+        const path = writeTempMd(tmpDir, 'spec-hash-run-only.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        registry.createRun(workflowId);
+
+        interface CountRow { count: number }
+        const { count } = db
+          .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ? AND spec_hash = ?')
+          .get(workflowId, computeSpecHash('{}')) as CountRow;
+        expect(count).toBe(1);
+      });
+    });
+
+    it("does NOT duplicate the revision when two runs share the same spec (OR IGNORE)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'spec-hash-dedup.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.createRun(workflowId);
+        registry.createRun(workflowId);
+
+        interface CountRow { count: number }
+        const { count } = db
+          .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
+          .get(workflowId) as CountRow;
+        // Both runs froze the SAME '{}' spec → one revision row, not two.
+        expect(count).toBe(1);
+      });
+    });
+
+    it("leaves spec_hash unmodified after the run — no UPDATE path (frozen)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'spec-hash-frozen.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId } = registry.createRun(workflowId);
+
+        interface HashRow { spec_hash: string | null }
+        const before = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
+
+        // Editing the workflow's live spec AFTER the run must not move the frozen
+        // hash — createRun is the only writer and there is no UPDATE path.
+        registry.updateSpec(workflowId, makeDefinition('planner'));
+
+        const after = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
+        expect(after.spec_hash).toBe(before.spec_hash);
+        expect(after.spec_hash).toBe(computeSpecHash('{}'));
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -948,6 +1084,63 @@ describe('WorkflowRegistry', () => {
     it('throws when the workflow id does not exist (0 rows updated)', () => {
       expect(() => registry.updateSpec('nonexistent-id', makeDefinition('x'))).toThrow('not found');
     });
+
+    // ───── revision snapshot on edit (spec-capture / migration 025) ─────
+
+    it('INSERT-OR-IGNOREs a workflow_revisions snapshot for the edited spec', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
+      ).run();
+
+      const definition = makeDefinition('planner');
+      registry.updateSpec('wf-1-planner', definition);
+
+      interface RevRow { spec_hash: string; spec_json: string }
+      const rev = db
+        .prepare('SELECT spec_hash, spec_json FROM workflow_revisions WHERE workflow_id = ?')
+        .get('wf-1-planner') as RevRow | undefined;
+      expect(rev).toBeDefined();
+      expect(rev!.spec_json).toBe(JSON.stringify(definition));
+      expect(rev!.spec_hash).toBe(computeSpecHash(JSON.stringify(definition)));
+    });
+
+    it('adds a SECOND revision when the spec is edited to a distinct value', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
+      ).run();
+
+      const first = makeDefinition('planner');
+      const second = makeDefinition('planner');
+      second.phases[0].label = 'Edited Plan'; // distinct spec text → distinct hash
+      registry.updateSpec('wf-1-planner', first);
+      registry.updateSpec('wf-1-planner', second);
+
+      interface CountRow { count: number }
+      const { count } = db
+        .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
+        .get('wf-1-planner') as CountRow;
+      expect(count).toBe(2);
+    });
+
+    it('re-saving the SAME spec does NOT duplicate the revision (OR IGNORE)', () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
+      ).run();
+
+      const definition = makeDefinition('planner');
+      registry.updateSpec('wf-1-planner', definition);
+      registry.updateSpec('wf-1-planner', definition); // identical re-save
+
+      interface CountRow { count: number }
+      const { count } = db
+        .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
+        .get('wf-1-planner') as CountRow;
+      // UNIQUE(workflow_id, spec_hash) makes the second save idempotent.
+      expect(count).toBe(1);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -993,6 +1186,25 @@ describe('WorkflowRegistry', () => {
       interface SpecRow { spec_json: string }
       const row = db.prepare('SELECT spec_json FROM workflows WHERE id = ?').get('wf-1-custom-def67890') as SpecRow;
       expect(row.spec_json).toBe(customSpec);
+    });
+
+    // ───── revision snapshot on reset (spec-capture / migration 025) ─────
+
+    it("INSERT-OR-IGNOREs a workflow_revisions snapshot for the reset-to-'{}' spec", () => {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-sprint', 1, 'sprint', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('sprint')));
+
+      registry.resetSpec('wf-1-sprint');
+
+      interface RevRow { spec_hash: string; spec_json: string }
+      const rev = db
+        .prepare('SELECT spec_hash, spec_json FROM workflow_revisions WHERE workflow_id = ?')
+        .get('wf-1-sprint') as RevRow | undefined;
+      expect(rev).toBeDefined();
+      expect(rev!.spec_json).toBe('{}');
+      expect(rev!.spec_hash).toBe(computeSpecHash('{}'));
     });
   });
 
