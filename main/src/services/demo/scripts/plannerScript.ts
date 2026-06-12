@@ -36,6 +36,42 @@ function resolveProjectId(ctx: DemoScriptContext): number {
   return row.projectId;
 }
 
+/**
+ * Advance the seed idea to the board stage at `position`, mirroring the
+ * production planner-step -> idea-stage coupling (PLANNER_STEP_TO_IDEA_POSITION
+ * in mcpQueryHandler: 1=Idea, 2=Research, 3=Idea spec). The real coupling fires
+ * inside the MCP report-step handler, which the demo's reportStep bypasses —
+ * so the demo replays it here. Fail-soft like the original: any unresolved
+ * board/stage or chokepoint rejection is swallowed.
+ */
+async function advanceIdeaStage(
+  ctx: DemoScriptContext,
+  projectId: number,
+  ideaId: string,
+  position: number,
+): Promise<void> {
+  try {
+    const ideaRow = ctx.db
+      .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
+      .get(ideaId) as { boardId?: string | null; stageId?: string | null } | undefined;
+    if (!ideaRow?.boardId) return;
+    const stageRow = ctx.db
+      .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+      .get(ideaRow.boardId, position) as { id?: string } | undefined;
+    if (!stageRow?.id || stageRow.id === ideaRow.stageId) return;
+    await TaskChangeRouter.getInstance().applyChange(projectId, {
+      actor: 'orchestrator',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: stageRow.id,
+      runId: ctx.runId,
+      kind: 'seed-idea-stage',
+    });
+  } catch {
+    // Stage advance is presentation polish — never let it break the demo run.
+  }
+}
+
 export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   const idea = resolveSeedIdea(ctx);
   const ideaTitle = idea?.title ?? 'Add tagging to notes';
@@ -44,6 +80,7 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
 
   // ── Plan phase · context ──────────────────────────────────────────────────
   ctx.reportStep('context', 'running');
+  if (idea) await advanceIdeaStage(ctx, projectId, idea.id, 1); // Idea
   ctx.think(`Selected idea: "${ideaTitle}". I should scan the codebase to ground the spec before asking the user about scope.`);
   await ctx.sleep(1200);
   ctx.say(`Working on the idea **${ideaTitle}**. Let me get oriented in the codebase first.`);
@@ -75,11 +112,13 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
     },
   ]);
   const tagStyle = answer.answers['How should tags be assigned to notes?'] ?? 'Free-form labels';
+  const scopeChoice = answer.answers['Should filtering by tag land in this iteration?'] ?? 'Yes, include filtering';
   ctx.say(`Got it — **${tagStyle}** it is. I've captured the idea spec with that decision baked in.`);
   await ctx.sleep(800);
 
   // ── Plan phase · research (optional step) ─────────────────────────────────
   ctx.reportStep('research', 'running');
+  if (idea) await advanceIdeaStage(ctx, projectId, idea.id, 2); // Research
   ctx.tool(
     'WebSearch',
     { query: 'lightweight tagging model for note apps' },
@@ -91,7 +130,39 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
 
   // ── Plan phase · approve-idea (human gate) ────────────────────────────────
   ctx.reportStep('approve-idea', 'running');
-  ctx.say('The idea spec is ready. Please review and approve it in the **Human review** queue to continue.');
+  // Write the spec INTO the seeded idea so the user has something concrete to
+  // review (idea card on the Task backlog board) before approving the gate.
+  if (idea) {
+    await router.applyChange(projectId, {
+      actor: 'agent:demo',
+      entityType: 'idea',
+      taskId: idea.id,
+      fields: {
+        summary: `Tagging for notes — ${tagStyle.toLowerCase()}, ${scopeChoice === 'Tags only for now' ? 'filtering deferred' : 'filtering included'}.`,
+        body: [
+          '## Idea spec',
+          '',
+          '### Problem',
+          'Notes pile up with no way to group or find related ones.',
+          '',
+          '### Approach',
+          `- **Tag style:** ${tagStyle} (per the planning decision)`,
+          '- `Note` gains a `tags: string[]` field; tags render as `#tag` suffixes in formatted output',
+          `- **Filtering:** ${scopeChoice === 'Tags only for now' ? 'deferred to a follow-up idea' : '`listNotes(tag?)` filters case-insensitively in this iteration'}`,
+          '',
+          '### Out of scope',
+          '- Tag renaming / merging',
+          '- Tag-based notifications',
+        ].join('\n'),
+      },
+      runId: ctx.runId,
+    });
+    await advanceIdeaStage(ctx, projectId, idea.id, 3); // Idea spec
+  }
+  ctx.say(
+    'The idea spec is ready — review it on the idea card in the **Task backlog**, ' +
+      'then approve the gate in the **Human review** queue to continue.',
+  );
   await ctx.humanGate('approve-idea', 'Approve idea spec');
   ctx.say('Idea approved — moving on to decomposition.');
   await ctx.sleep(800);
