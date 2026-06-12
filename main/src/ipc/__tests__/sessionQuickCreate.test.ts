@@ -1,22 +1,25 @@
 /**
- * Unit tests for the sessions:create-quick IPC handler and the pure
- * generateQuickWorktreeBranchName helper exported from session.ts.
+ * Unit tests for the sessions:create-quick / sessions:input IPC handlers and
+ * the pure generateQuickWorktreeBranchName helper exported from session.ts.
  *
  * Sections:
  *  A. generateQuickWorktreeBranchName -- pure UTC-timestamp helper (3 tests).
- *  B. sessions:create-quick handler -- workflow_runs pipeline integration (4 tests).
+ *  B. sessions:create-quick handler -- workflow_runs pipeline integration,
+ *     substrate threading, and the interactive eager PTY spawn.
+ *  C. sessions:input handler -- interactive-substrate relay branch vs the
+ *     byte-identical SDK path.
  *
- * For section B the full handler is exercised via a lightweight handler-capture
- * harness that replaces the Electron IPC stack.  All service collaborators are
- * stubbed at the object level; no real SQLite DB is used.
+ * For sections B/C the full handlers are exercised via a lightweight
+ * handler-capture harness that replaces the Electron IPC stack.  All service
+ * collaborators are stubbed at the object level; no real SQLite DB is used.
  *
- * Important: requests must include an explicit branchName so the listener
- * path-match check inside the handler resolves against a known value.  Without
- * it the handler generates a timestamp-derived name that won't match the
- * stub's worktreePath and the 30-second timeout fires.
+ * Important: create-quick requests must include an explicit branchName so the
+ * listener path-match check inside the handler resolves against a known value.
+ * Without it the handler generates a timestamp-derived name that won't match
+ * the stub's worktreePath and the 30-second timeout fires.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Electron is imported transitively via session.ts -> panelManager etc.
 vi.mock('electron', () => ({
@@ -29,15 +32,34 @@ vi.mock('electron', () => ({
   },
 }));
 
-// panelManager uses IPC at module load time - stub it.
+// panelManager uses IPC at module load time - stub it. createPanel /
+// getPanelsForSession back the create-quick eager spawn and sessions:input
+// panel resolution; tests override them per-case via vi.mocked().
 vi.mock('../../services/panelManager', () => ({
   panelManager: {
     getPanel: vi.fn(),
     getAllPanels: vi.fn(() => []),
+    getPanelsForSession: vi.fn(() => []),
+    createPanel: vi.fn(async (req: { sessionId: string }) => ({
+      id: 'panel-quick-1',
+      sessionId: req.sessionId,
+      type: 'claude',
+      state: {},
+    })),
+  },
+}));
+
+// The databaseService SINGLETON (services/database) backs validateSessionIsActive
+// inside sessions:input. Mocked so the module never opens a real sqlite file and
+// the validation deterministically passes for the test session.
+vi.mock('../../services/database', () => ({
+  databaseService: {
+    getSession: vi.fn(() => ({ id: 'sess-001', status: 'running', archived: false })),
   },
 }));
 
 import { generateQuickWorktreeBranchName, registerSessionHandlers } from '../session';
+import { panelManager } from '../../services/panelManager';
 import type { AppServices } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -83,14 +105,31 @@ function makeHandlerCapture() {
 async function invoke(
   handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
   channel: string,
-  arg: unknown,
+  ...args: unknown[]
 ): Promise<unknown> {
   const fn = handlers.get(channel);
   if (!fn) throw new Error(`No handler registered for channel: ${channel}`);
-  return fn({} as unknown, arg);
+  return fn({} as unknown, ...args);
 }
 
-function makeServices() {
+// Reset the shared module-level panelManager mocks between tests. createPanel
+// keeps its factory default implementation (mockClear, not mockReset);
+// getPanelsForSession is restored to the empty default.
+beforeEach(() => {
+  vi.mocked(panelManager.createPanel).mockClear();
+  vi.mocked(panelManager.getPanelsForSession).mockReset();
+  vi.mocked(panelManager.getPanelsForSession).mockReturnValue([]);
+});
+
+function makeServices(opts?: {
+  /**
+   * What the fake registry's resolution ladder yields when the REQUESTED
+   * substrate is absent — models WorkflowRegistry.createRun resolving
+   * 'interactive' via the global default / CYBOFLOW_SUBSTRATE even though the
+   * request carried no substrate. Defaults to 'sdk' (the ladder floor).
+   */
+  resolvedSubstrateDefault?: 'sdk' | 'interactive';
+}) {
   const dbRunCalls: Array<{ sql: string; args: unknown[] }> = [];
   let lastPreparedSql = '';
   const fakeStmt = {
@@ -111,14 +150,24 @@ function makeServices() {
 
   const ensureQuickWorkflowCalls: number[] = [];
   const createRunCalls: string[] = [];
+  const createRunArgs: unknown[][] = [];
   const fakeWorkflowRegistry = {
     ensureQuickWorkflow: (projectId: number) => {
       ensureQuickWorkflowCalls.push(projectId);
       return `wf-${projectId}-__quick__`;
     },
-    createRun: (workflowId: string) => {
-      createRunCalls.push(workflowId);
-      return { runId: 'test-run-id-abc', permissionMode: 'default' as const };
+    createRun: (...args: unknown[]) => {
+      createRunArgs.push(args);
+      createRunCalls.push(args[0] as string);
+      // Mirror the real createRun resolution ladder shape: the explicit
+      // REQUESTED substrate wins; an absent request falls through to the
+      // configurable "global default" rung (resolvedSubstrateDefault), floor 'sdk'.
+      const requested = args[1] as 'sdk' | 'interactive' | undefined;
+      return {
+        runId: 'test-run-id-abc',
+        permissionMode: 'default' as const,
+        substrate: requested ?? opts?.resolvedSubstrateDefault ?? ('sdk' as const),
+      };
     },
   };
 
@@ -127,6 +176,8 @@ function makeServices() {
   const fakeSession = {
     id: 'sess-001',
     worktreePath: `/tmp/project/${TEST_BRANCH}`,
+    status: 'stopped',
+    toolType: 'claude',
   };
 
   const fakeSessionManager = {
@@ -135,6 +186,9 @@ function makeServices() {
       cb(fakeSession);
     },
     removeListener: vi.fn(),
+    getSession: vi.fn(() => fakeSession),
+    updateSession: vi.fn(),
+    addSessionOutput: vi.fn(),
   };
 
   const fakeTaskQueue = {
@@ -144,7 +198,29 @@ function makeServices() {
   const fakeDatabaseService = {
     getProject: (_id: number) => ({ id: 42, name: 'TestProject', path: '/proj' }),
     getDb: () => fakeDb,
+    // sessions:input reads the db row for commit-mode + substrate routing.
+    getSession: vi.fn(() => ({ id: 'sess-001', commit_mode: undefined, substrate: undefined })),
   };
+
+  // SDK manager — the interactive branch must NEVER touch it.
+  const fakeClaudeCodeManager = {
+    isPanelRunning: vi.fn(() => false),
+    startPanel: vi.fn(),
+    sendInput: vi.fn(),
+  };
+
+  // Interactive (PTY) manager. startPanel returns a NEVER-settling promise to
+  // enforce the persistent-session contract: the handlers must fire-and-forget
+  // it (an await would deadlock the test the same way it would the app).
+  const fakeInteractiveCliManager = {
+    isPanelRunning: vi.fn(() => false),
+    relayUserTurn: vi.fn(),
+    startPanel: vi.fn(() => new Promise<void>(() => {})),
+  };
+
+  // At-spawn runId→panelId seed (facade.registerInteractivePanel) — the spawn
+  // sites must call it BEFORE the fire-and-forget startPanel.
+  const fakeRegisterLivePanel = vi.fn();
 
   const services = {
     sessionManager: fakeSessionManager,
@@ -152,7 +228,11 @@ function makeServices() {
     taskQueue: fakeTaskQueue,
     worktreeManager: {},
     cliManagerFactory: {},
-    claudeCodeManager: {},
+    claudeCodeManager: fakeClaudeCodeManager,
+    interactiveCliManager: fakeInteractiveCliManager,
+    endLiveSession: vi.fn(async () => {}),
+    killLiveSession: vi.fn(async () => {}),
+    registerLivePanel: fakeRegisterLivePanel,
     gitStatusManager: {},
     archiveProgressManager: undefined,
     cyboflow: {
@@ -161,7 +241,19 @@ function makeServices() {
     },
   } as unknown as AppServices;
 
-  return { services, dbRunCalls, ensureQuickWorkflowCalls, createRunCalls, fakeTaskQueue };
+  return {
+    services,
+    dbRunCalls,
+    ensureQuickWorkflowCalls,
+    createRunCalls,
+    createRunArgs,
+    fakeTaskQueue,
+    fakeSessionManager,
+    fakeDatabaseService,
+    fakeClaudeCodeManager,
+    fakeInteractiveCliManager,
+    fakeRegisterLivePanel,
+  };
 }
 
 describe('sessions:create-quick handler - workflow_runs pipeline', () => {
@@ -225,5 +317,269 @@ describe('sessions:create-quick handler - workflow_runs pipeline', () => {
 
     expect(result.success).toBe(true);
     expect(result.data?.runId).toBe('test-run-id-abc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B (cont.) sessions:create-quick - substrate threading + eager PTY spawn
+// ---------------------------------------------------------------------------
+
+function registerWith(services: AppServices) {
+  const { ipcMain, handlers } = makeHandlerCapture();
+  registerSessionHandlers(
+    ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
+    services,
+  );
+  return handlers;
+}
+
+describe('sessions:create-quick handler - substrate threading + eager PTY spawn', () => {
+  it('threads a valid request.substrate into createRun as the 2nd arg', async () => {
+    const { services, createRunArgs } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+    });
+
+    expect(createRunArgs).toHaveLength(1);
+    expect(createRunArgs[0][1]).toBe('interactive');
+  });
+
+  it('passes undefined substrate to createRun for an absent or invalid value', async () => {
+    const { services, createRunArgs, dbRunCalls } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'bogus',
+    });
+
+    expect(createRunArgs[0][1]).toBeUndefined();
+    expect(createRunArgs[1][1]).toBeUndefined();
+    // The invalid value is never persisted — sessions.substrate is ALWAYS
+    // stamped with the RESOLVED value from createRun ('sdk' here), never the
+    // raw request value.
+    const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    expect(stamps).toHaveLength(2);
+    expect(stamps.map((c) => c.args)).toEqual([
+      ['sdk', 'sess-001'],
+      ['sdk', 'sess-001'],
+    ]);
+  });
+
+  it('stamps the session worktree onto the sentinel run for EVERY quick session', async () => {
+    const { services, dbRunCalls } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+
+    const stamp = dbRunCalls.find((c) =>
+      c.sql.includes('UPDATE workflow_runs SET worktree_path'),
+    );
+    expect(stamp).toBeDefined();
+    expect(stamp?.args).toEqual([`/tmp/project/${TEST_BRANCH}`, 'test-run-id-abc']);
+  });
+
+  it('persists sessions.substrate when an interactive substrate is chosen', async () => {
+    const { services, dbRunCalls } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+    });
+
+    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    expect(stamp).toBeDefined();
+    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+  });
+
+  it('eagerly spawns the interactive REPL (fire-and-forget) and returns claudePanelId', async () => {
+    const { services, fakeInteractiveCliManager, fakeSessionManager, fakeRegisterLivePanel } =
+      makeServices();
+    const handlers = registerWith(services);
+
+    // Resolves even though the stubbed startPanel NEVER settles — proof the
+    // handler does not await the persistent spawn promise (the deadlock trap).
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data?.claudePanelId).toBe('panel-quick-1');
+
+    expect(vi.mocked(panelManager.createPanel)).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Claude',
+    });
+    expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
+    const [panelId, sessionId, worktreePath, briefing] =
+      fakeInteractiveCliManager.startPanel.mock.calls[0] as unknown as [string, string, string, string];
+    expect(panelId).toBe('panel-quick-1');
+    expect(sessionId).toBe('sess-001');
+    expect(worktreePath).toBe(`/tmp/project/${TEST_BRANCH}`);
+    expect(briefing).toContain('cyboflow');
+    // That keyword is the USER's to type — never cyboflow-authored prompt text.
+    expect(briefing).not.toMatch(/ultracode/i);
+
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith('sess-001', { status: 'running' });
+
+    // At-spawn runId→panelId registration fires BEFORE the fire-and-forget
+    // startPanel (deterministic facade translation — no first-PTY-byte race).
+    expect(fakeRegisterLivePanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
+    expect(fakeRegisterLivePanel.mock.invocationCallOrder[0]).toBeLessThan(
+      fakeInteractiveCliManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("eager-spawns + stamps when the registry RESOLVES 'interactive' from the global default (no requested substrate)", async () => {
+    // request.substrate is undefined, but createRun's resolution ladder
+    // (global default / CYBOFLOW_SUBSTRATE) yields 'interactive' — the session
+    // stamp and the eager-spawn gate must follow the RESOLVED value, or the
+    // run row says interactive while the session behaves SDK.
+    const { services, fakeInteractiveCliManager, dbRunCalls, fakeRegisterLivePanel } =
+      makeServices({ resolvedSubstrateDefault: 'interactive' });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data?.claudePanelId).toBe('panel-quick-1');
+
+    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+
+    expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
+    expect(fakeRegisterLivePanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
+  });
+
+  it('does not create a panel or return claudePanelId on the SDK path', async () => {
+    const { services, fakeInteractiveCliManager, fakeRegisterLivePanel } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+    })) as { success: boolean; data?: Record<string, unknown> };
+
+    expect(result.success).toBe(true);
+    expect(vi.mocked(panelManager.createPanel)).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
+    expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C. sessions:input handler - interactive relay branch vs the SDK path
+// ---------------------------------------------------------------------------
+
+describe('sessions:input handler - substrate routing', () => {
+  const SESSION_ID = 'sess-001';
+  const PANEL = { id: 'panel-1', sessionId: SESSION_ID, type: 'claude', state: {} };
+
+  function setupInput(opts: { substrate?: string; replRunning?: boolean; runId?: string }) {
+    const made = makeServices();
+    (made.fakeDatabaseService.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: SESSION_ID,
+      commit_mode: undefined,
+      substrate: opts.substrate,
+      run_id: opts.runId,
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue(
+      [PANEL] as unknown as ReturnType<typeof panelManager.getPanelsForSession>,
+    );
+    made.fakeInteractiveCliManager.isPanelRunning.mockReturnValue(opts.replRunning ?? false);
+    const handlers = registerWith(made.services);
+    return { ...made, handlers };
+  }
+
+  it('relays an interactive session turn into the live REPL, never the SDK manager', async () => {
+    const {
+      handlers,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeRegisterLivePanel,
+    } = setupInput({ substrate: 'interactive', replRunning: true });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello repl')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeInteractiveCliManager.relayUserTurn).toHaveBeenCalledWith('panel-1', 'hello repl');
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    // Only the SPAWN sites seed the facade mapping — a live-REPL relay doesn't.
+    expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
+    // The SDK manager is byte-untouched on the interactive branch.
+    expect(fakeClaudeCodeManager.isPanelRunning).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.sendInput).not.toHaveBeenCalled();
+    // The new turn re-enters 'running' so the turn-end rest has an edge to flip.
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+  });
+
+  it('re-spawns a dead interactive REPL fire-and-forget with the input as first prompt', async () => {
+    const {
+      handlers,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeRegisterLivePanel,
+    } = setupInput({ substrate: 'interactive', replRunning: false, runId: 'run-quick-001' });
+
+    // Resolves even though the stubbed startPanel NEVER settles — the handler
+    // must not await the persistent spawn promise.
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'wake up')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeInteractiveCliManager.relayUserTurn).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      SESSION_ID,
+      `/tmp/project/${TEST_BRANCH}`,
+      'wake up',
+      undefined,
+    );
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+
+    // At-spawn runId→panelId registration (mirrors create-quick) fires BEFORE
+    // the fire-and-forget startPanel — no first-PTY-byte race.
+    expect(fakeRegisterLivePanel).toHaveBeenCalledWith('run-quick-001', 'panel-1');
+    expect(fakeRegisterLivePanel.mock.invocationCallOrder[0]).toBeLessThan(
+      fakeInteractiveCliManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps the SDK path for sessions without an interactive substrate', async () => {
+    const { handlers, fakeInteractiveCliManager, fakeClaudeCodeManager } = setupInput({
+      substrate: undefined,
+    });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'sdk turn')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeClaudeCodeManager.isPanelRunning).toHaveBeenCalledWith('panel-1');
+    expect(fakeClaudeCodeManager.startPanel).toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.relayUserTurn).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
   });
 });

@@ -45,7 +45,7 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 }
 
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { databaseService, sessionManager, worktreeManager } = services;
+  const { databaseService, sessionManager, worktreeManager, killLiveSession } = services;
 
   ipcMain.handle('projects:get-all', async () => {
     try {
@@ -296,7 +296,22 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         if (session.is_main_repo || !session.worktree_name) {
           continue;
         }
-        
+
+        // PTY quick-session close-out (mirrors the sessions:delete pattern in
+        // session.ts): a live interactive REPL must not be orphaned when its
+        // worktree is torn out from under it below. HARD kill (not the graceful
+        // EOF/`/exit` end — claude may be mid-turn and never read PTY stdin).
+        // The facade translates the sentinel runId to the live panelId and
+        // NO-OPs for SDK/NULL-substrate rows. Fail-soft: a kill failure must
+        // never block the project deletion.
+        if (session.substrate === 'interactive' && session.run_id) {
+          try {
+            await killLiveSession(session.run_id);
+          } catch (error) {
+            console.warn(`[Main] Failed to kill live interactive REPL for session ${session.id}:`, error);
+          }
+        }
+
         try {
           console.log(`[Main] Removing worktree '${session.worktree_name}' for session ${session.id}`);
           await worktreeManager.removeWorktree(project.path, session.worktree_name, project.worktree_folder || undefined);

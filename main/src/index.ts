@@ -521,6 +521,14 @@ async function initializeServices() {
     },
     skipValidation: true,
   });
+  // Narrow the AbstractCliManager-typed factory return to the concrete class:
+  // AppServices.interactiveCliManager exposes the persistent-REPL seams
+  // (relayUserTurn et al.) that only InteractiveClaudeManager has. The factory's
+  // 'claude-interactive' branch always constructs one, so this throw is
+  // unreachable in practice — it exists purely to narrow the type without a cast.
+  if (!(interactiveCliManager instanceof InteractiveClaudeManager)) {
+    throw new Error('[Main] cliManagerFactory returned a non-InteractiveClaudeManager for claude-interactive');
+  }
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -812,6 +820,37 @@ async function initializeServices() {
     ptyPublisher(evt.runId, evt.data);
   });
 
+  // Turn-end status rest for PTY QUICK sessions (IDEA-030 follow-on). The facade
+  // re-emits the interactive manager's 'turn-end' ({ panelId, sessionId, runId }),
+  // but RunExecutor only listens for runs it executes — the sentinel `__quick__`
+  // run has NO executor, so nothing would flip the session out of 'running' when
+  // an assistant turn completes. Mirror the SDK quick path's resting value:
+  // sessionManager.addSessionOutput marks the DB row 'completed' on the
+  // system/result message (rendered as completed_unviewed/stopped by
+  // mapDbStatusToSessionStatus). Guarded to sessions whose substrate is
+  // 'interactive' AND whose sessions.run_id matches the payload runId — workflow
+  // runs (hosted sessions, runId ≠ sessions.run_id) are untouched. Fail-soft: a
+  // status-flip failure must never disturb the live REPL.
+  substrateFacade.on('turn-end', (payload) => {
+    try {
+      const evt = payload as { panelId: string; sessionId: string; runId: string };
+      const dbSession = sessionManager.getDbSession(evt.sessionId);
+      if (!dbSession || dbSession.substrate !== 'interactive') return;
+      if (!dbSession.run_id || dbSession.run_id !== evt.runId) return;
+      if (dbSession.status !== 'running') return;
+      // Direct DB write + manual session-updated emit — the same shape as the
+      // SDK exit handler in events.ts (updateSession would re-map 'completed'
+      // through mapSessionStatusToDbStatus and lose the completed_unviewed edge).
+      sessionManager.db.updateSession(evt.sessionId, { status: 'completed' });
+      const updatedSession = sessionManager.getSession(evt.sessionId);
+      if (updatedSession) {
+        sessionManager.emit('session-updated', updatedSession);
+      }
+    } catch (err) {
+      console.error('[Main] Failed to rest PTY quick-session status on turn-end:', err);
+    }
+  });
+
   // Per-run PQueue registry. Shared with Orchestrator (for drain-on-shutdown)
   // and ApprovalRouter (for permission-decision dispatch). RunLauncher needs it
   // so `runLauncher.launch()` can enqueue `runExecutor.execute(runId)` — without
@@ -899,6 +938,22 @@ async function initializeServices() {
     worktreeManager,
     cliManagerFactory,
     claudeCodeManager: defaultCliManager, // Backward compatibility
+    interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
+    // Live-REPL close-out seams for PTY quick sessions (IDEA-030): route the
+    // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
+    // so a quick session's persistent interactive REPL is gracefully ended
+    // (EOF/`/exit`) or hard-killed instead of orphaned. Mirrors the RelayDeps
+    // closures wired in app.whenReady(); the facade translates the sentinel
+    // runId to the live panelId and strictly NO-OPs for the SDK substrate.
+    endLiveSession: (runId: string) => substrateFacade.endSession(runId),
+    killLiveSession: (runId: string) => substrateFacade.killSession(runId),
+    // Deterministic at-spawn runId→panelId registration for PTY quick sessions:
+    // seeds the facade's translation maps BEFORE the fire-and-forget startPanel
+    // so a relay/close-out racing the first PTY byte never falls back to the
+    // sentinel runId (the event-fed mapping only exists after the first
+    // 'pty-output'/'turn-end').
+    registerLivePanel: (runId: string, panelId: string) =>
+      substrateFacade.registerInteractivePanel(runId, panelId),
     gitDiffManager,
     gitStatusManager,
     executionTracker,

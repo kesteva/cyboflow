@@ -9,6 +9,7 @@ import type { ExecutionTracker } from '../services/executionTracker';
 import type { DatabaseService } from '../database/database';
 import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
+import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { Logger } from '../utils/logger';
@@ -24,6 +25,36 @@ export interface AppServices {
   worktreeManager: WorktreeManager;
   cliManagerFactory: CliManagerFactory;
   claudeCodeManager: AbstractCliManager; // Now uses abstract base class
+  /**
+   * The PTY-substrate sibling of claudeCodeManager (IDEA-030 quick sessions).
+   * Typed CONCRETE (not AbstractCliManager) so the persistent-REPL seams —
+   * relayUserTurn / endSession — are visible to the sessions:input relay branch
+   * and the create-quick eager spawn. Safe: a type-only import, and
+   * interactiveClaudeManager.ts imports nothing from ipc/ (no cycle).
+   */
+  interactiveCliManager: InteractiveClaudeManager;
+  /**
+   * Live-REPL close-out seams for PTY QUICK sessions (mirrors the RelayDeps
+   * closures wired in index.ts). Both take the session's sentinel `__quick__`
+   * runId — the SubstrateDispatchFacade translates it to the live panelId and
+   * strictly NO-OPs for the SDK substrate. `endLiveSession` writes the graceful
+   * EOF/`/exit` (merge/rebase: claude is idle and reads it); `killLiveSession`
+   * hard-kills the process tree (dismiss/archive: claude may be mid-turn and
+   * never read PTY stdin). Callers must treat both as fail-soft.
+   */
+  endLiveSession: (runId: string) => Promise<void>;
+  killLiveSession: (runId: string) => Promise<void>;
+  /**
+   * Deterministic at-spawn registration of a PTY quick session's
+   * runId→panelId translation on the SubstrateDispatchFacade
+   * (registerInteractivePanel). The facade's event-fed mapping
+   * ('pty-output'/'turn-end') only exists after the first PTY byte, so the
+   * spawn sites (sessions:create-quick eager spawn, sessions:input dead-REPL
+   * re-spawn) call this immediately BEFORE the fire-and-forget startPanel —
+   * otherwise a relay/close-out racing the first byte falls back to the
+   * sentinel runId and throws "No claude process found". Idempotent.
+   */
+  registerLivePanel: (runId: string, panelId: string) => void;
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;

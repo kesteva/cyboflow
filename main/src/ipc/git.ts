@@ -58,7 +58,21 @@ interface RawCommitData {
 
 
 export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService, configManager } = services;
+  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
+
+  // PTY quick-session close-out (IDEA-030): after a merge/rebase the session's
+  // work is accepted, so a live persistent interactive REPL should exit instead
+  // of lingering orphaned. Graceful EOF/`/exit` (endLiveSession) is correct here
+  // — claude is idle post-merge and reads PTY stdin. The facade translates the
+  // sentinel `__quick__` runId to the live panelId and strictly NO-OPs for the
+  // SDK substrate / workflow runs. Fire-and-forget fail-soft: a close failure
+  // must never fail the git operation itself.
+  const endLiveReplIfInteractive = (session: Session, sessionId: string): void => {
+    if (session.substrate !== 'interactive' || !session.runId) return;
+    void endLiveSession(session.runId).catch((err: unknown) => {
+      console.warn(`[IPC:git] Failed to end live interactive REPL for session ${sessionId}:`, err);
+    });
+  };
 
   // Helper function to emit git operation events to all sessions in a project
   const emitGitOperationToProject = (sessionId: string, eventType: PanelEventType, message: string, details?: Record<string, unknown>) => {
@@ -1065,6 +1079,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
         });
 
+      // Gracefully end a PTY quick session's live REPL — the merge closes out
+      // the session's work (see endLiveReplIfInteractive).
+      endLiveReplIfInteractive(session, sessionId);
+
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately
       if (session.projectId !== undefined) {
@@ -1167,6 +1185,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         .catch((err: unknown) => {
           console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
         });
+
+      // Gracefully end a PTY quick session's live REPL — the merge closes out
+      // the session's work (see endLiveReplIfInteractive).
+      endLiveReplIfInteractive(session, sessionId);
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately

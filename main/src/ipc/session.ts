@@ -25,6 +25,7 @@ import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 import { isPermissionMode } from '../../../shared/types/workflows';
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
+import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 
 /**
@@ -112,6 +113,23 @@ export function generateQuickWorktreeBranchName(now: Date = new Date()): string 
   return `quick-${y}${mo}${d}-${h}${mi}${s}`;
 }
 
+/**
+ * First prompt written into the persistent interactive REPL when a quick session
+ * opts into the PTY substrate (sessions:create-quick eager spawn). A minimal
+ * context briefing — NOT a workflow prompt: it must never instruct the agent to
+ * start work. NOTE: this text must NEVER contain the word "ultracode" — that
+ * keyword is reserved for the USER to type (it is what the passive
+ * dynamic-workflow detection at the EventRouter seam keys off).
+ */
+const QUICK_PTY_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
+
+Session context:
+- This is a user-driven quick session: no predefined workflow, no step ceremony — just you and the user.
+- Your working directory is a dedicated git worktree for this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
+- A "cyboflow" MCP server is connected; its tools write to cyboflow's project database (tasks/backlog). Use them only when the user asks you to interact with the cyboflow backlog.
+
+Acknowledge briefly and wait for the user's instructions.`;
+
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
     sessionManager,
@@ -120,6 +138,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     worktreeManager,
     cliManagerFactory,
     claudeCodeManager, // For backward compatibility
+    interactiveCliManager, // PTY substrate sibling (quick-session relay/spawn)
+    killLiveSession, // hard-kill seam for a dismissed PTY quick session's REPL
+    registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
     gitStatusManager,
     archiveProgressManager,
     cyboflow
@@ -335,6 +356,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentPermissionMode
         : undefined;
 
+      // Opt-in CLI substrate for the quick session (migration 025). Validate the
+      // untyped IPC value; an absent/invalid value leaves the run + session on
+      // the SDK default (byte-identical to before).
+      const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
+
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
@@ -384,9 +410,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Stamp the chosen 4-mode onto the sentinel run's permission_mode_snapshot too,
       // so the run row is truthful (the quick PANEL reads the session column below,
       // but workflow-world tooling that inspects the run sees the right value).
-      const { runId } = cyboflow.workflowRegistry.createRun(
+      // createRun resolves the substrate through the FULL ladder (requested →
+      // global default → CYBOFLOW_SUBSTRATE env → 'sdk') and returns the value it
+      // stamped onto workflow_runs.substrate — everything below (the session
+      // stamp + the eager spawn gate) keys off that RESOLVED value, never the
+      // requested one, so the run row and the session can never diverge.
+      const { runId, substrate: resolvedSubstrate } = cyboflow.workflowRegistry.createRun(
         sentinelWorkflowId,
-        undefined,
+        requestedSubstrate,
         undefined,
         requestedAgentMode,
       );
@@ -407,6 +438,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // starting -> running via the guarded helper in transitions.ts.
       transitionToRunning(db, { runId });
 
+      // Stamp the session's worktree onto the sentinel run (ALL quick sessions).
+      // Sentinel runs never pass through RunLauncher (which stamps
+      // workflow_runs.worktree_path for workflow runs at launch), so without
+      // this the column stays NULL and mcpQueryHandler.resolveRunWorktree
+      // returns null — short-circuiting the per-run worktree allow-list for
+      // quick-session MCP writes. Mirror of the runLauncher.ts UPDATE, minus
+      // status/branch (the transitions above own status).
+      db.prepare(
+        `UPDATE workflow_runs SET worktree_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      ).run(session.worktreePath, runId);
+
       // Backfill sessions.run_id.
       db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
 
@@ -421,7 +463,76 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         );
       }
 
-      return { success: true, data: { jobId: job.id, sessionId: session.id, worktreePath: session.worktreePath, runId } };
+      // Persist the per-session CLI substrate (migration 025) so the
+      // sessions:input relay branch, frontend substrate gates, and any REPL
+      // re-spawn read it. ALWAYS stamp the RESOLVED value from createRun — a
+      // request without an explicit substrate can still resolve 'interactive'
+      // via the global default or CYBOFLOW_SUBSTRATE, and stamping only on
+      // explicit request would leave the run row saying interactive while the
+      // session behaved SDK. NULL remains the legacy/SDK meaning for
+      // pre-migration rows only; new quick sessions always carry the resolved
+      // value.
+      db.prepare(`UPDATE sessions SET substrate = ? WHERE id = ?`).run(
+        resolvedSubstrate,
+        session.id,
+      );
+
+      // EAGER PTY SPAWN (interactive substrate only): create the claude panel
+      // server-side (same pattern sessions:input uses) and boot the persistent
+      // REPL now, with the cyboflow context briefing as its first prompt, so the
+      // live terminal is alive before the user's first message.
+      // ⚠️ NEVER await startPanel here: the interactive spawn promise resolves
+      // only when the REPL EXITS (persistent-session contract) — awaiting would
+      // deadlock create-quick until the session ends.
+      let claudePanelId: string | undefined;
+      if (resolvedSubstrate === 'interactive') {
+        try {
+          // NOTE: deliberately NOT registered with ClaudePanelManager (the
+          // frontend panels:create handler auto-registers claude panels,
+          // panels.ts:30-41; this server-side createPanel does not). The
+          // interactive PTY surface drives this panel end-to-end — relay/resize/
+          // close-out all route through the SubstrateDispatchFacade, and the
+          // structured-panel claudePanels:* IPC is never used for it. Same
+          // intentional asymmetry as the pre-existing sessions:input in-handler
+          // createPanel below.
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'claude',
+            title: 'Claude'
+          });
+          claudePanelId = panel.id;
+          // Deterministic at-spawn registration (facade.registerInteractivePanel):
+          // seed the runId→panelId translation BEFORE the PTY spawn so a relay or
+          // close-out racing the first PTY byte never falls back to the sentinel
+          // runId ("No claude process found").
+          registerLivePanel(runId, panel.id);
+          void interactiveCliManager
+            .startPanel(panel.id, session.id, session.worktreePath, QUICK_PTY_BRIEFING, session.permissionMode)
+            .catch((err: unknown) => {
+              // Fail-soft: a spawn failure leaves the session usable — the next
+              // sessions:input re-spawns the REPL with the user's prompt.
+              console.error(`[IPC] Eager interactive REPL spawn failed for session ${session.id}:`, err);
+            });
+          // Mirror sessions:input — the REPL is live; show the session as running.
+          await sessionManager.updateSession(session.id, { status: 'running' });
+        } catch (error) {
+          console.error(`[IPC] Failed to create Claude panel for interactive quick session ${session.id}:`, error);
+          // Continue without the eager spawn — sessions:input bootstraps on demand.
+        }
+      }
+
+      // claudePanelId is only set on the interactive path (so the frontend skips
+      // creating a duplicate claude panel); the SDK response shape is unchanged.
+      return {
+        success: true,
+        data: {
+          jobId: job.id,
+          sessionId: session.id,
+          worktreePath: session.worktreePath,
+          runId,
+          ...(claudePanelId !== undefined ? { claudePanelId } : {}),
+        },
+      };
     } catch (error) {
       console.error('[IPC] Failed to create quick session:', error);
       console.error('[IPC] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
@@ -485,6 +596,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const timestamp = new Date().toLocaleTimeString();
       let archiveMessage = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[44m\x1b[37m 📦 ARCHIVING SESSION \x1b[0m\r\n`;
       archiveMessage += `\x1b[90mSession will be archived and removed from the active sessions list.\x1b[0m\r\n`;
+
+      // PTY quick-session close-out: a live interactive REPL must not be
+      // orphaned when its session is dismissed/archived. HARD kill (not the
+      // graceful EOF/`/exit` end — a dismissed session's claude may be mid-turn
+      // and never read PTY stdin) BEFORE the worktree-removal cleanup below
+      // tears the cwd out from under it. The facade translates the sentinel
+      // runId to the live panelId and NO-OPs for the SDK substrate. Fail-soft:
+      // a kill failure must never block the dismiss.
+      if (dbSession.substrate === 'interactive' && dbSession.run_id) {
+        try {
+          await killLiveSession(dbSession.run_id);
+        } catch (err) {
+          console.warn(`[IPC:session] Failed to kill live interactive REPL for dismissed session ${sessionId}:`, err);
+        }
+      }
 
       // Archive the session immediately to provide fast feedback to the user
       await sessionManager.archiveSession(sessionId);
@@ -700,7 +826,44 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Use the first Claude panel (in most cases there will be only one)
       const claudePanel = postCreateClaudePanels[0];
       console.log(`[IPC] Using Claude panel ${claudePanel.id} for input to session ${sessionId}`);
-      
+
+      // INTERACTIVE substrate branch (sessions.substrate, migration 025): the
+      // session's claude lives in a persistent PTY REPL, so a composer turn is
+      // RELAYED into the live process — never the SDK manager (whose
+      // startPanel/sendInput would spawn a competing SDK conversation). The SDK
+      // path below stays byte-identical for sdk/NULL sessions (Q3 invariant).
+      if (dbSession?.substrate === 'interactive') {
+        if (interactiveCliManager.isPanelRunning(claudePanel.id)) {
+          console.log(`[IPC] Relaying input into live interactive REPL for panel ${claudePanel.id}`);
+          interactiveCliManager.relayUserTurn(claudePanel.id, finalInput);
+          // Show the new turn as running so the turn-end rest listener
+          // (index.ts) has a 'running' edge to flip — mirrors the SDK quick
+          // cycle where each input re-enters 'running'.
+          await sessionManager.updateSession(sessionId, { status: 'running' });
+        } else {
+          // REPL died or the app restarted — re-spawn with the user's input as
+          // the first prompt. ⚠️ NEVER await startPanel: the interactive spawn
+          // promise resolves only when the REPL EXITS (persistent-session
+          // contract) — awaiting would deadlock sessions:input until the
+          // session ends.
+          console.log(`[IPC] Interactive REPL not running for panel ${claudePanel.id}, re-spawning...`);
+          // Deterministic at-spawn registration (mirrors the create-quick eager
+          // spawn): seed the facade's runId→panelId translation BEFORE the PTY
+          // spawn so a relay/close-out racing the first PTY byte never falls
+          // back to the sentinel runId.
+          if (dbSession?.run_id) {
+            registerLivePanel(dbSession.run_id, claudePanel.id);
+          }
+          void interactiveCliManager
+            .startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode)
+            .catch((err: unknown) => {
+              console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
+            });
+          await sessionManager.updateSession(sessionId, { status: 'running' });
+        }
+        return { success: true };
+      }
+
       // Check if Claude Code is running for this panel
       // TODO: In the future, this should detect the panel's CLI tool type and get the appropriate manager
       const isClaudeRunning = claudeCodeManager.isPanelRunning(claudePanel.id);
@@ -753,6 +916,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
+  // NOTE (PTY quick sessions): no interactive-substrate branch here. The quick
+  // session composer routes through sessions:input (ChatInput.tsx →
+  // API.sessions.sendInput), and API.sessions.continue has NO production
+  // frontend caller — the structured panel UI uses panels:continue instead. If
+  // a caller ever appears, mirror the sessions:input substrate guard
+  // (relayUserTurn / never-await startPanel) before the SDK manager is touched.
   ipcMain.handle('sessions:continue', async (_event, sessionId: string, prompt?: string, model?: string) => {
     try {
       // Validate session exists and is active

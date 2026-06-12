@@ -177,7 +177,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getAllWithProjects: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-all-with-projects'),
     get: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get', sessionId),
     create: (request: CreateSessionRequest): Promise<IPCResponse> => ipcRenderer.invoke('sessions:create', request),
-    createQuick: (request: CreateSessionRequest): Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string }>> =>
+    // claudePanelId is set ONLY when the handler eagerly spawned the interactive
+    // PTY REPL (request.substrate === 'interactive') so the frontend can skip
+    // creating a duplicate claude panel. KEEP IN SYNC with the handler's return
+    // and frontend/src/types/electron.d.ts (IPC handler ↔ declared T parity).
+    createQuick: (request: CreateSessionRequest): Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string; claudePanelId?: string }>> =>
       ipcRenderer.invoke('sessions:create-quick', request),
     delete: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:delete', sessionId),
     sendInput: (sessionId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:input', sessionId, input),
