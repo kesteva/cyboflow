@@ -70,7 +70,7 @@ import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
 import { buildStepReportingAppend } from './orchestrator/prompts/step-reporting-instructions';
 import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
-import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans } from './orchestrator/runRecovery';
+import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes } from './orchestrator/runRecovery';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -1027,6 +1027,17 @@ app.whenReady().then(async () => {
     const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
     if (archivedOrphanRecovery.runsCanceled > 0) {
       console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
+    }
+
+    // Boot recovery: stamp outcome on failed/canceled runs that never got one
+    // (kills mid-phase, pre-instrumentation rows) so the Insights success-rate
+    // stats are trustworthy. Deliberately runs AFTER the two orphan sweeps
+    // above — they transition orphans to failed/canceled, and this pass then
+    // backfills those fresh rows' outcomes in the same boot. completed+NULL
+    // rows are intentionally untouched (awaiting a close-out decision).
+    const outcomeBackfill = backfillTerminalOutcomes(db);
+    if (outcomeBackfill.failedBackfilled > 0 || outcomeBackfill.canceledBackfilled > 0) {
+      console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
     }
 
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op

@@ -22,7 +22,12 @@
  * no mocks, exercises real SQL and real registry semantics.
  */
 import { describe, it, expect } from 'vitest';
-import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans } from '../runRecovery';
+import {
+  recoverActiveStateOrphans,
+  recoverArchivedSessionRunOrphans,
+  backfillTerminalOutcomes,
+  stampSessionRunsOutcome,
+} from '../runRecovery';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -275,5 +280,171 @@ describe('recoverArchivedSessionRunOrphans', () => {
     expect(result.approvalsCanceled).toBe(1);
     const appr = db.prepare('SELECT status FROM approvals WHERE run_id = ?').get(runId) as { status: string };
     expect(appr.status).toBe('timed_out');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// backfillTerminalOutcomes — boot-time backfill that makes outcome trustworthy
+// for success-rate stats. Stamps the unambiguous status→outcome cases (failed /
+// canceled), DELIBERATELY leaving completed+NULL ("awaiting close-out decision")
+// and any pre-existing outcome untouched.
+// ---------------------------------------------------------------------------
+
+describe('backfillTerminalOutcomes', () => {
+  function readOutcome(db: ReturnType<typeof createTestDb>, runId: string): string | null {
+    const row = db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(runId) as {
+      outcome: string | null;
+    };
+    return row.outcome;
+  }
+
+  it("stamps outcome='failed' on status='failed' rows with NULL outcome", () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-bf-failed', status: 'failed' });
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    expect(result).toEqual({ failedBackfilled: 1, canceledBackfilled: 0 });
+    expect(readOutcome(db, 'run-bf-failed')).toBe('failed');
+  });
+
+  it("stamps outcome='canceled' on status='canceled' rows with NULL outcome", () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-bf-canceled', status: 'canceled' });
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    expect(result).toEqual({ failedBackfilled: 0, canceledBackfilled: 1 });
+    expect(readOutcome(db, 'run-bf-canceled')).toBe('canceled');
+  });
+
+  it("leaves status='completed' rows with NULL outcome UNTOUCHED (awaiting close-out)", () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-bf-completed', status: 'completed' });
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    // Completed+NULL legitimately means "awaiting close-out decision" — not stamped.
+    expect(result).toEqual({ failedBackfilled: 0, canceledBackfilled: 0 });
+    expect(readOutcome(db, 'run-bf-completed')).toBeNull();
+  });
+
+  it('never clobbers a pre-existing outcome on a terminal row', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    // A run that failed AFTER it was already dismissed — the dismiss decision stands.
+    seedRun(db, { id: 'run-bf-preexisting', status: 'failed' });
+    db.prepare("UPDATE workflow_runs SET outcome = 'dismissed' WHERE id = ?").run('run-bf-preexisting');
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    expect(result).toEqual({ failedBackfilled: 0, canceledBackfilled: 0 });
+    expect(readOutcome(db, 'run-bf-preexisting')).toBe('dismissed');
+  });
+
+  it('backfills a mixed batch in one pass', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-mix-f1', status: 'failed' });
+    seedRun(db, { id: 'run-mix-f2', status: 'failed' });
+    seedRun(db, { id: 'run-mix-c1', status: 'canceled' });
+    seedRun(db, { id: 'run-mix-done', status: 'completed' });
+    // Already-stamped failed row — must not be counted or re-written.
+    seedRun(db, { id: 'run-mix-stamped', status: 'canceled' });
+    db.prepare("UPDATE workflow_runs SET outcome = 'merged' WHERE id = ?").run('run-mix-stamped');
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    expect(result).toEqual({ failedBackfilled: 2, canceledBackfilled: 1 });
+    expect(readOutcome(db, 'run-mix-f1')).toBe('failed');
+    expect(readOutcome(db, 'run-mix-f2')).toBe('failed');
+    expect(readOutcome(db, 'run-mix-c1')).toBe('canceled');
+    expect(readOutcome(db, 'run-mix-done')).toBeNull();
+    expect(readOutcome(db, 'run-mix-stamped')).toBe('merged');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stampSessionRunsOutcome — the shared pure helper used by the session-level
+// Merge (ipc/git.ts) and Dismiss (ipc/session.ts) close-out paths. Runs link to
+// the session via workflow_runs.session_id; the guard never clobbers an existing
+// outcome.
+// ---------------------------------------------------------------------------
+
+describe('stampSessionRunsOutcome', () => {
+  // session_id needs includeSubstrate; outcome needs includeWorkflowRunTaskColumns.
+  function makeDb() {
+    return createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+  }
+
+  function setSession(db: ReturnType<typeof createTestDb>, runId: string, sessionId: string): void {
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run(sessionId, runId);
+  }
+
+  function readOutcome(db: ReturnType<typeof createTestDb>, runId: string): string | null {
+    const row = db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(runId) as {
+      outcome: string | null;
+    };
+    return row.outcome;
+  }
+
+  it("stamps outcome='merged' on all NULL-outcome runs of a session", () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-s1-a', status: 'completed' });
+    seedRun(db, { id: 'run-s1-b', status: 'completed' });
+    setSession(db, 'run-s1-a', 'sess-1');
+    setSession(db, 'run-s1-b', 'sess-1');
+
+    const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-1', 'merged');
+
+    expect(stamped).toBe(2);
+    expect(readOutcome(db, 'run-s1-a')).toBe('merged');
+    expect(readOutcome(db, 'run-s1-b')).toBe('merged');
+  });
+
+  it("stamps outcome='dismissed' on a session's runs", () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-s2-a', status: 'completed' });
+    setSession(db, 'run-s2-a', 'sess-2');
+
+    const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-2', 'dismissed');
+
+    expect(stamped).toBe(1);
+    expect(readOutcome(db, 'run-s2-a')).toBe('dismissed');
+  });
+
+  it('never clobbers a run that already recorded its own outcome', () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-s3-pr', status: 'completed' });
+    seedRun(db, { id: 'run-s3-null', status: 'completed' });
+    setSession(db, 'run-s3-pr', 'sess-3');
+    setSession(db, 'run-s3-null', 'sess-3');
+    // One run already opened a PR — its outcome must survive the session-level stamp.
+    db.prepare("UPDATE workflow_runs SET outcome = 'pr_open' WHERE id = ?").run('run-s3-pr');
+
+    const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-3', 'merged');
+
+    // Only the NULL-outcome run is stamped.
+    expect(stamped).toBe(1);
+    expect(readOutcome(db, 'run-s3-pr')).toBe('pr_open');
+    expect(readOutcome(db, 'run-s3-null')).toBe('merged');
+  });
+
+  it('does not touch runs belonging to a different session', () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-mine', status: 'completed' });
+    seedRun(db, { id: 'run-other', status: 'completed' });
+    setSession(db, 'run-mine', 'sess-mine');
+    setSession(db, 'run-other', 'sess-other');
+
+    const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-mine', 'merged');
+
+    expect(stamped).toBe(1);
+    expect(readOutcome(db, 'run-mine')).toBe('merged');
+    expect(readOutcome(db, 'run-other')).toBeNull();
+  });
+
+  it('returns 0 when a session has no runs', () => {
+    const db = makeDb();
+    const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-empty', 'dismissed');
+    expect(stamped).toBe(0);
   });
 });

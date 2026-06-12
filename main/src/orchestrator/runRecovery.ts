@@ -156,3 +156,90 @@ export function recoverArchivedSessionRunOrphans(
   const approvalsCanceled = tx();
   return { runsCanceled: ids.length, approvalsCanceled };
 }
+
+export interface OutcomeBackfillResult {
+  failedBackfilled: number;
+  canceledBackfilled: number;
+}
+
+/**
+ * Boot-time backfill that makes `workflow_runs.outcome` trustworthy for
+ * success-rate statistics (the Insights surface).
+ *
+ * The outcome column is written at the close-out seams (runExecutor's
+ * deriveTaskStageForPhase for 'failed'/'canceled', cancelRunHandler for a late
+ * cancel, and trpc/routers/runs.ts for 'merged'/'pr_open'/'dismissed'), each
+ * guarded by `outcome IS NULL` so a real decision is never clobbered. But a run
+ * that reached a terminal STATUS on a prior process — or via a code path that
+ * predates those seams — can carry status='failed'/'canceled' with outcome
+ * still NULL, which the stats query would otherwise read as "no recorded
+ * outcome". This sweep stamps the obvious correspondences so historic and
+ * crash-recovered rows aggregate correctly.
+ *
+ * DELIBERATE EXCLUSION — status='completed' rows are NOT touched. A completed
+ * run with outcome IS NULL legitimately means "awaiting a close-out decision"
+ * (the human has not yet chosen merge / PR / dismiss). Stamping it would erase
+ * that pending state and corrupt the awaiting-decision view. Only the two
+ * states whose outcome is unambiguous from status alone — 'failed' and
+ * 'canceled' — are backfilled.
+ *
+ * Same guard discipline + single-transaction style as
+ * {@link recoverActiveStateOrphans}: each UPDATE re-asserts `outcome IS NULL`
+ * so a pre-existing outcome (e.g. a 'dismissed' on a row that later failed) is
+ * never overwritten.
+ */
+export function backfillTerminalOutcomes(db: DatabaseLike): OutcomeBackfillResult {
+  const tx = db.transaction(() => {
+    const failed = db
+      .prepare(
+        `UPDATE workflow_runs
+            SET outcome = 'failed', updated_at = CURRENT_TIMESTAMP
+          WHERE status = 'failed' AND outcome IS NULL`,
+      )
+      .run() as { changes: number };
+
+    const canceled = db
+      .prepare(
+        `UPDATE workflow_runs
+            SET outcome = 'canceled', updated_at = CURRENT_TIMESTAMP
+          WHERE status = 'canceled' AND outcome IS NULL`,
+      )
+      .run() as { changes: number };
+
+    return { failedBackfilled: failed.changes, canceledBackfilled: canceled.changes };
+  });
+
+  return tx() as OutcomeBackfillResult;
+}
+
+/**
+ * Stamp `workflow_runs.outcome` on every child run of a session, used by the
+ * session-level close-out paths (Merge in ipc/git.ts, Dismiss in ipc/session.ts)
+ * to keep the run-outcome stats trustworthy when a session is resolved as a
+ * whole rather than per-run.
+ *
+ * Runs link to their session via `workflow_runs.session_id` (migration 019) —
+ * the session id the IPC handlers already hold IS that key, so no extra
+ * resolution is needed.
+ *
+ * Guard discipline mirrors cancelRunHandler.ts:204 and the close-out mutations:
+ * the `outcome IS NULL` guard means a run that already recorded a decision
+ * (e.g. its own 'pr_open' / 'failed') is NEVER clobbered by the session-level
+ * stamp. Returns the number of rows actually stamped so callers can log it.
+ *
+ * Pure over {@link DatabaseLike} so it is unit-testable without git.
+ */
+export function stampSessionRunsOutcome(
+  db: DatabaseLike,
+  sessionId: string,
+  outcome: 'merged' | 'dismissed',
+): number {
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET outcome = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND outcome IS NULL`,
+    )
+    .run(outcome, sessionId) as { changes: number };
+  return info.changes;
+}

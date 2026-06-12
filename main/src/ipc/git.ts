@@ -12,6 +12,8 @@ import type { GitCommit } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
+import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
+import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
@@ -168,6 +170,25 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         `[IPC:git] sprint close-out after session merge failed for session ${sessionId} (merge unaffected):`,
         error
       );
+    }
+  };
+
+  // After a successful session merge (squash or rebase), stamp outcome='merged'
+  // on that session's child runs so the run-outcome stats (Insights) credit the
+  // merge. Runs link via workflow_runs.session_id — the sessionId here IS that
+  // key. Guarded by `outcome IS NULL` inside stampSessionRunsOutcome, so a run
+  // that already recorded its own decision is never clobbered.
+  //
+  // Fail-soft: a stamping failure is logged and never propagates — the merge has
+  // already succeeded and its response must not depend on this bookkeeping.
+  const stampMergedOutcomeForSession = (sessionId: string) => {
+    try {
+      const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'merged');
+      if (stamped > 0) {
+        console.log(`[IPC:git] Stamped outcome='merged' on ${stamped} run(s) for session ${sessionId}`);
+      }
+    } catch (error) {
+      console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
     }
   };
 
@@ -1031,6 +1052,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // batch → completed. Fail-soft — never affects the merge result.
       await finalizeSprintLanesOnSessionMerge(sessionId);
 
+      // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
+      stampMergedOutcomeForSession(sessionId);
+
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately
       if (session.projectId !== undefined) {
@@ -1121,6 +1145,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // Sprint close-out (feat/parallel-sprint): integrated lanes → done stage,
       // batch → completed. Fail-soft — never affects the merge result.
       await finalizeSprintLanesOnSessionMerge(sessionId);
+
+      // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
+      stampMergedOutcomeForSession(sessionId);
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately

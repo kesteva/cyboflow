@@ -23,6 +23,8 @@ import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 import { isPermissionMode } from '../../../shared/types/workflows';
+import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
+import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -485,6 +487,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Archive the session immediately to provide fast feedback to the user
       await sessionManager.archiveSession(sessionId);
+
+      // Stamp outcome='dismissed' on this session's runs so the run-outcome stats
+      // (Insights) record the dismiss. Runs link via workflow_runs.session_id —
+      // the sessionId here IS that key. Guarded by `outcome IS NULL` inside
+      // stampSessionRunsOutcome so a run that already recorded its own decision is
+      // never clobbered. Fail-soft: a stamping failure is logged and never fails
+      // the archive (which has already succeeded).
+      try {
+        const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'dismissed');
+        if (stamped > 0) {
+          console.log(`[Main] Stamped outcome='dismissed' on ${stamped} run(s) for session ${sessionId}`);
+        }
+      } catch (stampError) {
+        console.error(`[Main] Failed to stamp dismissed outcome for session ${sessionId}:`, stampError);
+      }
 
       // Add the archive message to session output
       sessionManager.addSessionOutput(sessionId, {
