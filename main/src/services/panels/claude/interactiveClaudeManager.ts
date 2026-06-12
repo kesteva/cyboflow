@@ -20,7 +20,8 @@ import { InteractiveSettingsWriter } from './interactiveSettingsWriter';
 import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
-import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
+import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
+import { isPermissionMode, resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
@@ -878,8 +879,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   /**
    * Resolve the run's effective WorkflowDefinition and build its step-reporting
    * append. Returns `''` (fail-soft) when the run row cannot be found or its
-   * workflow has no resolvable definition (TASK-803 contract). No DB write, no
-   * emit — this is a pure read of the run's workflow row.
+   * workflow has no resolvable definition (TASK-803 contract), and ALWAYS `''`
+   * for the `__quick__` sentinel workflow — quick sessions have no real steps,
+   * so step-reporting instructions must never be prepended to their prompts.
+   * No DB write, no emit — this is a pure read of the run's workflow row.
    */
   private buildStepReportingAppendForRun(runId: string): string {
     let row: { name?: unknown; specJson?: unknown } | undefined;
@@ -901,6 +904,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     if (!row) return '';
     const name = typeof row.name === 'string' ? row.name : '';
+    // __quick__ sentinel suppression: a quick session's run row points at the
+    // per-project sentinel workflow (workflowRegistry.ensureQuickWorkflow), which
+    // has NO real steps — prepending step-reporting instructions to its prompts
+    // would be nonsense. ensureQuickWorkflow seeds spec_json='{}' (which already
+    // resolves to a null definition), but guard by NAME so a spec ever written
+    // onto the sentinel row cannot leak workflow instructions into quick-session
+    // prompts.
+    if (name === QUICK_WORKFLOW_NAME) return '';
     const specJson = typeof row.specJson === 'string' ? row.specJson : null;
     return buildStepReportingAppend(resolveWorkflowDefinition(name, specJson));
   }
@@ -1007,6 +1018,22 @@ export class InteractiveClaudeManager extends AbstractCliManager {
         );
       }
     }, SUBMIT_DELAY_MS);
+  }
+
+  /**
+   * Composer-relay seam for PTY-backed QUICK sessions: `sessions:input` routes
+   * here (instead of the SDK continue path) when the session's substrate is
+   * 'interactive', so a chat-composer turn reaches the LIVE persistent REPL.
+   * Thin public wrapper over the private submitToRepl — submits the way a human
+   * paste+Enter does (the body, then a SEPARATE '\r' keystroke after
+   * SUBMIT_DELAY_MS) to dodge bracketed-paste swallowing (a '\r' riding inside
+   * the same burst is captured as a literal newline and never submits). No-op
+   * when no live process exists for the panel; the deferred '\r' is guarded
+   * against teardown within the delay window. The raw-keystroke path (xterm ->
+   * relayInput, where Enter is already its own '\r') must NOT route through here.
+   */
+  public relayUserTurn(panelId: string, body: string): void {
+    this.submitToRepl(panelId, body);
   }
 
   /**
@@ -1245,7 +1272,22 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     permissionMode?: 'approve' | 'ignore',
     model?: string,
   ): Promise<void> {
-    await this.spawnCliProcess({ panelId, sessionId, worktreePath, prompt, permissionMode, model });
+    await this.spawnCliProcess({
+      panelId,
+      sessionId,
+      worktreePath,
+      prompt,
+      permissionMode,
+      // Quick/legacy interactive sessions resolve their 4-mode agent permission
+      // here (per-session override else global default) — without it the
+      // settings-writer's effectiveWriterMode never sees the 4-mode and ALWAYS
+      // installs the wildcard PreToolUse gate hook, and 'auto' never reaches the
+      // `--permission-mode auto` branch. Workflow runs never hit this path (they
+      // call spawnCliProcess directly with agentPermissionMode from the run
+      // snapshot). Mirrors the SDK twin's spawnClaudeCode seeding.
+      agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
+      model,
+    });
   }
 
   async continuePanel(
@@ -1260,7 +1302,38 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // v1 fresh-session-only: interactive resume is not implemented (#44607
     // ignored interactively — see parity table). A continue spawns a fresh REPL.
     await this.killProcess(panelId);
-    await this.spawnCliProcess({ panelId, sessionId, worktreePath, prompt, permissionMode, model });
+    await this.spawnCliProcess({
+      panelId,
+      sessionId,
+      worktreePath,
+      prompt,
+      permissionMode,
+      // Re-resolved from the DB row on every respawn (restart-safe — see
+      // resolveSessionAgentPermissionMode).
+      agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
+      model,
+    });
+  }
+
+  /**
+   * Resolve the 4-mode agent permission for a quick/legacy interactive session
+   * spawn. Mirrors the SDK twin EXACTLY
+   * (claudeCodeManager.ts resolveSessionAgentPermissionMode).
+   * Precedence: legacy 'ignore' (don't-ask) wins and returns undefined (the
+   * legacy branch is preserved); else the PER-SESSION override
+   * (sessions.agent_permission_mode, migration 021) if set and valid; else the
+   * GLOBAL default (Settings → Agent Permission Mode). Reading the override from
+   * the DB row (not a threaded arg) keeps it restart-safe — continuePanel
+   * re-resolves it for free on every respawn.
+   */
+  private resolveSessionAgentPermissionMode(
+    sessionId: string,
+    legacyPermissionMode?: 'approve' | 'ignore',
+  ): PermissionMode | undefined {
+    if (legacyPermissionMode === 'ignore') return undefined;
+    const stored = this.sessionManager.getDbSession(sessionId)?.agent_permission_mode;
+    if (isPermissionMode(stored)) return stored;
+    return this.configManager?.getDefaultAgentPermissionMode();
   }
 
   async stopPanel(panelId: string): Promise<void> {
@@ -1275,7 +1348,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     _conversationHistory: ConversationMessage[],
   ): Promise<void> {
     await this.killProcess(panelId);
-    await this.spawnCliProcess({ panelId, sessionId, worktreePath, prompt: initialPrompt });
+    // Carry the session's legacy permission_mode through the restart (twin
+    // parity: claudeCodeManager.restartPanelWithHistory reads the DB row — the
+    // restart seam has no permissionMode arg) and re-resolve the 4-mode exactly
+    // like startPanel/continuePanel. Without agentPermissionMode the
+    // settings-writer's effectiveWriterMode ALWAYS installs the wildcard
+    // PreToolUse gate on a restarted panel, even for auto/dontAsk sessions.
+    const permissionMode = this.sessionManager.getDbSession(sessionId)?.permission_mode;
+    await this.spawnCliProcess({
+      panelId,
+      sessionId,
+      worktreePath,
+      prompt: initialPrompt,
+      permissionMode,
+      agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
+    });
   }
 
   protected getCliNotAvailableMessage(error?: string): string {

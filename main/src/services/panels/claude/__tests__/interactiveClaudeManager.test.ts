@@ -31,6 +31,8 @@ import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter'
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { InteractiveClaudeManager } from '../interactiveClaudeManager';
 import { InteractiveSettingsWriter } from '../interactiveSettingsWriter';
+import { QUICK_WORKFLOW_NAME } from '../../../../orchestrator/workflowRegistry';
+import type { PermissionMode } from '../../../../../../shared/types/workflows';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConfigManager } from '../../../configManager';
 import type {
@@ -234,9 +236,12 @@ function createMockSessionManager(overrides?: Partial<Omit<SessionManager, 'db'>
   } as unknown as SessionManager;
 }
 
-function createMockConfigManager(claudeExecutablePath?: string): ConfigManager {
+function createMockConfigManager(claudeExecutablePath?: string, defaultAgentPermissionMode?: PermissionMode): ConfigManager {
   return {
     getConfig: vi.fn(() => ({ claudeExecutablePath })),
+    // Global 4-mode default consumed by resolveSessionAgentPermissionMode (the
+    // quick/legacy-session seam mirrored from the SDK twin).
+    getDefaultAgentPermissionMode: vi.fn(() => defaultAgentPermissionMode),
   } as unknown as ConfigManager;
 }
 
@@ -1146,6 +1151,291 @@ describe('InteractiveClaudeManager', () => {
       // so its completion promise never resolves. Detach it so vitest does not
       // flag an unhandled pending promise.
       void spawnA;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (T2) 4-mode resolution on the quick-session panel seams (trap T3b):
+  // startPanel + continuePanel + restartPanelWithHistory resolve the session's
+  // agent permission mode (legacy 'ignore' wins; else per-session override;
+  // else global default) and thread it into spawnCliProcess options — mirroring
+  // the SDK twin's spawnClaudeCode seeding
+  // (claudeCodeManager.ts resolveSessionAgentPermissionMode).
+  // -------------------------------------------------------------------------
+  describe('startPanel/continuePanel/restartPanelWithHistory 4-mode resolution', () => {
+    let db: Database.Database;
+
+    beforeEach(() => {
+      db = makeRawEventsDb();
+    });
+
+    afterEach(() => {
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    /**
+     * Build a manager whose session row stores `storedMode` (omit = no row
+     * field) and optionally a legacy `permission_mode` (read by
+     * restartPanelWithHistory, which has no permissionMode arg).
+     */
+    function makeMgr(opts: {
+      storedMode?: unknown;
+      globalDefault?: PermissionMode;
+      legacyMode?: 'approve' | 'ignore';
+    }): TestableInteractiveClaudeManager {
+      const sm = createMockSessionManager({
+        getDbSession: vi.fn(() => ({
+          ...(opts.storedMode === undefined ? {} : { agent_permission_mode: opts.storedMode }),
+          ...(opts.legacyMode === undefined ? {} : { permission_mode: opts.legacyMode }),
+        })) as unknown as SessionManager['getDbSession'],
+      });
+      return new TestableInteractiveClaudeManager(
+        sm,
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(undefined, opts.globalDefault),
+        db,
+      );
+    }
+
+    it('startPanel threads the per-session agent_permission_mode override into spawn options', async () => {
+      const mgr = makeMgr({ storedMode: 'acceptEdits', globalDefault: 'default' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.startPanel('p-4m', 's-4m', '/tmp/wt-4m', 'hi', 'approve', 'auto');
+
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0][0]).toMatchObject({
+        panelId: 'p-4m',
+        sessionId: 's-4m',
+        permissionMode: 'approve',
+        // The per-session override wins over the global default.
+        agentPermissionMode: 'acceptEdits',
+      });
+    });
+
+    it('startPanel falls back to the GLOBAL default when no per-session override is stored', async () => {
+      const mgr = makeMgr({ globalDefault: 'auto' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.startPanel('p-glob', 's-glob', '/tmp/wt-glob', 'hi');
+
+      expect(spawnSpy.mock.calls[0][0].agentPermissionMode).toBe('auto');
+    });
+
+    it('startPanel preserves the legacy \'ignore\' branch — agentPermissionMode stays undefined', async () => {
+      // Even with a stored override AND a global default, an explicit legacy
+      // 'ignore' (don't-ask) is a stronger statement and wins (twin parity).
+      const mgr = makeMgr({ storedMode: 'acceptEdits', globalDefault: 'auto' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.startPanel('p-ign', 's-ign', '/tmp/wt-ign', 'hi', 'ignore');
+
+      expect(spawnSpy.mock.calls[0][0].permissionMode).toBe('ignore');
+      expect(spawnSpy.mock.calls[0][0].agentPermissionMode).toBeUndefined();
+    });
+
+    it('an invalid stored override falls through to the global default (isPermissionMode guard)', async () => {
+      const mgr = makeMgr({ storedMode: 'bogus-mode', globalDefault: 'dontAsk' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.startPanel('p-bogus', 's-bogus', '/tmp/wt-bogus', 'hi');
+
+      expect(spawnSpy.mock.calls[0][0].agentPermissionMode).toBe('dontAsk');
+    });
+
+    it('continuePanel re-resolves the 4-mode from the DB row on respawn (restart-safe)', async () => {
+      const mgr = makeMgr({ storedMode: 'dontAsk', globalDefault: 'default' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.continuePanel('p-cont', 's-cont', '/tmp/wt-cont', 'continue please', [], 'approve');
+
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      expect(spawnSpy.mock.calls[0][0]).toMatchObject({
+        panelId: 'p-cont',
+        permissionMode: 'approve',
+        agentPermissionMode: 'dontAsk',
+      });
+    });
+
+    it('restartPanelWithHistory re-resolves the 4-mode from the DB row (no wildcard gate for auto)', async () => {
+      const mgr = makeMgr({ storedMode: 'auto', globalDefault: 'default' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.restartPanelWithHistory('p-rst', 's-rst', '/tmp/wt-rst', 'restart prompt', []);
+
+      expect(spawnSpy).toHaveBeenCalledTimes(1);
+      // Mirrors startPanel/continuePanel: without this a restarted interactive
+      // panel ALWAYS installed the wildcard PreToolUse gate, even for auto/dontAsk.
+      expect(spawnSpy.mock.calls[0][0]).toMatchObject({
+        panelId: 'p-rst',
+        sessionId: 's-rst',
+        prompt: 'restart prompt',
+        agentPermissionMode: 'auto',
+      });
+    });
+
+    it("restartPanelWithHistory carries the session's legacy 'ignore' through (agentPermissionMode stays undefined)", async () => {
+      // The restart seam has no permissionMode arg — it must read the legacy
+      // permission_mode off the DB row (twin parity with the SDK manager) so an
+      // explicit session-level 'ignore' is not clobbered by the global default.
+      const mgr = makeMgr({ storedMode: 'acceptEdits', globalDefault: 'auto', legacyMode: 'ignore' });
+      const spawnSpy = vi.spyOn(mgr, 'spawnCliProcess').mockResolvedValue(undefined);
+
+      await mgr.restartPanelWithHistory('p-rst-ign', 's-rst-ign', '/tmp/wt-rst-ign', 'restart', []);
+
+      expect(spawnSpy.mock.calls[0][0].permissionMode).toBe('ignore');
+      expect(spawnSpy.mock.calls[0][0].agentPermissionMode).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (T2) relayUserTurn — composer-relay seam for PTY-backed QUICK sessions:
+  // submits the way a human paste+Enter does (body, then a SEPARATE '\r' after
+  // SUBMIT_DELAY_MS) so bracketed-paste cannot swallow the submit.
+  // -------------------------------------------------------------------------
+  describe('relayUserTurn (composer-relay seam)', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    it('writes the body immediately and a SEPARATE \'\\r\' keystroke after the paste-coalescing delay', async () => {
+      const panelId = 'panel-relay';
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-relay', worktreePath: '/tmp/wt-relay', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+      const pty = mgr.ptys[0];
+
+      mgr.relayUserTurn(panelId, 'hello from composer');
+
+      // Body written immediately; the submitting '\r' has NOT ridden the same
+      // burst (bracketed-paste would capture it as a literal newline).
+      expect(pty.writes).toContain('hello from composer');
+      expect(pty.writes).not.toContain('\r');
+
+      // After SUBMIT_DELAY_MS (300ms) the '\r' lands as its OWN keystroke.
+      await new Promise((r) => setTimeout(r, 450));
+      expect(pty.writes).toContain('\r');
+      expect(pty.writes.indexOf('hello from composer')).toBeLessThan(pty.writes.indexOf('\r'));
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('no-ops when no live process exists for the panel', () => {
+      expect(() => mgr.relayUserTurn('panel-ghost', 'hello')).not.toThrow();
+    });
+
+    it('guards the deferred \'\\r\' against teardown within the delay window', async () => {
+      const panelId = 'panel-relay-kill';
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-relay-kill', worktreePath: '/tmp/wt-rk', prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+      const pty = mgr.ptys[0];
+
+      mgr.relayUserTurn(panelId, 'doomed turn');
+      expect(pty.writes).toContain('doomed turn');
+
+      // Tear down before SUBMIT_DELAY_MS elapses — the deferred '\r' is guarded
+      // on the processes map and must not fire after the panel is gone.
+      await mgr.killProcess(panelId);
+      await new Promise((r) => setTimeout(r, 450));
+      expect(pty.writes).not.toContain('\r');
+
+      void spawn;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // (T2) __quick__ sentinel step-append suppression: a quick-session run row
+  // points at the per-project __quick__ sentinel workflow, which has no real
+  // steps — buildStepReportingAppendForRun must return '' BY NAME even when a
+  // resolvable spec_json sits on the sentinel row (the '{}' seed already
+  // resolves null; the name guard closes the leak for any future spec).
+  // -------------------------------------------------------------------------
+  describe('__quick__ sentinel step-append suppression', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    /** A spec that WOULD resolve to a definition (and thus a non-empty append). */
+    const validSpecJson = JSON.stringify({
+      id: 'spec-on-row',
+      phases: [
+        {
+          id: 'phase-1',
+          label: 'Phase 1',
+          color: '#aabbcc',
+          steps: [{ id: 'step-1', name: 'Step 1', agent: 'executor' }],
+        },
+      ],
+    });
+
+    /** Seed a workflow + run pair (integration-test fixture pattern). */
+    function seedRunWithWorkflow(runId: string, workflowName: string, specJson: string): void {
+      const workflowId = `wf-${runId}`;
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+      ).run(workflowId, workflowName, specJson);
+      db.prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, worktree_path, status, policy_json)
+         VALUES (?, ?, 1, '/tmp/test', 'running', '{}')`,
+      ).run(runId, workflowId);
+    }
+
+    function callAppendForRun(runId: string): string {
+      return (mgr as unknown as { buildStepReportingAppendForRun(r: string): string })
+        .buildStepReportingAppendForRun(runId);
+    }
+
+    beforeEach(() => {
+      db = createTestDb();
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    it('returns \'\' for a sentinel __quick__ run even when its row carries a RESOLVABLE spec_json', () => {
+      seedRunWithWorkflow('run-quick-1', QUICK_WORKFLOW_NAME, validSpecJson);
+      expect(callAppendForRun('run-quick-1')).toBe('');
+    });
+
+    it('returns \'\' for the sentinel as seeded by ensureQuickWorkflow (spec_json \'{}\')', () => {
+      seedRunWithWorkflow('run-quick-2', QUICK_WORKFLOW_NAME, '{}');
+      expect(callAppendForRun('run-quick-2')).toBe('');
+    });
+
+    it('control: the SAME spec under a non-sentinel name produces a non-empty append', () => {
+      seedRunWithWorkflow('run-custom-1', 'my-custom-flow', validSpecJson);
+      const append = callAppendForRun('run-custom-1');
+      expect(append.length).toBeGreaterThan(0);
+      expect(append).toContain('cyboflow_report_step');
+      expect(append).toContain('`step-1`');
     });
   });
 });
