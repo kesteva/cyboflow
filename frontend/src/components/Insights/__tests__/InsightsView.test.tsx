@@ -15,10 +15,14 @@
  *      sections), and the reverse once initialized.
  *   4. Surfaces a NON-FATAL error banner while still rendering the sections.
  *   5. Renders the three numbered section-index chips.
+ *   6. Renders the project filter, lists fetched projects, reflects the store
+ *      value, and routes changes (id / null) back through setProjectFilter — with
+ *      a project-load failure degrading to "All projects" alone.
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Project } from '../../../types/project';
 import type {
   WorkflowRunStats,
   WorkflowUsageStats,
@@ -36,6 +40,7 @@ import type { ReviewItem } from '../../../../../shared/types/reviews';
 let mockInitialized = true;
 let mockLoading = false;
 let mockError: string | null = null;
+let mockProjectFilter: number | null = null;
 let mockWorkflowStats: WorkflowRunStats[] = [];
 let mockWorkflowUsage: WorkflowUsageStats[] = [];
 let mockReviewSummary: ReviewItemSummary | null = null;
@@ -47,13 +52,14 @@ let mockUsageTrends: Record<string, UsageTrendPoint[]> = {};
 const mockInit = vi.fn(async () => {});
 const mockRefresh = vi.fn(async () => {});
 const mockSetProjectFilter = vi.fn(async () => {});
+const mockEnsureWorkflowDetail = vi.fn(async () => {});
 
 function snapshot() {
   return {
     initialized: mockInitialized,
     loading: mockLoading,
     error: mockError,
-    projectFilter: null as number | null,
+    projectFilter: mockProjectFilter,
     workflowStats: mockWorkflowStats,
     workflowUsage: mockWorkflowUsage,
     reviewSummary: mockReviewSummary,
@@ -61,9 +67,13 @@ function snapshot() {
     pendingFindings: mockPendingFindings,
     stepTokens: mockStepTokens,
     usageTrends: mockUsageTrends,
+    // Static at this integration level — StatsSection.test owns their behavior.
+    dailyUsage: [],
+    revisionHistory: {},
     init: mockInit,
     refresh: mockRefresh,
     setProjectFilter: mockSetProjectFilter,
+    ensureWorkflowDetail: mockEnsureWorkflowDetail,
   };
 }
 
@@ -73,6 +83,37 @@ vi.mock('../../../stores/insightsStore', () => {
   useInsightsStore.getState = () => snapshot();
   return { useInsightsStore };
 });
+
+// ---------------------------------------------------------------------------
+// API mock — drives the ProjectFilter's one-shot project load. `mockGetAll` is
+// reassigned per-test to model success / failure / empty responses.
+// ---------------------------------------------------------------------------
+
+let mockGetAll: () => Promise<{ success: boolean; data?: Project[]; error?: string }> = async () => ({
+  success: true,
+  data: [],
+});
+
+vi.mock('../../../utils/api', () => ({
+  API: {
+    projects: {
+      getAll: () => mockGetAll(),
+    },
+  },
+}));
+
+/** Build a minimal Project fixture for the filter's options. */
+function buildProject(over: Partial<Project> = {}): Project {
+  return {
+    id: 1,
+    name: 'Project',
+    path: '/tmp/project',
+    active: true,
+    created_at: '2026-06-10T00:00:00.000Z',
+    updated_at: '2026-06-10T00:00:00.000Z',
+    ...over,
+  };
+}
 
 // Stub ReviewItemCard to a marker so FindingsSection renders without the real
 // actions hook / trpc client.
@@ -101,6 +142,8 @@ beforeEach(() => {
   mockInitialized = true;
   mockLoading = false;
   mockError = null;
+  mockProjectFilter = null;
+  mockGetAll = async () => ({ success: true, data: [] });
   mockWorkflowStats = [];
   mockWorkflowUsage = [];
   mockReviewSummary = { total: 0, pending: 0, resolved: 0, dismissed: 0, pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 } };
@@ -138,6 +181,78 @@ describe('InsightsView', () => {
     expect(screen.getByTestId('insights-index-insights-findings')).toBeInTheDocument();
     expect(screen.getByTestId('insights-index-insights-statistics')).toBeInTheDocument();
     expect(screen.getByTestId('insights-index-insights-code-quality')).toBeInTheDocument();
+  });
+
+  it('renders the project filter with an "All projects" option plus fetched projects', async () => {
+    mockGetAll = async () => ({
+      success: true,
+      data: [buildProject({ id: 7, name: 'Acme Notes' }), buildProject({ id: 9, name: 'Widgets' })],
+    });
+    render(<InsightsView />);
+    const filter = screen.getByTestId('insights-project-filter');
+    expect(filter).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'All projects' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'Acme Notes' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('option', { name: 'Widgets' })).toBeInTheDocument();
+  });
+
+  it('reflects the current store projectFilter value', async () => {
+    mockProjectFilter = 9;
+    mockGetAll = async () => ({
+      success: true,
+      data: [buildProject({ id: 7, name: 'Acme Notes' }), buildProject({ id: 9, name: 'Widgets' })],
+    });
+    render(<InsightsView />);
+    const filter = screen.getByTestId('insights-project-filter') as HTMLSelectElement;
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'Widgets' })).toBeInTheDocument();
+    });
+    expect(filter.value).toBe('9');
+  });
+
+  it('calls setProjectFilter with the picked project id on change', async () => {
+    mockGetAll = async () => ({
+      success: true,
+      data: [buildProject({ id: 7, name: 'Acme Notes' })],
+    });
+    render(<InsightsView />);
+    const filter = screen.getByTestId('insights-project-filter');
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'Acme Notes' })).toBeInTheDocument();
+    });
+    fireEvent.change(filter, { target: { value: '7' } });
+    expect(mockSetProjectFilter).toHaveBeenCalledWith(7);
+  });
+
+  it('calls setProjectFilter with null when "All projects" is picked', async () => {
+    mockProjectFilter = 7;
+    mockGetAll = async () => ({
+      success: true,
+      data: [buildProject({ id: 7, name: 'Acme Notes' })],
+    });
+    render(<InsightsView />);
+    const filter = screen.getByTestId('insights-project-filter');
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'Acme Notes' })).toBeInTheDocument();
+    });
+    fireEvent.change(filter, { target: { value: 'all' } });
+    expect(mockSetProjectFilter).toHaveBeenCalledWith(null);
+  });
+
+  it('degrades to "All projects" alone when the project load fails', async () => {
+    mockGetAll = async () => {
+      throw new Error('projects.getAll failed');
+    };
+    render(<InsightsView />);
+    // The control still renders; the only option is the "All projects" sentinel.
+    expect(screen.getByTestId('insights-project-filter')).toBeInTheDocument();
+    // Give the rejected load a tick to settle, then assert no project options arrived.
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'All projects' })).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole('option')).toHaveLength(1);
   });
 
   it('shows the first-load skeleton (and no sections) when loading && !initialized', () => {
@@ -203,7 +318,7 @@ describe('InsightsView', () => {
       buildRunStats({ workflowId: 'wf-sprint', workflowName: 'Sprint', totalRuns: 12, errorRatePct: 8.3 }),
     ];
     mockWorkflowUsage = [
-      { workflowId: 'wf-sprint', workflowName: 'Sprint', runsWithUsage: 10, avgTotalTokens: 184000, totalCostUsd: 4.2, avgCostUsd: 0.42 },
+      { workflowId: 'wf-sprint', workflowName: 'Sprint', runsWithUsage: 10, avgTotalTokens: 184000, totalTokens: 1840000, totalCostUsd: 4.2, avgCostUsd: 0.42 },
     ];
     render(<InsightsView />);
     const card = screen.getByTestId('stats-card-wf-sprint');
@@ -220,7 +335,7 @@ describe('InsightsView', () => {
     expect(screen.getByTestId('stats-integrity-hint')).toHaveTextContent('3 runs missing outcome');
   });
 
-  it('renders the token-by-step panel for the busiest workflow only when it has step data', () => {
+  it('renders the token-by-step panel after a workflow card is selected', () => {
     mockWorkflowStats = [
       buildRunStats({ workflowId: 'wf-busy', workflowName: 'Busy', totalRuns: 20 }),
       buildRunStats({ workflowId: 'wf-quiet', workflowName: 'Quiet', totalRuns: 2 }),
@@ -232,6 +347,10 @@ describe('InsightsView', () => {
       ],
     };
     render(<InsightsView />);
+    // Default (no selection) state shows the by-flow panel, never by-step.
+    expect(screen.queryByTestId('stats-token-by-step')).not.toBeInTheDocument();
+    // Drill in: selecting a card switches the panel to that flow's steps.
+    fireEvent.click(screen.getByTestId('stats-card-wf-busy'));
     const panel = screen.getByTestId('stats-token-by-step');
     expect(panel).toBeInTheDocument();
     // BarRow stub renders its label; both step ids present.

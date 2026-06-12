@@ -27,6 +27,7 @@ import { useInsightsStore } from '../../stores/insightsStore';
 import { FindingsSection } from './FindingsSection';
 import { StatsSection } from './StatsSection';
 import { CodeQualitySection } from './CodeQualitySection';
+import { ProjectFilter } from './ProjectFilter';
 
 // ---------------------------------------------------------------------------
 // Section index — the three numbered chips in the header. `anchor` matches the
@@ -119,8 +120,15 @@ export function InsightsView(): React.JSX.Element {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="insights-view">
       <div className="flex-shrink-0 border-b border-border-primary bg-bg-secondary px-7 py-4">
-        <div className="eyebrow text-text-tertiary">Continuous improvement · post-sprint debrief</div>
-        <h2 className="mt-1 text-[22px] font-bold tracking-[-0.01em] text-text-primary">Insights</h2>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="eyebrow text-text-tertiary">Continuous improvement · post-sprint debrief</div>
+            <h2 className="mt-1 text-[22px] font-bold tracking-[-0.01em] text-text-primary">Insights</h2>
+          </div>
+          <div className="flex-shrink-0 pt-1 font-mono">
+            <ProjectFilter />
+          </div>
+        </div>
         <SectionIndex onScrollTo={handleScrollTo} />
       </div>
 
