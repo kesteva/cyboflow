@@ -12,6 +12,7 @@ import { workflowsRouter } from './routers/workflows';
 import { eventsRouter } from './routers/events';
 import { filesRouter } from './routers/files';
 import { healthRouter } from './routers/health';
+import { insightsRouter } from './routers/insights';
 import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { reviewItemsRouter } from './routers/reviewItems';
@@ -23,6 +24,7 @@ export const appRouter = router({
     events: eventsRouter,
     files: filesRouter,
     health: healthRouter,
+    insights: insightsRouter,
     questions: questionsRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,
