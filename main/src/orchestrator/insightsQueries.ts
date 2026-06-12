@@ -19,6 +19,17 @@
  *     `num_turns`, SUMMED across results (a resumed run emits one `result` per
  *     turn-session). Null when no result ever carried the field.
  *
+ * Materialized-row contract (migration 025): a `run_usage` row, when present,
+ * is the precomputed projection of the same `assistant`/`result` scan above —
+ * written once at run finalization. The two read-heavy rollup paths
+ * (`selectRunUsageRollups` / `selectWorkflowUsageStats`) prefer it and skip the
+ * raw_events scan for any run that has one, falling back to the live scan ONLY
+ * for runs without a materialized row (historic runs, runs still in flight).
+ * The WRITER of that row (`rollupRunUsage` in runUsageRollup.ts) must NOT use the
+ * materialized-first read — it would read back its own stale row on each
+ * re-materialization and freeze the values. It takes the force-scan sibling
+ * `selectRunUsageRollupsFromRawEvents` instead, which always re-scans raw_events.
+ *
  * SQLite DATETIME columns are stored as 'YYYY-MM-DD HH:MM:SS' (space-separated,
  * UTC). `toIso` below normalizes them to ISO-8601 strings for the tRPC boundary.
  */
@@ -217,14 +228,95 @@ interface RawEventUsageRow {
   payloadJson: string;
 }
 
+/** Shape of a migration-025 `run_usage` row (SELECT * column names). */
+interface RunUsageMaterializedRow {
+  run_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  num_turns: number | null;
+  assistant_message_count: number;
+}
+
 /** Max ids per IN-list chunk; keeps us well under SQLite's parameter ceiling. */
 const RUN_ID_CHUNK_SIZE = 400;
 
+/** A freshly-zeroed rollup for a run id with no usage data in either tier. */
+function zeroRollup(runId: string): RunUsageRollup {
+  return {
+    runId,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalTokens: 0,
+    costUsd: null,
+    numTurns: null,
+    assistantMessageCount: 0,
+  };
+}
+
 /**
- * Token/cost rollup per run, from one pass over the run's persisted
- * `assistant` + `result` raw_events. The id list is chunked at 400 so the
- * `IN (...)` clause never blows the bound-parameter limit; rows are processed
- * in (run_id, id) order so cost/turn SUMs are deterministic.
+ * Map a materialized `run_usage` row to a `RunUsageRollup`. The persisted
+ * columns are the precomputed projection of the same assistant/result scan the
+ * fallback performs, so the mapping is one-to-one (cost_usd / num_turns stay
+ * null when the run never reported them). `totalTokens` is re-derived from
+ * input + output rather than trusting the stored `total_tokens` so a corrupt
+ * materialized total can never desync from the contract's definition.
+ */
+function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup {
+  const inputTokens = asNumber(row.input_tokens);
+  const outputTokens = asNumber(row.output_tokens);
+  return {
+    runId: row.run_id,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: asNumber(row.cache_read_tokens),
+    cacheCreationTokens: asNumber(row.cache_creation_tokens),
+    totalTokens: inputTokens + outputTokens,
+    costUsd: typeof row.cost_usd === 'number' && Number.isFinite(row.cost_usd) ? row.cost_usd : null,
+    numTurns: typeof row.num_turns === 'number' && Number.isFinite(row.num_turns) ? row.num_turns : null,
+    assistantMessageCount: asNumber(row.assistant_message_count),
+  };
+}
+
+/**
+ * Bulk-fetch the materialized `run_usage` rows for `runIds`, returned as a
+ * runId→rollup map. The id list is chunked so the `IN (...)` clause stays under
+ * SQLite's bound-parameter ceiling. Runs without a row are simply absent from
+ * the map (the caller falls back to the raw_events scan for those).
+ */
+function fetchMaterializedRollups(
+  db: DatabaseLike,
+  runIds: readonly string[],
+): Map<string, RunUsageRollup> {
+  const out = new Map<string, RunUsageRollup>();
+  if (runIds.length === 0) return out;
+  for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
+    const rows = db
+      .prepare(
+        `SELECT run_id, input_tokens, output_tokens, cache_read_tokens,
+                cache_creation_tokens, total_tokens, cost_usd, num_turns,
+                assistant_message_count
+         FROM run_usage
+         WHERE run_id IN (${placeholders(ids.length)})`,
+      )
+      .all(...ids) as RunUsageMaterializedRow[];
+    for (const row of rows) {
+      out.set(row.run_id, rollupFromMaterializedRow(row));
+    }
+  }
+  return out;
+}
+
+/**
+ * Live raw_events scan for the runs WITHOUT a materialized row — the original
+ * Phase-1 aggregation, now scoped to the fallback cohort. Seeds a zeroed rollup
+ * for every requested id, then folds in `assistant` + `result` payloads in
+ * (run_id, id) order so cost/turn SUMs are deterministic.
  *
  * Parsing rules (all guarded against malformed JSON, which is skipped silently):
  *   - assistant → message.usage.{input,output,cache_read,cache_creation}_tokens
@@ -233,34 +325,14 @@ const RUN_ID_CHUNK_SIZE = 400;
  *   - result → total_cost_usd (SUMmed; null when never present) and num_turns
  *     (SUMmed; null when never present).
  * `result.usage` tokens are intentionally NOT added (they restate turn totals).
- * `totalTokens` = inputTokens + outputTokens.
- *
- * Runs with no matching events still get a zeroed rollup (every requested id is
- * seeded), so callers can index by runId without undefined checks.
- *
- * @param db     - Narrow DatabaseLike surface.
- * @param runIds - Run ids to roll up (order of the result mirrors this list).
  */
-export function selectRunUsageRollups(
+function scanRawEventRollups(
   db: DatabaseLike,
-  runIds: string[],
-): RunUsageRollup[] {
-  // Seed an accumulator for every requested id so empty runs still appear.
+  runIds: readonly string[],
+): Map<string, RunUsageRollup> {
   const acc = new Map<string, RunUsageRollup>();
-  for (const id of runIds) {
-    acc.set(id, {
-      runId: id,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      totalTokens: 0,
-      costUsd: null,
-      numTurns: null,
-      assistantMessageCount: 0,
-    });
-  }
-  if (runIds.length === 0) return [];
+  for (const id of runIds) acc.set(id, zeroRollup(id));
+  if (runIds.length === 0) return acc;
 
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
     const rows = db
@@ -309,26 +381,80 @@ export function selectRunUsageRollups(
     }
   }
 
-  // Finalize derived totals and emit in the caller's requested order.
-  return runIds.map((id) => {
-    const r = acc.get(id);
-    // acc always has the id (seeded above), but narrow defensively.
-    if (r === undefined) {
-      return {
-        runId: id,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        totalTokens: 0,
-        costUsd: null,
-        numTurns: null,
-        assistantMessageCount: 0,
-      };
-    }
-    r.totalTokens = r.inputTokens + r.outputTokens;
-    return r;
-  });
+  for (const rollup of acc.values()) {
+    rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
+  }
+  return acc;
+}
+
+/**
+ * Token/cost rollup per run, via a TWO-TIER read (migration 025):
+ *   1. Bulk-fetch the materialized `run_usage` rows for all requested ids.
+ *      Any run WITH a row maps directly — no raw_events touched.
+ *   2. The remaining ids (no materialized row — historic runs, runs still in
+ *      flight) fall back to the live `assistant` + `result` raw_events scan.
+ * Ids found in NEITHER tier still get a zeroed rollup, so callers can index by
+ * runId without undefined checks.
+ *
+ * `result.usage` tokens are never added (they restate turn totals); `totalTokens`
+ * = inputTokens + outputTokens in both tiers.
+ *
+ * @param db     - Narrow DatabaseLike surface.
+ * @param runIds - Run ids to roll up (order of the result mirrors this list).
+ */
+export function selectRunUsageRollups(
+  db: DatabaseLike,
+  runIds: string[],
+): RunUsageRollup[] {
+  if (runIds.length === 0) return [];
+
+  // Tier 1: materialized rows win outright.
+  const materialized = fetchMaterializedRollups(db, runIds);
+
+  // Tier 2: scan raw_events only for ids that lack a materialized row.
+  const fallbackIds = runIds.filter((id) => !materialized.has(id));
+  const scanned =
+    fallbackIds.length === 0
+      ? new Map<string, RunUsageRollup>()
+      : scanRawEventRollups(db, fallbackIds);
+
+  // Emit in the caller's requested order; zeroRollup covers ids in neither tier.
+  return runIds.map(
+    (id) => materialized.get(id) ?? scanned.get(id) ?? zeroRollup(id),
+  );
+}
+
+/**
+ * Raw-events-ONLY rollup — the force-scan sibling of `selectRunUsageRollups`
+ * that DELIBERATELY ignores the materialized `run_usage` tier and computes every
+ * id straight from the live `assistant` + `result` raw_events scan (with the same
+ * zero-seeding and caller-order array semantics).
+ *
+ * WHY THIS EXISTS — the materializer must never read back its own row
+ * --------------------------------------------------------------------
+ * `run_usage` is WRITTEN by `rollupRunUsage` (runUsageRollup.ts), which derives
+ * the row to upsert from this module. If the writer used the two-tier
+ * `selectRunUsageRollups`, tier 1 would return the EXISTING `run_usage` row on
+ * every re-materialization (the interactive substrate re-fires 'drained' per
+ * turn; resumed runs re-drain) and the scan of the now-larger raw_events log
+ * would be skipped — so the row would be REPLACEd with its own frozen values and
+ * all usage from later turns would be permanently dropped. The writer MUST take
+ * this force-scan path so each re-materialization re-reads the full raw_events
+ * log; the materialized-first read is correct only for the Insights READ paths,
+ * which never write the row they read.
+ *
+ * @param db     - Narrow DatabaseLike surface.
+ * @param runIds - Run ids to roll up (order of the result mirrors this list).
+ */
+export function selectRunUsageRollupsFromRawEvents(
+  db: DatabaseLike,
+  runIds: string[],
+): RunUsageRollup[] {
+  if (runIds.length === 0) return [];
+  const scanned = scanRawEventRollups(db, runIds);
+  // scanRawEventRollups already seeds a zeroed rollup per requested id, so the
+  // `?? zeroRollup(id)` is purely defensive; emit in the caller's order.
+  return runIds.map((id) => scanned.get(id) ?? zeroRollup(id));
 }
 
 // ---------------------------------------------------------------------------
@@ -346,12 +472,20 @@ interface RunIdRow {
 
 /**
  * Per-workflow usage aggregate. For each workflow, take the most recent
- * `limitRunsPerWorkflow` run ids that have ANY persisted events (any status),
+ * `limitRunsPerWorkflow` run ids that have usage data — either a materialized
+ * `run_usage` row (migration 025) OR at least one persisted raw_events row —
  * roll them up via `selectRunUsageRollups`, then aggregate:
  *   - runsWithUsage = rollups whose assistantMessageCount > 0.
  *   - avgTotalTokens = mean totalTokens over those runs (null when none).
  *   - totalCostUsd = sum of non-null costUsd (null when every rollup was null).
  *   - avgCostUsd = mean costUsd over runs with a non-null cost (null when none).
+ *
+ * Two-tier benefit: the recent-runs window qualifies a run on EITHER an
+ * EXISTS(run_usage) or an EXISTS(raw_events) — so a run whose raw_events were
+ * pruned but whose usage was materialized still counts. An early bulk-fetch of
+ * the materialized rollups means the run_usage hit path never loads raw_events
+ * (`selectRunUsageRollups` scans them only for the fallback ids). The LIMIT is
+ * applied AFTER the OR, so the N-runs cap semantics are unchanged.
  *
  * @param db                   - Narrow DatabaseLike surface.
  * @param projectId            - When non-null, restricts to that project.
@@ -381,12 +515,17 @@ export function selectWorkflowUsageStats(
           .all(projectId)
   ) as WorkflowWithRunIdsRow[];
 
-  // Per workflow: last N run ids that carry at least one raw_events row.
+  // Per workflow: last N run ids that carry usage — a materialized run_usage row
+  // OR at least one raw_events row. The OR (not a switch) keeps historic runs
+  // without a materialized row visible; the LIMIT after it preserves the N cap.
   const recentRunsStmt = db.prepare(
     `SELECT r.id AS runId
      FROM workflow_runs r
      WHERE r.workflow_id = ?
-       AND EXISTS (SELECT 1 FROM raw_events e WHERE e.run_id = r.id)
+       AND (
+         EXISTS (SELECT 1 FROM run_usage u WHERE u.run_id = r.id)
+         OR EXISTS (SELECT 1 FROM raw_events e WHERE e.run_id = r.id)
+       )
      ORDER BY r.created_at DESC, r.id DESC
      LIMIT ?`,
   );
@@ -398,6 +537,8 @@ export function selectWorkflowUsageStats(
       limitRunsPerWorkflow,
     ) as RunIdRow[];
     const runIds = runIdRows.map((row) => row.runId);
+    // selectRunUsageRollups already does the materialized-first two-tier read,
+    // so run_usage hits here never load raw_events.
     const rollups = selectRunUsageRollups(db, runIds);
 
     const usedRollups = rollups.filter((r) => r.assistantMessageCount > 0);
@@ -655,6 +796,9 @@ export function selectQualityFindings(
 
 interface StepEventRow {
   runId: string;
+  /** raw_events.id — the row-id ordering key both attribution paths interleave on. */
+  rowId: number;
+  eventType: string;
   payloadJson: string;
 }
 
@@ -662,8 +806,20 @@ interface StepEventRow {
  *  'mcp__cyboflow__cyboflow_report_step', so we suffix-match. */
 const REPORT_STEP_TOOL_SUFFIX = 'cyboflow_report_step';
 
-/** Step id used before the first cyboflow_report_step lands in a run. */
+/** Step id used before the first step transition lands in a run. */
 const UNATTRIBUTED_STEP = 'unattributed';
+
+/**
+ * One element of a run's id-ordered attribution stream consumed by
+ * `attributeStepStream`. A `usage` item attributes `tokens` to the current
+ * step; a `transition` item switches the current step to `stepId`.
+ */
+type StepStreamItem =
+  | { kind: 'usage'; tokens: number }
+  | { kind: 'transition'; stepId: string };
+
+/** Per-step accumulator (mutated in place by `attributeStepStream`). */
+type StepBuckets = Map<string, { totalTokens: number; assistantMessageCount: number }>;
 
 /**
  * Extract input.step_id (string) from a tool_use block whose name ends with
@@ -688,16 +844,136 @@ function extractReportedStepId(message: Record<string, unknown>): string | null 
 }
 
 /**
+ * Parse the step_id out of a persisted `step_transition` raw_events payload
+ * ({ kind:'step_transition', step_id, status, timestamp }). Returns null when
+ * the payload is malformed or carries no usable step_id — every transition row
+ * (status 'running' OR 'done') is treated uniformly: the attribution rule is
+ * "the most recent transition row with a smaller id", so a 'done' row simply
+ * keeps the just-finished step current until the next 'running' arrives.
+ */
+function parseStepTransitionStepId(payloadJson: string): string | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return null; // malformed — skip
+  }
+  if (!isRecord(payload)) return null;
+  if (typeof payload.step_id === 'string' && payload.step_id.length > 0) {
+    return payload.step_id;
+  }
+  return null;
+}
+
+/**
+ * SHARED attribution loop reused by both paths. Walks an already-id-ordered
+ * stream of stream items for ONE run, starting at 'unattributed', attributing
+ * each `usage` item to the current step and switching on each `transition`.
+ * Mutates `buckets` in place.
+ */
+function attributeStepStream(items: readonly StepStreamItem[], buckets: StepBuckets): void {
+  let currentStep = UNATTRIBUTED_STEP;
+  for (const item of items) {
+    if (item.kind === 'transition') {
+      currentStep = item.stepId;
+      continue;
+    }
+    const existing = buckets.get(currentStep) ?? { totalTokens: 0, assistantMessageCount: 0 };
+    existing.totalTokens += item.tokens;
+    existing.assistantMessageCount += 1;
+    buckets.set(currentStep, existing);
+  }
+}
+
+/** Pull the input+output token count off an assistant payload, or null when it carries no usage object. */
+function assistantUsageTokens(payloadJson: string): number | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return null; // malformed — skip
+  }
+  if (!isRecord(payload)) return null;
+  const message = payload.message;
+  if (!isRecord(message)) return null;
+  const usage = message.usage;
+  if (!isRecord(usage)) return null; // no usage object → not attributed
+  return asNumber(usage.input_tokens) + asNumber(usage.output_tokens);
+}
+
+/**
+ * Build the id-ordered stream for ONE run from the persisted `step_transition`
+ * rows interleaved with its `assistant` rows. Because each transition is its
+ * own row, ordering by row id alone places every assistant after the most
+ * recent transition with a smaller id — so an assistant row attributes to that
+ * transition's step (the contract). tool_use-embedded transitions are IGNORED
+ * here: the persisted rows are authoritative.
+ */
+function buildTransitionStream(rows: readonly StepEventRow[]): StepStreamItem[] {
+  const items: StepStreamItem[] = [];
+  for (const row of rows) {
+    if (row.eventType === 'step_transition') {
+      const stepId = parseStepTransitionStepId(row.payloadJson);
+      if (stepId !== null) items.push({ kind: 'transition', stepId });
+    } else {
+      const tokens = assistantUsageTokens(row.payloadJson);
+      if (tokens !== null) items.push({ kind: 'usage', tokens });
+    }
+  }
+  return items;
+}
+
+/**
+ * Build the id-ordered stream for ONE run with NO persisted transition rows —
+ * the original tool_use-scan fallback. Each assistant row emits its `usage`
+ * item FIRST (attributed to the step that was current BEFORE the switch), THEN,
+ * when the message content carries a `cyboflow_report_step` tool_use, a
+ * `transition` item — so the reporting message is itself counted under the
+ * PREVIOUS step (load-bearing Phase-1 behavior).
+ */
+function buildToolUseFallbackStream(rows: readonly StepEventRow[]): StepStreamItem[] {
+  const items: StepStreamItem[] = [];
+  for (const row of rows) {
+    if (row.eventType !== 'assistant') continue;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      continue; // malformed — skip
+    }
+    if (!isRecord(payload)) continue;
+    const message = payload.message;
+    if (!isRecord(message)) continue;
+
+    const usage = isRecord(message.usage) ? message.usage : null;
+    if (usage !== null) {
+      items.push({
+        kind: 'usage',
+        tokens: asNumber(usage.input_tokens) + asNumber(usage.output_tokens),
+      });
+    }
+    const reported = extractReportedStepId(message);
+    if (reported !== null) items.push({ kind: 'transition', stepId: reported });
+  }
+  return items;
+}
+
+/**
  * Tokens attributed to each workflow step across the workflow's most recent
- * `lastNRuns` runs. Within each run we walk its `assistant` events in
- * (run_id, id) order, tracking a "current step" that starts at 'unattributed'.
+ * `lastNRuns` runs. Within each run we walk its events in (run_id, id) order,
+ * tracking a "current step" that starts at 'unattributed'.
  *
- * Attribution ORDER per assistant payload (load-bearing): we FIRST attribute
- * the payload's own usage to the current step, THEN inspect its content for a
- * `cyboflow_report_step` tool_use that switches the current step. This means
- * the message that REPORTS a step transition is itself counted under the
- * PREVIOUS step — the report tool_use belongs to the step that was running
- * when the agent decided to advance.
+ * Two-tier attribution (migration 025), decided PER RUN:
+ *   - Runs WITH persisted `step_transition` raw_events build their step timeline
+ *     from those rows. An assistant row belongs to the most recent transition
+ *     row with a smaller id (row-id interleaving) — usage before the first
+ *     transition lands in 'unattributed'.
+ *   - Runs WITHOUT any transition row keep the tool_use-scan fallback: the step
+ *     comes from `cyboflow_report_step` tool_use blocks, and the reporting
+ *     message's own usage counts under the PREVIOUS step.
+ * Both paths emit a per-run id-ordered StepStreamItem[] and fold it through the
+ * single shared `attributeStepStream` loop, so the attribution semantics cannot
+ * drift between them.
  *
  * Buckets are aggregated across all the runs and returned sorted by
  * totalTokens desc.
@@ -724,59 +1000,43 @@ export function selectStepTokenBuckets(
   if (runIds.length === 0) return [];
 
   // Accumulate per step across runs.
-  const buckets = new Map<string, { totalTokens: number; assistantMessageCount: number }>();
-  const bump = (stepId: string, tokens: number): void => {
-    const existing = buckets.get(stepId) ?? { totalTokens: 0, assistantMessageCount: 0 };
-    existing.totalTokens += tokens;
-    existing.assistantMessageCount += 1;
-    buckets.set(stepId, existing);
-  };
+  const buckets: StepBuckets = new Map();
 
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
+    // Fetch assistant AND step_transition rows together, id-ordered per run, so
+    // each run's timeline can interleave the two without a second query.
     const rows = db
       .prepare(
-        `SELECT run_id AS runId, payload_json AS payloadJson
+        `SELECT run_id AS runId, id AS rowId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type = 'assistant'
+           AND event_type IN ('assistant', 'step_transition')
          ORDER BY run_id, id`,
       )
       .all(...ids) as StepEventRow[];
 
-    // Track the current step per run (rows are grouped by run_id via ORDER BY).
+    // Partition the id-ordered rows into per-run runs (rows are grouped by
+    // run_id via ORDER BY), then dispatch each run to the right stream builder.
+    let runRows: StepEventRow[] = [];
     let currentRunId: string | null = null;
-    let currentStep = UNATTRIBUTED_STEP;
+    const flush = (): void => {
+      if (runRows.length === 0) return;
+      const hasTransition = runRows.some((r) => r.eventType === 'step_transition');
+      const items = hasTransition
+        ? buildTransitionStream(runRows)
+        : buildToolUseFallbackStream(runRows);
+      attributeStepStream(items, buckets);
+      runRows = [];
+    };
 
     for (const row of rows) {
       if (row.runId !== currentRunId) {
+        flush();
         currentRunId = row.runId;
-        currentStep = UNATTRIBUTED_STEP;
       }
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(row.payloadJson);
-      } catch {
-        continue; // malformed — skip
-      }
-      if (!isRecord(payload)) continue;
-      const message = payload.message;
-      if (!isRecord(message)) continue;
-
-      // 1. Attribute this payload's usage to the CURRENT step (before any switch).
-      const usage = isRecord(message.usage) ? message.usage : null;
-      if (usage !== null) {
-        const tokens =
-          asNumber(usage.input_tokens) + asNumber(usage.output_tokens);
-        bump(currentStep, tokens);
-      }
-
-      // 2. THEN switch the current step if this message reported a transition.
-      const reported = extractReportedStepId(message);
-      if (reported !== null) {
-        currentStep = reported;
-      }
+      runRows.push(row);
     }
+    flush();
   }
 
   return Array.from(buckets.entries())

@@ -14,14 +14,27 @@
  *     errorRatePct 1dp rounding, avgDurationMs, lastRunAt ISO, projectId filter.
  *   - selectRunUsageRollups: assistant-with/without-usage, multiple results
  *     summing cost+turns, malformed JSON skipped, result.usage NOT double-counted,
- *     empty-run seeding.
- *   - selectWorkflowUsageStats: runsWithUsage / avgTotalTokens / cost aggregates.
+ *     empty-run seeding, materialized-row preference (run_usage wins over a
+ *     contradicting raw_events scan), mixed materialized + fallback cohort.
+ *   - selectRunUsageRollupsFromRawEvents: force-scan path IGNORES an existing
+ *     run_usage row (the writer's re-materialization contract — never read back
+ *     its own row), empty-id list, caller-order array, zero-seeding.
+ *   - selectWorkflowUsageStats: runsWithUsage / avgTotalTokens / cost aggregates,
+ *     run_usage hit path qualifies a run with no raw_events.
  *   - selectReviewItemSummary: status + pendingByKind, all-kinds-present default.
  *   - selectQualityFindings: category/locations/sourceStep parsing, LEFT JOIN
  *     null path (run deleted), severity/status narrowing, ordering.
  *   - selectStepTokenBuckets: usage-before-first-report lands in 'unattributed',
- *     suffix-matched MCP tool name, step_id switching, sort order.
+ *     suffix-matched MCP tool name, step_id switching, sort order (tool_use
+ *     fallback); persisted step_transition rows drive attribution by row-id
+ *     interleaving incl. 'unattributed' head; fallback unchanged sans transitions.
  *   - selectUsageTrend: date bucketing, window filter, ascending order.
+ *
+ * Migration-025 fixtures: the in-memory schema carries the `run_usage` table so
+ * the two-tier (materialized-first) read paths can be exercised; `seedRunUsage`
+ * inserts a precomputed rollup row and `seedEvent` with event_type
+ * 'step_transition' seeds the persisted-timeline path (AUTOINCREMENT id =
+ * insertion order = the row-id ordering both attribution paths interleave on).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -29,6 +42,7 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
   selectWorkflowRunStats,
   selectRunUsageRollups,
+  selectRunUsageRollupsFromRawEvents,
   selectWorkflowUsageStats,
   selectReviewItemSummary,
   selectQualityFindings,
@@ -71,6 +85,18 @@ function createInsightsDb(): Database.Database {
       event_type TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE run_usage (
+      run_id TEXT PRIMARY KEY,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL,
+      num_turns INTEGER,
+      assistant_message_count INTEGER NOT NULL DEFAULT 0,
+      computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE review_items (
       id TEXT PRIMARY KEY,
@@ -148,6 +174,54 @@ function seedEvent(
     `INSERT INTO raw_events (run_id, event_type, payload_json, created_at)
      VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
   ).run(runId, eventType, payloadJson, createdAt ?? null);
+}
+
+interface SeedRunUsageOpts {
+  runId: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  /** When omitted, defaults to input + output to mirror the migration-025 contract. */
+  totalTokens?: number;
+  costUsd?: number | null;
+  numTurns?: number | null;
+  assistantMessageCount?: number;
+}
+
+/** Insert a precomputed migration-025 `run_usage` row (the materialized tier). */
+function seedRunUsage(db: Database.Database, opts: SeedRunUsageOpts): void {
+  const input = opts.inputTokens ?? 0;
+  const output = opts.outputTokens ?? 0;
+  db.prepare(
+    `INSERT INTO run_usage
+       (run_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+        total_tokens, cost_usd, num_turns, assistant_message_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.runId,
+    input,
+    output,
+    opts.cacheReadTokens ?? 0,
+    opts.cacheCreationTokens ?? 0,
+    opts.totalTokens ?? input + output,
+    opts.costUsd === undefined ? null : opts.costUsd,
+    opts.numTurns === undefined ? null : opts.numTurns,
+    opts.assistantMessageCount ?? 0,
+  );
+}
+
+/** Construct a persisted `step_transition` raw_events payload (migration 025). */
+function stepTransitionPayload(
+  stepId: string,
+  status: 'running' | 'done' = 'running',
+): Record<string, unknown> {
+  return {
+    kind: 'step_transition',
+    step_id: stepId,
+    status,
+    timestamp: '2026-06-11T10:00:00.000Z',
+  };
 }
 
 interface SeedReviewOpts {
@@ -459,6 +533,147 @@ describe('selectRunUsageRollups', () => {
     expect(rollups[0].inputTokens).toBe(20);
     expect(rollups[1].inputTokens).toBe(10);
   });
+
+  it('prefers the materialized run_usage row over a contradicting raw_events scan', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // raw_events DELIBERATELY disagree with the materialized row — they would
+    // produce 100/50/150 if scanned. The two-tier read must IGNORE them entirely
+    // for a run that carries a run_usage row.
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50 }));
+    seedEvent(db, 'r1', 'result', resultPayload(0.99, 9));
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 300,
+      outputTokens: 200,
+      cacheReadTokens: 11,
+      cacheCreationTokens: 7,
+      costUsd: 0.02,
+      numTurns: 3,
+      assistantMessageCount: 4,
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    // Materialized values win — NOT the 100/50 from raw_events.
+    expect(rollup.inputTokens).toBe(300);
+    expect(rollup.outputTokens).toBe(200);
+    expect(rollup.cacheReadTokens).toBe(11);
+    expect(rollup.cacheCreationTokens).toBe(7);
+    // totalTokens re-derived from input + output (500), not the contradicting scan.
+    expect(rollup.totalTokens).toBe(500);
+    expect(rollup.costUsd).toBeCloseTo(0.02, 5);
+    expect(rollup.numTurns).toBe(3);
+    expect(rollup.assistantMessageCount).toBe(4);
+  });
+
+  it('keeps materialized cost/turns null when the row carried none', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, { runId: 'r1', inputTokens: 10, outputTokens: 5, costUsd: null, numTurns: null });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.totalTokens).toBe(15);
+    expect(rollup.costUsd).toBeNull();
+    expect(rollup.numTurns).toBeNull();
+  });
+
+  it('mixes a materialized run with a raw_events-fallback run in one call', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'rMat', workflowId: 'wf-1' });
+    seedRun(db, { id: 'rRaw', workflowId: 'wf-1' });
+    // rMat: materialized only (no raw_events at all — pruned).
+    seedRunUsage(db, { runId: 'rMat', inputTokens: 80, outputTokens: 20, costUsd: 0.05, assistantMessageCount: 2 });
+    // rRaw: no run_usage row → falls back to the live scan.
+    seedEvent(db, 'rRaw', 'assistant', assistantPayload({ input: 40, output: 10 }));
+    seedEvent(db, 'rRaw', 'result', resultPayload(0.01, 1));
+
+    const rollups = selectRunUsageRollups(dbAdapter(db), ['rMat', 'rRaw']);
+    const byId = new Map(rollups.map((r) => [r.runId, r]));
+
+    expect(byId.get('rMat')?.totalTokens).toBe(100);
+    expect(byId.get('rMat')?.costUsd).toBeCloseTo(0.05, 5);
+    expect(byId.get('rMat')?.assistantMessageCount).toBe(2);
+
+    expect(byId.get('rRaw')?.totalTokens).toBe(50);
+    expect(byId.get('rRaw')?.costUsd).toBeCloseTo(0.01, 5);
+    expect(byId.get('rRaw')?.assistantMessageCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. selectRunUsageRollupsFromRawEvents (the writer's force-scan path)
+// ---------------------------------------------------------------------------
+
+describe('selectRunUsageRollupsFromRawEvents', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  it('returns [] for an empty run-id list', () => {
+    expect(selectRunUsageRollupsFromRawEvents(dbAdapter(db), [])).toEqual([]);
+  });
+
+  it('IGNORES an existing run_usage row and recomputes from raw_events', () => {
+    // This is the materializer's contract: rollupRunUsage reads back the row it
+    // is about to REPLACE, so it must NEVER serve the stale materialized tier —
+    // otherwise every re-rollup freezes the row at its first value. Here the
+    // materialized row DELIBERATELY contradicts the (larger) raw_events log; the
+    // force-scan path must return the raw_events values, NOT the stale 300/200.
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 300,
+      outputTokens: 200,
+      costUsd: 0.99,
+      numTurns: 9,
+      assistantMessageCount: 4,
+    });
+    // raw_events tell the TRUE, now-larger story (the later turns the stale row missed).
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50, cacheRead: 3, cacheCreation: 2 }));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 200, output: 100 }));
+    seedEvent(db, 'r1', 'result', resultPayload(0.05, 2));
+
+    const [rollup] = selectRunUsageRollupsFromRawEvents(dbAdapter(db), ['r1']);
+    // Raw-events values win — the materialized 300/200/0.99/9/4 are ignored.
+    expect(rollup.inputTokens).toBe(300); // 100 + 200 from the events
+    expect(rollup.outputTokens).toBe(150); // 50 + 100
+    expect(rollup.cacheReadTokens).toBe(3);
+    expect(rollup.cacheCreationTokens).toBe(2);
+    expect(rollup.totalTokens).toBe(450);
+    expect(rollup.costUsd).toBeCloseTo(0.05, 5);
+    expect(rollup.numTurns).toBe(2);
+    expect(rollup.assistantMessageCount).toBe(2);
+  });
+
+  it('seeds a zeroed rollup for an id with no raw_events even when no run_usage row exists', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const [rollup] = selectRunUsageRollupsFromRawEvents(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      runId: 'r1',
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUsd: null,
+      numTurns: null,
+      assistantMessageCount: 0,
+    });
+  });
+
+  it('returns rollups in the requested run-id order, isolated per run', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'rA', workflowId: 'wf-1' });
+    seedRun(db, { id: 'rB', workflowId: 'wf-1' });
+    seedEvent(db, 'rA', 'assistant', assistantPayload({ input: 10, output: 1 }));
+    seedEvent(db, 'rB', 'assistant', assistantPayload({ input: 20, output: 2 }));
+
+    const rollups = selectRunUsageRollupsFromRawEvents(dbAdapter(db), ['rB', 'rA']);
+    expect(rollups.map((r) => r.runId)).toEqual(['rB', 'rA']);
+    expect(rollups[0].inputTokens).toBe(20);
+    expect(rollups[1].inputTokens).toBe(10);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -517,6 +732,31 @@ describe('selectWorkflowUsageStats', () => {
     expect(stats.runsWithUsage).toBe(2);
     // most recent 2 = r3(3) + r2(2) → avg 2.5 → rounded 3 (banker-agnostic round).
     expect(stats.avgTotalTokens).toBe(3);
+  });
+
+  it('qualifies a run via its materialized run_usage row even with no raw_events', () => {
+    seedWorkflow(db, { id: 'wf-1', name: 'Sprint' });
+    // rMat has NO raw_events (pruned) — it must still count via EXISTS(run_usage).
+    seedRun(db, { id: 'rMat', workflowId: 'wf-1' });
+    seedRunUsage(db, {
+      runId: 'rMat',
+      inputTokens: 120,
+      outputTokens: 80,
+      costUsd: 0.04,
+      assistantMessageCount: 3,
+    });
+    // rRaw uses the fallback scan path.
+    seedRun(db, { id: 'rRaw', workflowId: 'wf-1' });
+    seedEvent(db, 'rRaw', 'assistant', assistantPayload({ input: 100, output: 0 }));
+
+    const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
+    // both runs carried usage (rMat materialized, rRaw scanned).
+    expect(stats.runsWithUsage).toBe(2);
+    // avg over (200, 100) = 150.
+    expect(stats.avgTotalTokens).toBe(150);
+    // only rMat carried cost.
+    expect(stats.totalCostUsd).toBeCloseTo(0.04, 5);
+    expect(stats.avgCostUsd).toBeCloseTo(0.04, 5);
   });
 });
 
@@ -724,6 +964,100 @@ describe('selectStepTokenBuckets', () => {
     const byStep = new Map(buckets.map((b) => [b.stepId, b]));
     expect(byStep.get('plan')?.totalTokens).toBe(50);
     expect(byStep.get('unattributed')?.totalTokens).toBe(20);
+  });
+
+  it('drives attribution from persisted step_transition rows via row-id interleaving', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // Insertion order = AUTOINCREMENT id order:
+    //   id1 assistant 100 → BEFORE any transition → 'unattributed'.
+    //   id2 step_transition running 'plan' → switch.
+    //   id3 assistant 30 → 'plan' (most recent transition with a smaller id).
+    //   id4 step_transition running 'execute' → switch.
+    //   id5 assistant 7 → 'execute'.
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 0 }));
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('plan', 'running'));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 30, output: 0 }));
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('execute', 'running'));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 7, output: 0 }));
+
+    const buckets = selectStepTokenBuckets(dbAdapter(db), 'wf-1');
+    const byStep = new Map(buckets.map((b) => [b.stepId, b]));
+    expect(byStep.get('unattributed')?.totalTokens).toBe(100);
+    expect(byStep.get('unattributed')?.assistantMessageCount).toBe(1);
+    expect(byStep.get('plan')?.totalTokens).toBe(30);
+    expect(byStep.get('execute')?.totalTokens).toBe(7);
+    expect(buckets.map((b) => b.stepId)).toEqual(['unattributed', 'plan', 'execute']);
+  });
+
+  it('keeps the just-finished step current across a done transition until the next running', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    //   id1 step_transition running 'plan'.
+    //   id2 assistant 10 → 'plan'.
+    //   id3 step_transition done 'plan' (most recent transition keeps 'plan' current).
+    //   id4 assistant 5 → 'plan' (still — no new running yet).
+    //   id5 step_transition running 'execute'.
+    //   id6 assistant 8 → 'execute'.
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('plan', 'running'));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 10, output: 0 }));
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('plan', 'done'));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 5, output: 0 }));
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('execute', 'running'));
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 8, output: 0 }));
+
+    const buckets = selectStepTokenBuckets(dbAdapter(db), 'wf-1');
+    const byStep = new Map(buckets.map((b) => [b.stepId, b]));
+    expect(byStep.get('plan')?.totalTokens).toBe(15); // 10 + 5
+    expect(byStep.get('execute')?.totalTokens).toBe(8);
+    expect(byStep.has('unattributed')).toBe(false); // no usage before the first transition
+  });
+
+  it('ignores tool_use-embedded transitions when persisted step_transition rows exist', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // The persisted rows are authoritative. The reportStep tool_use names a
+    // DIFFERENT step ('ghost') that must be IGNORED because a transition row is present.
+    seedEvent(db, 'r1', 'step_transition', stepTransitionPayload('plan', 'running'));
+    seedEvent(db, 'r1', 'assistant', reportStepPayload('ghost', { input: 40, output: 0 }));
+
+    const buckets = selectStepTokenBuckets(dbAdapter(db), 'wf-1');
+    const byStep = new Map(buckets.map((b) => [b.stepId, b]));
+    expect(byStep.get('plan')?.totalTokens).toBe(40);
+    expect(byStep.has('ghost')).toBe(false);
+  });
+
+  it('falls back to the tool_use scan for runs with NO step_transition rows (per-run decision)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'rTrans', workflowId: 'wf-1', createdAt: '2026-06-01 10:00:00' });
+    seedRun(db, { id: 'rTool', workflowId: 'wf-1', createdAt: '2026-06-02 10:00:00' });
+    // rTrans uses the persisted-timeline path.
+    seedEvent(db, 'rTrans', 'step_transition', stepTransitionPayload('plan', 'running'));
+    seedEvent(db, 'rTrans', 'assistant', assistantPayload({ input: 12, output: 0 }));
+    // rTool has NO transition rows → tool_use fallback: the reporting message's
+    // own usage (10) counts under the PREVIOUS step ('unattributed'), then 'build'.
+    seedEvent(db, 'rTool', 'assistant', reportStepPayload('build', { input: 10, output: 0 }));
+    seedEvent(db, 'rTool', 'assistant', assistantPayload({ input: 3, output: 0 }));
+
+    const buckets = selectStepTokenBuckets(dbAdapter(db), 'wf-1');
+    const byStep = new Map(buckets.map((b) => [b.stepId, b]));
+    // rTrans 'plan' + rTool fallback 'build' aggregate independently.
+    expect(byStep.get('plan')?.totalTokens).toBe(12);
+    expect(byStep.get('unattributed')?.totalTokens).toBe(10); // rTool's reporting-message usage
+    expect(byStep.get('build')?.totalTokens).toBe(3);
+  });
+
+  it('skips a malformed step_transition payload (no step_id) but still scans the run via the transition path', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // A broken transition row makes the run a "has-transition" run, but the
+    // unparseable row contributes no switch — usage stays 'unattributed'.
+    seedEvent(db, 'r1', 'step_transition', '{ broken json');
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 9, output: 0 }));
+
+    const buckets = selectStepTokenBuckets(dbAdapter(db), 'wf-1');
+    const byStep = new Map(buckets.map((b) => [b.stepId, b]));
+    expect(byStep.get('unattributed')?.totalTokens).toBe(9);
   });
 });
 
