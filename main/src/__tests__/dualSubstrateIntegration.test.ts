@@ -110,6 +110,16 @@ function makeDb(): Database.Database {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
       ended_at DATETIME,
+      spec_hash TEXT,
+      FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+    );
+    CREATE TABLE workflow_revisions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      workflow_id TEXT NOT NULL,
+      spec_hash   TEXT NOT NULL,
+      spec_json   TEXT NOT NULL,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (workflow_id, spec_hash),
       FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
     );
     CREATE TABLE raw_events (
@@ -320,8 +330,10 @@ describe('dual-substrate parity — same workflow on both substrates', () => {
 
     // (b) raw_events row count is EQUAL across substrates.
     expect(countRawEvents(db, interactiveRunId)).toBe(countRawEvents(db, sdkRunId));
-    // Sanity: persistence actually happened (3 json outputs => 3 rows).
-    expect(countRawEvents(db, sdkRunId)).toBe(3);
+    // Sanity: persistence actually happened (3 json outputs + 2 persisted
+    // step_transition rows — stepTransitionBridge writes one per report, both
+    // substrates equally, since Phase-2 step persistence).
+    expect(countRawEvents(db, sdkRunId)).toBe(5);
 
     // (c) current_step_id advanced through the SAME step sequence — both runs
     // end on the last driven step.
@@ -355,7 +367,8 @@ describe('dual-substrate rollback — flip back to sdk preserves prior history',
     const priorRow = readRun(db, interactiveRunId);
     const priorRawCount = countRawEvents(db, interactiveRunId);
     expect(priorRow.substrate).toBe('interactive');
-    expect(priorRawCount).toBe(3);
+    // 3 json outputs + 2 persisted step_transition rows (Phase-2 step persistence).
+    expect(priorRawCount).toBe(5);
     expect(priorRow.current_step_id).toBe('step-two');
 
     // 2. Roll back: a NEW run for the SAME workflow on 'sdk' (substrate is
@@ -376,7 +389,7 @@ describe('dual-substrate rollback — flip back to sdk preserves prior history',
 
     // The new sdk run accrued its own independent history.
     expect(readRun(db, sdkRunId).substrate).toBe('sdk');
-    expect(countRawEvents(db, sdkRunId)).toBe(3);
+    expect(countRawEvents(db, sdkRunId)).toBe(5);
 
     db.close();
   });

@@ -7,12 +7,18 @@
  *   (c) Emit happens AFTER the UPDATE (write-then-emit ordering).
  *   (d) Unknown workflow name → resolveInitialStepId returns null; no DB write/emit.
  *   (e) Missing workflow_runs row → logs warn, does NOT throw.
+ *   (f) raw_events 'step_transition' persistence (Insights timeline): row written
+ *       on valid transitions (shape + payload), no row on rejected/missing, and
+ *       fail-soft emit when the INSERT throws.
  */
 
+import Database from 'better-sqlite3';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { countRawEvents } from '../__test_fixtures__/rawEvents';
+import type { DatabaseLike } from '../types';
 import {
   buildStepTransitionEvent,
   resolveInitialStepId,
@@ -20,6 +26,38 @@ import {
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
+
+/**
+ * Shape of a persisted 'step_transition' raw_events row's decoded payload_json.
+ * Mirrors the object written by buildStepTransitionEvent.
+ */
+interface StepTransitionPayload {
+  kind: string;
+  step_id: string;
+  status: string;
+  timestamp: string;
+}
+
+/**
+ * Read the single 'step_transition' raw_events row for a run and return its
+ * { event_type, decoded payload }. Throws if there is not exactly one such row.
+ */
+function readStepTransitionRow(
+  db: Database.Database,
+  runId: string,
+): { event_type: string; payload: StepTransitionPayload } {
+  const rows = db
+    .prepare(
+      `SELECT event_type, payload_json FROM raw_events
+       WHERE run_id = ? AND event_type = 'step_transition'`,
+    )
+    .all(runId) as { event_type: string; payload_json: string }[];
+  expect(rows).toHaveLength(1);
+  return {
+    event_type: rows[0].event_type,
+    payload: JSON.parse(rows[0].payload_json) as StepTransitionPayload,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -407,5 +445,153 @@ describe('buildStepTransitionEvent — stepId validation', () => {
 
     expect(logger.warn).toHaveBeenCalledOnce();
     expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('execute-tasks');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildStepTransitionEvent — raw_events 'step_transition' persistence
+// (Insights timeline; shared handler path → both substrates persist)
+// ---------------------------------------------------------------------------
+
+describe('buildStepTransitionEvent — step_transition raw_events persistence', () => {
+  let emittedEvents: WorkflowStepTransitionEvent[] = [];
+
+  beforeEach(() => {
+    emittedEvents = [];
+    stepTransitionEvents.on('transition', (ev: WorkflowStepTransitionEvent) => {
+      emittedEvents.push(ev);
+    });
+  });
+
+  afterEach(() => {
+    stepTransitionEvents.removeAllListeners('transition');
+  });
+
+  it('(f) writes a step_transition raw_events row with the correct payload shape on a valid transition', () => {
+    const { db, runId } = seedForBridge('sprint');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const event = buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
+
+    expect(event).not.toBeNull();
+    // Exactly one step_transition row for this run.
+    expect(countRawEvents(db, runId)).toBe(1);
+
+    const { event_type, payload } = readStepTransitionRow(db, runId);
+    expect(event_type).toBe('step_transition');
+    expect(payload).toEqual({
+      kind: 'step_transition',
+      step_id: 'implement',
+      status: 'running',
+      timestamp: event!.timestamp,
+    });
+  });
+
+  it('(f) the persisted payload timestamp equals the emitted event timestamp', () => {
+    const { db, runId } = seedForBridge('sprint');
+    const adapter = dbAdapter(db);
+
+    const event = buildStepTransitionEvent(runId, 'implement', 'done', adapter);
+
+    expect(event).not.toBeNull();
+    expect(emittedEvents).toHaveLength(1);
+
+    const { payload } = readStepTransitionRow(db, runId);
+    // Payload timestamp matches BOTH the returned event and the emitted event.
+    expect(payload.timestamp).toBe(event!.timestamp);
+    expect(payload.timestamp).toBe(emittedEvents[0].timestamp);
+    expect(payload.status).toBe('done');
+  });
+
+  it('(f) persists from the shared handler path regardless of substrate (no substrate fork)', () => {
+    // The bridge has no substrate parameter — the SAME call site serves both the
+    // SDK and interactive substrates, so a single valid transition always lands
+    // exactly one row. This guards against a future substrate-specific fork.
+    const { db, runId } = seedForBridge('planner');
+    const adapter = dbAdapter(db);
+
+    buildStepTransitionEvent(runId, 'context', 'running', adapter);
+    buildStepTransitionEvent(runId, 'epics', 'running', adapter);
+
+    expect(countRawEvents(db, runId)).toBe(2);
+    const rows = db
+      .prepare(
+        `SELECT payload_json FROM raw_events
+         WHERE run_id = ? AND event_type = 'step_transition'
+         ORDER BY id ASC`,
+      )
+      .all(runId) as { payload_json: string }[];
+    const stepIds = rows.map((r) => (JSON.parse(r.payload_json) as StepTransitionPayload).step_id);
+    expect(stepIds).toEqual(['context', 'epics']);
+  });
+
+  it('(f) writes NO raw_events row when the stepId is rejected', () => {
+    const { db, runId } = seedForBridge('sprint');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const result = buildStepTransitionEvent(runId, 'not-a-real-step', 'running', adapter, logger);
+
+    expect(result).toBeNull();
+    expect(emittedEvents).toHaveLength(0);
+    expect(countRawEvents(db, runId)).toBe(0);
+  });
+
+  it('(f) writes NO raw_events row when the workflow_runs row is missing', () => {
+    const db = createTestDbWithCurrentStep();
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const result = buildStepTransitionEvent('nonexistent-run-id', 'implement', 'running', adapter, logger);
+
+    expect(result).toBeNull();
+    expect(emittedEvents).toHaveLength(0);
+    expect(countRawEvents(db, 'nonexistent-run-id')).toBe(0);
+  });
+
+  it('(f) fail-soft: still emits and returns the event when the raw_events INSERT throws', () => {
+    const { db, runId } = seedForBridge('sprint');
+    const realAdapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    // Wrap the adapter so prepare() for the raw_events INSERT yields a statement
+    // whose run() throws — but the pointer UPDATE and the validation SELECT still
+    // go through the real DB so the transition is genuinely committed first.
+    const throwingAdapter: DatabaseLike = {
+      prepare: (sql: string) => {
+        const stmt = realAdapter.prepare(sql);
+        if (sql.includes('INSERT INTO raw_events')) {
+          return {
+            run: () => {
+              throw new Error('simulated raw_events INSERT failure');
+            },
+            get: stmt.get.bind(stmt),
+            all: stmt.all.bind(stmt),
+          };
+        }
+        return stmt;
+      },
+      transaction: realAdapter.transaction.bind(realAdapter),
+    };
+
+    const event = buildStepTransitionEvent(runId, 'implement', 'running', throwingAdapter, logger);
+
+    // The INSERT threw, but the emit and return STILL happened.
+    expect(event).not.toBeNull();
+    expect(event!.stepId).toBe('implement');
+    expect(emittedEvents).toHaveLength(1);
+    expect(emittedEvents[0].stepId).toBe('implement');
+
+    // The authoritative pointer write committed despite the INSERT failure.
+    const row = db
+      .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { current_step_id: string | null } | undefined;
+    expect(row?.current_step_id).toBe('implement');
+
+    // No row landed (the INSERT threw) and the failure was warn-logged.
+    expect(countRawEvents(db, runId)).toBe(0);
+    expect(logger.warn).toHaveBeenCalledOnce();
+    expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('raw_events INSERT threw');
   });
 });
