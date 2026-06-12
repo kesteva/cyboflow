@@ -60,6 +60,7 @@ import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
 import type {
+  FindingPayload,
   ReviewItemEntityType,
   ReviewItemKind,
   ReviewItemPayload,
@@ -151,6 +152,15 @@ export type McpQueryMessage =
       /** Soft polymorphic entity link — both must be set together or both omitted. */
       entityType?: ReviewItemEntityType;
       entityId?: string;
+      /**
+       * Structured finding extras (camelCase wire). Each is `unknown` because the
+       * MCP tool passes them through unvalidated; handleReportFinding unknown-guards
+       * the shape and DROPS any malformed member rather than failing the write.
+       */
+      category?: unknown;
+      locations?: unknown;
+      suggestedFix?: unknown;
+      impact?: unknown;
       /** Per-kind payload JSON; its discriminant must equal `kind`. */
       payloadJson?: string;
     }
@@ -188,6 +198,69 @@ const PLANNER_STEP_TO_IDEA_POSITION: Readonly<Record<string, number>> = {
   research: 2, // Research
   'approve-idea': 3, // Idea spec
 };
+
+// ---------------------------------------------------------------------------
+// Structured finding-extras mapping (snake_case wire -> camelCase payload).
+//
+// The cyboflow_report_finding tool accepts optional category / locations /
+// suggested_fix / impact alongside the legacy payload_json. They arrive on the
+// query message UNVALIDATED (typed `unknown`); the guards below narrow each shape
+// and the builder DROPS any malformed member rather than erroring — an agent typo
+// must never fail a non-blocking finding write (the whole point of the inbox).
+// ---------------------------------------------------------------------------
+
+/** A non-null object whose own keys can be safely indexed. */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Narrow `unknown` to FindingPayload['locations'], keeping only well-formed
+ * entries ({ path: string, line?: number }) and dropping malformed ones. Returns
+ * undefined when the input is not an array OR no entry survives.
+ */
+function parseFindingLocations(v: unknown): FindingPayload['locations'] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: NonNullable<FindingPayload['locations']> = [];
+  for (const entry of v) {
+    if (!isRecord(entry) || typeof entry.path !== 'string') continue; // drop malformed
+    out.push(typeof entry.line === 'number' ? { path: entry.path, line: entry.line } : { path: entry.path });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Narrow `unknown` to FindingPayload['impact'], keeping only the numeric/string
+ * members that are present and well-typed. Returns undefined when the input is
+ * not an object OR no member survives.
+ */
+function parseFindingImpact(v: unknown): FindingPayload['impact'] | undefined {
+  if (!isRecord(v)) return undefined;
+  const impact: NonNullable<FindingPayload['impact']> = {};
+  if (typeof v['ran_count'] === 'number') impact.ranCount = v['ran_count'];
+  if (typeof v['caught_regressions'] === 'number') impact.caughtRegressions = v['caught_regressions'];
+  if (typeof v['token_delta'] === 'number') impact.tokenDelta = v['token_delta'];
+  if (typeof v['note'] === 'string') impact.note = v['note'];
+  return Object.keys(impact).length > 0 ? impact : undefined;
+}
+
+/**
+ * Build the FindingPayload extras from a report-finding message, dropping any
+ * malformed member. Returns only the keys that survived narrowing (so the caller
+ * can spread them over a base payload without clobbering with undefined).
+ */
+function buildFindingExtras(
+  msg: Extract<McpQueryMessage, { type: 'mcp-report-finding' }>,
+): Partial<Omit<FindingPayload, 'kind'>> {
+  const extras: Partial<Omit<FindingPayload, 'kind'>> = {};
+  if (typeof msg.category === 'string') extras.category = msg.category;
+  if (typeof msg.suggestedFix === 'string') extras.suggestedFix = msg.suggestedFix;
+  const locations = parseFindingLocations(msg.locations);
+  if (locations !== undefined) extras.locations = locations;
+  const impact = parseFindingImpact(msg.impact);
+  if (impact !== undefined) extras.impact = impact;
+  return extras;
+}
 
 // ---------------------------------------------------------------------------
 // Internal row shapes (enough for safe narrowing — not a full ORM mapping)
@@ -1188,6 +1261,21 @@ export class McpQueryHandler {
         return;
       }
       payload = parsed as ReviewItemPayload;
+    }
+
+    // Fold the structured finding extras (category / locations / suggestedFix /
+    // impact) into the FindingPayload. These arrive UNVALIDATED from the MCP tool
+    // (typed `unknown`); each shape is guarded and a malformed member is DROPPED
+    // rather than erroring — an agent typo must never fail a non-blocking finding
+    // write. Extras only apply to kind='finding'; for other kinds they are ignored.
+    // An explicit payloadJson (parsed above) is the base; extras override per-field.
+    if (kind === 'finding') {
+      const extras = buildFindingExtras(msg);
+      if (Object.keys(extras).length > 0) {
+        const base: FindingPayload =
+          payload !== null && payload.kind === 'finding' ? payload : { kind: 'finding' };
+        payload = { ...base, ...extras };
+      }
     }
 
     const create: ReviewItemCreate = {

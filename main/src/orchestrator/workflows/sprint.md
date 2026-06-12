@@ -84,8 +84,10 @@ message); as each returns, you continue that task's chain.
    to fix the cause before continuing.
 3. **code-review** → delegate to `cyboflow-code-review`. For each entry in its
    `## Findings`, record a finding via `cyboflow_report_finding` (non-blocking; lands
-   in the review queue for human triage). If it returns a `## Blocking` defect, loop
-   back to `cyboflow-implement` to fix it before proceeding.
+   in the review queue for human triage). When the finding concerns code, always pass
+   `category` and `locations` (each `{ path, line }`) so the review queue can group and
+   jump to it. If it returns a `## Blocking` defect, loop back to `cyboflow-implement`
+   to fix it before proceeding.
 4. **task-verify** → delegate to `cyboflow-task-verify`. Read its `VERDICT`. On
    `FAIL`, re-delegate to `cyboflow-implement` with its `## Fix guidance`, then
    re-verify — up to 3× before marking the lane `failed` and **continuing the other
@@ -96,7 +98,9 @@ message); as each returns, you continue that task's chain.
 5. **visual-verify** (optional) → when visual verification is enabled, delegate to
    `cyboflow-visual-verify`; otherwise skip. On `VERDICT: FAIL`, loop back to
    `cyboflow-implement` with its `## Visual check` notes, or record a finding via
-   `cyboflow_report_finding` when the regression is out of scope.
+   `cyboflow_report_finding` when the regression is out of scope. Verify-phase findings
+   must carry a `severity`; when a regression traces to already-merged work, set
+   `category: 'post-merge-bug'`.
 
 If a subagent comes back stuck (no usable result), re-delegate it **once** with a
 sharper, narrower scope; if it is still stuck, mark the lane `failed` and move on.
@@ -126,7 +130,8 @@ Enter this phase only after **every** lane is terminal (`integrated` or `failed`
    most **2** such loops — after that, surface the failure at the human gate rather
    than merging silently.
 2. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in its
-   `## Findings` via `cyboflow_report_finding`.
+   `## Findings` via `cyboflow_report_finding`, passing `category` + code `locations`
+   and a `severity` (this is a verify-phase step).
 3. **human-review** → **human gate, inline.** Use **AskUserQuestion** for the final
    taste-level sign-off on the whole sprint. Use the header `Approve sprint` with
    the options **Approve** / **Reject** (these exact labels). Do **not**
@@ -135,6 +140,7 @@ Enter this phase only after **every** lane is terminal (`integrated` or `failed`
    commit) — and stop; the user merges the session from the UI. Do **not** merge to
    main yourself. On **Reject**, summarize what was rejected, leave the lanes as
    they stand, and end.
+
 
 ## Hard rules
 
@@ -148,7 +154,8 @@ Enter this phase only after **every** lane is terminal (`integrated` or `failed`
 - Subagents never call `cyboflow_*` tools and never call **AskUserQuestion** — only
   this session asks the user anything.
 - Emit out-of-scope issues as findings via `cyboflow_report_finding` (from the
-  subagents' returned findings); do not widen any task.
+  subagents' returned findings); do not widen any task. Carry `category` + code
+  `locations` on every code finding so the queue can group and navigate to it.
 - Use **AskUserQuestion** for the human gate; never silently pass it.
   `cyboflow_report_step` is observational only and never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —

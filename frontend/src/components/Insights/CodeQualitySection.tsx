@@ -13,9 +13,12 @@
  * Each column header carries a count badge. An item row shows a severity dot
  * (error → status-error, warning → status-warning, info/null → text-muted), the
  * finding title, a meta line ('<location path> · <sourceStep> · <workflowName>'
- * with the missing parts elided), and a right-aligned status chip mapping the
- * finding status (pending → OPEN, resolved → RESOLVED, dismissed → DISMISSED).
- * Empty columns render a quiet placeholder so the three-column rhythm holds.
+ * with the missing parts elided), and a right-aligned status chip. The chip text
+ * keys on status AND — for resolved items — the resolution prefix, parsed through
+ * the shared {@link parseResolutionKind}: pending → OPEN, dismissed → DISMISSED,
+ * and resolved → FIXED ('fixed:') / TRIAGED ('triaged:') / PROMOTED ('promoted:')
+ * / else RESOLVED. Empty columns render a quiet placeholder so the three-column
+ * rhythm holds.
  *
  * Label maps (column titles, status chips) are keyed on the shared discriminants
  * so a new bucket / status breaks the map at compile time (per CODE-PATTERNS
@@ -28,6 +31,7 @@ import {
   type QualityBucket,
   type QualityFinding,
 } from '../../../../shared/types/insights';
+import { parseResolutionKind } from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Discriminant-keyed label maps — exhaustive over the shared unions.
@@ -43,18 +47,40 @@ const BUCKET_LABEL: Record<QualityBucket, string> = {
 
 type FindingStatus = QualityFinding['status'];
 
-const STATUS_CHIP_LABEL: Record<FindingStatus, string> = {
-  pending: 'Open',
-  resolved: 'Resolved',
-  dismissed: 'Dismissed',
-};
-
 /** Status chip color — open stands out (interactive), triaged recede. */
 const STATUS_CHIP_CLASS: Record<FindingStatus, string> = {
   pending: 'border-interactive/40 bg-interactive-surface text-interactive',
   resolved: 'border-status-success/40 bg-status-success/10 text-status-success',
   dismissed: 'border-border-primary bg-bg-secondary text-text-tertiary',
 };
+
+/**
+ * Chip TEXT for a finding. Pending → OPEN and dismissed → DISMISSED key on status
+ * alone; a resolved item refines RESOLVED by its resolution prefix (parsed via the
+ * shared parseResolutionKind, never re-implemented) so the queue distinguishes a
+ * fix-in-place from a triage or a promote-to-task. The chip COLOR stays per status
+ * ({@link STATUS_CHIP_CLASS}) — all resolved variants share the success styling.
+ */
+function chipLabel(finding: QualityFinding): string {
+  switch (finding.status) {
+    case 'pending':
+      return 'Open';
+    case 'dismissed':
+      return 'Dismissed';
+    case 'resolved':
+      switch (parseResolutionKind(finding.resolution)) {
+        case 'fixed':
+          return 'Fixed';
+        case 'triaged':
+          return 'Triaged';
+        case 'promoted':
+          return 'Promoted';
+        // 'other' (free-text) and null (no resolution recorded) → generic.
+        default:
+          return 'Resolved';
+      }
+  }
+}
 
 /** Severity dot color — null/info are the quietest. */
 function severityDotClass(severity: QualityFinding['severity']): string {
@@ -107,7 +133,7 @@ function FindingRow({ finding }: { finding: QualityFinding }): React.JSX.Element
         className={`flex-shrink-0 rounded-full border px-1.5 py-px text-[9px] font-bold uppercase tracking-wider ${STATUS_CHIP_CLASS[finding.status]}`}
         data-testid="quality-status-chip"
       >
-        {STATUS_CHIP_LABEL[finding.status]}
+        {chipLabel(finding)}
       </span>
     </div>
   );

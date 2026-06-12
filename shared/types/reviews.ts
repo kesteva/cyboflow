@@ -67,6 +67,13 @@ export interface FindingPayload {
   suggestedFix?: string;
   /** Optional file:line locations the finding refers to. */
   locations?: Array<{ path: string; line?: number }>;
+  /**
+   * Optional verification impact — how many times a regression-guard ran, how
+   * many regressions it caught, a token delta, and free-text. All members are
+   * optional so an agent can carry whichever signal it has; the mcp handler
+   * drops malformed members rather than failing the finding write.
+   */
+  impact?: { ranCount?: number; caughtRegressions?: number; tokenDelta?: number; note?: string };
 }
 
 /**
@@ -147,6 +154,41 @@ export interface ReviewItem {
   resolved_by: string | null;
   /** Free-form resolution note (e.g. 'promoted:tsk_...'); null while pending. */
   resolution: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Resolution-prefix convention
+// ---------------------------------------------------------------------------
+
+/**
+ * `review_items.resolution` is a free-text note, but a small set of leading
+ * `<verb>:` prefixes carry machine-readable triage intent the UI keys on:
+ *   - 'promoted:<taskId>' — the finding minted a real backlog task.
+ *   - 'fixed:<note>'      — the issue was fixed in-place.
+ *   - 'triaged:<note>'    — reviewed + dispositioned without a code fix.
+ * The convention is FORWARD-ONLY: any resolution that does NOT start with one
+ * of these prefixes (incl. plain human prose) parses as 'other'; a null
+ * resolution (still pending) parses as null. New writers must reuse a prefix
+ * const rather than hand-typing the string so the parser cannot drift.
+ */
+export const RESOLUTION_PREFIX_PROMOTED = 'promoted:';
+export const RESOLUTION_PREFIX_FIXED = 'fixed:';
+export const RESOLUTION_PREFIX_TRIAGED = 'triaged:';
+
+/** Discriminant a {@link parseResolutionKind} result narrows to. */
+export type ResolutionKind = 'promoted' | 'fixed' | 'triaged' | 'other';
+
+/**
+ * Classify a `resolution` string by its leading prefix. Returns null for a null
+ * (still-pending) resolution, the matching kind for a known prefix, and 'other'
+ * for any free-text resolution that matches none — see the convention above.
+ */
+export function parseResolutionKind(resolution: string | null): ResolutionKind | null {
+  if (resolution === null) return null;
+  if (resolution.startsWith(RESOLUTION_PREFIX_PROMOTED)) return 'promoted';
+  if (resolution.startsWith(RESOLUTION_PREFIX_FIXED)) return 'fixed';
+  if (resolution.startsWith(RESOLUTION_PREFIX_TRIAGED)) return 'triaged';
+  return 'other';
 }
 
 // ---------------------------------------------------------------------------

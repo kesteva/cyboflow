@@ -1559,6 +1559,145 @@ describe('McpQueryHandler', () => {
       expect(JSON.parse(row.payload_json)).toEqual({ kind: 'finding', category: 'perf' });
     });
 
+    it('maps the structured finding extras (category / locations / suggested_fix / impact) into the payload', async () => {
+      // The MCP tool forwards camelCase extras on the query message; the handler
+      // folds them into a FindingPayload (snake_case impact members → camelCase).
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'review', stepsSnapshot: { review: 'reviewer' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-extras',
+          runId: 'run-1',
+          title: 'Regression after merge',
+          body: 'Guard ran but a regression slipped through',
+          severity: 'error',
+          category: 'post-merge-bug',
+          locations: [
+            { path: 'src/foo.ts', line: 42 },
+            { path: 'src/bar.ts' }, // no line — still kept
+          ],
+          suggestedFix: 'Re-add the null check',
+          impact: { ran_count: 3, caught_regressions: 1, token_delta: -120, note: 'cheaper now' },
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string };
+      expect(JSON.parse(row.payload_json)).toEqual({
+        kind: 'finding',
+        category: 'post-merge-bug',
+        suggestedFix: 'Re-add the null check',
+        locations: [{ path: 'src/foo.ts', line: 42 }, { path: 'src/bar.ts' }],
+        impact: { ranCount: 3, caughtRegressions: 1, tokenDelta: -120, note: 'cheaper now' },
+      });
+    });
+
+    it('DROPS malformed extras (bad location entries / wrong-typed impact members) without failing the write', async () => {
+      // An agent typo must never fail a non-blocking finding. Malformed location
+      // entries are dropped individually; a non-numeric impact member is dropped;
+      // an impact with no surviving member is omitted entirely.
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'review', stepsSnapshot: { review: 'reviewer' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-malformed',
+          runId: 'run-1',
+          title: 'Has typos',
+          body: 'b',
+          category: 'perf',
+          // Only the well-formed entry (string path) survives; the others are dropped.
+          locations: [
+            { path: 'src/ok.ts', line: 7 },
+            { path: 123 }, // path not a string → dropped
+            { line: 9 }, // missing path → dropped
+            'not-an-object', // not a record → dropped
+          ],
+          // ran_count is a string → dropped; nothing else valid → impact omitted.
+          impact: { ran_count: 'three' },
+          // suggested_fix wrong type → dropped.
+          suggestedFix: 99,
+        } as unknown as McpQueryMessage,
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string };
+      // Only the valid category + the single surviving location remain; impact and
+      // suggestedFix are absent (every member was malformed).
+      expect(JSON.parse(row.payload_json)).toEqual({
+        kind: 'finding',
+        category: 'perf',
+        locations: [{ path: 'src/ok.ts', line: 7 }],
+      });
+    });
+
+    it('leaves the payload null when no structured extras and no payload_json are sent (unchanged from before)', async () => {
+      // The legacy no-payload path must be byte-for-byte unchanged: a bare finding
+      // persists with a NULL payload_json (the extras mapping adds nothing).
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'implement', stepsSnapshot: { implement: 'executor' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        { type: 'mcp-report-finding', requestId: 'rf-bare', runId: 'run-1', title: 'Bare', body: 'b' },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string | null };
+      expect(row.payload_json).toBeNull();
+    });
+
+    it('folds extras over an explicit finding payload_json (extras win per-field, base kept otherwise)', async () => {
+      // payload_json carries a base finding payload; the structured extras override
+      // category and add impact, while a payload-only field (suggestedFix) survives.
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'review', stepsSnapshot: { review: 'reviewer' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-fold',
+          runId: 'run-1',
+          title: 'Merged base + extras',
+          body: 'b',
+          payloadJson: JSON.stringify({ kind: 'finding', category: 'style', suggestedFix: 'from payload' }),
+          category: 'perf', // overrides the payload's 'style'
+          impact: { ran_count: 2 },
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string };
+      expect(JSON.parse(row.payload_json)).toEqual({
+        kind: 'finding',
+        category: 'perf', // extra overrode base
+        suggestedFix: 'from payload', // base survived (no extra for it)
+        impact: { ranCount: 2 },
+      });
+    });
+
     it('never throws on a DB fault during the async create (the run is already replied to)', async () => {
       // The chokepoint's late failure is fire-and-forget — the synchronous reply
       // is ok:true and the handler returns without awaiting. Even if we surface a

@@ -292,6 +292,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             blocking: { type: 'boolean', description: 'Optional — whether this item gates run resume; defaults to false (non-blocking)' },
             entity_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: 'Optional soft entity link type (must be paired with entity_id)' },
             entity_id: { type: 'string', description: 'Optional soft entity link id (must be paired with entity_type)' },
+            category: { type: 'string', description: "Optional finding category for grouping (e.g. 'security', 'perf', 'post-merge-bug')" },
+            locations: {
+              type: 'array',
+              description: 'Optional file:line locations the finding refers to',
+              items: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string', description: 'File path (required within a location)' },
+                  line: { type: 'number', description: 'Optional 1-based line number' },
+                },
+                required: ['path'],
+              },
+            },
+            suggested_fix: { type: 'string', description: 'Optional prose suggesting how to fix the finding' },
+            impact: {
+              type: 'object',
+              description: 'Optional verification impact (all members optional)',
+              properties: {
+                ran_count: { type: 'number', description: 'How many times a regression-guard ran' },
+                caught_regressions: { type: 'number', description: 'How many regressions it caught' },
+                token_delta: { type: 'number', description: 'Token delta attributable to the finding' },
+                note: { type: 'string', description: 'Free-text impact note' },
+              },
+            },
             payload_json: { type: 'string', description: 'Optional per-kind payload JSON; its discriminant must equal kind' },
           },
           required: ['title', 'body'],
@@ -779,9 +803,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         blocking?: unknown;
         entity_type?: unknown;
         entity_id?: unknown;
+        category?: unknown;
+        locations?: unknown;
+        suggested_fix?: unknown;
+        impact?: unknown;
         payload_json?: unknown;
       };
-      const { title, body, severity, kind, blocking, entity_type, entity_id, payload_json } = args;
+      const { title, body, severity, kind, blocking, entity_type, entity_id, category, locations, suggested_fix, impact, payload_json } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -862,6 +890,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (blocking !== undefined) queryParams['blocking'] = blocking;
       if (entity_type !== undefined) queryParams['entityType'] = entity_type;
       if (entity_id !== undefined) queryParams['entityId'] = entity_id;
+      // The structured finding extras are passed through UNVALIDATED — the
+      // handler unknown-guards each shape and DROPS malformed members so an agent
+      // typo can never fail a finding write (see handleReportFinding).
+      if (category !== undefined) queryParams['category'] = category;
+      if (locations !== undefined) queryParams['locations'] = locations;
+      if (suggested_fix !== undefined) queryParams['suggestedFix'] = suggested_fix;
+      if (impact !== undefined) queryParams['impact'] = impact;
       if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
       return executeMcpQuery('mcp-report-finding', queryParams);
     }
