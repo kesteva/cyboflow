@@ -473,7 +473,7 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
-    const event = buildStepTransitionEvent(runId, 'implement', 'running', adapter, logger);
+    const event = buildStepTransitionEvent(runId, 'execute-tasks', 'running', adapter, logger);
 
     expect(event).not.toBeNull();
     // Exactly one step_transition row for this run.
@@ -483,7 +483,7 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     expect(event_type).toBe('step_transition');
     expect(payload).toEqual({
       kind: 'step_transition',
-      step_id: 'implement',
+      step_id: 'execute-tasks',
       status: 'running',
       timestamp: event!.timestamp,
     });
@@ -493,7 +493,7 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     const { db, runId } = seedForBridge('sprint');
     const adapter = dbAdapter(db);
 
-    const event = buildStepTransitionEvent(runId, 'implement', 'done', adapter);
+    const event = buildStepTransitionEvent(runId, 'execute-tasks', 'done', adapter);
 
     expect(event).not.toBeNull();
     expect(emittedEvents).toHaveLength(1);
@@ -544,7 +544,7 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
-    const result = buildStepTransitionEvent('nonexistent-run-id', 'implement', 'running', adapter, logger);
+    const result = buildStepTransitionEvent('nonexistent-run-id', 'execute-tasks', 'running', adapter, logger);
 
     expect(result).toBeNull();
     expect(emittedEvents).toHaveLength(0);
@@ -576,19 +576,19 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
       transaction: realAdapter.transaction.bind(realAdapter),
     };
 
-    const event = buildStepTransitionEvent(runId, 'implement', 'running', throwingAdapter, logger);
+    const event = buildStepTransitionEvent(runId, 'execute-tasks', 'running', throwingAdapter, logger);
 
     // The INSERT threw, but the emit and return STILL happened.
     expect(event).not.toBeNull();
-    expect(event!.stepId).toBe('implement');
+    expect(event!.stepId).toBe('execute-tasks');
     expect(emittedEvents).toHaveLength(1);
-    expect(emittedEvents[0].stepId).toBe('implement');
+    expect(emittedEvents[0].stepId).toBe('execute-tasks');
 
     // The authoritative pointer write committed despite the INSERT failure.
     const row = db
       .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
       .get(runId) as { current_step_id: string | null } | undefined;
-    expect(row?.current_step_id).toBe('implement');
+    expect(row?.current_step_id).toBe('execute-tasks');
 
     // No row landed (the INSERT threw) and the failure was warn-logged.
     expect(countRawEvents(db, runId)).toBe(0);
