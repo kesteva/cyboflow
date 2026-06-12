@@ -5,6 +5,7 @@ import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
 import { ensureGitignoreEntry } from '../utils/gitignoreWriter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
+import { seedDemoInsightsHistory } from '../services/demo/demoInsightsSeed';
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -164,6 +165,18 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           console.log('[Main] Demo backlog seeded for project', project.id);
         } catch (error) {
           console.error('[Main] Demo backlog seeding failed (continuing):', error);
+        }
+        // Insights history (runs / usage / findings) — separately fail-soft so a
+        // history hiccup never costs the backlog seed above.
+        try {
+          await seedDemoInsightsHistory({
+            db: services.databaseService.getDb(),
+            projectId: project.id,
+            workflowRegistry: services.cyboflow.workflowRegistry,
+          });
+          console.log('[Main] Demo insights history seeded for project', project.id);
+        } catch (error) {
+          console.error('[Main] Demo insights seeding failed (continuing):', error);
         }
       }
 
