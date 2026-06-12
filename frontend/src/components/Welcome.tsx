@@ -49,7 +49,7 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
           <div>
             <img src={cyboflowWordmark} alt="Cyboflow" className="h-9 w-auto mb-2" />
             <h1 className="text-2xl font-bold">Welcome</h1>
-            <p className="text-interactive-text/80">Multi-Session Claude Code Manager</p>
+            <p className="text-interactive-text/80">Run AI coding flows in parallel — with you in the loop</p>
           </div>
         </div>
       </div>
@@ -72,15 +72,15 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
                 <ul className="space-y-2 text-status-warning/80">
                   <li className="flex items-start">
                     <span className="mr-2">•</span>
-                    <span>Claude Code must be installed with credentials configured</span>
+                    <span>Claude Code must be installed with credentials configured (a <strong>Max plan</strong> works best)</span>
                   </li>
                   <li className="flex items-start">
                     <span className="mr-2">•</span>
-                    <span>We recommend using a <strong>MAX plan</strong> for best performance</span>
+                    <span>You control how much agents can do on their own — from ask-before-edits to fully autonomous (<strong>Settings → Agent Permission Mode</strong>)</span>
                   </li>
                   <li className="flex items-start">
                     <span className="mr-2">•</span>
-                    <span>Cyboflow runs Claude Code with <code className="bg-status-warning/20 px-1 rounded text-sm">--dangerously-ignore-permissions</code></span>
+                    <span>Want a guided tour first? Turn on <strong>Demo Mode</strong> in Settings for a sandbox project with scripted agents</span>
                   </li>
                 </ul>
               </div>
@@ -105,11 +105,11 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
                     2
                   </div>
                   <div className="ml-4 flex-1">
-                    <h4 className="font-semibold text-text-primary mb-1">Create Sessions</h4>
+                    <h4 className="font-semibold text-text-primary mb-1">Start a Session</h4>
                     <ul className="text-text-secondary space-y-1 text-sm">
-                      <li>• Enter a prompt describing what you want Claude to do</li>
-                      <li>• <strong>Create multiple sessions</strong> with different prompts to explore various approaches</li>
-                      <li>• Or <strong>run the same prompt multiple times</strong> to choose the best result</li>
+                      <li>• Each session gets its own <strong>isolated git worktree</strong> — run several in parallel</li>
+                      <li>• Chat directly in a <strong>quick session</strong>, or run a built-in flow</li>
+                      <li>• <strong>Planner</strong> turns an idea into epics and tasks on the board; <strong>Sprint</strong> executes a batch of ready tasks in parallel lanes</li>
                     </ul>
                   </div>
                 </div>
@@ -119,11 +119,25 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
                     3
                   </div>
                   <div className="ml-4 flex-1">
-                    <h4 className="font-semibold text-text-primary mb-1">Work with Results</h4>
+                    <h4 className="font-semibold text-text-primary mb-1">Stay in the Loop</h4>
                     <ul className="text-text-secondary space-y-1 text-sm">
-                      <li>• View changes in the <strong>Diff panel</strong></li>
-                      <li>• <strong>Continue conversations</strong> to refine the solution</li>
-                      <li>• <strong>Rebase back to main</strong> when you're done</li>
+                      <li>• Permission requests, agent questions, and findings land in the <strong>Human review</strong> queue</li>
+                      <li>• Watch live <strong>flow progress</strong> and per-task <strong>sprint lanes</strong> as agents work</li>
+                      <li>• Blocking items pause the run until you decide — nothing ships without you</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="flex items-start">
+                  <div className="flex-shrink-0 w-8 h-8 bg-interactive rounded-full flex items-center justify-center text-on-interactive font-semibold">
+                    4
+                  </div>
+                  <div className="ml-4 flex-1">
+                    <h4 className="font-semibold text-text-primary mb-1">Ship the Result</h4>
+                    <ul className="text-text-secondary space-y-1 text-sm">
+                      <li>• Review the session's changes in the <strong>Diff panel</strong> and file explorer</li>
+                      <li>• <strong>Merge back to main</strong> or <strong>open a PR</strong> when you're happy — merging a sprint moves its tasks to Done</li>
+                      <li>• Not happy? <strong>Dismiss</strong> the session and nothing touches your main branch</li>
                     </ul>
                   </div>
                 </div>
@@ -139,19 +153,27 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="flex items-center text-text-secondary">
                   <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
-                  <span>Parallel sessions with git worktrees</span>
+                  <span>Parallel sessions in isolated git worktrees</span>
                 </div>
                 <div className="flex items-center text-text-secondary">
                   <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
-                  <span>Real-time status updates</span>
+                  <span>Built-in Planner &amp; Sprint flows</span>
                 </div>
                 <div className="flex items-center text-text-secondary">
                   <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
-                  <span>Session persistence</span>
+                  <span>Idea → epic → task board</span>
                 </div>
                 <div className="flex items-center text-text-secondary">
                   <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
-                  <span>Git integration</span>
+                  <span>Human review queue for approvals &amp; questions</span>
+                </div>
+                <div className="flex items-center text-text-secondary">
+                  <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
+                  <span>Configurable agent permission modes</span>
+                </div>
+                <div className="flex items-center text-text-secondary">
+                  <CheckCircle className="h-4 w-4 mr-2 text-status-success flex-shrink-0" />
+                  <span>Merge or PR back to main when you approve</span>
                 </div>
               </div>
             </section>
