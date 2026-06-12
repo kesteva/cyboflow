@@ -10,8 +10,10 @@
  * Layout (top → bottom):
  *   1. A {@link DailyUsageChart} of the store's `dailyUsage` slice (the section's
  *      cross-project, per-(day, model) token history for the last 30 days).
- *   2. The card grid — one {@link WorkflowCard} per workflow:
- *        - workflow name + a big avg-tokens figure (compact '184k' form).
+ *   2. The card grid — one {@link WorkflowCard} per workflow, sorted spendiest
+ *      first (totalCostUsd DESC, null-cost cards last):
+ *        - workflow name + a big TOTAL-tokens figure (compact '1.8m'/'184k'
+ *          form) with a smaller '· avg Nk' per-run figure beside it.
  *        - an 'error X% · runs N · cost $Y' meta line (cost 2dp, '—' when null).
  *        - a {@link Sparkline} of the usage trend for that workflow (totalTokens).
  *      Each card is a SELECTABLE button (aria-pressed): clicking selects the
@@ -51,9 +53,10 @@ import type {
 // Presentation formatters — section-local (display contract, not domain logic).
 // ---------------------------------------------------------------------------
 
-/** Compact token figure: >= 1000 → 'Nk' (rounded), else the raw integer. */
+/** Compact token figure: >= 1M → 'N.Nm', >= 1000 → 'Nk', else the raw integer. */
 function compactTokens(n: number | null): string {
   if (n === null) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
   if (n >= 1000) return `${(n / 1000).toFixed(0)}k`;
   return `${Math.round(n)}`;
 }
@@ -73,14 +76,24 @@ interface WorkflowCardModel {
   totalRuns: number;
   errorRatePct: number;
   nullOutcomeRuns: number;
+  totalTokens: number | null;
   avgTotalTokens: number | null;
   totalCostUsd: number | null;
+}
+
+/** Sort key that sends null (no recorded cost/usage) below any real value ≥ 0. */
+function nullsLast(n: number | null): number {
+  return n === null ? -1 : n;
 }
 
 /**
  * Merge `workflowStats` (always the spine — every workflow that has run) with
  * `workflowUsage` (present only for workflows with usage data) by `workflowId`.
  * Usage fields fall back to null when a workflow has stats but no usage rollup.
+ *
+ * Cards come back sorted spendiest-first: totalCostUsd DESC (null cost last),
+ * tie-broken by totalTokens DESC (null last), then workflowName ASC so the
+ * grid order is stable across refreshes.
  */
 function mergeWorkflowCards(
   stats: WorkflowRunStats[],
@@ -89,18 +102,26 @@ function mergeWorkflowCards(
   const usageById = new Map<string, WorkflowUsageStats>();
   for (const u of usage) usageById.set(u.workflowId, u);
 
-  return stats.map((s): WorkflowCardModel => {
-    const u = usageById.get(s.workflowId) ?? null;
-    return {
-      workflowId: s.workflowId,
-      workflowName: s.workflowName,
-      totalRuns: s.totalRuns,
-      errorRatePct: s.errorRatePct,
-      nullOutcomeRuns: s.nullOutcomeRuns,
-      avgTotalTokens: u?.avgTotalTokens ?? null,
-      totalCostUsd: u?.totalCostUsd ?? null,
-    };
-  });
+  return stats
+    .map((s): WorkflowCardModel => {
+      const u = usageById.get(s.workflowId) ?? null;
+      return {
+        workflowId: s.workflowId,
+        workflowName: s.workflowName,
+        totalRuns: s.totalRuns,
+        errorRatePct: s.errorRatePct,
+        nullOutcomeRuns: s.nullOutcomeRuns,
+        totalTokens: u?.totalTokens ?? null,
+        avgTotalTokens: u?.avgTotalTokens ?? null,
+        totalCostUsd: u?.totalCostUsd ?? null,
+      };
+    })
+    .sort(
+      (a, b) =>
+        nullsLast(b.totalCostUsd) - nullsLast(a.totalCostUsd) ||
+        nullsLast(b.totalTokens) - nullsLast(a.totalTokens) ||
+        (a.workflowName < b.workflowName ? -1 : a.workflowName > b.workflowName ? 1 : 0),
+    );
 }
 
 /** One by-flow token bar: a workflow with a non-null, positive totalTokens sum. */
@@ -129,10 +150,11 @@ function selectFlowTokenRows(usage: WorkflowUsageStats[]): FlowTokenRow[] {
 }
 
 /**
- * One workflow card — name, big avg-tokens figure, meta line, sparkline. Rendered
- * as a selectable <button>: `selected` toggles the aria-pressed state plus the
- * paper-theme selected affordance (emphasized border + a faint surface lift); the
- * whole card is the click target, and `onSelect` toggles selection in the parent.
+ * One workflow card — name, big total-tokens figure (with a smaller per-run
+ * average beside it), meta line, sparkline. Rendered as a selectable <button>:
+ * `selected` toggles the aria-pressed state plus the paper-theme selected
+ * affordance (emphasized border + a faint surface lift); the whole card is the
+ * click target, and `onSelect` toggles selection in the parent.
  */
 function WorkflowCard({
   card,
@@ -162,10 +184,18 @@ function WorkflowCard({
     >
       <div className="eyebrow text-text-tertiary">{card.workflowName}</div>
       <div className="mt-1 flex items-baseline gap-1">
-        <span className="text-3xl font-bold tabular-nums text-text-primary" data-testid="stats-avg-tokens">
-          {compactTokens(card.avgTotalTokens)}
+        <span className="text-3xl font-bold tabular-nums text-text-primary" data-testid="stats-total-tokens">
+          {compactTokens(card.totalTokens)}
         </span>
-        <span className="text-[10px] uppercase tracking-wider text-text-tertiary">avg tokens</span>
+        <span className="text-[10px] uppercase tracking-wider text-text-tertiary">tokens</span>
+        {card.avgTotalTokens !== null && (
+          <span
+            className="ml-1 text-[10px] uppercase tracking-wider text-text-tertiary"
+            data-testid="stats-avg-tokens"
+          >
+            · avg {compactTokens(card.avgTotalTokens)}
+          </span>
+        )}
       </div>
       <div className="mt-1 text-xs text-text-secondary" data-testid="stats-meta">
         error {card.errorRatePct}% · runs {card.totalRuns} · cost {formatCost(card.totalCostUsd)}

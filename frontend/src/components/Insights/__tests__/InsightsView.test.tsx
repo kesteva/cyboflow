@@ -323,8 +323,10 @@ describe('InsightsView', () => {
     render(<InsightsView />);
     const card = screen.getByTestId('stats-card-wf-sprint');
     expect(card).toBeInTheDocument();
-    // Compact token form: 184000 → '184k'.
-    expect(screen.getByTestId('stats-avg-tokens')).toHaveTextContent('184k');
+    // Headline is the TOTAL (m-tier compact: 1840000 → '1.8m'); the per-run
+    // average rides beside it in k-form (184000 → '184k').
+    expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('1.8m');
+    expect(screen.getByTestId('stats-avg-tokens')).toHaveTextContent('avg 184k');
     // Meta line: error % · runs · cost (2dp).
     expect(screen.getByTestId('stats-meta')).toHaveTextContent('error 8.3% · runs 12 · cost $4.20');
   });

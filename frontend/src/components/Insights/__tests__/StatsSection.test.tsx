@@ -172,6 +172,54 @@ describe('StatsSection daily chart', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Card grid — spendiest-first ordering + the total/avg token headline
+// ---------------------------------------------------------------------------
+
+describe('StatsSection card grid', () => {
+  it('sorts cards by total cost DESC with null-cost cards last', () => {
+    mockWorkflowStats = [
+      runStats({ workflowId: 'wf-cheap', workflowName: 'Cheap' }),
+      runStats({ workflowId: 'wf-pricey', workflowName: 'Pricey' }),
+      runStats({ workflowId: 'wf-free', workflowName: 'Free' }),
+    ];
+    mockWorkflowUsage = [
+      usageStats({ workflowId: 'wf-cheap', workflowName: 'Cheap', totalCostUsd: 1.5 }),
+      usageStats({ workflowId: 'wf-pricey', workflowName: 'Pricey', totalCostUsd: 32.96 }),
+      usageStats({ workflowId: 'wf-free', workflowName: 'Free', totalCostUsd: null }),
+    ];
+    render(<StatsSection />);
+    const ids = screen
+      .getAllByTestId(/^stats-card-/)
+      .map((n) => n.getAttribute('data-testid'));
+    expect(ids).toEqual(['stats-card-wf-pricey', 'stats-card-wf-cheap', 'stats-card-wf-free']);
+  });
+
+  it('headlines TOTAL tokens with a smaller avg figure beside it', () => {
+    mockWorkflowStats = [runStats({ workflowId: 'wf-a', workflowName: 'Alpha' })];
+    mockWorkflowUsage = [
+      usageStats({
+        workflowId: 'wf-a',
+        workflowName: 'Alpha',
+        totalTokens: 1_840_000,
+        avgTotalTokens: 184_000,
+      }),
+    ];
+    render(<StatsSection />);
+    // m-tier compact form for the big total; k-form for the per-run average.
+    expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('1.8m');
+    expect(screen.getByTestId('stats-avg-tokens')).toHaveTextContent('avg 184k');
+  });
+
+  it('renders an em-dash headline and no avg figure for a card without usage', () => {
+    mockWorkflowStats = [runStats({ workflowId: 'wf-a', workflowName: 'Alpha' })];
+    mockWorkflowUsage = [];
+    render(<StatsSection />);
+    expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('—');
+    expect(screen.queryByTestId('stats-avg-tokens')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Default (no selection) → token by flow
 // ---------------------------------------------------------------------------
 

@@ -62,12 +62,15 @@ const BAR_FILL = 0.7;
 const TOP_INSET = 4;
 
 /**
- * Compact token figure: >= 1000 → 'Nk' (rounded), else the raw integer.
+ * Compact token figure: >= 1M → 'N.Nm', >= 1000 → 'Nk' (rounded), else the raw
+ * integer.
  *
- * Replicates StatsSection.compactTokens deliberately (the task forbids importing
- * it) so this chart's legend totals read identically to the cards above it.
+ * Replicates StatsSection.compactTokens deliberately (this chart stays
+ * import-free of section internals) so its legend totals read identically to
+ * the cards above it.
  */
 function compactTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
   if (n >= 1000) return `${(n / 1000).toFixed(0)}k`;
   return `${Math.round(n)}`;
 }
