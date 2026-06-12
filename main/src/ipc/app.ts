@@ -1,6 +1,6 @@
 import { IpcMain, shell } from 'electron';
 import type { AppServices } from './types';
-import { getDemoSandboxPath, DEMO_PROJECT_NAME } from '../services/demo/demoEnvironment';
+import { getDemoSandboxPath, DEMO_PROJECT_NAME, DEMO_REMOTE_URL } from '../services/demo/demoEnvironment';
 
 export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app } = services;
@@ -17,6 +17,15 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
   // System utilities
   ipcMain.handle('openExternal', async (_event, url: string) => {
     try {
+      // Demo mode: the sandbox's origin is a fake github.com URL (pushes go to
+      // a local bare repo — see demoEnvironment.ts). Opening it would 404 in
+      // the browser mid-tour, so report success without opening; the Create-PR
+      // dialog proceeds exactly as if the compare page had opened.
+      const demoRepoWebUrl = DEMO_REMOTE_URL.replace(/\.git$/, '');
+      if (services.configManager.isDemoMode() && url.startsWith(demoRepoWebUrl)) {
+        console.log('[Main] Demo mode — suppressed openExternal for fake demo repo URL:', url);
+        return { success: true };
+      }
       await shell.openExternal(url);
       return { success: true };
     } catch (error) {
