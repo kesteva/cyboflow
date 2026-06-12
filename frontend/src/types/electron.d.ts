@@ -137,6 +137,8 @@ interface ElectronAPI {
     gitPush: (sessionId: string) => Promise<IPCResponse<void>>;
     getGitStatus: (sessionId: string, nonBlocking?: boolean, isInitialLoad?: boolean) => Promise<IPCResponse<GitStatus>>;
     getLastCommits: (sessionId: string, count: number) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
+    // Subjects of the session branch's own commits (main..HEAD), newest first
+    getBranchCommitSubjects: (sessionId: string) => Promise<IPCResponse<{ subjects: string[] }>>;
 
     // IDE operations
     openIDE: (sessionId: string) => Promise<IPCResponse<void>>;

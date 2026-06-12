@@ -29,6 +29,32 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
     }
   }, [isOpen]);
 
+  // Prefill the squash message from the branch's own commit subjects: a single
+  // commit becomes the message verbatim; several become a headline (oldest
+  // subject) plus a bullet per remaining commit. Never clobbers user typing.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    API.sessions
+      .getBranchCommitSubjects(sessionId)
+      .then((result) => {
+        if (cancelled || !result.success || !result.data) return;
+        const subjects = [...result.data.subjects].reverse(); // newest-first → chronological
+        if (subjects.length === 0) return;
+        const prefill =
+          subjects.length === 1
+            ? subjects[0]
+            : `${subjects[0]}\n\n${subjects.slice(1).map((s) => `- ${s}`).join('\n')}`;
+        setCommitMessage((prev) => (prev === '' ? prefill : prev));
+      })
+      .catch(() => {
+        // Prefill is best-effort — the dialog works with an empty message field.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, sessionId]);
+
   const canConfirm = strategy !== null && (strategy === 'preserve' || commitMessage.trim().length > 0);
 
   const handleConfirm = useCallback(async () => {

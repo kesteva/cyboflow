@@ -1375,6 +1375,36 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   });
 
+  /**
+   * Subjects of the session branch's OWN commits (mainBranch..HEAD in the
+   * worktree), newest first. Used by the merge dialog to prefill the squash
+   * commit message — unlike sessions:get-last-commits this never includes
+   * main-branch history.
+   */
+  ipcMain.handle('sessions:get-branch-commit-subjects', async (_event, sessionId: string) => {
+    try {
+      const session = await sessionManager.getSession(sessionId);
+      if (!session || !session.worktreePath) {
+        return { success: false, error: 'Session or worktree path not found' };
+      }
+
+      const project = sessionManager.getProjectForSession(sessionId);
+      if (!project) {
+        return { success: false, error: 'Project not found for session' };
+      }
+
+      const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
+      const output = execSync(`git log --pretty=%s ${escapeShellArg(mainBranch)}..HEAD`, {
+        cwd: session.worktreePath,
+        encoding: 'utf8',
+      }).toString().trim();
+      const subjects = output.length > 0 ? output.split('\n') : [];
+      return { success: true, data: { subjects } };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read branch commits' };
+    }
+  });
+
   ipcMain.handle('sessions:get-last-commits', async (_event, sessionId: string, count: number = 50) => {
     try {
       const session = await sessionManager.getSession(sessionId);
