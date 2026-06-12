@@ -43,6 +43,13 @@ export interface WorkflowDescriptor {
 export interface WorkflowConfigProvider {
   getDefaultAgentPermissionMode(): PermissionMode;
   getDefaultSubstrate(): CliSubstrate;
+  /**
+   * Boot-profile override that PINS the substrate for every run, bypassing the
+   * whole resolution ladder (even the explicit per-run UI choice). Demo mode
+   * returns 'sdk' here so no run/session ever engages the real interactive
+   * manager. null (or absent) = no pin, resolve normally.
+   */
+  getForcedSubstrate?(): CliSubstrate | null;
 }
 
 // The built-in workflow descriptors now live in-repo. See
@@ -514,7 +521,11 @@ export class WorkflowRegistry {
     // The global default comes from the injected config; frontmatter /
     // project-config rungs are not yet wired (still resolve from env + floor).
     // With no override at any level every run resolves 'sdk' (zero-behavior-change).
-    const substrate = resolveSubstrate({
+    // A boot-profile pin (demo mode → 'sdk') outranks the whole ladder,
+    // including the explicit per-run UI choice — demo runs must never spawn a
+    // real agent regardless of what the launch surface requested.
+    const forcedSubstrate = this.config?.getForcedSubstrate?.() ?? null;
+    const substrate = forcedSubstrate ?? resolveSubstrate({
       requestedSubstrate,
       globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
       env: process.env,

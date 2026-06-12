@@ -175,6 +175,17 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Boot-profile substrate pin consumed by WorkflowRegistry.createRun (the
+   * WorkflowConfigProvider seam). Demo mode pins EVERY run/session to 'sdk' —
+   * outranking even the explicit per-run UI choice — so the scripted
+   * DemoCliManager handles all spawns and the real interactive (PTY) manager is
+   * never engaged. null = no pin (normal resolution ladder).
+   */
+  getForcedSubstrate(): CliSubstrate | null {
+    return this.isDemoMode() ? 'sdk' : null;
+  }
+
+  /**
    * The global default agent permission mode for new workflow runs, applied on
    * both CLI substrates (SDK + interactive).
    *

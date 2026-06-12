@@ -84,12 +84,20 @@ export class CliManagerFactory {
     try {
       this.validateConfig(config);
 
-      // Demo mode (read once at boot): EVERY tool id resolves to a scripted
+      // Demo mode (read once at boot): tool ids resolve to a scripted
       // DemoCliManager, so both the orchestrator spawn path and panel chat play
       // canned runs instead of spawning Claude. One instance per toolId — the
       // SubstrateDispatchFacade subscribes to its two managers separately, and
       // sharing one instance would double-emit every event.
-      if (this.configManager?.isDemoMode()) {
+      //
+      // EXCEPTION: 'claude-interactive' stays REAL even in demo. The boot
+      // wiring narrows it to the concrete InteractiveClaudeManager (index.ts
+      // AppServices + the sessions:input PTY relay seam) and would throw on a
+      // demo stand-in. Safe because demo never routes a spawn to it:
+      // WorkflowRegistry.createRun pins every demo run/session substrate to
+      // 'sdk' via ConfigManager.getForcedSubstrate, so the interactive manager
+      // is constructed but never engaged while demo mode is on.
+      if (this.configManager?.isDemoMode() && toolId !== 'claude-interactive') {
         const existing = this.demoManagers.get(toolId);
         if (existing) return existing;
         const db = config.additionalOptions?.db;
