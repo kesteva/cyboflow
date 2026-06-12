@@ -328,6 +328,23 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Append projects created via the shared CreateProjectDialog from any call
+  // site (landing empty state, wizard, this rail). The dialog broadcasts a
+  // 'project-created' window event on success; dedup by id so the rail's own
+  // create path can't double-append.
+  useEffect(() => {
+    const handleProjectCreatedEvent = (event: CustomEvent<Project>) => {
+      const project = event.detail;
+      setProjectsWithRuns(prev =>
+        prev.some(p => p.id === project.id)
+          ? prev
+          : [...prev, { ...project, sessions: [] as never[], folders: [] }],
+      );
+    };
+    window.addEventListener('project-created', handleProjectCreatedEvent as EventListener);
+    return () => window.removeEventListener('project-created', handleProjectCreatedEvent as EventListener);
+  }, []);
+
   // Load folders after projects are loaded
   useEffect(() => {
     if (projectsWithRuns.length > 0) {
@@ -643,12 +660,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // Project creation
   // ---------------------------------------------------------------------------
 
-  // A freshly-created project is reflected in the rail via the project-updated
-  // event stream + next load; the create flow itself routes the center to the
-  // new-flow wizard locked to that project (onCreated below).
+  // The rail append itself happens in the global 'project-created' listener
+  // above (shared with every other CreateProjectDialog call site); this handler
+  // only routes the center to the new-flow wizard locked to that project.
   const handleProjectCreated = (project: Project) => {
     setShowAddProjectDialog(false);
-    setProjectsWithRuns(prev => [...prev, { ...project, sessions: [] as never[], folders: [] }]);
     useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
   };
 

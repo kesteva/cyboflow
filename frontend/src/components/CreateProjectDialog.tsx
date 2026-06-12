@@ -100,6 +100,9 @@ export function CreateProjectDialog({ isOpen, onClose, onCreated }: CreateProjec
       }
       const createdProject = response.data;
       resetForm();
+      // Broadcast so the project rail picks up the new project regardless of
+      // which call site (rail, landing empty state, wizard) opened the dialog.
+      window.dispatchEvent(new CustomEvent('project-created', { detail: createdProject }));
       onCreated(createdProject);
       onClose();
     } catch (error: unknown) {
