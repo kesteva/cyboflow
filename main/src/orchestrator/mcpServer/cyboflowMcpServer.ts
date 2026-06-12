@@ -306,6 +306,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               },
             },
             suggested_fix: { type: 'string', description: 'Optional prose suggesting how to fix the finding' },
+            proposed_target: { type: 'string', enum: ['backlog', 'docs', 'prompt'], description: 'Optional hint for where accepting the finding should land: backlog = promote to task, docs = a docs/ edit, prompt = a workflow-prompt/CLAUDE.md edit' },
             impact: {
               type: 'object',
               description: 'Optional verification impact (all members optional)',
@@ -806,10 +807,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         category?: unknown;
         locations?: unknown;
         suggested_fix?: unknown;
+        proposed_target?: unknown;
         impact?: unknown;
         payload_json?: unknown;
       };
-      const { title, body, severity, kind, blocking, entity_type, entity_id, category, locations, suggested_fix, impact, payload_json } = args;
+      const { title, body, severity, kind, blocking, entity_type, entity_id, category, locations, suggested_fix, proposed_target, impact, payload_json } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -896,6 +898,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (category !== undefined) queryParams['category'] = category;
       if (locations !== undefined) queryParams['locations'] = locations;
       if (suggested_fix !== undefined) queryParams['suggestedFix'] = suggested_fix;
+      if (proposed_target !== undefined) queryParams['proposedTarget'] = proposed_target;
       if (impact !== undefined) queryParams['impact'] = impact;
       if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
       return executeMcpQuery('mcp-report-finding', queryParams);

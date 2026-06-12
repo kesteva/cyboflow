@@ -5,6 +5,12 @@
  * human_task) with kind-specific chrome and triage actions:
  *
  *   - finding    — a non-blocking observation. Triage: Dismiss / Promote to task.
+ *                  When the reporting agent carries an accept-routing hint
+ *                  (payload.proposedTarget), the card renders a '→ TARGET' chip
+ *                  and makes the primary action CONTEXTUAL: 'backlog' keeps
+ *                  Promote-to-task (relabelled 'Accept → task'); 'docs'/'prompt'
+ *                  surface an 'Accept' that resolves with 'triaged:accepted-<target>'
+ *                  (the human applies the edit). No hint = today's exact actions.
  *   - permission — a real-time PreToolUse/approval gate (blocking). Reuses the
  *                  APPROVAL resolution path: Approve / Reject route to
  *                  cyboflow.approvals.approve / reject via the folded approvalId.
@@ -23,8 +29,20 @@ import React from 'react';
 import { Button } from '../ui/Button';
 import { formatAge } from '../../utils/approvalFormatters';
 import { trpc } from '../../trpc/client';
-import type { ReviewItem, ReviewItemKind } from '../../../../shared/types/reviews';
+import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
+
+// ---------------------------------------------------------------------------
+// Accept-routing target chip — keyed on the discriminant so a new target breaks
+// the map at compile time (per docs/CODE-PATTERNS.md "Label maps for shared-type
+// discriminants").
+// ---------------------------------------------------------------------------
+
+const TARGET_CHIP_LABEL: Record<FindingProposedTarget, string> = {
+  backlog: '→ Backlog',
+  docs: '→ Docs',
+  prompt: '→ Prompt',
+};
 
 // ---------------------------------------------------------------------------
 // Kind label map — keyed on the discriminant so a new kind breaks the map at
@@ -66,11 +84,28 @@ function permissionApprovalId(item: ReviewItem): string | null {
   return null;
 }
 
+/**
+ * The accept-routing hint for a finding (or null when absent / malformed).
+ * Parsed defensively (unknown + guards) so a payload missing or carrying a
+ * non-union proposedTarget behaves EXACTLY like no payload — the card then keeps
+ * its legacy Dismiss / Promote-to-task actions with zero behavior change.
+ */
+function findingProposedTarget(item: ReviewItem): FindingProposedTarget | null {
+  if (item.kind !== 'finding') return null;
+  const payload: unknown = item.payload;
+  if (payload === null || typeof payload !== 'object') return null;
+  const target = (payload as { proposedTarget?: unknown }).proposedTarget;
+  if (target === 'backlog' || target === 'docs' || target === 'prompt') return target;
+  return null;
+}
+
 export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
-  const { pendingItemId, error, resolve, dismiss, promoteToTask } = useReviewItemActions();
+  const { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask } = useReviewItemActions();
   const [approvalBusy, setApprovalBusy] = React.useState(false);
 
   const busy = pendingItemId === item.id || approvalBusy;
+  // Accept-routing hint (findings only); null = legacy actions, zero change.
+  const proposedTarget = findingProposedTarget(item);
   const focusClass = isFocused
     ? ' ring-2 ring-interactive'
     : ' focus-within:ring-2 focus-within:ring-interactive';
@@ -91,6 +126,14 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
 
   const handlePromote = (): void => {
     void promoteToTask(item.project_id, item.id).then((r) => {
+      if (r !== null) onResolved?.();
+    });
+  };
+
+  // Accept a docs/prompt finding: resolve with 'triaged:accepted-<target>' (the
+  // human applies the edit). 'backlog' never reaches here — it uses handlePromote.
+  const handleAccept = (target: Exclude<FindingProposedTarget, 'backlog'>): void => {
+    void acceptFinding(item.project_id, item.id, target).then((r) => {
       if (r !== null) onResolved?.();
     });
   };
@@ -159,14 +202,30 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         );
       case 'finding':
       default:
+        // Contextual primary action driven by the accept-routing hint:
+        //   - no hint            → legacy Dismiss / Promote to task (unchanged).
+        //   - 'backlog'          → Promote-to-task, relabelled 'Accept → task'.
+        //   - 'docs' | 'prompt'  → 'Accept' resolves with 'triaged:accepted-<target>'.
         return (
           <>
             <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
               Dismiss
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={handlePromote} data-testid="promote-to-task">
-              Promote to task
-            </Button>
+            {proposedTarget === 'docs' || proposedTarget === 'prompt' ? (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy}
+                onClick={() => handleAccept(proposedTarget)}
+                data-testid="accept-finding"
+              >
+                Accept
+              </Button>
+            ) : (
+              <Button variant={proposedTarget === 'backlog' ? 'primary' : 'secondary'} size="sm" disabled={busy} onClick={handlePromote} data-testid="promote-to-task">
+                {proposedTarget === 'backlog' ? 'Accept → task' : 'Promote to task'}
+              </Button>
+            )}
           </>
         );
     }
@@ -186,6 +245,15 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         <span className="text-sm font-semibold text-text-primary">{item.title}</span>
         {item.kind === 'finding' && item.severity && (
           <span className="text-[10px] font-medium uppercase text-text-tertiary">{item.severity}</span>
+        )}
+        {proposedTarget && (
+          <span
+            className="rounded-full border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-text-secondary"
+            data-testid="proposed-target-chip"
+            data-target={proposedTarget}
+          >
+            {TARGET_CHIP_LABEL[proposedTarget]}
+          </span>
         )}
         {item.blocking && (
           <span

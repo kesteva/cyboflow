@@ -160,6 +160,7 @@ export type McpQueryMessage =
       category?: unknown;
       locations?: unknown;
       suggestedFix?: unknown;
+      proposedTarget?: unknown;
       impact?: unknown;
       /** Per-kind payload JSON; its discriminant must equal `kind`. */
       payloadJson?: string;
@@ -255,6 +256,11 @@ function buildFindingExtras(
   const extras: Partial<Omit<FindingPayload, 'kind'>> = {};
   if (typeof msg.category === 'string') extras.category = msg.category;
   if (typeof msg.suggestedFix === 'string') extras.suggestedFix = msg.suggestedFix;
+  // proposedTarget must be one of the three routing literals; anything else is
+  // DROPPED (same agent-typo-can-never-fail-a-write discipline as the rest).
+  if (msg.proposedTarget === 'backlog' || msg.proposedTarget === 'docs' || msg.proposedTarget === 'prompt') {
+    extras.proposedTarget = msg.proposedTarget;
+  }
   const locations = parseFindingLocations(msg.locations);
   if (locations !== undefined) extras.locations = locations;
   const impact = parseFindingImpact(msg.impact);

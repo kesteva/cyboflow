@@ -9,6 +9,10 @@
  *   - human_task Dismiss routes to reviewItems.dismiss.
  *   - permission Approve/Reject reuse the approval resolution path
  *     (cyboflow.approvals.approve/reject via the folded approvalId).
+ *   - finding accept-routing: a proposedTarget renders the '→ TARGET' chip and
+ *     makes the primary action contextual ('backlog' → Promote-to-task relabel,
+ *     'docs'/'prompt' → Accept resolving 'triaged:accepted-<target>'); a finding
+ *     with no / malformed proposedTarget renders the legacy actions unchanged.
  *
  * The tRPC client is mocked at the canonical import path so both the actions
  * hook and the card's direct approval calls route through one set of spies.
@@ -157,5 +161,92 @@ describe('ReviewItemCard', () => {
     render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec2' })} onResolved={onResolved} />);
     fireEvent.click(screen.getByTestId('decision-resolve'));
     await waitFor(() => expect(onResolved).toHaveBeenCalledTimes(1));
+  });
+
+  // -- Accept-routing (proposedTarget) ------------------------------------
+
+  it('renders the target chip per proposedTarget', () => {
+    const cases: Array<['backlog' | 'docs' | 'prompt', string]> = [
+      ['backlog', '→ Backlog'],
+      ['docs', '→ Docs'],
+      ['prompt', '→ Prompt'],
+    ];
+    for (const [target, label] of cases) {
+      const { unmount } = render(
+        <ReviewItemCard
+          item={makeItem('finding', { id: `rvw_${target}` }, { kind: 'finding', proposedTarget: target })}
+        />,
+      );
+      const chip = screen.getByTestId('proposed-target-chip');
+      expect(chip).toHaveTextContent(label);
+      expect(chip).toHaveAttribute('data-target', target);
+      unmount();
+    }
+  });
+
+  it("proposedTarget 'docs' Accept resolves with triaged:accepted-docs", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('finding', { id: 'rvw_docs' }, { kind: 'finding', proposedTarget: 'docs' })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('accept-finding'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_docs',
+        resolution: 'triaged:accepted-docs',
+      }),
+    );
+    expect(mockPromote).not.toHaveBeenCalled();
+  });
+
+  it("proposedTarget 'prompt' Accept resolves with triaged:accepted-prompt", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('finding', { id: 'rvw_prompt' }, { kind: 'finding', proposedTarget: 'prompt' })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('accept-finding'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_prompt',
+        resolution: 'triaged:accepted-prompt',
+      }),
+    );
+  });
+
+  it("proposedTarget 'backlog' keeps promote-to-task (relabelled Accept → task)", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('finding', { id: 'rvw_bk' }, { kind: 'finding', proposedTarget: 'backlog' })}
+      />,
+    );
+    const btn = screen.getByTestId('promote-to-task');
+    expect(btn).toHaveTextContent('Accept → task');
+    expect(screen.queryByTestId('accept-finding')).not.toBeInTheDocument();
+    fireEvent.click(btn);
+    await waitFor(() => expect(mockPromote).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_bk' }));
+    expect(mockResolve).not.toHaveBeenCalled();
+  });
+
+  it('a finding with NO proposedTarget renders the legacy actions unchanged', () => {
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_legacy' })} />);
+    expect(screen.queryByTestId('proposed-target-chip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('accept-finding')).not.toBeInTheDocument();
+    const promote = screen.getByTestId('promote-to-task');
+    expect(promote).toHaveTextContent('Promote to task');
+    expect(screen.getByText('Dismiss')).toBeInTheDocument();
+  });
+
+  it('a malformed proposedTarget behaves exactly like no payload', () => {
+    // A non-union proposedTarget must fall through the defensive guard so the
+    // card keeps its legacy actions (zero behavior change).
+    const payload = { kind: 'finding', proposedTarget: 'editor' } as unknown as ReviewItemPayload;
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_bad' }, payload)} />);
+    expect(screen.queryByTestId('proposed-target-chip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('accept-finding')).not.toBeInTheDocument();
+    expect(screen.getByTestId('promote-to-task')).toHaveTextContent('Promote to task');
   });
 });

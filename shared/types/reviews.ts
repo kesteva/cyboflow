@@ -58,6 +58,19 @@ export type ReviewItemSource = string;
 // ---------------------------------------------------------------------------
 
 /**
+ * Where the reporting agent hints that ACCEPTING a finding should land. A pure
+ * routing hint — it does NOT make the edit, only steers the human's primary
+ * action (mockup F4: accept → editor / docs / backlog "apply now"):
+ *   - 'backlog' — promote the finding to a real backlog task (the existing
+ *                 promote-to-task path).
+ *   - 'docs'    — a docs/ change the human applies manually.
+ *   - 'prompt'  — a workflow-prompt / CLAUDE.md edit the human applies manually.
+ * 'docs'/'prompt' resolve the item with a 'triaged:accepted-<target>' note (the
+ * decision is recorded per the resolution-prefix convention; no task is minted).
+ */
+export type FindingProposedTarget = 'backlog' | 'docs' | 'prompt';
+
+/**
  * Finding payload — a non-blocking observation. `category` lets the UI group
  * findings (e.g. 'security', 'perf', 'style'); `suggestedFix` is optional prose.
  */
@@ -65,6 +78,12 @@ export interface FindingPayload {
   kind: 'finding';
   category?: string;
   suggestedFix?: string;
+  /**
+   * Optional accept-routing hint from the reporting agent — see
+   * {@link FindingProposedTarget}. Absent when the agent has no preference, in
+   * which case the card keeps its default Dismiss / Promote-to-task actions.
+   */
+  proposedTarget?: FindingProposedTarget;
   /** Optional file:line locations the finding refers to. */
   locations?: Array<{ path: string; line?: number }>;
   /**
@@ -174,6 +193,17 @@ export interface ReviewItem {
 export const RESOLUTION_PREFIX_PROMOTED = 'promoted:';
 export const RESOLUTION_PREFIX_FIXED = 'fixed:';
 export const RESOLUTION_PREFIX_TRIAGED = 'triaged:';
+
+/**
+ * Build the resolution note recorded when a human ACCEPTS a finding whose
+ * proposedTarget is a manual ('docs' | 'prompt') edit — e.g.
+ * 'triaged:accepted-docs'. Parses as 'triaged' (no code fix was applied here;
+ * the human makes the edit). A 'backlog' target does NOT use this — it goes
+ * through promote-to-task and records 'promoted:<taskId>' instead.
+ */
+export function acceptedResolution(target: Exclude<FindingProposedTarget, 'backlog'>): string {
+  return `${RESOLUTION_PREFIX_TRIAGED}accepted-${target}`;
+}
 
 /** Discriminant a {@link parseResolutionKind} result narrows to. */
 export type ResolutionKind = 'promoted' | 'fixed' | 'triaged' | 'other';

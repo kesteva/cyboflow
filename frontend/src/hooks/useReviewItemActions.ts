@@ -23,6 +23,7 @@
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../trpc/client';
+import { acceptedResolution, type FindingProposedTarget } from '../../../shared/types/reviews';
 
 export interface ReviewItemActionsState {
   /** Review item id whose mutation is currently in flight (or null when idle). */
@@ -35,6 +36,19 @@ export interface ReviewItemActionsState {
    * on error.
    */
   resolve: (projectId: number, reviewItemId: string, resolution?: string) => Promise<{ resumed: boolean } | null>;
+  /**
+   * Accept a finding whose proposedTarget is a manual ('docs' | 'prompt') edit:
+   * resolve it with a 'triaged:accepted-<target>' note (built via
+   * {@link acceptedResolution}) recording the human's decision. The human applies
+   * the actual edit; nothing is minted. Thin wrapper over {@link resolve} — the
+   * only triage chokepoint is still reviewItems.resolve. Returns `{ resumed }` on
+   * success or null on error (mirrors resolve).
+   */
+  acceptFinding: (
+    projectId: number,
+    reviewItemId: string,
+    target: Exclude<FindingProposedTarget, 'backlog'>,
+  ) => Promise<{ resumed: boolean } | null>;
   /** Dismiss a review item (cruft). Returns true on success, false on error. */
   dismiss: (projectId: number, reviewItemId: string, resolution?: string) => Promise<boolean>;
   /**
@@ -79,6 +93,16 @@ export function useReviewItemActions(): ReviewItemActionsState {
       }
     },
     [],
+  );
+
+  const acceptFinding = useCallback(
+    (
+      projectId: number,
+      reviewItemId: string,
+      target: Exclude<FindingProposedTarget, 'backlog'>,
+    ): Promise<{ resumed: boolean } | null> =>
+      resolve(projectId, reviewItemId, acceptedResolution(target)),
+    [resolve],
   );
 
   const dismiss = useCallback(
@@ -128,5 +152,5 @@ export function useReviewItemActions(): ReviewItemActionsState {
     [],
   );
 
-  return { pendingItemId, error, resolve, dismiss, promoteToTask };
+  return { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask };
 }
