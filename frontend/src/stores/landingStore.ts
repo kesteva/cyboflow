@@ -252,6 +252,13 @@ export const useLandingStore = create<LandingState>((set) => {
       // inbox without a per-project review-item delta.
       const onLifecycle = () => scheduleResync();
 
+      // Project creation fires NO run/approval lifecycle signal, so without
+      // this the landing keeps its stale (possibly empty) project list until
+      // some run activity happens — the home showed "Add your first project"
+      // with a freshly-created project already in the rail. CreateProjectDialog
+      // broadcasts this window event on every successful create.
+      window.addEventListener('project-created', onLifecycle);
+
       lifecycleSubs.push(
         trpc.cyboflow.events.onRunStatusChanged.subscribe(undefined, {
           onData: onLifecycle,
@@ -275,6 +282,7 @@ export const useLandingStore = create<LandingState>((set) => {
           clearTimeout(resyncTimer);
           resyncTimer = null;
         }
+        window.removeEventListener('project-created', onLifecycle);
         for (const sub of reviewItemSubs.values()) sub.unsubscribe();
         reviewItemSubs.clear();
         for (const sub of lifecycleSubs) sub.unsubscribe();
