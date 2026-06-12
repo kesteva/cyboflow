@@ -123,6 +123,7 @@ describe('resolveInitialStepId', () => {
   it('returns stable bare step ids matching the first step of each WORKFLOW_DEFINITIONS entry', () => {
     expect(resolveInitialStepId('planner')).toBe('context');
     expect(resolveInitialStepId('sprint')).toBe('analyze-dependencies');
+    expect(resolveInitialStepId('compound')).toBe('load-sprint');
   });
 });
 

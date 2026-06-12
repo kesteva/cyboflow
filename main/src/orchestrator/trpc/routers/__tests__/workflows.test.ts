@@ -21,7 +21,7 @@ import { createContext } from '../../context';
 import { WorkflowRegistry } from '../../../workflowRegistry';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { REGISTRY_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
-import { WORKFLOW_DEFINITIONS } from '../../../../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../../../shared/types/workflows';
 
 /**
@@ -126,10 +126,13 @@ describe('cyboflow.workflows.list', () => {
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
 
-    expect(result).toHaveLength(2);
+    // list() reconciles built-ins on every call, so the missing 'compound'
+    // built-in is auto-seeded alongside the 2 manually seeded rows.
+    expect(result).toHaveLength(3);
     const ids = result.map((r) => r.id);
     expect(ids).toContain('wf-1-sprint');
     expect(ids).toContain('wf-1-planner');
+    expect(ids).toContain('wf-1-compound');
     expect(ids).not.toContain('wf-2-sprint');
 
     // Every returned row now carries spec_json (defaults to '{}' for these).
@@ -139,9 +142,9 @@ describe('cyboflow.workflows.list', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b) list auto-seeds the 2 in-repo built-ins when project has none
+  // (b) list auto-seeds the in-repo built-ins when project has none
   // -------------------------------------------------------------------------
-  it('(b) auto-seeds the 2 in-repo built-ins (planner+sprint) and returns them when project has no workflows', async () => {
+  it('(b) auto-seeds the in-repo built-ins (planner+sprint+compound) and returns them when project has no workflows', async () => {
     const rawDb = createWorkflowTestDb();
     const adapter = dbAdapter(rawDb);
     const registry = new WorkflowRegistry(adapter, silentLogger);
@@ -149,8 +152,8 @@ describe('cyboflow.workflows.list', () => {
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 42 });
 
-    // The 2 in-repo built-ins must have been seeded.
-    expect(result).toHaveLength(2);
+    // Every in-repo built-in must have been seeded (planner + sprint + compound).
+    expect(result).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
 
     // All belong to projectId=42.
     for (const wf of result) {
@@ -159,7 +162,7 @@ describe('cyboflow.workflows.list', () => {
 
     // Verify the canonical cyboflow built-in names are present.
     const names = result.map((r) => r.name).sort();
-    expect(names).toEqual(['planner', 'sprint']);
+    expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
 
     // Deterministic id format: wf-<projectId>-<name>.
     for (const wf of result) {

@@ -65,6 +65,7 @@ export const DEFAULT_WORKFLOW_NAME = 'sprint';
 const SUBTITLE_BY_NAME: Record<string, string> = {
   planner: 'Idea → epics → tasks (plan + refine, no execute)',
   sprint: 'Parallel task fan-out → sprint review',
+  compound: 'Mine merged work for learnings → tasks + review items',
 };
 
 /**
@@ -74,6 +75,7 @@ const SUBTITLE_BY_NAME: Record<string, string> = {
 const TITLE_BY_NAME: Record<string, string> = {
   planner: 'Planner',
   sprint: 'Sprint',
+  compound: 'Compound',
 };
 
 /** Title-case a raw workflow name for display when no static title exists. */

@@ -143,14 +143,15 @@ export interface WorkflowRunListRow {
 }
 
 /**
- * All built-in flow names in cyboflow v1 — the two user-facing flows
- * (`planner` / `sprint`), both launchable by hand from the `WorkflowPicker`.
+ * The three user-facing built-in flows in cyboflow v1.
  *
- * Narrowed from the historical SoloFlow set of five (the dropped
- * `soloflow` / `compound` / `prune` flows have their prose preserved under
- * `docs/workflows-future/` for a future cyboflow-native rebuild). The internal
- * `__quick__` sentinel is NOT a member here — it is filtered out of the picker
- * and handled separately by the quick-session pipeline.
+ * Narrowed from the historical SoloFlow set of five: `planner` + `sprint` ship,
+ * `compound` was rebuilt cyboflow-native (mines merged runs for learnings →
+ * tasks + review-queue items via the `cyboflow_*` MCP tools, never `.soloflow/`
+ * files), and the remaining `soloflow` / `prune` flows keep their prose under
+ * `docs/workflows-future/` for a future rebuild. The internal `__quick__`
+ * sentinel is NOT a member here — it is filtered out of the picker and handled
+ * separately by the quick-session pipeline.
  *
  * A parallel sprint is a SINGLE session-hosted `sprint` run seeded with N task
  * ids: the sprint ORCHESTRATOR AGENT analyzes the task dependency DAG itself,
@@ -162,8 +163,9 @@ export interface WorkflowRunListRow {
  * `sprint-finalize`) is gone — stale `wf-<pid>-<trio>` rows in existing DBs are
  * hidden by the `resolveWorkflowDefinition` filter in
  * `WorkflowRegistry.listByProject`.
+
  */
-export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint'] as const;
+export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint', 'compound'] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
@@ -274,7 +276,7 @@ export interface WorkflowStepTransitionEvent {
 // The v1 loopback invariant still holds: `loopback` is intra-phase only.
 
 /**
- * The two built-in workflow definitions, keyed by `CyboflowWorkflowName`.
+ * The three built-in workflow definitions, keyed by `CyboflowWorkflowName`.
  * `Readonly<Record<…>>` forces the compiler to flag any missing key.
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
@@ -420,6 +422,57 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: 'Final taste check before the sprint is sealed.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // compound — mine recently merged runs for durable learnings and fold them
+  // back as clean-up tasks (cyboflow_create_task) + review-queue items
+  // (cyboflow_report_finding: 'finding' observations, 'decision' doc edits).
+  // Single 'Compound' phase; the approve-learnings human gate sits between the
+  // draft and the write-back so nothing lands without sign-off.
+  compound: {
+    id: 'compound',
+    phases: [
+      {
+        id: 'compound',
+        label: 'Compound',
+        color: '#8b5cf6',
+        steps: [
+          {
+            id: 'load-sprint',
+            name: 'Load merged work',
+            agent: 'compounder',
+            mcps: ['filesystem', 'git'],
+            retries: 0,
+            desc: 'Gather the session diff + raw run data for recently merged/completed runs.',
+          },
+          {
+            id: 'extract',
+            name: 'Extract learnings',
+            agent: 'compounder',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Draft durable learnings with computed impact (token deltas, recurrence counts).',
+          },
+          {
+            id: 'approve-learnings',
+            name: 'Approve learnings',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You decide which learnings become tasks / doc edits before any write-back.',
+          },
+          {
+            id: 'write-back',
+            name: 'Write back',
+            agent: 'compounder',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Apply only approved items: create tasks + emit findings via cyboflow_*.',
           },
         ],
       },

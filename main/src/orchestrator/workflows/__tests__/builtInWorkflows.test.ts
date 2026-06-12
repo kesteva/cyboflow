@@ -3,8 +3,8 @@
  * descriptors that severed the SoloFlow plugin-cache dependency (P0).
  *
  * Coverage:
- *  1. Maps EXACTLY the two cyboflow built-in names (planner + sprint), keyed
- *     by CYBOFLOW_WORKFLOW_NAMES.
+ *  1. Maps EXACTLY the three cyboflow built-in names (planner + sprint +
+ *     compound), keyed by CYBOFLOW_WORKFLOW_NAMES.
  *  2. Each descriptor path points at an existing, readable, non-empty `.md`
  *     prompt body alongside the module.
  *  3. The prompt bodies are self-contained: no `.soloflow` / `IDEA-NNN.md` /
@@ -16,10 +16,10 @@ import { buildBuiltInWorkflows } from '../builtInWorkflows';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 
 describe('buildBuiltInWorkflows', () => {
-  it('maps exactly the two cyboflow built-in names', () => {
+  it('maps exactly the cyboflow built-in names (planner + sprint + compound)', () => {
     const descriptors = buildBuiltInWorkflows();
     const names = descriptors.map((d) => d.name).sort();
-    expect(names).toEqual(['planner', 'sprint']);
+    expect(names).toEqual(['compound', 'planner', 'sprint']);
     // Keyed by CYBOFLOW_WORKFLOW_NAMES — same set, no extras, no omissions.
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
   });
@@ -82,5 +82,32 @@ describe('buildBuiltInWorkflows', () => {
     // delegated unit. \s allows the soft line-break before the backtick'd header.
     expect(body, 'planner uses the `Approve idea` gate header').toMatch(/header\s+`Approve idea`/);
     expect(body, 'planner uses the `Approve plan` gate header').toMatch(/header\s+`Approve plan`/);
+  });
+
+  it('compound gates learnings inline and folds them back via the cyboflow_* MCP tools (no doc writes)', () => {
+    const compound = buildBuiltInWorkflows().find((d) => d.name === 'compound');
+    expect(compound, 'compound descriptor present').toBeDefined();
+    const body = readFileSync(compound!.path, 'utf-8');
+
+    // approve-learnings is a human gate run inline via AskUserQuestion; nothing
+    // folds back without it.
+    expect(body, 'compound must name AskUserQuestion for the gate').toMatch(/AskUserQuestion/);
+    expect(body, 'compound forbids silently folding a learning back').toMatch(
+      /never silently fold a learning back/,
+    );
+
+    // Write-back funnels through the chokepoint MCP tools — tasks via
+    // cyboflow_create_task, findings/decisions via cyboflow_report_finding — and
+    // doc edits land as gated `decision` items, never direct file writes.
+    expect(body, 'compound creates clean-up tasks via cyboflow_create_task').toMatch(
+      /cyboflow_create_task/,
+    );
+    expect(body, 'compound emits findings via cyboflow_report_finding').toMatch(
+      /cyboflow_report_finding/,
+    );
+    expect(body, 'compound proposes doc edits as blocking decision items').toMatch(/decision/);
+    expect(body, 'compound traces regressions to merged work as post-merge-bug').toMatch(
+      /post-merge-bug/,
+    );
   });
 });

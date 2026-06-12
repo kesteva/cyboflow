@@ -26,7 +26,7 @@ import { computeSpecHash } from '../specHash';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
-import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -44,7 +44,9 @@ function buildDescriptors(
   dir: string,
   overrides: Partial<Record<CyboflowWorkflowName, string>> = {},
 ): WorkflowDescriptor[] {
-  const names: CyboflowWorkflowName[] = ['planner', 'sprint'];
+  // Derive from the single source of truth so the descriptor set tracks the
+  // built-in flow list automatically (planner + sprint + compound + …).
+  const names: readonly CyboflowWorkflowName[] = CYBOFLOW_WORKFLOW_NAMES;
   return names.map((name) => {
     if (name in overrides) {
       return { name, path: overrides[name]! };
@@ -54,6 +56,9 @@ function buildDescriptors(
     return { name, path };
   });
 }
+
+/** The built-in flow names sorted — for set-equality assertions. */
+const BUILTIN_NAMES_SORTED = [...CYBOFLOW_WORKFLOW_NAMES].sort();
 
 /**
  * Minimal structurally-valid `WorkflowDefinition` for the editor write-path
@@ -147,12 +152,12 @@ describe('WorkflowRegistry', () => {
 
         interface CountRow { count: number }
         const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
-        expect(count).toBe(2);
+        expect(count).toBe(CYBOFLOW_WORKFLOW_NAMES.length);
 
         interface NameRow { name: string }
         const rows = db.prepare('SELECT name FROM workflows WHERE project_id = 1 ORDER BY name').all() as NameRow[];
         const names = rows.map((r) => r.name).sort();
-        expect(names).toEqual(['planner', 'sprint']);
+        expect(names).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
 
@@ -164,7 +169,7 @@ describe('WorkflowRegistry', () => {
 
         interface CountRow { count: number }
         const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
-        expect(count).toBe(2);
+        expect(count).toBe(CYBOFLOW_WORKFLOW_NAMES.length);
       });
     });
 
@@ -302,7 +307,7 @@ describe('WorkflowRegistry', () => {
         const descriptors = buildDescriptors(tmpDir);
         registry.seed(1, descriptors);
         const rows = registry.listByProject(1);
-        expect(rows).toHaveLength(2);
+        expect(rows).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
       });
     });
 
@@ -321,31 +326,33 @@ describe('WorkflowRegistry', () => {
         ).run();
 
         const rows = registry.listByProject(1);
-        // Should still be 5 (no sentinel)
-        expect(rows).toHaveLength(2);
+        // Still exactly the built-in flows (no sentinel).
+        expect(rows).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
         expect(rows.every((r) => r.name !== '__quick__')).toBe(true);
       });
     });
 
-    it('excludes dropped legacy built-ins (soloflow/compound/prune) lingering from a pre-refactor DB', async () => {
+    it('excludes the still-dropped legacy built-ins (soloflow/prune) lingering from a pre-refactor DB', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint
-        // Simulate the stale rows a pre-refactor project DB still carries.
+        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint + compound
+        // Simulate the stale rows a pre-refactor project DB still carries. NOTE:
+        // `compound` is NO LONGER in this set — it was rebuilt as a real built-in
+        // (TASK compound-flow), so it is seeded above and surfaces in the picker;
+        // only `soloflow` / `prune` remain dropped.
         db.prepare(
           `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json, permission_mode) VALUES
              ('wf-1-soloflow', 1, 'soloflow', '{}', 'default'),
-             ('wf-1-compound', 1, 'compound', '{}', 'default'),
              ('wf-1-prune', 1, 'prune', '{}', 'default')`,
         ).run();
 
         const names = registry.listByProject(1).map((r) => r.name).sort();
-        expect(names).toEqual(['planner', 'sprint']);
+        expect(names).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
 
     it('excludes foreign/internal flows with an unresolvable empty spec (e.g. task/sprint-init/sprint-finalize leaked via the shared dev DB)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint
+        registry.seed(1, buildDescriptors(tmpDir)); // planner + sprint + compound
         // Rows another worktree (feat/parallel-sprint) registered into the SHARED
         // dev DB: unknown names + empty spec → resolveWorkflowDefinition returns
         // null, so they must not surface as dead "0 steps / 0 phases" picker cards.
@@ -357,7 +364,7 @@ describe('WorkflowRegistry', () => {
         ).run();
 
         const names = registry.listByProject(1).map((r) => r.name).sort();
-        expect(names).toEqual(['planner', 'sprint']);
+        expect(names).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
   });
@@ -390,7 +397,7 @@ describe('WorkflowRegistry', () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         registry.reconcileBuiltIns(7, buildDescriptors(tmpDir));
         const names = registry.listByProject(7).map((r) => r.name).sort();
-        expect(names).toEqual(['planner', 'sprint']);
+        expect(names).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
 
@@ -1035,7 +1042,7 @@ describe('WorkflowRegistry', () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         registry.seed(1, buildDescriptors(tmpDir));
         const rows = registry.listByProject(1);
-        expect(rows).toHaveLength(2);
+        expect(rows).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
         for (const r of rows) {
           // Field is present (typed string) — '{}' default for fresh seeds.
           expect(typeof r.spec_json).toBe('string');

@@ -66,13 +66,17 @@ export interface WorkflowConfigProvider {
 export const QUICK_WORKFLOW_NAME = '__quick__' as const;
 
 /**
- * Built-in workflow names dropped in the 2-flow refactor (SoloFlow removal).
+ * Built-in workflow names dropped in the flow refactor (SoloFlow removal).
  * Rows may still linger in a pre-refactor project DB. listByProject() filters
  * them so they never appear in the picker — they are NOT deleted, because
  * workflow_runs.workflow_id has no ON DELETE CASCADE and historical runs would
  * orphan. A future migration can clean them up with proper FK handling.
+ *
+ * 'compound' is NOT in this list: it was rebuilt as a native third built-in
+ * (CYBOFLOW_WORKFLOW_NAMES), so its rows must surface in the picker like
+ * planner/sprint, not be filtered as legacy cruft.
  */
-export const LEGACY_DROPPED_WORKFLOW_NAMES = ['soloflow', 'compound', 'prune'] as const;
+export const LEGACY_DROPPED_WORKFLOW_NAMES = ['soloflow', 'prune'] as const;
 
 // ---------------------------------------------------------------------------
 // WorkflowRegistry
@@ -176,8 +180,8 @@ export class WorkflowRegistry {
    * prompt, and its `permission_mode` is re-derived from that file. A fresh
    * project gets the rows inserted. `spec_json` (user step edits) is preserved.
    *
-   * Dropped legacy built-ins (soloflow/compound/prune) are intentionally NOT
-   * removed here — listByProject() filters them from the picker instead (see
+   * Dropped legacy built-ins (soloflow/prune) are intentionally NOT removed
+   * here — listByProject() filters them from the picker instead (see
    * LEGACY_DROPPED_WORKFLOW_NAMES; deleting them would orphan historical runs).
    */
   reconcileBuiltIns(projectId: number, workflowDescriptors: WorkflowDescriptor[]): void {
@@ -387,10 +391,10 @@ export class WorkflowRegistry {
    * flows leaked via the shared dev DB — so the picker never shows dead cards.
    */
   listByProject(projectId: number): WorkflowRow[] {
-    // Exclude the __quick__ sentinel and any dropped legacy built-ins
-    // (soloflow/compound/prune) that linger in a pre-refactor project DB — none
-    // may appear in the user-facing picker. Filtered, not deleted, to preserve
-    // the workflow_runs FK for historical runs.
+    // Exclude the __quick__ sentinel AND any dropped legacy built-ins
+    // (soloflow/prune) that linger in a pre-refactor project DB — they must
+    // never appear in the user-facing picker. Filtered, not deleted, to
+    // preserve the workflow_runs FK for historical runs.
     const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
     const placeholders = excluded.map(() => '?').join(', ');
     const stmt = this.db.prepare(

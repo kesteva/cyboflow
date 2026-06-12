@@ -58,8 +58,9 @@ export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflow
  * regardless of position.
  */
 const INITIAL_STEP_IDS: Record<CyboflowWorkflowName, string> = {
-  planner: 'context',
-  sprint:  'analyze-dependencies',
+  planner:  'context',
+  sprint:   'analyze-dependencies',
+  compound: 'load-sprint',
 } as const;
 
 /**

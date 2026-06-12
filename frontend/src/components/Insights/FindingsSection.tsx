@@ -14,8 +14,16 @@
  *
  * Empty state mirrors the review-queue copy: findings only appear here once a
  * Sprint agent reports one via `cyboflow_report_finding` during a run.
+ *
+ * Header CTA: a "Run compounding session" button starts the center-pane start
+ * wizard ({@link useNavigationStore.goToWizard}). Compound is now a built-in flow
+ * the picker lists, so the button just opens the wizard (WizardOpts has no
+ * workflow-preselect slot to pin); it is hidden until at least one project
+ * exists, since the wizard's first step is project selection.
  */
 import { useInsightsStore } from '../../stores/insightsStore';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { useProjectsCount } from '../../stores/landingStore';
 import { ReviewItemCard } from '../ReviewQueue/ReviewItemCard';
 
 /**
@@ -43,12 +51,25 @@ export function FindingsSection(): React.JSX.Element {
   const reviewSummary = useInsightsStore((s) => s.reviewSummary);
   const pendingFindings = useInsightsStore((s) => s.pendingFindings);
   const refresh = useInsightsStore((s) => s.refresh);
+  // Gate the "Run compounding session" CTA on having at least one project — the
+  // wizard's first step is project selection, so it is pointless without one.
+  const hasProjects = useProjectsCount() > 0;
 
   return (
     <div data-testid="findings-section">
       <header className="flex flex-wrap items-baseline gap-2 border-b border-border-primary pb-2">
         <span className="eyebrow text-text-tertiary">01 Findings</span>
         <span className="text-xs text-text-secondary">— triage what the flows surfaced</span>
+        {hasProjects && (
+          <button
+            type="button"
+            onClick={() => useNavigationStore.getState().goToWizard()}
+            data-testid="run-compounding-session"
+            className="ml-auto bg-interactive px-3 py-1 font-mono text-xs uppercase tracking-wider text-text-on-interactive hover:bg-interactive-hover"
+          >
+            Run compounding session
+          </button>
+        )}
       </header>
 
       {/* Counter strip — whole-inbox triage state (pending / resolved / dismissed). */}
