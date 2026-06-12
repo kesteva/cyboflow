@@ -128,10 +128,30 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   ctx.say('Research done — bucketing check-ins by calendar day sidesteps the DST traps; no scheduler needed.');
   await ctx.sleep(800);
 
-  // ── Plan phase · approve-idea (human gate) ────────────────────────────────
+  // ── Plan phase · approve-idea (inline human gate) ─────────────────────────
+  // Production planner gates are agent-driven AskUserQuestion gates: the spec
+  // renders inline in chat and the approval is the question card right below
+  // it (QuestionRouter pauses the run + folds a blocking decision review item,
+  // so the gate also shows in the Human review queue while pending).
   ctx.reportStep('approve-idea', 'running');
-  // Write the spec INTO the seeded idea so the user has something concrete to
-  // review (idea card on the Task backlog board) before approving the gate.
+  const specBody = [
+    '## Idea spec',
+    '',
+    '### Problem',
+    'Users check habits off but get no sense of momentum — nothing rewards consistency.',
+    '',
+    '### Approach',
+    `- **Streak counting:** ${streakStyle} (per the planning decision)`,
+    '- `computeStreak(completions, today)` derives the current streak from a habit\'s check-in timestamps',
+    '- Formatted output renders the streak so it shows up everywhere habits are listed',
+    `- **Missed-day grace:** ${graceChoice === 'One grace day' ? 'one grace day before the streak resets' : 'none — a missed day resets the streak (grace is a follow-up idea)'}`,
+    '',
+    '### Out of scope',
+    '- Reminders / notifications',
+    '- Weekly or custom-cadence goals',
+  ].join('\n');
+  // Also persist the spec onto the seeded idea so the board card matches what
+  // is approved here.
   if (idea) {
     await router.applyChange(projectId, {
       actor: 'agent:demo',
@@ -139,33 +159,31 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
       taskId: idea.id,
       fields: {
         summary: `Streaks per habit — ${streakStyle.toLowerCase()}, ${graceChoice === 'One grace day' ? 'one grace day' : 'no grace rule'}.`,
-        body: [
-          '## Idea spec',
-          '',
-          '### Problem',
-          'Users check habits off but get no sense of momentum — nothing rewards consistency.',
-          '',
-          '### Approach',
-          `- **Streak counting:** ${streakStyle} (per the planning decision)`,
-          '- `computeStreak(completions, today)` derives the current streak from a habit\'s check-in timestamps',
-          '- Formatted output renders the streak so it shows up everywhere habits are listed',
-          `- **Missed-day grace:** ${graceChoice === 'One grace day' ? 'one grace day before the streak resets' : 'none — a missed day resets the streak (grace is a follow-up idea)'}`,
-          '',
-          '### Out of scope',
-          '- Reminders / notifications',
-          '- Weekly or custom-cadence goals',
-        ].join('\n'),
+        body: specBody,
       },
       runId: ctx.runId,
     });
     await advanceIdeaStage(ctx, projectId, idea.id, 3); // Idea spec
   }
-  ctx.say(
-    'The idea spec is ready — review it on the idea card in the **Task backlog**, ' +
-      'then approve the gate in the **Human review** queue to continue.',
-  );
-  await ctx.humanGate('approve-idea', 'Approve idea spec');
-  ctx.say('Idea approved — moving on to decomposition.');
+  ctx.say(`Here is the idea spec — review it right here, then approve below to continue.\n\n---\n\n${specBody}`);
+  const ideaApproval = await ctx.askQuestion([
+    {
+      question: 'Approve the idea spec?',
+      header: 'Approval',
+      multiSelect: false,
+      options: [
+        { label: 'Approve', description: 'Lock the spec and move on to decomposition.' },
+        { label: 'Request changes', description: 'Have the agent tighten the spec before continuing.' },
+      ],
+    },
+  ]);
+  if ((ideaApproval.answers['Approve the idea spec?'] ?? 'Approve').startsWith('Request')) {
+    ctx.say('Tightening the spec — pulling the grace rule out into its own follow-up idea and trimming the approach to the calculation + display.');
+    await ctx.sleep(1100);
+    ctx.say('Spec revised — proceeding to decomposition with the slimmer scope.');
+  } else {
+    ctx.say('Idea approved — moving on to decomposition.');
+  }
   await ctx.sleep(800);
 
   // ── Refine phase · epics ──────────────────────────────────────────────────
@@ -212,11 +230,34 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
     await ctx.sleep(900);
   }
 
-  // ── Refine phase · approve-plan (human gate) ──────────────────────────────
+  // ── Refine phase · approve-plan (inline human gate) ───────────────────────
   ctx.reportStep('approve-plan', 'running');
-  ctx.say('The plan is laid out — 1 epic, 3 tasks. Approve the task plan in the **Human review** queue to seal it.');
-  await ctx.humanGate('approve-plan', 'Approve task plan');
+  const planSummary = [
+    '## Task plan',
+    '',
+    '**Epic: Habit streaks**',
+    '',
+    ...taskSpecs.map((spec, i) => `${i + 1}. **${spec.title}**\n${spec.body.replace('## AC', '   AC:').replace(/\n- /g, '\n   - ')}`),
+  ].join('\n');
+  ctx.say(`The plan is laid out — review it here, then approve below to seal it.\n\n---\n\n${planSummary}`);
+  // 'Approve' on the approve-plan step also triggers the backend task
+  // promotion to Ready-for-development (QuestionRouter.promoteTasksOnPlanApproval).
+  const planApproval = await ctx.askQuestion([
+    {
+      question: 'Approve the task plan?',
+      header: 'Approval',
+      multiSelect: false,
+      options: [
+        { label: 'Approve', description: 'Seal the plan and mark the tasks Ready for development.' },
+        { label: 'Request changes', description: 'Have the agent rework the decomposition first.' },
+      ],
+    },
+  ]);
   ctx.reportStep('approve-plan', 'done');
+  if ((planApproval.answers['Approve the task plan?'] ?? 'Approve').startsWith('Request')) {
+    ctx.say('Noted — in a live run I would rework the decomposition here. For the demo, the plan stands as drafted.');
+    await ctx.sleep(900);
+  }
   ctx.say(
     'Plan approved. The tasks are on the board and ready for a sprint — start one from this session, ' +
       'pick the streak tasks, and watch the lanes go.',
