@@ -60,6 +60,15 @@ class ResizeCapableSpyManager extends SpyManager {
   resizePanel = vi.fn<(panelId: string, cols: number, rows: number) => void>();
 }
 
+/**
+ * SpyManager variant that ALSO exposes the `endSession(panelId)` seam
+ * (InteractiveClaudeManager-only, TASK-818). Used to assert the facade's
+ * runId→panelId translation reaches endSession for PTY quick sessions.
+ */
+class EndSessionCapableSpyManager extends SpyManager {
+  endSession = vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined);
+}
+
 /** Build a SpyManager cast to AbstractCliManager at the construction boundary. */
 function makeSpyManager(): SpyManager {
   return new SpyManager();
@@ -423,6 +432,187 @@ describe('SubstrateDispatchFacade — relayResize relays geometry into the live 
 
     // The interactive resize seam is never called for an SDK-substrate run.
     expect(interactive.resizePanel).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runId→panelId translation for PTY QUICK sessions
+//
+// Quick PTY sessions spawn via InteractiveClaudeManager.startPanel(claudePanel.id)
+// while the run row is the `__quick__` sentinel — so panelId ≠ runId. The facade
+// learns the mapping from the interactive 'pty-output' / 'turn-end' payloads
+// (both carry { panelId, runId }) and translates in relayInput / relayResize /
+// endSession / killSession. Workflow runs (panelId === runId) fall back
+// identically when the map misses.
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick sessions)', () => {
+  const ptyChunk = (panelId: string, runId: string, data = 'paint') => ({
+    panelId,
+    sessionId: panelId,
+    runId,
+    type: 'pty',
+    data,
+    timestamp: new Date(),
+  });
+
+  it("relayInput(runId, text) reaches sendInput with the LIVE panelId learned from 'pty-output'", () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // Quick-session shape: the process lives under 'panel-X', the run is 'run-Y'.
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+
+    facade.relayInput('run-Y', 'hi');
+
+    expect(interactive.sendInput).toHaveBeenCalledOnce();
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-X', 'hi');
+  });
+
+  it('registerInteractivePanel seeds the mapping at spawn — relayInput translates with NO event seen; exit still evicts', () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // Deterministic at-spawn registration (sessions:create-quick / dead-REPL
+    // re-spawn) — no 'pty-output'/'turn-end' has flowed yet.
+    facade.registerInteractivePanel('run-Y', 'panel-X');
+
+    facade.relayInput('run-Y', 'first-byte-race');
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-X', 'first-byte-race');
+
+    // The seed feeds BOTH maps: the exit eviction resolves the forward entry
+    // through the reverse map, so a later relay falls back to the runId.
+    interactive.emit('exit', { panelId: 'panel-X', sessionId: 'panel-X', exitCode: 0, signal: null });
+    facade.relayInput('run-Y', 'after-exit');
+    expect(interactive.sendInput).toHaveBeenLastCalledWith('run-Y', 'after-exit');
+  });
+
+  it("learns the mapping from 'turn-end' too (available before any PTY byte flows)", () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('turn-end', { panelId: 'panel-X', sessionId: 'panel-X', runId: 'run-Y' });
+
+    facade.relayInput('run-Y', 'hi');
+
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-X', 'hi');
+  });
+
+  it('relayResize translates runId to the live panelId', () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = new ResizeCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+
+    facade.relayResize('run-Y', 120, 40);
+
+    expect(interactive.resizePanel).toHaveBeenCalledOnce();
+    expect(interactive.resizePanel).toHaveBeenCalledWith('panel-X', 120, 40);
+  });
+
+  it('endSession translates runId to the live panelId', async () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = new EndSessionCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+
+    await facade.endSession('run-Y');
+
+    expect(interactive.endSession).toHaveBeenCalledOnce();
+    expect(interactive.endSession).toHaveBeenCalledWith('panel-X');
+  });
+
+  it('killSession translates runId to the live panelId', async () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+
+    await facade.killSession('run-Y');
+
+    expect(interactive.killProcess).toHaveBeenCalledOnce();
+    expect(interactive.killProcess).toHaveBeenCalledWith('panel-X');
+  });
+
+  it('workflow-shaped runs (panelId === runId) are unchanged — identity mapping or map miss', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // Map MISS (no events seen yet) → fallback to runId.
+    facade.relayInput(run.id, 'first');
+    expect(interactive.sendInput).toHaveBeenLastCalledWith(run.id, 'first');
+
+    // Identity mapping (workflow pty-output carries panelId === runId) → same panelId.
+    interactive.emit('pty-output', ptyChunk(run.id, run.id));
+    facade.relayInput(run.id, 'second');
+    expect(interactive.sendInput).toHaveBeenLastCalledWith(run.id, 'second');
+  });
+
+  it("the interactive 'exit' for the panel evicts the mapping (relay falls back to runId)", () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+    interactive.emit('exit', { panelId: 'panel-X', sessionId: 'panel-X', exitCode: 0, signal: null });
+
+    facade.relayInput('run-Y', 'after-exit');
+
+    // Mapping gone → fallback to the runId (pre-mapping behavior).
+    expect(interactive.sendInput).toHaveBeenCalledWith('run-Y', 'after-exit');
+  });
+
+  it("'exit' clears the runId-keyed PTY backlog even when panelId ≠ runId (quick session)", () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(makeSpyManager()), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y', 'quick paint'));
+    expect(facade.getPtyBacklog('run-Y')).toBe('quick paint');
+
+    // Exit carries panelId ONLY — the backlog (keyed by runId) must still clear.
+    interactive.emit('exit', { panelId: 'panel-X', sessionId: 'panel-X', exitCode: 0, signal: null });
+    expect(facade.getPtyBacklog('run-Y')).toBe('');
+  });
+
+  it('dispose() clears the translation maps (relay falls back to runId after re-construction window)', () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    interactive.emit('pty-output', ptyChunk('panel-X', 'run-Y'));
+    facade.dispose();
+
+    // Calling a relay on a disposed facade is not part of the contract, but the
+    // maps must be empty so nothing stale leaks across a re-init.
+    facade.relayInput('run-Y', 'post-dispose');
+    expect(interactive.sendInput).toHaveBeenCalledWith('run-Y', 'post-dispose');
   });
 });
 

@@ -125,6 +125,24 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private readonly ptyBacklog = new Map<string, string>();
 
+  /**
+   * runId → LIVE interactive panelId (plus the panelId → runId reverse used for
+   * exit-time cleanup). For workflow runs the orchestrator invariant
+   * panelId === runId holds, so entries here are identity mappings — or absent,
+   * in which case lookups fall back to runId (byte-identical behavior). For PTY
+   * QUICK sessions the process is spawned via
+   * InteractiveClaudeManager.startPanel(claudePanel.id, ...) while the manager
+   * resolves runId from sessions.run_id (the `__quick__` sentinel), so
+   * panelId ≠ runId — without translation the inherited sendInput would throw
+   * "No claude process found for panel <sentinelRunId>". Fed from the
+   * interactive 'pty-output' and 'turn-end' payloads (both carry
+   * { panelId, runId }; the interactive 'output' payload has NO runId so it is
+   * not a source); evicted when the interactive 'exit' fires for the panel.
+   * Interactive-only by construction (only interactive events feed it).
+   */
+  private readonly interactiveRunToPanel = new Map<string, string>();
+  private readonly interactivePanelToRun = new Map<string, string>();
+
   constructor(
     private readonly sdkManager: AbstractCliManager,
     private readonly interactiveManager: AbstractCliManager,
@@ -140,20 +158,31 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.sdkExitHandler = (payload) => this.emit('exit', payload);
     this.interactiveOutputHandler = (payload) => this.emit('output', payload);
     this.interactiveExitHandler = (payload) => {
-      // Drop the run's PTY backlog when its REPL exits (panelId === runId).
+      // Drop the run's PTY backlog when its REPL exits (resolved through the
+      // panel→run mapping so quick sessions — panelId ≠ runId — clear too),
+      // THEN evict the panel's runId↔panelId mapping (order matters: the
+      // backlog clear consumes the mapping).
       this.clearPtyBacklog(payload);
+      this.clearInteractivePanelMapping(payload);
       this.emit('exit', payload);
     };
-    // Raw-PTY fan-in — accumulate a bounded per-run backlog for replay-on-attach
+    // Raw-PTY fan-in — record the runId↔panelId mapping (the payload carries
+    // both ids), accumulate a bounded per-run backlog for replay-on-attach
     // (blank-xterm fix), then re-emit 'pty-output' by reference (live channel
     // unchanged). Interactive manager ONLY (the SDK manager is never subscribed).
     this.interactivePtyHandler = (payload) => {
+      this.recordInteractivePanelMapping(payload);
       this.recordPtyBacklog(payload);
       this.emit('pty-output', payload);
     };
     // Turn-end fan-in — re-emit 'turn-end' by reference (TASK-818). Interactive
-    // manager ONLY; the SDK manager never emits it.
-    this.interactiveTurnEndHandler = (payload) => this.emit('turn-end', payload);
+    // manager ONLY; the SDK manager never emits it. The payload also carries
+    // { panelId, runId } — a second mapping source so the runId→panelId
+    // translation is available even before any PTY byte flows.
+    this.interactiveTurnEndHandler = (payload) => {
+      this.recordInteractivePanelMapping(payload);
+      this.emit('turn-end', payload);
+    };
 
     this.sdkManager.on('output', this.sdkOutputHandler);
     this.sdkManager.on('exit', this.sdkExitHandler);
@@ -222,49 +251,52 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   /**
    * Relay a live-input turn into the SAME running process (IDEA-030 / TASK-817).
    *
-   * panelId === runId per the orchestrator invariant. Resolves the manager via
-   * the existing resolveManager() seam so substrate dispatch stays in ONE place.
-   * For the interactive manager this writes raw to the live node-pty via
-   * `sendInput` (AbstractCliManager.ts:205-218 — NO kill, NO respawn; this is
-   * NEVER continuePanel/restartPanelWithHistory, which would destroy the
-   * persistent session). For the SDK manager it is a strict NO-OP: the SDK has
-   * no PTY (`process: undefined as never`), so the structured Workflow panel +
-   * SDK iterator path stay byte-identical (Q3 panel-preservation).
+   * Takes the RUN id (workflow runs: panelId === runId per the orchestrator
+   * invariant; PTY quick sessions: panelId ≠ runId, translated via
+   * toLivePanelId). Resolves the manager via the existing resolveManager() seam
+   * so substrate dispatch stays in ONE place. For the interactive manager this
+   * writes raw to the live node-pty via `sendInput` (AbstractCliManager.ts:205-218
+   * — NO kill, NO respawn; this is NEVER continuePanel/restartPanelWithHistory,
+   * which would destroy the persistent session). For the SDK manager it is a
+   * strict NO-OP: the SDK has no PTY (`process: undefined as never`), so the
+   * structured Workflow panel + SDK iterator path stay byte-identical (Q3
+   * panel-preservation).
    */
-  relayInput(panelId: string, text: string): void {
-    const mgr = this.resolveManager(panelId);
+  relayInput(runId: string, text: string): void {
+    const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
       // SDK substrate has no PTY — relaying input is a no-op (Q3 byte-identical).
-      this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { panelId });
+      this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { runId });
       return;
     }
-    mgr.sendInput(panelId, text);
+    mgr.sendInput(this.toLivePanelId(runId), text);
   }
 
   /**
    * Relay a PTY geometry change into the live node-pty (IDEA-030 / TASK-817).
    *
-   * panelId === runId per the orchestrator invariant. Resolves the manager via
+   * Takes the RUN id (quick sessions translate runId → live panelId via
+   * toLivePanelId; workflow runs are identity). Resolves the manager via
    * resolveManager(). For the interactive manager it feature-detects a
    * `resizePanel(panelId, cols, rows)` seam (the seam ON the manager lands in
    * TASK-818) and calls it when present; otherwise NO-OP. The SDK manager is a
    * strict NO-OP (no PTY). No `any` — the narrow ResizeCapable interface +
    * `isResizeCapable` guard own the feature detection.
    */
-  relayResize(panelId: string, cols: number, rows: number): void {
-    const mgr = this.resolveManager(panelId);
+  relayResize(runId: string, cols: number, rows: number): void {
+    const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
-      this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { panelId });
+      this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { runId });
       return;
     }
     if (isResizeCapable(mgr)) {
-      mgr.resizePanel(panelId, cols, rows);
+      mgr.resizePanel(this.toLivePanelId(runId), cols, rows);
       return;
     }
     // The manager resize seam (TASK-818) is not yet present — no-op so the
     // renderer ResizeObserver wiring is harmless until it lands.
     this.logger.debug('[SubstrateDispatchFacade] relayResize no-op — interactive manager has no resize seam yet', {
-      panelId,
+      runId,
       cols,
       rows,
     });
@@ -278,23 +310,24 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * control sequence so the inherited onExit settles the run's spawn promise and
    * teardownRun fires. Wired from the run close-out mutations (Merge / Dismiss /
    * Create-PR) via the RelayDeps bag. Strict NO-OP for the SDK substrate (no PTY,
-   * the SDK iterator owns its own drain) — Q3 byte-identity holds. panelId ===
-   * runId per the orchestrator invariant, so close-out passes runId straight
-   * through. Feature-detected via the narrow EndSessionCapable interface (no
-   * `any`) so it is harmless if the manager ever lacks the seam.
+   * the SDK iterator owns its own drain) — Q3 byte-identity holds. Close-out
+   * passes the RUN id; workflow runs hit the manager directly (panelId === runId
+   * per the orchestrator invariant) while PTY quick sessions translate via
+   * toLivePanelId. Feature-detected via the narrow EndSessionCapable interface
+   * (no `any`) so it is harmless if the manager ever lacks the seam.
    */
-  async endSession(panelId: string): Promise<void> {
-    const mgr = this.resolveManager(panelId);
+  async endSession(runId: string): Promise<void> {
+    const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
-      this.logger.debug('[SubstrateDispatchFacade] endSession no-op for SDK substrate', { panelId });
+      this.logger.debug('[SubstrateDispatchFacade] endSession no-op for SDK substrate', { runId });
       return;
     }
     if (isEndSessionCapable(mgr)) {
-      await mgr.endSession(panelId);
+      await mgr.endSession(this.toLivePanelId(runId));
       return;
     }
     this.logger.warn('[SubstrateDispatchFacade] endSession no-op — interactive manager has no endSession seam', {
-      panelId,
+      runId,
     });
   }
 
@@ -309,16 +342,17 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * already gone). Used by the Dismiss close-out, where the run is being discarded
    * and a polite request is the wrong tool. Strict NO-OP for the SDK substrate
    * (no PTY; the SDK iterator owns its own drain) — Q3 byte-identity holds.
-   * panelId === runId per the orchestrator invariant. `killProcess` is on
-   * `AbstractCliManager` so no feature-detection is needed.
+   * Takes the RUN id (workflow runs: panelId === runId per the orchestrator
+   * invariant; PTY quick sessions translate via toLivePanelId). `killProcess`
+   * is on `AbstractCliManager` so no feature-detection is needed.
    */
-  async killSession(panelId: string): Promise<void> {
-    const mgr = this.resolveManager(panelId);
+  async killSession(runId: string): Promise<void> {
+    const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
-      this.logger.debug('[SubstrateDispatchFacade] killSession no-op for SDK substrate', { panelId });
+      this.logger.debug('[SubstrateDispatchFacade] killSession no-op for SDK substrate', { runId });
       return;
     }
-    await mgr.killProcess(panelId);
+    await mgr.killProcess(this.toLivePanelId(runId));
   }
 
   /**
@@ -342,10 +376,68 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     );
   }
 
-  /** Drop a run's backlog on REPL exit (CliExitEvent.panelId === runId). */
+  /**
+   * Drop a run's backlog on REPL exit. CliExitEvent carries panelId only; the
+   * backlog is keyed by runId, so resolve through the panel→run mapping (PTY
+   * quick sessions: panelId ≠ runId) with a panelId fallback (workflow runs:
+   * panelId === runId — identical behavior).
+   */
   private clearPtyBacklog(payload: unknown): void {
     const evt = payload as { panelId?: unknown };
-    if (typeof evt.panelId === 'string') this.ptyBacklog.delete(evt.panelId);
+    if (typeof evt.panelId !== 'string') return;
+    this.ptyBacklog.delete(this.interactivePanelToRun.get(evt.panelId) ?? evt.panelId);
+  }
+
+  /**
+   * Translate a RUN id to the LIVE interactive panelId for manager calls.
+   * Workflow runs either miss the map (→ fallback runId, identical behavior —
+   * panelId === runId per the orchestrator invariant) or map runId→runId; PTY
+   * quick sessions map the sentinel `__quick__` runId to the claudePanel id the
+   * process was actually spawned under.
+   */
+  private toLivePanelId(runId: string): string {
+    return this.interactiveRunToPanel.get(runId) ?? runId;
+  }
+
+  /**
+   * Deterministic at-spawn registration of the runId↔panelId pair for a PTY
+   * QUICK session. The event-fed mapping below ('pty-output'/'turn-end') only
+   * exists after the FIRST PTY byte / turn boundary — a relay or close-out call
+   * racing that first event would fall back to the sentinel `__quick__` runId
+   * and throw "No claude process found". sessions:create-quick (eager spawn)
+   * and the sessions:input dead-REPL re-spawn call this immediately BEFORE the
+   * fire-and-forget startPanel so the translation is live from t0. Seeds BOTH
+   * maps with the exact shape recordInteractivePanelMapping writes; idempotent
+   * (the event-fed path re-records the identical pair) and evicted on the
+   * interactive 'exit' like any event-fed entry.
+   */
+  registerInteractivePanel(runId: string, panelId: string): void {
+    this.interactiveRunToPanel.set(runId, panelId);
+    this.interactivePanelToRun.set(panelId, runId);
+  }
+
+  /**
+   * Record the runId↔panelId pair carried by an interactive event payload
+   * ('pty-output' / 'turn-end' — both carry { panelId, runId }). Idempotent;
+   * silently skips payloads missing either id.
+   */
+  private recordInteractivePanelMapping(payload: unknown): void {
+    const evt = payload as { panelId?: unknown; runId?: unknown };
+    if (typeof evt.panelId !== 'string' || typeof evt.runId !== 'string') return;
+    this.interactiveRunToPanel.set(evt.runId, evt.panelId);
+    this.interactivePanelToRun.set(evt.panelId, evt.runId);
+  }
+
+  /**
+   * Evict a panel's runId↔panelId mapping on REPL exit. CliExitEvent carries
+   * panelId only, so the forward entry is found via the reverse map.
+   */
+  private clearInteractivePanelMapping(payload: unknown): void {
+    const evt = payload as { panelId?: unknown };
+    if (typeof evt.panelId !== 'string') return;
+    const runId = this.interactivePanelToRun.get(evt.panelId);
+    if (runId !== undefined) this.interactiveRunToPanel.delete(runId);
+    this.interactivePanelToRun.delete(evt.panelId);
   }
 
   /**
@@ -363,6 +455,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.removeAllListeners();
     this.panelOwners.clear();
     this.ptyBacklog.clear();
+    this.interactiveRunToPanel.clear();
+    this.interactivePanelToRun.clear();
     this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');
   }
 }
