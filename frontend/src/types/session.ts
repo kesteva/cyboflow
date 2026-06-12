@@ -1,5 +1,6 @@
 import type { TextBlock, ToolUseBlock, ToolResultBlock } from '../../../shared/types/claudeStream';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 // Claude message content types
 /** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
@@ -98,6 +99,12 @@ export interface Session {
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
   runId?: string | null;
+  /**
+   * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
+   * Stamped by sessions:create-quick (sessions.substrate, migration 025);
+   * undefined/NULL → sdk (legacy). Mirror of main/src/types/session.ts Session.
+   */
+  substrate?: CliSubstrate;
 }
 
 export interface GitStatus {
@@ -136,6 +143,14 @@ export interface CreateSessionRequest {
    * twin in main/src/types/session.ts (request-parity rule).
    */
   agentPermissionMode?: PermissionMode;
+  /**
+   * Opt-in CLI substrate for the quick session ('sdk'|'interactive'). When
+   * omitted the session runs on the SDK substrate (legacy behavior). Persisted
+   * to sessions.substrate by the create-quick handler (migration 025). KEEP IN
+   * SYNC with the main twin in main/src/types/session.ts (request-parity rule,
+   * FIND-SPRINT-037-5).
+   */
+  substrate?: CliSubstrate;
   projectId?: number;
   folderId?: string;
   isMainRepo?: boolean;

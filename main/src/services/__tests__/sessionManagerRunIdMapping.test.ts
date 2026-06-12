@@ -133,6 +133,21 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
 
     expect(session.runId).toBeNull();
   });
+
+  it("copies substrate='interactive' to substrate; legacy row maps to undefined (migration 025)", () => {
+    // Stamped row (sessions:create-quick with the interactive PTY substrate).
+    const stamped = makeDbSession({ substrate: 'interactive' });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(stamped);
+    expect(session.substrate).toBe('interactive');
+
+    // Legacy row without the column → undefined (renderer treats as sdk).
+    const legacy = makeDbSession();
+    const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
+    expect(legacySession.substrate).toBeUndefined();
+  });
 });
 
 // ------------------------------------------------------------------

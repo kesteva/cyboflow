@@ -1,4 +1,5 @@
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 export interface Session {
   id: string;
@@ -32,6 +33,12 @@ export interface Session {
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
   runId?: string | null;
+  /**
+   * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
+   * Stamped by sessions:create-quick (sessions.substrate, migration 025);
+   * undefined/NULL → sdk (legacy).
+   */
+  substrate?: CliSubstrate;
 }
 
 export interface GitStatus {
@@ -71,6 +78,14 @@ export interface CreateSessionRequest {
    * the frontend twin in frontend/src/types/session.ts (request-parity rule).
    */
   agentPermissionMode?: PermissionMode;
+  /**
+   * Opt-in CLI substrate for the quick session ('sdk'|'interactive'). When
+   * omitted the session runs on the SDK substrate (legacy behavior). Persisted
+   * to sessions.substrate by the create-quick handler (migration 025). KEEP IN
+   * SYNC with the frontend twin in frontend/src/types/session.ts
+   * (request-parity rule, FIND-SPRINT-037-5).
+   */
+  substrate?: CliSubstrate;
   projectId?: number;
   folderId?: string;
   baseBranch?: string;

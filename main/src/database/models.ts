@@ -1,4 +1,5 @@
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 export interface Project {
   id: number;
@@ -79,6 +80,11 @@ export interface Session {
   run_id?: string | null;
   /** Set to true for sessions created outside any workflow flow (TASK-787 / IDEA-027). */
   is_quick?: boolean;
+  /**
+   * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
+   * Written by sessions:create-quick (migration 025); NULL → sdk (legacy).
+   */
+  substrate?: CliSubstrate;
 }
 
 export interface SessionOutput {

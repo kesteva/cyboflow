@@ -215,7 +215,8 @@ export class SessionManager extends EventEmitter {
       baseBranch: dbSession.base_branch,
       commitMode: dbSession.commit_mode,
       commitModeSettings: dbSession.commit_mode_settings,
-      runId: dbSession.run_id ?? null
+      runId: dbSession.run_id ?? null,
+      substrate: dbSession.substrate
     };
   }
 
