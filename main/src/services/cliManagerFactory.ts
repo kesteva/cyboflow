@@ -5,12 +5,23 @@ import type { SessionManager } from './sessionManager';
 import { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './panels/claude/interactiveClaudeManager';
-import { 
-  CliToolRegistry, 
-  CliToolDefinition, 
+import {
+  CliToolRegistry,
+  CliToolDefinition,
   CliManagerFactory as ManagerFactoryFunction,
-  CLI_OUTPUT_FORMATS 
+  CLI_OUTPUT_FORMATS
 } from './cliToolRegistry';
+import { DemoCliManager } from './demo/demoCliManager';
+
+/** Structural guard for the better-sqlite3 handle passed via additionalOptions.db. */
+function isSqliteDatabase(value: unknown): value is Database.Database {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { prepare?: unknown }).prepare === 'function' &&
+    typeof (value as { transaction?: unknown }).transaction === 'function'
+  );
+}
 
 /**
  * Factory configuration for CLI manager creation
@@ -42,6 +53,8 @@ export interface CliManagerFactoryConfig {
 export class CliManagerFactory {
   private static instance: CliManagerFactory | null = null;
   private readonly registry: CliToolRegistry;
+  /** Demo-mode manager cache — one DemoCliManager per toolId (see createManager). */
+  private readonly demoManagers = new Map<string, DemoCliManager>();
 
   private constructor(
     private logger?: Logger,
@@ -70,6 +83,29 @@ export class CliManagerFactory {
   ): Promise<AbstractCliManager> {
     try {
       this.validateConfig(config);
+
+      // Demo mode (read once at boot): EVERY tool id resolves to a scripted
+      // DemoCliManager, so both the orchestrator spawn path and panel chat play
+      // canned runs instead of spawning Claude. One instance per toolId — the
+      // SubstrateDispatchFacade subscribes to its two managers separately, and
+      // sharing one instance would double-emit every event.
+      if (this.configManager?.isDemoMode()) {
+        const existing = this.demoManagers.get(toolId);
+        if (existing) return existing;
+        const db = config.additionalOptions?.db;
+        if (!isSqliteDatabase(db)) {
+          throw new Error('[CliManagerFactory] demo mode requires additionalOptions.db');
+        }
+        const demoManager = new DemoCliManager(
+          config.sessionManager as SessionManager,
+          this.logger,
+          this.configManager,
+          db,
+        );
+        this.demoManagers.set(toolId, demoManager);
+        this.logger?.info(`[CliManagerFactory] Demo mode — created DemoCliManager for tool '${toolId}'`);
+        return demoManager;
+      }
 
       const manager = await this.registry.createManager(
         toolId,
