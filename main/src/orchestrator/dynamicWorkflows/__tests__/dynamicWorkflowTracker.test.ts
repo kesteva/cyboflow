@@ -243,6 +243,60 @@ describe('DynamicWorkflowTracker', () => {
     expect(changed.at(-1)?.state.status).toBe('running');
   });
 
+  it('merges agent transcript stats into the emitted state (absent before any parse)', async () => {
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Before the transcript lands, the optional stats fields are absent.
+    const before = changed.at(-1)?.state.agents[0];
+    expect(before).toMatchObject({ agentId: 'a1', status: 'running' });
+    expect(before?.model).toBeUndefined();
+    expect(before?.outputTokens).toBeUndefined();
+    expect(before?.toolUses).toBeUndefined();
+    expect(before?.startedAt).toBeUndefined();
+    expect(before?.lastActivityAt).toBeUndefined();
+    expect(before?.promptExcerpt).toBeUndefined();
+
+    const emitsBefore = changed.length;
+    writeFileSync(
+      join(transcriptDir, 'agent-a1.jsonl'),
+      [
+        JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: 'Do the thing' },
+          timestamp: '2026-06-11T10:00:00.000Z',
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            model: 'claude-fable-5',
+            usage: { input_tokens: 4, output_tokens: 12 },
+            content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }],
+          },
+          timestamp: '2026-06-11T10:00:04.000Z',
+        }),
+        '',
+      ].join('\n'),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changed.length).toBe(emitsBefore + 1); // a stats-only change also emits onChanged
+    expect(changed.at(-1)?.state.agents).toEqual([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-fable-5',
+        outputTokens: 12,
+        toolUses: 1,
+        startedAt: '2026-06-11T10:00:00.000Z',
+        lastActivityAt: '2026-06-11T10:00:04.000Z',
+        promptExcerpt: 'Do the thing',
+      },
+    ]);
+    expect(changed.at(-1)?.state.status).toBe('running');
+  });
+
   // -------------------------------------------------------------------------
   // finalization: terminal record (authoritative)
   // -------------------------------------------------------------------------

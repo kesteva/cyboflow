@@ -171,6 +171,168 @@ describe('JournalTailer', () => {
     expect(onStalled).toHaveBeenCalledTimes(1);
   });
 
+  // ---------------------------------------------------------------------------
+  // agent transcript stats (agent-<agentId>.jsonl in the journal's directory)
+  // ---------------------------------------------------------------------------
+
+  function transcriptLine(entry: Record<string, unknown>): string {
+    return `${JSON.stringify(entry)}\n`;
+  }
+
+  it('accumulates transcript stats across polls (offset respected) and merges them into onAgents', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    const transcriptPath = join(dir, 'agent-a1.jsonl');
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { role: 'user', content: 'Refactor the API layer' },
+        timestamp: '2026-06-11T10:00:00.000Z',
+      }) +
+        transcriptLine({
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            model: 'claude-fable-5',
+            usage: { input_tokens: 3, output_tokens: 10 },
+            content: [
+              { type: 'tool_use', id: 't1', name: 'Read', input: {} },
+              { type: 'text', text: 'hi' },
+            ],
+          },
+          timestamp: '2026-06-11T10:00:05.000Z',
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(onAgents).toHaveBeenCalledTimes(1);
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-fable-5',
+        outputTokens: 10,
+        toolUses: 1,
+        startedAt: '2026-06-11T10:00:00.000Z',
+        lastActivityAt: '2026-06-11T10:00:05.000Z',
+        promptExcerpt: 'Refactor the API layer',
+      },
+    ]);
+
+    // Append: ONLY the new bytes are parsed — a full re-parse would double-count
+    // the first assistant line (27 tokens instead of 17).
+    appendFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          model: 'claude-other-model',
+          usage: { output_tokens: 7 },
+          content: [
+            { type: 'tool_use', id: 't2', name: 'Edit', input: {} },
+            { type: 'tool_use', id: 't3', name: 'Bash', input: {} },
+          ],
+        },
+        timestamp: '2026-06-11T10:00:09.000Z',
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(onAgents).toHaveBeenCalledTimes(2); // a stats-only change still emits
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-fable-5', // first assistant model wins
+        outputTokens: 17,
+        toolUses: 3,
+        startedAt: '2026-06-11T10:00:00.000Z',
+        lastActivityAt: '2026-06-11T10:00:09.000Z',
+        promptExcerpt: 'Refactor the API layer',
+      },
+    ]);
+  });
+
+  it('carries a torn transcript line over to the next poll', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    const transcriptPath = join(dir, 'agent-a1.jsonl');
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    const full = transcriptLine({
+      type: 'assistant',
+      message: { role: 'assistant', model: 'claude-fable-5', usage: { output_tokens: 5 }, content: [] },
+      timestamp: '2026-06-11T11:00:00.000Z',
+    });
+    writeFileSync(transcriptPath, full.slice(0, 25)); // torn mid-JSON, no newline yet
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    // The journal change emits, but the torn line contributes no stats (and no warn-skip).
+    expect(onAgents).toHaveBeenCalledTimes(1);
+    expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'running' }]);
+
+    appendFileSync(transcriptPath, full.slice(25));
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-fable-5',
+        outputTokens: 5,
+        startedAt: '2026-06-11T11:00:00.000Z',
+        lastActivityAt: '2026-06-11T11:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('tolerates a missing agent transcript, then picks it up when it appears', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(POLL_MS * 3); // transcript absent — no errors, no re-emits
+    expect(onAgents).toHaveBeenCalledTimes(1);
+    expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'running' }]);
+
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({ type: 'user', message: { role: 'user', content: 'Go' }, timestamp: '2026-06-11T12:00:00.000Z' }),
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        startedAt: '2026-06-11T12:00:00.000Z',
+        lastActivityAt: '2026-06-11T12:00:00.000Z',
+        promptExcerpt: 'Go',
+      },
+    ]);
+  });
+
+  it('extracts promptExcerpt from array content (first text part), truncated to 200 chars', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    const longPrompt = 'p'.repeat(300);
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: longPrompt }] },
+        timestamp: '2026-06-11T13:00:00.000Z',
+      }) +
+        transcriptLine({
+          // A LATER user line (tool result) must NOT overwrite the prompt.
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'text', text: 'NOT THE PROMPT' }] },
+          timestamp: '2026-06-11T13:00:01.000Z',
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    const agents = onAgents.mock.calls.at(-1)?.[0];
+    expect(agents?.[0]?.promptExcerpt).toBe('p'.repeat(200));
+    expect(agents?.[0]?.lastActivityAt).toBe('2026-06-11T13:00:01.000Z');
+  });
+
   it('stop() is idempotent and start() after stop() is a fresh poll loop', async () => {
     const { onAgents } = buildTailer();
     tailer!.start();

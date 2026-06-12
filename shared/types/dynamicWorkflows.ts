@@ -35,10 +35,28 @@ export interface DynamicWorkflowPhase {
  * One subagent's lifecycle, derived from journal.jsonl lines:
  * a `started` line creates the agent as 'running'; the matching `result`
  * line (same agentId) flips it to 'done'.
+ *
+ * The optional stats fields are accumulated live from the agent's transcript
+ * sidecar (`<transcriptDir>/agent-<agentId>.jsonl`, tailed incrementally next
+ * to the journal). ALL of them may be absent — older main builds never set
+ * them, and even on current builds the transcript lands a beat after the
+ * journal `started` line — so renderers must degrade gracefully.
  */
 export interface DynamicWorkflowAgent {
   agentId: string;
   status: 'running' | 'done';
+  /** Raw model id from the first assistant transcript line, e.g. 'claude-fable-5'. */
+  model?: string;
+  /** Sum of `message.usage.output_tokens` across assistant transcript lines. */
+  outputTokens?: number;
+  /** Count of `tool_use` content blocks across assistant transcript lines. */
+  toolUses?: number;
+  /** ISO-8601 — timestamp of the FIRST transcript line (the agent's prompt). */
+  startedAt?: string;
+  /** ISO-8601 — timestamp of the LAST transcript line seen so far. */
+  lastActivityAt?: string;
+  /** First ~200 chars of the agent's FIRST user-message text (raw; the frontend dedups). */
+  promptExcerpt?: string;
 }
 
 /** Terminal totals lifted from the wf_<id>.json completion record. */
