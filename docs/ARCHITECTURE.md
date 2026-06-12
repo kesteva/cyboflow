@@ -3,8 +3,9 @@
 ## Purpose
 
 Cyboflow is a macOS desktop app that orchestrates Claude Code as a multi-agent workflow runner.
-It is **self-contained**: the two user-facing flows — **Planner** and **Sprint** — and their
-prompt bodies ship inside the app source (`main/src/orchestrator/workflows/`). There is **no
+It is **self-contained**: the three user-facing flows — **Planner**, **Sprint**, and
+**Compound** (mines merged runs for durable learnings, launched from the Insights view) — and
+their prompt bodies ship inside the app source (`main/src/orchestrator/workflows/`). There is **no
 runtime dependency on the SoloFlow plugin cache** (`~/.claude/plugins/cache/soloflow/...`). The
 app spawns Claude Code in an isolated git worktree per run, streams and parses its structured
 output, and concentrates everything that needs human attention — tool-use approvals, agent
