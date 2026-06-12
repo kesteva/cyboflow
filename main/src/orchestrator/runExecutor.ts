@@ -22,6 +22,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
+import { rollupRunUsage } from './runUsageRollup';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -938,6 +939,34 @@ export class RunExecutor {
     // through TaskChangeRouter. Fail-soft: a task-side error is logged, never
     // escalated — task overlays must never crash the run lifecycle.
     await this.deriveTaskStageForPhase(runId, phase);
+
+    // Insights Phase-2 (migration 025) — materialize the durable run_usage rollup
+    // at EVERY terminal seam: 'drained' (clean rest in awaiting_review), 'failed',
+    // and 'canceled'. Placed LAST in onLifecycleTransition so it runs after the
+    // status transition + task derivation; by this point the run's raw_events log
+    // is fully persisted for this seam (the SDK iterator drained for 'drained';
+    // whatever landed is persisted for 'failed'/'canceled'). A single placement
+    // here also covers the interactive substrate's per-turn re-drain and resumed
+    // runs re-rolling up — INSERT OR REPLACE makes each re-materialization
+    // idempotent. Fail-soft inside rollupRunUsage: a rollup error is logged and
+    // swallowed there, so it can never break this transition.
+    this.materializeRunUsage(runId, phase);
+  }
+
+  /**
+   * Terminal-seam dispatch to the run_usage rollup writer (migration 025).
+   *
+   * Skips non-terminal phases (pre_spawn / post_spawn / sdk_initialized) and the
+   * case where no `db` was injected (backward-compat with executor constructions
+   * that omit it). For 'drained' / 'failed' / 'canceled' it calls the fail-soft
+   * `rollupRunUsage`, threading the executor's logger (CLAUDE.md: never omit the
+   * optional logger). The rollup writer owns its own try/catch — this seam adds
+   * only the phase gate and the db presence check.
+   */
+  private materializeRunUsage(runId: string, phase: ExecutionPhase): void {
+    if (!this.db) return;
+    if (phase !== 'drained' && phase !== 'failed' && phase !== 'canceled') return;
+    rollupRunUsage(this.db, runId, this.logger);
   }
 
   /**
