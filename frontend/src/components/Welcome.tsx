@@ -44,7 +44,7 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="lg">
       {/* Header with gradient */}
-      <div className="bg-gradient-to-r from-interactive to-interactive-active p-6 text-on-interactive rounded-t-lg">
+      <div className="bg-interactive p-6 text-on-interactive rounded-t-lg">
         <div className="flex items-center justify-between">
           <div>
             <img src={cyboflowWordmark} alt="Cyboflow" className="h-9 w-auto mb-2" />
