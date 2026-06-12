@@ -13,7 +13,12 @@
  * Each column header carries a count badge. An item row shows a severity dot
  * (error → status-error, warning → status-warning, info/null → text-muted), the
  * finding title, a meta line ('<location path> · <sourceStep> · <workflowName>'
- * with the missing parts elided), and a right-aligned status chip. The chip text
+ * with the missing parts elided), and a right-aligned status chip. POST-MERGE rows
+ * append a lag annotation to that meta line — '<N>d after merge' ('<N>h' under 24h)
+ * computed from runEndedAt → createdAt when the run merged and both stamps are
+ * present (mirroring the mockup's '2d after merge'); a category-tagged post-merge
+ * finding with no run linkage shows the category text instead (no fabricated lag).
+ * The chip text
  * keys on status AND — for resolved items — the resolution prefix, parsed through
  * the shared {@link parseResolutionKind}: pending → OPEN, dismissed → DISMISSED,
  * and resolved → FIXED ('fixed:') / TRIAGED ('triaged:') / PROMOTED ('promoted:')
@@ -28,6 +33,7 @@ import { useMemo } from 'react';
 import { useInsightsStore } from '../../stores/insightsStore';
 import {
   classifyQualityFinding,
+  POST_MERGE_FINDING_CATEGORY,
   type QualityBucket,
   type QualityFinding,
 } from '../../../../shared/types/insights';
@@ -109,9 +115,66 @@ function metaParts(f: QualityFinding): string[] {
   return parts;
 }
 
+/** Parse an ISO timestamp to ms, or null when absent/unparseable (NaN-guard). */
+function isoToMs(iso: string | null): number | null {
+  if (iso === null) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * The POST-MERGE meta annotation, mirroring the mockup's "2d after merge".
+ *
+ * Computes the merge-to-discovery lag (`runEndedAt` → `createdAt`) ONLY when the
+ * finding lands in post_merge via the TIME rule — i.e. the run merged and both
+ * stamps are present + valid + ordered (createdAt after the merge). Sub-24h lags
+ * read '<N>h after merge'; ≥24h read '<N>d after merge' (matching the formatAge
+ * bucketing, floored). Invalid/missing dates and the not-actually-after case
+ * return null so the meta line renders nothing rather than NaN.
+ *
+ * For a category-tagged post-merge finding WITHOUT usable run linkage, we have no
+ * merge instant to subtract from, so this returns null and the caller falls back
+ * to the category chip text — no lag is fabricated.
+ */
+function postMergeLagAnnotation(f: QualityFinding): string | null {
+  if (f.runOutcome !== 'merged') return null;
+  const mergedMs = isoToMs(f.runEndedAt);
+  const discoveredMs = isoToMs(f.createdAt);
+  if (mergedMs === null || discoveredMs === null) return null;
+
+  const lagMs = discoveredMs - mergedMs;
+  if (lagMs <= 0) return null; // discovered at/before the merge — not a post-merge lag.
+
+  const lagHours = Math.floor(lagMs / (1000 * 60 * 60));
+  if (lagHours < 24) return `${lagHours}h after merge`;
+  return `${Math.floor(lagHours / 24)}d after merge`;
+}
+
+/**
+ * Extra meta annotation for a finding in the POST-MERGE column. The merge-lag
+ * label wins when the time rule produced it; otherwise a category-tagged
+ * post-merge finding (no run linkage) shows the category text so the column
+ * still explains why the item sits here. Findings in other buckets get null.
+ */
+function postMergeMeta(f: QualityFinding, bucket: QualityBucket): string | null {
+  if (bucket !== 'post_merge') return null;
+  const lag = postMergeLagAnnotation(f);
+  if (lag !== null) return lag;
+  if (f.category === POST_MERGE_FINDING_CATEGORY) return f.category;
+  return null;
+}
+
 /** One finding row inside a column. */
-function FindingRow({ finding }: { finding: QualityFinding }): React.JSX.Element {
+function FindingRow({
+  finding,
+  bucket,
+}: {
+  finding: QualityFinding;
+  bucket: QualityBucket;
+}): React.JSX.Element {
   const meta = metaParts(finding);
+  const postMerge = postMergeMeta(finding, bucket);
+  if (postMerge !== null) meta.push(postMerge);
   return (
     <div
       className="flex items-start gap-2 border-b border-border-tertiary py-2 last:border-b-0"
@@ -167,7 +230,7 @@ function QualityColumn({
             Nothing here.
           </p>
         ) : (
-          findings.map((f) => <FindingRow key={f.id} finding={f} />)
+          findings.map((f) => <FindingRow key={f.id} finding={f} bucket={bucket} />)
         )}
       </div>
     </div>

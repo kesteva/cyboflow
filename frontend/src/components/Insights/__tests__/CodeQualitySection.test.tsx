@@ -208,6 +208,126 @@ describe('CodeQualitySection bucketing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// POST-MERGE lag annotation (Q3) — the "<N>d after merge" meta tail.
+// ---------------------------------------------------------------------------
+
+describe('CodeQualitySection post-merge lag annotation', () => {
+  /** Render a single post-merge finding and return its rendered meta-line text. */
+  function metaTextFor(over: Partial<QualityFinding>): string | null {
+    cleanup();
+    mockQualityFindings = [finding({ id: 'qf-pm', sourceStep: 'executor', ...over })];
+    render(<CodeQualitySection />);
+    const row = screen.getByTestId('quality-finding-row');
+    // The meta line is the second div inside the title/meta column (the truncate
+    // [10px] node); read it via its text content if present.
+    return row.querySelector('.text-\\[10px\\]')?.textContent ?? null;
+  }
+
+  it("appends '<N>d after merge' for a multi-day merge→discovery lag", () => {
+    const meta = metaTextFor({
+      runOutcome: 'merged',
+      runEndedAt: '2026-06-08T00:00:00.000Z',
+      createdAt: '2026-06-10T00:00:00.000Z', // 2 days later
+    });
+    expect(meta).toContain('2d after merge');
+  });
+
+  it("appends '<N>h after merge' for a sub-day (under 24h) lag", () => {
+    const meta = metaTextFor({
+      runOutcome: 'merged',
+      runEndedAt: '2026-06-10T00:00:00.000Z',
+      createdAt: '2026-06-10T05:00:00.000Z', // 5 hours later
+    });
+    expect(meta).toContain('5h after merge');
+    // Sub-day lags use the hour label, never the day label.
+    expect(meta).not.toContain('d after merge');
+  });
+
+  it('floors the lag to whole days (≥24h) and whole hours (<24h)', () => {
+    // 50h → 2d (floor of 2.08).
+    expect(
+      metaTextFor({
+        runOutcome: 'merged',
+        runEndedAt: '2026-06-08T00:00:00.000Z',
+        createdAt: '2026-06-10T02:00:00.000Z',
+      }),
+    ).toContain('2d after merge');
+    // 90m → 1h (floor of 1.5).
+    expect(
+      metaTextFor({
+        runOutcome: 'merged',
+        runEndedAt: '2026-06-10T00:00:00.000Z',
+        createdAt: '2026-06-10T01:30:00.000Z',
+      }),
+    ).toContain('1h after merge');
+  });
+
+  it('shows the category chip text (no fabricated lag) for a category-only post-merge finding', () => {
+    // Categorized post-merge but no merged-run linkage / time stamps → render the
+    // category text, never an invented lag.
+    const meta = metaTextFor({
+      category: 'post-merge-bug',
+      runOutcome: null,
+      runEndedAt: null,
+      sourceStep: 'executor',
+    });
+    expect(meta).toContain('post-merge-bug');
+    expect(meta).not.toContain('after merge');
+  });
+
+  it('renders no lag (and no NaN) when the merge stamp is an invalid date', () => {
+    const meta = metaTextFor({
+      runOutcome: 'merged',
+      runEndedAt: 'not-a-date',
+      createdAt: '2026-06-10T00:00:00.000Z',
+      category: 'post-merge-bug', // still post_merge via category → category fallback shown
+    });
+    expect(meta).not.toContain('NaN');
+    expect(meta).not.toContain('after merge');
+    expect(meta).toContain('post-merge-bug');
+  });
+
+  it('renders no lag when discovery precedes the merge (createdAt ≤ runEndedAt)', () => {
+    // Such a finding is not post_merge by the time rule; with no category it lands
+    // in_workflow and carries no lag annotation at all.
+    const meta = metaTextFor({
+      runOutcome: 'merged',
+      runEndedAt: '2026-06-10T00:00:00.000Z',
+      createdAt: '2026-06-09T00:00:00.000Z',
+    });
+    expect(meta).not.toContain('after merge');
+    expect(meta).not.toContain('NaN');
+  });
+
+  it('does NOT annotate findings in the in-workflow or verification buckets', () => {
+    cleanup();
+    mockQualityFindings = [
+      // in_workflow — merged stamps present but createdAt is BEFORE runEndedAt, so
+      // it never lands in post_merge; the annotation is post_merge-only regardless.
+      finding({
+        id: 'qf-inflow',
+        title: 'In-flow',
+        sourceStep: 'executor',
+        runOutcome: 'merged',
+        runEndedAt: '2026-06-10T00:00:00.000Z',
+        createdAt: '2026-06-09T00:00:00.000Z',
+      }),
+      // verification — verify step; no post-merge annotation even if dates exist.
+      finding({
+        id: 'qf-verify',
+        title: 'At verify',
+        sourceStep: 'verify-step',
+      }),
+    ];
+    render(<CodeQualitySection />);
+    const inCol = screen.getByTestId('quality-column-in_workflow');
+    const verifyCol = screen.getByTestId('quality-column-verification');
+    expect(within(inCol).queryByText(/after merge/)).toBeNull();
+    expect(within(verifyCol).queryByText(/after merge/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // parseResolutionKind matrix — the shared classifier the chip mapping keys on.
 // ---------------------------------------------------------------------------
 
