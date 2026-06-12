@@ -42,6 +42,16 @@ interface NavigationState {
    * one closes the other so the center never tries to render both.
    */
   backlogOpen: boolean;
+  /**
+   * Whether the full-width Insights pane is the active center surface (App swaps
+   * it in over the home surface — third sibling alongside `humanReviewOpen` /
+   * `backlogOpen`). Lives here so the rail navigation handlers can dismiss it on
+   * any nav away. Mutually exclusive with BOTH overlays — opening insights closes
+   * human review + the backlog, and opening either of those (or any project /
+   * session nav) closes insights, so the center only ever hosts one full-width
+   * pane at a time.
+   */
+  insightsOpen: boolean;
 
   // Actions
   goHome: () => void;
@@ -57,6 +67,9 @@ interface NavigationState {
   openBacklog: () => void;
   closeBacklog: () => void;
   toggleBacklog: () => void;
+  openInsights: () => void;
+  closeInsights: () => void;
+  toggleInsights: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -66,13 +79,16 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   activeProjectId: null,
   humanReviewOpen: false,
   backlogOpen: false,
+  insightsOpen: false,
 
   // Center-surface state machine. goHome returns to the rail-overlay surface
-  // (clearing any wizard opts + both overlays); goToWizard swaps in the
+  // (clearing any wizard opts + all three overlays); goToWizard swaps in the
   // new-flow launcher; goToSession is called by the run/session OPEN handlers.
-  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false }),
-  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false }),
-  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false }),
+  // Each transition also clears `insightsOpen` so navigating away always tears
+  // the Insights pane down (mirrors the human-review / backlog clears).
+  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false }),
+  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false }),
+  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false }),
 
   setActiveView: (view) => set({ activeView: view }),
 
@@ -86,29 +102,38 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     activeView: 'project',
     activeProjectId: projectId,
     humanReviewOpen: false,
-    backlogOpen: false
+    backlogOpen: false,
+    insightsOpen: false
   }),
 
-  // Navigating to sessions likewise dismisses both full-width center panes.
+  // Navigating to sessions likewise dismisses all three full-width center panes.
   navigateToSessions: () => set({
     view: 'home',
     activeView: 'sessions',
     activeProjectId: null,
     humanReviewOpen: false,
-    backlogOpen: false
+    backlogOpen: false,
+    insightsOpen: false
   }),
 
-  // Opening human review closes the backlog (the center hosts one full-width
-  // pane at a time) and forces the home view — the overlays only ever render
-  // over the home surface. Closing/toggling leave the backlog flag untouched.
-  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false }),
+  // Opening human review closes the backlog AND insights (the center hosts one
+  // full-width pane at a time) and forces the home view — the overlays only ever
+  // render over the home surface. Closing/toggling leave the sibling flags
+  // untouched (toggle still clears them on the open transition).
+  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false }),
   closeHumanReview: () => set({ humanReviewOpen: false }),
-  toggleHumanReview: () => set((s) => ({ view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false })),
+  toggleHumanReview: () => set((s) => ({ view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false })),
 
   // Symmetric with the human-review actions — opening/toggling the backlog
-  // closes human review and forces home so the center never tries to render
-  // both panes.
-  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false }),
+  // closes human review AND insights and forces home so the center never tries
+  // to render two panes.
+  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false }),
   closeBacklog: () => set({ backlogOpen: false }),
-  toggleBacklog: () => set((s) => ({ view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false })),
+  toggleBacklog: () => set((s) => ({ view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false })),
+
+  // Third sibling — opening/toggling insights closes BOTH other overlays and
+  // forces home, so the mutual-exclusion invariant holds in every direction.
+  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false }),
+  closeInsights: () => set({ insightsOpen: false }),
+  toggleInsights: () => set((s) => ({ view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false })),
 }));

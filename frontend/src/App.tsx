@@ -25,10 +25,12 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import LandingHome from './components/landing/LandingHome';
 import SessionStartWizard from './components/cyboflow/wizard/SessionStartWizard';
 import BacklogPane from './components/BacklogPane';
+import { InsightsView } from './components/Insights/InsightsView';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
+import { useReviewItemsSlice } from './stores/reviewItemsSlice';
 import { useBacklogStore } from './stores/backlogStore';
 import { useActiveRunsStore } from './stores/activeRunsStore';
 import { useLandingStore } from './stores/landingStore';
@@ -58,11 +60,23 @@ function App() {
   const toggleHumanReview = useNavigationStore((s) => s.toggleHumanReview);
   const showBacklog = useNavigationStore((s) => s.backlogOpen);
   const toggleBacklog = useNavigationStore((s) => s.toggleBacklog);
+  const showInsights = useNavigationStore((s) => s.insightsOpen);
+  const toggleInsights = useNavigationStore((s) => s.toggleInsights);
   const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
   // Non-done, non-archived task count drives the backlog rail badge (mirrors the
   // review count). Cross-project by design — the board is the overall view now.
   const backlogCount = useBacklogStore(
     (s) => s.tasks.filter((t) => !t.isDone && t.archived_at === null).length,
+  );
+  // Pending findings drive the Insights rail badge — derived from the SAME
+  // source the review-queue findings partition uses (useReviewItemsSlice.items
+  // filtered to kind='finding' + status='pending'; see ReviewQueueView), NOT the
+  // insights store, so the badge stays decoupled from the Insights view's own
+  // fetch lifecycle. The slice is project-scoped: it carries findings only for
+  // the project ReviewQueueView last wired, so this badge reflects the active
+  // project's findings (0 until a project's review inbox has been opened).
+  const insightsCount = useReviewItemsSlice(
+    (s) => s.items.filter((it) => it.kind === 'finding' && it.status === 'pending').length,
   );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
@@ -303,16 +317,23 @@ function App() {
             backlogCount={backlogCount}
             backlogActive={showBacklog}
             onToggleBacklog={toggleBacklog}
+            insightsCount={insightsCount}
+            insightsActive={showInsights}
+            onToggleInsights={toggleInsights}
           />
           {/* Center-surface state machine, keyed off navigationStore.view:
                 • 'session' → CyboflowRoot (the active run/session workspace, the
                   only mount point for the run surface; legacy SessionView retired
                   in TASK-690).
                 • 'wizard'  → SessionStartWizard (the new-flow launcher).
-                • 'home'    → the rail-driven overlays: BacklogPane when the
-                  backlog rail item is active, else LandingHome (the cross-project
-                  home). focusQueue scrolls LandingHome to its review queue when
-                  the user arrived from the human-review rail affordance. */}
+                • 'home'    → the rail-driven overlays, checked in priority order:
+                  InsightsView when the insights rail item is active, else
+                  BacklogPane when the backlog rail item is active, else
+                  LandingHome (the cross-project home). The navigationStore
+                  mutual-exclusion invariant guarantees at most one overlay flag
+                  is set, so the order is just a tiebreaker. focusQueue scrolls
+                  LandingHome to its review queue when the user arrived from the
+                  human-review rail affordance. */}
           <div className="flex flex-col flex-1 overflow-hidden">
             {view === 'session' ? (
               <CyboflowRoot projectId={activeProjectId} />
@@ -326,6 +347,17 @@ function App() {
                 </div>
               )}>
                 <SessionStartWizard />
+              </ErrorBoundary>
+            ) : showInsights ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Insights error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <InsightsView />
               </ErrorBoundary>
             ) : showBacklog ? (
               <ErrorBoundary fallback={(error) => (

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Cog, Kanban } from 'lucide-react';
+import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Cog, Kanban, Activity } from 'lucide-react';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
@@ -29,6 +29,16 @@ interface SidebarProps {
   backlogActive?: boolean;
   /** Toggle the task-backlog center pane. */
   onToggleBacklog?: () => void;
+  /**
+   * Count of pending findings (drives the Insights rail badge). Optional with a
+   * safe default so render sites predating the Insights pane keep compiling;
+   * App.tsx always supplies it.
+   */
+  insightsCount?: number;
+  /** Whether the Insights pane is the active center view. */
+  insightsActive?: boolean;
+  /** Toggle the Insights center pane. */
+  onToggleInsights?: () => void;
 }
 
 export function Sidebar({
@@ -43,6 +53,9 @@ export function Sidebar({
   backlogCount = 0,
   backlogActive = false,
   onToggleBacklog,
+  insightsCount = 0,
+  insightsActive = false,
+  onToggleInsights,
 }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
@@ -199,6 +212,37 @@ export function Sidebar({
             }`}
           >
             {backlogCount}
+          </span>
+        </button>
+
+        {/* Insights — primary rail item directly below Task backlog; opens the
+            full-width Insights pane (mirrors the Task-backlog markup). The badge
+            counts pending findings. */}
+        <button
+          type="button"
+          onClick={() => onToggleInsights?.()}
+          aria-pressed={insightsActive}
+          data-testid="insights-rail-item"
+          className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
+            insightsActive
+              ? 'border-border-emphasized bg-surface-primary'
+              : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
+          }`}
+          style={insightsActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+        >
+          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+            <Activity className="h-3 w-3" strokeWidth={2} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Insights</span>
+            <span className="block text-[10px] text-text-secondary">Findings · stats · quality</span>
+          </span>
+          <span
+            className={`min-w-[20px] flex-shrink-0 rounded-[9px] px-1.5 py-px text-center text-[10px] font-bold text-text-on-interactive ${
+              insightsCount > 0 ? 'bg-interactive' : 'bg-text-tertiary'
+            }`}
+          >
+            {insightsCount}
           </span>
         </button>
 

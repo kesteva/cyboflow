@@ -10,6 +10,11 @@
  *      rail while the human-review pane was open left the center stuck on the
  *      review queue (humanReviewOpen lifted into this store so the rail handlers
  *      in DraggableProjectTreeView can dismiss it via closeHumanReview()).
+ *   3. The three-way mutual-exclusion invariant between the full-width center
+ *      overlays (humanReviewOpen / backlogOpen / insightsOpen): opening any one
+ *      closes the other two, and every nav action (goHome/goToWizard/goToSession/
+ *      navigateToProject/navigateToSessions) clears all three so the center only
+ *      ever hosts one overlay at a time.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useNavigationStore } from '../navigationStore';
@@ -22,6 +27,7 @@ function reset(): void {
     activeProjectId: null,
     humanReviewOpen: false,
     backlogOpen: false,
+    insightsOpen: false,
   });
 }
 
@@ -155,5 +161,108 @@ describe('navigationStore — humanReviewOpen', () => {
     expect(state.humanReviewOpen).toBe(false);
     expect(state.activeProjectId).toBe(42);
     expect(state.activeView).toBe('project');
+  });
+});
+
+describe('navigationStore — insightsOpen mutual exclusion', () => {
+  beforeEach(reset);
+
+  it('defaults to closed', () => {
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('openInsights / closeInsights set the flag and force home', () => {
+    useNavigationStore.getState().goToSession();
+    useNavigationStore.getState().openInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(true);
+    expect(useNavigationStore.getState().view).toBe('home');
+
+    useNavigationStore.getState().closeInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('toggleInsights flips the flag and forces home', () => {
+    useNavigationStore.getState().goToWizard();
+    useNavigationStore.getState().toggleInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(true);
+    expect(useNavigationStore.getState().view).toBe('home');
+    useNavigationStore.getState().toggleInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('opening insights closes human review AND the backlog', () => {
+    useNavigationStore.getState().openHumanReview();
+    useNavigationStore.setState({ backlogOpen: true });
+    useNavigationStore.getState().openInsights();
+    const s = useNavigationStore.getState();
+    expect(s.insightsOpen).toBe(true);
+    expect(s.humanReviewOpen).toBe(false);
+    expect(s.backlogOpen).toBe(false);
+  });
+
+  it('opening human review closes insights (reverse exclusion)', () => {
+    useNavigationStore.getState().openInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(true);
+    useNavigationStore.getState().openHumanReview();
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('opening the backlog closes insights (reverse exclusion)', () => {
+    useNavigationStore.getState().openInsights();
+    expect(useNavigationStore.getState().insightsOpen).toBe(true);
+    useNavigationStore.getState().openBacklog();
+    expect(useNavigationStore.getState().backlogOpen).toBe(true);
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('toggling either sibling open while insights is up clears insights', () => {
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().toggleHumanReview();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+
+    reset();
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().toggleBacklog();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('goHome / goToWizard / goToSession all clear insights', () => {
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().goHome();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().goToWizard();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().goToSession();
+    expect(useNavigationStore.getState().insightsOpen).toBe(false);
+  });
+
+  it('navigateToProject / navigateToSessions clear insights (rail nav contract)', () => {
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().navigateToProject(11);
+    let s = useNavigationStore.getState();
+    expect(s.insightsOpen).toBe(false);
+    expect(s.activeProjectId).toBe(11);
+    expect(s.activeView).toBe('project');
+
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().navigateToSessions();
+    s = useNavigationStore.getState();
+    expect(s.insightsOpen).toBe(false);
+    expect(s.activeView).toBe('sessions');
+  });
+
+  it('closeInsights leaves project navigation state untouched (rail-click contract)', () => {
+    useNavigationStore.getState().navigateToProject(42);
+    useNavigationStore.getState().openInsights();
+    useNavigationStore.getState().closeInsights();
+    const s = useNavigationStore.getState();
+    expect(s.insightsOpen).toBe(false);
+    expect(s.activeProjectId).toBe(42);
+    expect(s.activeView).toBe('project');
   });
 });
