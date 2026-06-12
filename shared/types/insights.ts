@@ -75,8 +75,32 @@ export interface WorkflowUsageStats {
   /** Runs whose rollup had assistantMessageCount > 0. */
   runsWithUsage: number;
   avgTotalTokens: number | null;
+  /** Sum of totalTokens (input + output, cache excluded) across runsWithUsage;
+   *  null when no run has usage. Backs the by-flow token bars. */
+  totalTokens: number | null;
   totalCostUsd: number | null;
   avgCostUsd: number | null;
+}
+
+/**
+ * One day x model token bucket for the 30-day usage chart at the top of the
+ * Statistics section. Buckets come from the raw_events assistant-message scan:
+ * `day` is the UTC date slice of raw_events.created_at, `model` is the SDK
+ * assistant message's `message.model` ('unknown' when absent). Token fields
+ * follow the RunUsageRollup convention — totalTokens = input + output, cache
+ * counted separately and excluded from the total. Days with no usage emit no
+ * bucket (the chart component fills the axis).
+ */
+export interface DailyModelUsagePoint {
+  /** UTC day, 'YYYY-MM-DD'. */
+  day: string;
+  /** Model id as reported by the assistant message, or 'unknown'. */
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  /** inputTokens + outputTokens (cache excluded). */
+  totalTokens: number;
+  assistantMessageCount: number;
 }
 
 /** Tokens attributed to one workflow step across recent runs (mockup S5). */
