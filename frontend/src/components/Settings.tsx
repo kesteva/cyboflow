@@ -33,6 +33,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
   const [devMode, setDevMode] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
+  // demoMode is read once at app startup, so the saved value only takes effect
+  // after a relaunch — track the loaded value to detect a toggle on save.
+  const [initialDemoMode, setInitialDemoMode] = useState(false);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
@@ -66,6 +70,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       setDevMode(data.devMode || false);
+      setDemoMode(data.demoMode || false);
+      setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       
@@ -101,6 +107,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         systemPromptAppend: globalSystemPrompt,
         claudeExecutablePath,
         devMode,
+        demoMode,
         enableCyboflowFooter,
         defaultAgentPermissionMode,
         additionalPaths: parsedPaths,
@@ -119,6 +126,19 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
       // Also refresh the global config store
       await refreshConfigStore();
+
+      // Demo mode is applied at boot — offer a relaunch when it was toggled.
+      if (demoMode !== initialDemoMode) {
+        const restartNow = window.confirm(
+          demoMode
+            ? 'Demo mode saved. Cyboflow needs to restart to enter the demo environment. Restart now?'
+            : 'Demo mode disabled. Cyboflow needs to restart to return to your real workspace. Restart now?'
+        );
+        if (restartNow) {
+          await window.electronAPI.relaunch();
+          return;
+        }
+      }
 
       onClose();
     } catch (err) {
@@ -269,6 +289,33 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 </div>
                 <p className="text-xs text-text-tertiary mt-2">
                   Applies to workflow runs on both CLI substrates. "Auto" uses Claude's native permission classifier; "Don't ask" skips all permission prompts.
+                </p>
+              </SettingsSection>
+            </CollapsibleCard>
+
+            {/* Demo Mode */}
+            <CollapsibleCard
+              title="Demo Mode"
+              subtitle="Tour Cyboflow with a sandbox project and scripted agents"
+              icon={<Eye className="w-5 h-5" />}
+              defaultExpanded={false}
+              variant="subtle"
+            >
+              <SettingsSection
+                title="Demo Mode"
+                description="Explore every flow without touching your real projects"
+                icon={<Eye className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Enable demo mode"
+                  checked={demoMode}
+                  onChange={(e) => setDemoMode(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1">
+                  Restarts Cyboflow into a throwaway demo environment: add a sample project, run a
+                  scripted Planner and Sprint (with every kind of human approval), try a quick
+                  session, open a PR, and merge back to main. Your real projects, sessions, and
+                  settings are untouched; demo data is discarded when you turn this off.
                 </p>
               </SettingsSection>
             </CollapsibleCard>

@@ -21,6 +21,9 @@ export interface AppConfig {
     notifyOnComplete: boolean;
   };
   devMode?: boolean;
+  // Demo mode: throwaway demo database + sandbox repo with scripted agent runs.
+  // Read once at startup — toggling relaunches the app.
+  demoMode?: boolean;
   sessionCreationPreferences?: {
     sessionCount?: number;
     toolType?: 'claude' | 'none';

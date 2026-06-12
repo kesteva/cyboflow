@@ -29,6 +29,9 @@ export interface AppConfig {
   };
   // Dev mode for debugging
   devMode?: boolean;
+  // Demo mode: boots the app against a throwaway demo database + sandbox repo
+  // with scripted agent runs. Read ONCE at startup — toggling relaunches the app.
+  demoMode?: boolean;
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
   // Session creation preferences
@@ -73,6 +76,8 @@ export interface UpdateConfigRequest {
     notifyOnComplete: boolean;
   };
   devMode?: boolean;
+  // Demo mode (see AppConfig.demoMode) — applied on next launch.
+  demoMode?: boolean;
   additionalPaths?: string[];
   sessionCreationPreferences?: {
     sessionCount?: number;

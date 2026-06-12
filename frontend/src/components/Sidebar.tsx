@@ -6,6 +6,7 @@ import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Cog
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
+import { useConfigStore } from '../stores/configStore';
 
 interface SidebarProps {
   onHelpClick: () => void;
@@ -58,6 +59,7 @@ export function Sidebar({
   onToggleInsights,
 }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [version, setVersion] = useState<string>('');
   const [gitCommit, setGitCommit] = useState<string>('');
@@ -123,6 +125,15 @@ export function Sidebar({
           <div className="flex items-center space-x-2 min-w-0">
             <img src={cyboflowLogo} alt="Cyboflow" className="h-6 w-6 flex-shrink-0" />
             <h1 className="text-xl font-bold truncate">Cyboflow</h1>
+            {demoModeEnabled && (
+              <span
+                className="flex-shrink-0 rounded-[4px] border border-interactive px-1.5 py-px text-[10px] font-bold tracking-wide text-interactive"
+                title="Demo mode — sandbox project with scripted agents. Turn off in Settings."
+                data-testid="demo-mode-chip"
+              >
+                DEMO
+              </span>
+            )}
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
             <IconButton

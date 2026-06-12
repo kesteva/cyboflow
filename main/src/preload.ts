@@ -171,6 +171,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System utilities
   openExternal: (url: string): Promise<IPCResponse> => ipcRenderer.invoke('openExternal', url),
 
+  // Relaunch the app (demo-mode toggle applies on next boot)
+  relaunch: (): Promise<void> => ipcRenderer.invoke('app:relaunch'),
+
   // Session management
   sessions: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-all'),

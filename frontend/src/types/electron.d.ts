@@ -61,6 +61,9 @@ interface ElectronAPI {
   // System utilities
   openExternal: (url: string) => Promise<void>;
 
+  // Relaunch the app (demo-mode toggle applies on next boot)
+  relaunch: () => Promise<void>;
+
   // Session management
   sessions: {
     getAll: () => Promise<IPCResponse<Session[]>>;

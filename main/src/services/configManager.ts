@@ -136,6 +136,16 @@ export class ConfigManager extends EventEmitter {
     return this.config.verbose || false;
   }
 
+  /**
+   * Demo mode (read ONCE at startup by initializeServices / CliManagerFactory).
+   * When true the app boots against the throwaway demo database + sandbox repo
+   * and all CLI managers are replaced by the scripted DemoCliManager. Toggling
+   * the flag at runtime has no effect until the app relaunches.
+   */
+  isDemoMode(): boolean {
+    return this.config.demoMode || false;
+  }
+
   getDatabasePath(): string {
     return path.join(this.configDir, 'sessions.db');
   }

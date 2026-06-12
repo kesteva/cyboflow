@@ -25,6 +25,15 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
   });
 
 
+  // Relaunch the app (used by the Settings demo-mode toggle — demoMode is read
+  // once at startup, so flipping it requires a fresh boot). exit(0) skips the
+  // graceful before-quit drain on purpose: this is a user-requested restart,
+  // mirroring how Electron docs pair relaunch() with exit().
+  ipcMain.handle('app:relaunch', () => {
+    app.relaunch();
+    app.exit(0);
+  });
+
   // App opens tracking
   ipcMain.handle('app:record-open', (_event, welcomeHidden: boolean) => {
     try {
