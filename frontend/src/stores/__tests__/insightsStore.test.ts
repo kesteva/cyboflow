@@ -25,6 +25,7 @@ import type {
   StepTokenBucket,
   UsageTrendPoint,
   WorkflowRevisionStats,
+  DailyModelUsagePoint,
 } from '../../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ let runStatusOnData: Array<(event: unknown) => void>;
 
 let mockWorkflowStatsQuery: ReturnType<typeof vi.fn>;
 let mockWorkflowUsageQuery: ReturnType<typeof vi.fn>;
+let mockDailyUsageQuery: ReturnType<typeof vi.fn>;
 let mockReviewSummaryQuery: ReturnType<typeof vi.fn>;
 let mockQualityFindingsQuery: ReturnType<typeof vi.fn>;
 let mockStepTokensQuery: ReturnType<typeof vi.fn>;
@@ -57,6 +59,7 @@ vi.mock('../../trpc/client', () => ({
       insights: {
         workflowStats: { get query() { return mockWorkflowStatsQuery; } },
         workflowUsage: { get query() { return mockWorkflowUsageQuery; } },
+        dailyUsage: { get query() { return mockDailyUsageQuery; } },
         reviewSummary: { get query() { return mockReviewSummaryQuery; } },
         qualityFindings: { get query() { return mockQualityFindingsQuery; } },
         stepTokens: { get query() { return mockStepTokensQuery; } },
@@ -113,6 +116,7 @@ function makeUsage(workflowId: string): WorkflowUsageStats {
     workflowName: workflowId,
     runsWithUsage: 1,
     avgTotalTokens: 100,
+    totalTokens: 100,
     totalCostUsd: 0.1,
     avgCostUsd: 0.1,
   };
@@ -174,6 +178,16 @@ function makeReviewItem(
   };
 }
 
+const DAILY_USAGE: DailyModelUsagePoint[] = [
+  {
+    day: '2026-06-10',
+    model: 'claude-opus',
+    inputTokens: 400,
+    outputTokens: 100,
+    totalTokens: 500,
+    assistantMessageCount: 3,
+  },
+];
 const STEP_BUCKET: StepTokenBucket[] = [
   { stepId: 'execute', totalTokens: 500, assistantMessageCount: 4 },
 ];
@@ -212,6 +226,7 @@ beforeEach(() => {
     makeStats({ workflowId: 'wf-sprint', lastRunAt: '2026-06-10T00:00:00.000Z' }),
   ]);
   mockWorkflowUsageQuery = vi.fn().mockResolvedValue([makeUsage('wf-sprint')]);
+  mockDailyUsageQuery = vi.fn().mockResolvedValue(DAILY_USAGE);
   mockReviewSummaryQuery = vi.fn().mockResolvedValue(makeSummary());
   mockQualityFindingsQuery = vi.fn().mockResolvedValue([makeFinding('q1')]);
   mockStepTokensQuery = vi.fn().mockResolvedValue(STEP_BUCKET);
@@ -304,6 +319,9 @@ describe('init()', () => {
     expect(s.error).toBeNull();
     expect(s.workflowStats).toHaveLength(1);
     expect(s.workflowUsage).toHaveLength(1);
+    // dailyUsage fetched in the PHASE-1 fan-out, projectId=null (cross-project).
+    expect(s.dailyUsage).toEqual(DAILY_USAGE);
+    expect(mockDailyUsageQuery).toHaveBeenCalledWith({ projectId: null });
     expect(s.reviewSummary).toEqual(makeSummary());
     expect(s.qualityFindings.map((f) => f.id)).toEqual(['q1']);
     // pendingFindings fanned out via reviewItems.list (kept finding/pending).
@@ -442,6 +460,91 @@ describe('setProjectFilter()', () => {
       status: 'pending',
       kind: 'finding',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureWorkflowDetail() — lazy per-workflow drill-down for out-of-cap workflows
+// ---------------------------------------------------------------------------
+
+describe('ensureWorkflowDetail()', () => {
+  it('fetches and merges the three slices for a workflow missing from the maps', async () => {
+    const { useInsightsStore } = await loadStore();
+    await useInsightsStore.getState().init();
+    // The fan-out only populated 'wf-sprint'; 'wf-other' is out of the cap.
+    expect(useInsightsStore.getState().stepTokens['wf-other']).toBeUndefined();
+
+    mockStepTokensQuery.mockClear();
+    mockUsageTrendQuery.mockClear();
+    mockRevisionHistoryQuery.mockClear();
+
+    await useInsightsStore.getState().ensureWorkflowDetail('wf-other');
+
+    const s = useInsightsStore.getState();
+    // The missing workflow's three slices are now present.
+    expect(s.stepTokens['wf-other']).toEqual(STEP_BUCKET);
+    expect(s.usageTrends['wf-other']).toEqual(TREND_POINTS);
+    expect(s.revisionHistory['wf-other']).toEqual(REVISION_HISTORY);
+    // usageTrend carried the current (null) project filter, like the fan-out.
+    expect(mockStepTokensQuery).toHaveBeenCalledWith({ workflowId: 'wf-other' });
+    expect(mockUsageTrendQuery).toHaveBeenCalledWith({
+      workflowId: 'wf-other',
+      projectId: null,
+    });
+    expect(mockRevisionHistoryQuery).toHaveBeenCalledWith({ workflowId: 'wf-other' });
+    // The fan-out's existing workflow is untouched.
+    expect(s.stepTokens['wf-sprint']).toEqual(STEP_BUCKET);
+  });
+
+  it('is a no-op when all three slices already carry the workflow id', async () => {
+    const { useInsightsStore } = await loadStore();
+    await useInsightsStore.getState().init();
+    // 'wf-sprint' was populated by the fan-out — all three maps have it.
+    mockStepTokensQuery.mockClear();
+    mockUsageTrendQuery.mockClear();
+    mockRevisionHistoryQuery.mockClear();
+
+    await useInsightsStore.getState().ensureWorkflowDetail('wf-sprint');
+
+    // No re-fetch — the slices are already present.
+    expect(mockStepTokensQuery).not.toHaveBeenCalled();
+    expect(mockUsageTrendQuery).not.toHaveBeenCalled();
+    expect(mockRevisionHistoryQuery).not.toHaveBeenCalled();
+  });
+
+  it('dedupes concurrent calls for the same workflow id', async () => {
+    const { useInsightsStore } = await loadStore();
+    await useInsightsStore.getState().init();
+    mockStepTokensQuery.mockClear();
+
+    // Fire two concurrent ensures for the same out-of-cap id before either settles.
+    await Promise.all([
+      useInsightsStore.getState().ensureWorkflowDetail('wf-other'),
+      useInsightsStore.getState().ensureWorkflowDetail('wf-other'),
+    ]);
+
+    // The second call short-circuited on the in-flight set → one fetch only.
+    expect(mockStepTokensQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the other two slices when one per-workflow query fails (warned, not surfaced)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { useInsightsStore } = await loadStore();
+    await useInsightsStore.getState().init();
+    const errorBefore = useInsightsStore.getState().error;
+
+    mockUsageTrendQuery.mockRejectedValueOnce(new Error('trend boom'));
+    await useInsightsStore.getState().ensureWorkflowDetail('wf-other');
+
+    const s = useInsightsStore.getState();
+    // stepTokens + revisionHistory still merged; usageTrend left absent.
+    expect(s.stepTokens['wf-other']).toEqual(STEP_BUCKET);
+    expect(s.revisionHistory['wf-other']).toEqual(REVISION_HISTORY);
+    expect(s.usageTrends['wf-other']).toBeUndefined();
+    // The failure is console.warn'd, NOT surfaced on the store's `error`.
+    expect(warnSpy).toHaveBeenCalled();
+    expect(s.error).toBe(errorBefore);
+    warnSpy.mockRestore();
   });
 });
 

@@ -19,8 +19,12 @@
  *   - selectRunUsageRollupsFromRawEvents: force-scan path IGNORES an existing
  *     run_usage row (the writer's re-materialization contract — never read back
  *     its own row), empty-id list, caller-order array, zero-seeding.
- *   - selectWorkflowUsageStats: runsWithUsage / avgTotalTokens / cost aggregates,
- *     run_usage hit path qualifies a run with no raw_events.
+ *   - selectWorkflowUsageStats: runsWithUsage / avgTotalTokens / totalTokens / cost
+ *     aggregates (totalTokens null when no run has usage), run_usage hit path
+ *     qualifies a run with no raw_events.
+ *   - selectDailyModelUsage: (day, model) grouping, project scoping, day-window
+ *     cutoff, cache exclusion from totalTokens, 'unknown' model fallback,
+ *     non-assistant events ignored, malformed payload_json skipped, sort order.
  *   - selectReviewItemSummary: status + pendingByKind, all-kinds-present default.
  *   - selectQualityFindings: category/locations/sourceStep parsing, LEFT JOIN
  *     null path (run deleted), severity/status narrowing, ordering.
@@ -49,6 +53,7 @@ import {
   selectStepTokenBuckets,
   selectUsageTrend,
   selectWorkflowRevisionStats,
+  selectDailyModelUsage,
 } from '../insightsQueries';
 import { computeSpecHash } from '../specHash';
 
@@ -322,6 +327,22 @@ function assistantPayload(usage: {
     };
   }
   return { type: 'assistant', message };
+}
+
+/**
+ * Assistant payload with a caller-chosen model (or NO model field when `model`
+ * is null, exercising the 'unknown' fallback). When `usage` is null the message
+ * carries no usage object, so the daily-model scan skips it.
+ */
+function assistantPayloadWithModel(
+  model: string | null,
+  usage: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number } | null,
+): Record<string, unknown> {
+  const base = assistantPayload(usage);
+  const message = base.message as Record<string, unknown>;
+  if (model === null) delete message.model;
+  else message.model = model;
+  return base;
 }
 
 /** Construct a result payload with cost/turns (and a usage block to prove it's ignored). */
@@ -736,6 +757,8 @@ describe('selectWorkflowUsageStats', () => {
     expect(stats.runsWithUsage).toBe(2);
     // avg over (150, 250) = 200.
     expect(stats.avgTotalTokens).toBe(200);
+    // raw SUM over (150, 250) = 400 — the unaveraged companion to avgTotalTokens.
+    expect(stats.totalTokens).toBe(400);
     // only r1 carried cost.
     expect(stats.totalCostUsd).toBeCloseTo(0.02, 5);
     expect(stats.avgCostUsd).toBeCloseTo(0.02, 5);
@@ -750,6 +773,9 @@ describe('selectWorkflowUsageStats', () => {
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
     expect(stats.runsWithUsage).toBe(0);
     expect(stats.avgTotalTokens).toBeNull();
+    // totalTokens is null (not 0) when no run carried usage — distinguishes
+    // "no data" from "a real zero" for the by-flow bars.
+    expect(stats.totalTokens).toBeNull();
     expect(stats.totalCostUsd).toBeNull();
     expect(stats.avgCostUsd).toBeNull();
   });
@@ -1321,5 +1347,183 @@ describe('selectWorkflowRevisionStats', () => {
     expect(out).toHaveLength(1);
     expect(out[0].specHash).toBe(computeSpecHash(specA));
     expect(out[0].workflowId).toBe('wf-a');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. selectDailyModelUsage
+// ---------------------------------------------------------------------------
+
+describe('selectDailyModelUsage', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  /** A datetime in the window, N days ago, at 10:00 — first 10 chars are the day. */
+  function daysAgoAt(n: number, hhmmss = '10:00:00'): { day: string; ts: string } {
+    const day = (
+      db.prepare(`SELECT date('now', ?) AS d`).get(`-${n} days`) as { d: string }
+    ).d;
+    return { day, ts: `${day} ${hhmmss}` };
+  }
+
+  it('returns [] on an empty DB', () => {
+    expect(selectDailyModelUsage(dbAdapter(db), null, 30)).toEqual([]);
+  });
+
+  it('groups by (day, model), sums tokens, and excludes cache from totalTokens', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const t0 = daysAgoAt(0);
+    const t1 = daysAgoAt(1);
+    // Same day + same model → one bucket summing two messages (cache excluded).
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus', { input: 100, output: 50, cacheRead: 10, cacheCreation: 5 }),
+      t0.ts,
+    );
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus', { input: 20, output: 5 }),
+      t0.ts,
+    );
+    // Same day, DIFFERENT model → its own bucket.
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-sonnet', { input: 7, output: 3 }),
+      t0.ts,
+    );
+    // Different (earlier) day, same model as the first → separate day bucket.
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus', { input: 1, output: 1 }),
+      t1.ts,
+    );
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    const byKey = new Map(points.map((p) => [`${p.day}|${p.model}`, p]));
+
+    const todayOpus = byKey.get(`${t0.day}|claude-opus`);
+    expect(todayOpus?.inputTokens).toBe(120); // 100 + 20
+    expect(todayOpus?.outputTokens).toBe(55); // 50 + 5
+    // cache (10/5) is EXCLUDED from the total.
+    expect(todayOpus?.totalTokens).toBe(175);
+    expect(todayOpus?.assistantMessageCount).toBe(2);
+
+    const todaySonnet = byKey.get(`${t0.day}|claude-sonnet`);
+    expect(todaySonnet?.totalTokens).toBe(10);
+    expect(todaySonnet?.assistantMessageCount).toBe(1);
+
+    const yesterdayOpus = byKey.get(`${t1.day}|claude-opus`);
+    expect(yesterdayOpus?.totalTokens).toBe(2);
+  });
+
+  it('sorts by day ASC then model ASC', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const t0 = daysAgoAt(0);
+    const t1 = daysAgoAt(1);
+    // Seed out of order; expect day-then-model ascending in the output.
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('zebra', { input: 1, output: 0 }), t0.ts);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('alpha', { input: 1, output: 0 }), t0.ts);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('mid', { input: 1, output: 0 }), t1.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points.map((p) => `${p.day}|${p.model}`)).toEqual([
+      `${t1.day}|mid`, // earlier day first
+      `${t0.day}|alpha`, // same day → model ASC
+      `${t0.day}|zebra`,
+    ]);
+  });
+
+  it("falls back to model 'unknown' when the assistant message carries no model", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel(null, { input: 9, output: 1 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toHaveLength(1);
+    expect(points[0].model).toBe('unknown');
+    expect(points[0].totalTokens).toBe(10);
+  });
+
+  it('scopes to a single project when projectId is non-null', () => {
+    seedWorkflow(db, { id: 'wf-a', projectId: 1 });
+    seedWorkflow(db, { id: 'wf-b', projectId: 2 });
+    seedRun(db, { id: 'ra', workflowId: 'wf-a', projectId: 1 });
+    seedRun(db, { id: 'rb', workflowId: 'wf-b', projectId: 2 });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'ra', 'assistant', assistantPayloadWithModel('m', { input: 10, output: 0 }), t0.ts);
+    seedEvent(db, 'rb', 'assistant', assistantPayloadWithModel('m', { input: 20, output: 0 }), t0.ts);
+
+    // Cross-project sees both runs (same day+model → one bucket of 30).
+    const all = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(all).toHaveLength(1);
+    expect(all[0].totalTokens).toBe(30);
+
+    // Project 2 only sees rb.
+    const onlyP2 = selectDailyModelUsage(dbAdapter(db), 2, 30);
+    expect(onlyP2).toHaveLength(1);
+    expect(onlyP2[0].totalTokens).toBe(20);
+  });
+
+  it('excludes events older than the day window and clamps days to [1, 365]', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const recent = daysAgoAt(2);
+    // ~200 days ago: visible with the clamped-from-9999 max (365) but not days=7.
+    const old = (
+      db.prepare(`SELECT datetime('now','-200 days') AS d`).get() as { d: string }
+    ).d;
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 5, output: 0 }), recent.ts);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 50, output: 0 }), old);
+
+    // days=7 → only the recent event.
+    const narrow = selectDailyModelUsage(dbAdapter(db), null, 7);
+    expect(narrow).toHaveLength(1);
+    expect(narrow[0].totalTokens).toBe(5);
+
+    // days=9999 clamps to 365 → the ~200-day-old event is now also in window.
+    const wide = selectDailyModelUsage(dbAdapter(db), null, 9999);
+    const total = wide.reduce((sum, p) => sum + p.totalTokens, 0);
+    expect(total).toBe(55);
+  });
+
+  it('ignores non-assistant events (result rows never count)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const t0 = daysAgoAt(0);
+    // A result event whose embedded usage block (99999/88888) MUST be ignored —
+    // the WHERE clause only scans assistant rows.
+    seedEvent(db, 'r1', 'result', resultPayload(0.01, 1), t0.ts);
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 4, output: 1 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toHaveLength(1);
+    expect(points[0].totalTokens).toBe(5); // not the result's 99999/88888
+  });
+
+  it('skips malformed payload_json and assistant rows with no usage object', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    const t0 = daysAgoAt(0);
+    seedEvent(db, 'r1', 'assistant', '{ not valid json', t0.ts); // malformed → skip
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', null), t0.ts); // no usage → skip
+    seedEvent(db, 'r1', 'assistant', assistantPayloadWithModel('m', { input: 6, output: 0 }), t0.ts);
+
+    const points = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(points).toHaveLength(1);
+    expect(points[0].totalTokens).toBe(6);
+    expect(points[0].assistantMessageCount).toBe(1);
   });
 });

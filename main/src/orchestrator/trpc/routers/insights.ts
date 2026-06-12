@@ -11,6 +11,7 @@
  *   - stepTokens       : query -> StepTokenBucket[]     (tokens attributed per workflow step)
  *   - usageTrend       : query -> UsageTrendPoint[]     (time-bucketed sparkline points)
  *   - revisionHistory  : query -> WorkflowRevisionStats[] (per-spec_hash run stats, newest-first)
+ *   - dailyUsage       : query -> DailyModelUsagePoint[] (per-(day, model) token buckets)
  *
  * Every procedure is a thin wrapper over a pure SELECT helper in
  * `../../insightsQueries` — this router owns ONLY zod input validation + the
@@ -42,6 +43,7 @@ import type {
   StepTokenBucket,
   UsageTrendPoint,
   WorkflowRevisionStats,
+  DailyModelUsagePoint,
 } from '../../../../../shared/types/insights';
 import {
   selectWorkflowRunStats,
@@ -52,6 +54,7 @@ import {
   selectStepTokenBuckets,
   selectUsageTrend,
   selectWorkflowRevisionStats,
+  selectDailyModelUsage,
 } from '../../insightsQueries';
 
 // ---------------------------------------------------------------------------
@@ -233,5 +236,24 @@ export const insightsRouter = router({
     .query(({ ctx, input }): WorkflowRevisionStats[] => {
       const db = requireDb(ctx.db, 'revisionHistory');
       return selectWorkflowRevisionStats(db, input.workflowId);
+    }),
+
+  /**
+   * Per-(day, model) token buckets for the usage chart at the top of the
+   * Statistics section, scanned over the last `days` days of `assistant`
+   * raw_events. `projectId` is the usual nullable cross-project filter (null
+   * aggregates every project); `days` caps the lookback window (1..365), omitted
+   * defaults to 30. The helper clamps `days` defensively as well.
+   */
+  dailyUsage: protectedProcedure
+    .input(
+      z.object({
+        projectId: projectIdSchema,
+        days: z.number().int().min(1).max(365).optional(),
+      }),
+    )
+    .query(({ ctx, input }): DailyModelUsagePoint[] => {
+      const db = requireDb(ctx.db, 'dailyUsage');
+      return selectDailyModelUsage(db, input.projectId, input.days ?? 30);
     }),
 });

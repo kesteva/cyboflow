@@ -13,6 +13,9 @@
  *
  *   - workflowStats   — per-workflow run-outcome statistics (WorkflowRunStats[]).
  *   - workflowUsage   — per-workflow token/cost aggregate (WorkflowUsageStats[]).
+ *   - dailyUsage      — per-(day, model) token buckets for the usage chart
+ *                       (DailyModelUsagePoint[]); fetched once per fan-out in
+ *                       PHASE 1 alongside the other top-level aggregates.
  *   - reviewSummary   — review-queue counters (ReviewItemSummary).
  *   - qualityFindings — kind='finding' review items flattened for the quality
  *                       columns (QualityFinding[]).
@@ -67,6 +70,7 @@ import type {
   ReviewItemSummary,
   QualityFinding,
   WorkflowRevisionStats,
+  DailyModelUsagePoint,
 } from '../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -126,6 +130,9 @@ export interface InsightsState {
 
   workflowStats: WorkflowRunStats[];
   workflowUsage: WorkflowUsageStats[];
+  /** Per-(day, model) token buckets for the usage chart (cross-project when the
+   *  filter is null). Fetched once per fan-out in PHASE 1. */
+  dailyUsage: DailyModelUsagePoint[];
   reviewSummary: ReviewItemSummary | null;
   qualityFindings: QualityFinding[];
   /** kind='finding', status='pending' review items. */
@@ -151,6 +158,18 @@ export interface InsightsState {
   refresh: () => Promise<void>;
   /** Set the project filter (null = ALL projects) and refresh. */
   setProjectFilter: (projectId: number | null) => Promise<void>;
+  /**
+   * Lazily fetch the per-workflow drill-down detail (stepTokens + usageTrend +
+   * revisionHistory) for ONE workflow that the PHASE-2 fan-out cap left out — the
+   * stats drill-down for a workflow outside the top-{@link PER_WORKFLOW_FANOUT_CAP}
+   * set. Returns immediately when all three maps already carry the key. Otherwise
+   * it fetches the same three per-workflow queries the fan-out uses (each caught
+   * independently — a failure is console.warn'd, not surfaced as `error`) and
+   * merges ONLY this workflowId's entries into the three maps, leaving every other
+   * key untouched. Concurrent calls for the same id dedupe via a closure-private
+   * in-flight set, so opening a drill-down does not double-fetch.
+   */
+  ensureWorkflowDetail: (workflowId: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +187,9 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
   // Monotonic fetch generation: a stale in-flight fan-out (whose projectFilter
   // changed mid-flight) must not clobber a newer one's committed slices.
   let fetchGeneration = 0;
+  // Workflow ids whose ensureWorkflowDetail fetch is in flight — concurrent calls
+  // for the same id short-circuit on this set instead of double-fetching.
+  const detailInFlight = new Set<string>();
 
   /**
    * Resolve the projectIds to fan out over: a single id when filtered, else the
@@ -254,12 +276,14 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     const [
       workflowStats,
       workflowUsage,
+      dailyUsage,
       reviewSummary,
       qualityFindings,
       projectIds,
     ] = await Promise.all([
       safe('workflowStats', trpc.cyboflow.insights.workflowStats.query({ projectId })),
       safe('workflowUsage', trpc.cyboflow.insights.workflowUsage.query({ projectId })),
+      safe('dailyUsage', trpc.cyboflow.insights.dailyUsage.query({ projectId })),
       safe('reviewSummary', trpc.cyboflow.insights.reviewSummary.query({ projectId })),
       safe('qualityFindings', trpc.cyboflow.insights.qualityFindings.query({ projectId })),
       projectIdsPromise,
@@ -322,6 +346,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     set({
       workflowStats: workflowStats ?? prev.workflowStats,
       workflowUsage: workflowUsage ?? prev.workflowUsage,
+      dailyUsage: dailyUsage ?? prev.dailyUsage,
       reviewSummary: reviewSummary ?? prev.reviewSummary,
       qualityFindings: qualityFindings ?? prev.qualityFindings,
       pendingFindings: pendingFindings ?? prev.pendingFindings,
@@ -348,6 +373,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     projectFilter: null,
     workflowStats: [],
     workflowUsage: [],
+    dailyUsage: [],
     reviewSummary: null,
     qualityFindings: [],
     pendingFindings: [],
@@ -401,6 +427,57 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     setProjectFilter: async (projectId) => {
       set({ projectFilter: projectId });
       await runFetch();
+    },
+
+    ensureWorkflowDetail: async (workflowId) => {
+      // Already have all three slices for this id, or a fetch is in flight — nothing to do.
+      const have = get();
+      if (
+        workflowId in have.stepTokens &&
+        workflowId in have.usageTrends &&
+        workflowId in have.revisionHistory
+      ) {
+        return;
+      }
+      if (detailInFlight.has(workflowId)) return;
+      detailInFlight.add(workflowId);
+
+      // The usageTrend query carries the current project filter (the cross-project
+      // view passes null), mirroring the PHASE-2 fan-out. Each query is caught
+      // individually: a failure is warned and that one slice is simply left absent
+      // rather than aborting the other two or surfacing on `error`.
+      const projectId = get().projectFilter;
+      try {
+        const [steps, trend, revisions] = await Promise.all([
+          trpc.cyboflow.insights.stepTokens.query({ workflowId }).catch((err: unknown) => {
+            console.warn(`[insightsStore] stepTokens:${workflowId} failed:`, err);
+            return undefined;
+          }),
+          trpc.cyboflow.insights.usageTrend.query({ workflowId, projectId }).catch((err: unknown) => {
+            console.warn(`[insightsStore] usageTrend:${workflowId} failed:`, err);
+            return undefined;
+          }),
+          trpc.cyboflow.insights.revisionHistory.query({ workflowId }).catch((err: unknown) => {
+            console.warn(`[insightsStore] revisionHistory:${workflowId} failed:`, err);
+            return undefined;
+          }),
+        ]);
+
+        // Merge ONLY this workflowId's entries onto the prior maps; a failed
+        // (undefined) slice leaves its map untouched and other keys are preserved.
+        const prev = get();
+        const stepTokens: Record<string, StepTokenBucket[]> = { ...prev.stepTokens };
+        const usageTrends: Record<string, UsageTrendPoint[]> = { ...prev.usageTrends };
+        const revisionHistory: Record<string, WorkflowRevisionStats[]> = {
+          ...prev.revisionHistory,
+        };
+        if (steps !== undefined) stepTokens[workflowId] = steps;
+        if (trend !== undefined) usageTrends[workflowId] = trend;
+        if (revisions !== undefined) revisionHistory[workflowId] = revisions;
+        set({ stepTokens, usageTrends, revisionHistory });
+      } finally {
+        detailInFlight.delete(workflowId);
+      }
     },
   };
 });

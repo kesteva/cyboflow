@@ -43,6 +43,7 @@ import type {
   StepTokenBucket,
   UsageTrendPoint,
   WorkflowRevisionStats,
+  DailyModelUsagePoint,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
@@ -483,6 +484,8 @@ interface RunIdRow {
  * roll them up via `selectRunUsageRollups`, then aggregate:
  *   - runsWithUsage = rollups whose assistantMessageCount > 0.
  *   - avgTotalTokens = mean totalTokens over those runs (null when none).
+ *   - totalTokens = raw SUM of totalTokens over those runs (null when none) —
+ *     the unaveraged companion that backs the by-flow token bars.
  *   - totalCostUsd = sum of non-null costUsd (null when every rollup was null).
  *   - avgCostUsd = mean costUsd over runs with a non-null cost (null when none).
  *
@@ -551,12 +554,18 @@ export function selectWorkflowUsageStats(
     const costRollups = rollups.filter((r) => r.costUsd !== null);
 
     const runsWithUsage = usedRollups.length;
+    // Raw sum of totalTokens across the usage-bearing runs — the unaveraged
+    // companion to avgTotalTokens that backs the by-flow token bars. Null when
+    // no run carried usage (mirrors avgTotalTokens), NOT 0, so the bar chart can
+    // distinguish "no data" from "a real zero".
+    const totalTokens =
+      runsWithUsage === 0
+        ? null
+        : usedRollups.reduce((sum, r) => sum + r.totalTokens, 0);
     const avgTotalTokens =
       runsWithUsage === 0
         ? null
-        : Math.round(
-            usedRollups.reduce((sum, r) => sum + r.totalTokens, 0) / runsWithUsage,
-          );
+        : Math.round((totalTokens ?? 0) / runsWithUsage);
     const totalCostUsd =
       costRollups.length === 0
         ? null
@@ -571,6 +580,7 @@ export function selectWorkflowUsageStats(
       workflowName: wf.workflowName,
       runsWithUsage,
       avgTotalTokens,
+      totalTokens,
       totalCostUsd,
       avgCostUsd,
     });
@@ -1227,4 +1237,151 @@ export function selectWorkflowRevisionStats(
         row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 9. selectDailyModelUsage
+// ---------------------------------------------------------------------------
+
+interface DailyModelUsageRow {
+  payloadJson: string;
+  createdAt: string;
+}
+
+/** Per-(day, model) accumulator mutated in place while folding raw_events rows. */
+interface DailyModelBucket {
+  inputTokens: number;
+  outputTokens: number;
+  assistantMessageCount: number;
+}
+
+/** Model id reported when an assistant message carried no `message.model`. */
+const UNKNOWN_MODEL = 'unknown';
+
+/**
+ * Composite-key separator joining `day` and `model` into one Map key. A space
+ * never appears in a date slice, and the model id is the rest of the key after
+ * the FIRST separator, so the key stays unambiguous even if a model id itself
+ * contained a space — `indexOf` splits on the first one and keeps the tail whole.
+ */
+const DAY_MODEL_SEP = ' ';
+
+/**
+ * Per-(day, model) token buckets for the usage chart at the top of the
+ * Statistics section, scanned over the last `days` days of `assistant`
+ * raw_events.
+ *
+ * Window: rows are kept when `raw_events.created_at >= datetime('now', '-N days')`
+ * -- the bind value is the string `-${days} days`, so the lookback is parameterized,
+ * not string-concatenated. `days` is clamped to [1, 365] inside the helper. When
+ * `projectId` is non-null the scan joins through `workflow_runs`/`workflows` and
+ * restricts to that project; null aggregates every project.
+ *
+ * Parsing mirrors the other raw_events scan helpers (see scanRawEventRollups):
+ *   - usage is read from `payload.message.usage` ({input_tokens, output_tokens,
+ *     cache_read_input_tokens?, cache_creation_input_tokens?} -- any number may be
+ *     absent). A row with no usable usage object is skipped (NOT counted).
+ *   - model is `payload.message.model` (string), falling back to 'unknown'.
+ *   - malformed JSON is skipped silently.
+ *
+ * Buckets are keyed by (day, model) where `day` is the UTC date slice of
+ * `created_at` (the first 10 chars of SQLite's 'YYYY-MM-DD HH:MM:SS' UTC form).
+ * `totalTokens` = inputTokens + outputTokens (cache EXCLUDED, matching the
+ * RunUsageRollup convention). Only `assistant` events are scanned -- `result`
+ * events (which restate per-turn totals) are excluded by the WHERE clause so their
+ * totals can never be double-counted. The result is sorted by `day` ASC then
+ * `model` ASC; days with no usage emit no bucket.
+ *
+ * @param db        - Narrow DatabaseLike surface.
+ * @param projectId - When non-null, restricts to that project; null = all.
+ * @param days      - Lookback window in days, clamped to [1, 365].
+ */
+export function selectDailyModelUsage(
+  db: DatabaseLike,
+  projectId: number | null,
+  days: number,
+): DailyModelUsagePoint[] {
+  const clampedDays = Math.min(365, Math.max(1, Math.trunc(days)));
+  // '-N days' is the datetime() modifier; bound as a parameter (the helper never
+  // concatenates `days` into the SQL text).
+  const windowArg = `-${clampedDays} days`;
+
+  // The project scope is an optional JOIN through workflow_runs -> workflows; when
+  // projectId is null we skip the joins entirely (a flat raw_events scan).
+  const sql =
+    projectId === null
+      ? `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
+         FROM raw_events e
+         WHERE e.event_type = 'assistant'
+           AND e.created_at >= datetime('now', ?)`
+      : `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
+         FROM raw_events e
+         JOIN workflow_runs r ON r.id = e.run_id
+         JOIN workflows w ON w.id = r.workflow_id
+         WHERE e.event_type = 'assistant'
+           AND e.created_at >= datetime('now', ?)
+           AND w.project_id = ?`;
+
+  const stmt = db.prepare(sql);
+  const rows = (
+    projectId === null ? stmt.all(windowArg) : stmt.all(windowArg, projectId)
+  ) as DailyModelUsageRow[];
+
+  // Accumulate per (day, model); the key joins both on DAY_MODEL_SEP.
+  const buckets = new Map<string, DailyModelBucket>();
+
+  for (const row of rows) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      continue; // malformed JSON -- skip silently
+    }
+    if (!isRecord(payload)) continue;
+    const message = payload.message;
+    if (!isRecord(message)) continue;
+    const usage = message.usage;
+    if (!isRecord(usage)) continue; // no usage object -> not counted
+
+    const model = typeof message.model === 'string' ? message.model : UNKNOWN_MODEL;
+    // SQLite DATETIME is 'YYYY-MM-DD HH:MM:SS' UTC; the first 10 chars are the day.
+    const day = row.createdAt.slice(0, 10);
+    const key = `${day}${DAY_MODEL_SEP}${model}`;
+
+    const bucket = buckets.get(key) ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      assistantMessageCount: 0,
+    };
+    bucket.inputTokens += asNumber(usage.input_tokens);
+    bucket.outputTokens += asNumber(usage.output_tokens);
+    bucket.assistantMessageCount += 1;
+    buckets.set(key, bucket);
+  }
+
+  return Array.from(buckets.entries())
+    .map(([key, agg]): DailyModelUsagePoint => {
+      const sep = key.indexOf(DAY_MODEL_SEP);
+      const day = key.slice(0, sep);
+      const model = key.slice(sep + DAY_MODEL_SEP.length);
+      return {
+        day,
+        model,
+        inputTokens: agg.inputTokens,
+        outputTokens: agg.outputTokens,
+        totalTokens: agg.inputTokens + agg.outputTokens,
+        assistantMessageCount: agg.assistantMessageCount,
+      };
+    })
+    .sort((a, b) =>
+      a.day < b.day
+        ? -1
+        : a.day > b.day
+          ? 1
+          : a.model < b.model
+            ? -1
+            : a.model > b.model
+              ? 1
+              : 0,
+    );
 }
