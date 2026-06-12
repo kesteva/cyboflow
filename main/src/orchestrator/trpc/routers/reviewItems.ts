@@ -103,6 +103,45 @@ function requireDb(db: DatabaseLike | undefined, where: string): DatabaseLike {
 const kindSchema = z.enum(['finding', 'permission', 'decision', 'human_task']);
 const statusSchema = z.enum(['pending', 'resolved', 'dismissed']);
 
+/**
+ * Guard: a PENDING question-sourced decision item must be settled by ANSWERING
+ * its AskUserQuestion (questions.respond), never by direct resolve/dismiss —
+ * the run is awaiting_input on a specific answer, so triaging the item alone
+ * strands the waiting agent forever (the question socket never replies and
+ * maybeResumeRun only resumes awaiting_review). QuestionRouter resolves the
+ * folded item itself when the question is answered. Throws CONFLICT when a
+ * pending question still exists for the item's run.
+ */
+function assertNotOpenQuestionGate(db: DatabaseLike, reviewItemId: string, projectId: number): void {
+  const item = db
+    .prepare(
+      `SELECT kind, source, status, run_id AS runId FROM review_items
+        WHERE id = ? AND project_id = ?`,
+    )
+    .get(reviewItemId, projectId) as
+    | { kind?: string; source?: string | null; status?: string; runId?: string | null }
+    | undefined;
+  if (
+    !item ||
+    item.kind !== 'decision' ||
+    item.source !== 'question' ||
+    item.status !== 'pending' ||
+    !item.runId
+  ) {
+    return;
+  }
+  const pendingQuestion = db
+    .prepare(`SELECT 1 FROM questions WHERE run_id = ? AND status = 'pending' LIMIT 1`)
+    .get(item.runId);
+  if (pendingQuestion) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message:
+        'invalid_status: this decision is an open question — answer it from the session chat; resolving it here would strand the waiting agent',
+    });
+  }
+}
+
 export const reviewItemsRouter = router({
   /**
    * List the review inbox for a project, newest-first, with optional filters on
@@ -201,6 +240,8 @@ export const reviewItemsRouter = router({
         .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
         .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
 
+      assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
+
       try {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
           op: 'resolve',
@@ -231,7 +272,9 @@ export const reviewItemsRouter = router({
         resolution: z.string().nullable().optional(),
       }),
     )
-    .mutation(async ({ input }): Promise<{ reviewItemId: string }> => {
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string }> => {
+      const db = requireDb(ctx.db, 'dismiss');
+      assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
       try {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
           op: 'dismiss',

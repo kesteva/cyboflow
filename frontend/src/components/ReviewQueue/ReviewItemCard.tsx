@@ -31,6 +31,8 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
+import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 // ---------------------------------------------------------------------------
 // Accept-routing target chip — keyed on the discriminant so a new target breaks
@@ -138,6 +140,15 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
     });
   };
 
+  // A question-sourced decision can only be settled by ANSWERING the question
+  // in the session chat — jump there (mirrors TypeGroupedQueue's openRunSession).
+  const handleAnswerInSession = (): void => {
+    if (item.run_id === null) return;
+    useCyboflowStore.getState().setActiveRun(item.run_id);
+    useNavigationStore.getState().setActiveProjectId(item.project_id);
+    useNavigationStore.getState().goToSession();
+  };
+
   // Permission items reuse the real-time approval resolution path.
   const handleApprovalDecision = (decision: 'approve' | 'reject'): void => {
     const approvalId = permissionApprovalId(item);
@@ -175,6 +186,23 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
           </>
         );
       case 'decision':
+        // A question-sourced decision is an OPEN AskUserQuestion: the run is
+        // awaiting_input on a specific answer, so plain resolve/dismiss would
+        // strand the waiting agent (the backend rejects it too). The only
+        // honest action is answering the question card in the session chat.
+        if (item.source === 'question') {
+          return (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={item.run_id === null}
+              onClick={handleAnswerInSession}
+              data-testid="decision-answer-in-session"
+            >
+              Answer in session →
+            </Button>
+          );
+        }
         // Resolving auto-resumes the paused run (aggregate-unblock).
         return (
           <>
