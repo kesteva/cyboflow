@@ -11,8 +11,10 @@
  *   3. Store-isolation (Q3 panel-preservation): cyboflowStore.streamEvents stays
  *      empty before AND after chunks are delivered — raw bytes NEVER enter the
  *      structured pipeline.
- *   4. Read-only contract: the Terminal is constructed with disableStdin: true
- *      and term.onData is NEVER registered (no input relay at this stage).
+ *   4. Stdin gating: guarded surfaces construct with disableStdin: true (the
+ *      REAL keystroke gate — xterm's triggerDataEvent early-returns while set)
+ *      and flip it false on "Interact anyway"; unguarded (quick-session)
+ *      surfaces construct with stdin enabled from mount.
  *   5. Auto-scroll: a write re-pins to the bottom only when the viewport is
  *      already at the bottom (viewportY >= baseY); not when scrolled up.
  *   6. Unmount cleanup off()s the SAME channel + handler and disposes the term.
@@ -39,6 +41,7 @@ const termMock = {
   loadAddon: vi.fn(),
   dispose: vi.fn(),
   scrollToBottom: vi.fn(),
+  focus: vi.fn(),
   onData: vi.fn((handler: (data: string) => void) => {
     onDataHandler = handler;
     return { dispose: onDataDispose };
@@ -47,6 +50,9 @@ const termMock = {
   cols: 80,
   rows: 24,
   buffer: { active: xtermBuffer },
+  // Live-mutable options bag — the component flips `options.disableStdin` when
+  // the relay (un)blocks; seeded from the constructor opts per render below.
+  options: {} as Record<string, unknown>,
 };
 
 let lastTerminalOptions: Record<string, unknown> | undefined;
@@ -54,6 +60,7 @@ let lastTerminalOptions: Record<string, unknown> | undefined;
 vi.mock('@xterm/xterm', () => ({
   Terminal: vi.fn((opts: Record<string, unknown>) => {
     lastTerminalOptions = opts;
+    termMock.options = { ...opts };
     return termMock;
   }),
 }));
@@ -445,10 +452,19 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
   it('relays raw keystrokes VERBATIM (no appended newline) ONLY after "Interact anyway" flips the flag', () => {
     render(<InteractiveTerminalView runId="run-relay-on" substrate="interactive" />);
 
+    // Guarded mount blocks xterm stdin (triggerDataEvent early-returns while
+    // disableStdin is true — the REAL keystroke gate).
+    expect(termMock.options.disableStdin).toBe(true);
+
     // Flip the per-run relay flag via the warn dialog's "Interact anyway".
     const surface = screen.getByTestId('interactive-terminal-surface');
     fireEvent.mouseDown(surface);
     fireEvent.click(screen.getByText('Interact anyway'));
+
+    // The acknowledgement un-blocks xterm stdin live and focuses the TERMINAL
+    // (its internal textarea) so keystrokes land without a second click.
+    expect(termMock.options.disableStdin).toBe(false);
+    expect(termMock.focus).toHaveBeenCalled();
 
     // A bare keystroke ('h') relays verbatim — NO '\n' appended.
     onDataHandler?.('h');
@@ -500,7 +516,7 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
 // ---------------------------------------------------------------------------
 
 describe('InteractiveTerminalView — guardFirstInteraction', () => {
-  it('guardFirstInteraction={false}: relays keystrokes immediately and never opens the warn dialog', () => {
+  it('guardFirstInteraction={false}: stdin open + relays keystrokes immediately, never opens the warn dialog', () => {
     render(
       <InteractiveTerminalView
         runId="run-unguarded"
@@ -508,6 +524,12 @@ describe('InteractiveTerminalView — guardFirstInteraction', () => {
         guardFirstInteraction={false}
       />,
     );
+
+    // Unguarded surfaces construct the Terminal with stdin ENABLED — with
+    // disableStdin true, xterm's triggerDataEvent early-returns and onData
+    // would never fire for user keystrokes (typing would be dead).
+    expect(lastTerminalOptions?.disableStdin).toBe(false);
+    expect(termMock.options.disableStdin).toBe(false);
 
     // Keystrokes relay VERBATIM from mount — no "Interact anyway" opt-in needed.
     onDataHandler?.('h');
@@ -518,8 +540,11 @@ describe('InteractiveTerminalView — guardFirstInteraction', () => {
     expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
   });
 
-  it('default (guarded): relay stays inert and the first mousedown still opens the dialog', () => {
+  it('default (guarded): stdin blocked + relay inert, and the first mousedown still opens the dialog', () => {
     render(<InteractiveTerminalView runId="run-guarded" substrate="interactive" />);
+
+    // Guarded mount constructs with stdin blocked (composer is the input path).
+    expect(lastTerminalOptions?.disableStdin).toBe(true);
 
     // Inert relay until the user opts in via "Interact anyway".
     onDataHandler?.('h');

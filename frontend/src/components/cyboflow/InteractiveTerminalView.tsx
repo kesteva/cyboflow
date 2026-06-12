@@ -12,20 +12,23 @@
  *      `term.write()` and NEVER into the structured cyboflow stream store. The
  *      structured `cyboflow:stream:<runId>` pipeline (Workflow panel + SDK path)
  *      is untouched.
- *   2. Two-way via the guarded relay (TASK-817). `disableStdin: true` keeps xterm
- *      from echoing locally, but `term.onData` relays raw keystrokes VERBATIM to
- *      `cyboflow.runs.relayInput` — ONLY while the per-run "Interact anyway" flag
- *      (set by TASK-816's warn modal) is true; otherwise it is inert and the chat
- *      composer is the sole input path. The whole guardrail is opt-out via
- *      `guardFirstInteraction={false}` (quick sessions): relay starts ON and the
- *      warn dialog never mounts. A ResizeObserver also relays geometry to
+ *   2. Two-way via the guarded relay (TASK-817). xterm's `disableStdin` option is
+ *      the REAL keystroke gate — while true, xterm's triggerDataEvent
+ *      early-returns and `term.onData` never fires for user input (xterm never
+ *      locally echoes regardless; echo always comes from the PTY). It is kept in
+ *      lockstep with the per-run relay flag: guarded runs mount with stdin
+ *      disabled and the chat composer as the sole input path until "Interact
+ *      anyway" (TASK-816's warn modal) enables the relay; with
+ *      `guardFirstInteraction={false}` (quick sessions) stdin + relay start ON
+ *      and the warn dialog never mounts. Enabled keystrokes relay VERBATIM to
+ *      `cyboflow.runs.relayInput`. A ResizeObserver also relays geometry to
  *      `cyboflow.runs.relayResize`. The relay routes to the interactive manager's
  *      live PTY and NO-OPs for the SDK substrate (Q3 byte-identical).
  *
  * The xterm construct / open / fit / dispose lifecycle is cloned from
  * `TerminalPanel.tsx`, with two deltas: the mono font is read from the
  * `--font-family-mono` CSS variable (not the legacy hard-coded font string), and
- * the terminal ships `disableStdin: true`.
+ * `disableStdin` tracks the relay state instead of shipping always-on stdin.
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { Terminal } from '@xterm/xterm';
@@ -149,6 +152,11 @@ export function InteractiveTerminalView({
   // `xterm.onData`; this task SETS the flag but does NOT wire the relay.
   // With `guardFirstInteraction={false}` (quick sessions) the relay starts ON
   // and the warn path is skipped entirely.
+  //
+  // ⚠ `relayEnabled` must ALSO drive xterm's `disableStdin` option (see the
+  // effect below): xterm's CoreService.triggerDataEvent EARLY-RETURNS when
+  // `disableStdin` is true, so `term.onData` NEVER fires for user keystrokes
+  // while it is set — gating onData alone is not enough to (un)block typing.
   const [hasWarned, setHasWarned] = useState(false);
   const [warnOpen, setWarnOpen] = useState(false);
   const [relayEnabled, setRelayEnabled] = useState(!guardFirstInteraction);
@@ -160,6 +168,20 @@ export function InteractiveTerminalView({
   // while flipping live the instant "Interact anyway" sets the flag.
   const relayEnabledRef = useRef(relayEnabled);
   relayEnabledRef.current = relayEnabled;
+
+  // Live Terminal instance for post-mount option flips ((un)blocking stdin) and
+  // focus. Set inside the mount effect, cleared in its cleanup.
+  const termRef = useRef<Terminal | null>(null);
+
+  // Keep xterm's stdin gate in lockstep with the relay flag. `disableStdin` is
+  // the REAL keystroke gate (with it set, xterm's triggerDataEvent early-returns
+  // and onData never fires for user input); the relayEnabledRef check inside the
+  // onData handler is defense-in-depth. Quick sessions mount with stdin enabled;
+  // workflow runs enable it the instant "Interact anyway" is acknowledged.
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) term.options.disableStdin = !relayEnabled;
+  }, [relayEnabled]);
 
   const elapsed = useElapsed(isInteractive);
 
@@ -186,11 +208,12 @@ export function InteractiveTerminalView({
 
   const grantTerminalFocus = useCallback((): void => {
     // Mark the warning acknowledged + enable the per-run keystroke relay flag
-    // that TASK-817 consumes. The actual `xterm.onData` relay is wired by
-    // TASK-817 — do NOT relay keystrokes here.
+    // that TASK-817 consumes (the relayEnabled effect above also un-blocks
+    // xterm's stdin). Focus the TERMINAL (its internal textarea via
+    // term.focus()), not the container div — keystrokes land on the textarea.
     setHasWarned(true);
     setRelayEnabled(true);
-    containerRef.current?.focus();
+    termRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -217,9 +240,14 @@ export function InteractiveTerminalView({
       fontFamily: getCSSMonoFont(),
       theme: getTerminalTheme(),
       scrollback: 50000,
-      disableStdin: true,
+      // The REAL keystroke gate: while true, xterm's triggerDataEvent
+      // early-returns and onData never fires for user input. Starts open for
+      // unguarded surfaces (quick sessions); the relayEnabled effect flips it
+      // live when a guarded run acknowledges "Interact anyway".
+      disableStdin: !relayEnabledRef.current,
       convertEol: false,
     });
+    termRef.current = term;
 
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -297,12 +325,14 @@ export function InteractiveTerminalView({
         /* no backlog available — proceed with live bytes only */
       });
 
-    // Raw-keystroke relay (TASK-817). Bound ONCE here; gated on the per-run
-    // "Interact anyway" flag via relayEnabledRef so it stays inert by default
-    // (the first-interaction warn modal is the gate). Bytes are relayed VERBATIM
-    // — xterm already encodes Enter as '\r', so NO '\n' is appended (the composer
-    // owns the '\n' turn semantics; appending one here would corrupt the REPL).
-    // The input type is AppRouter-inferred (no local mirror interface).
+    // Raw-keystroke relay (TASK-817). Bound ONCE here. The primary gate is
+    // xterm's own `disableStdin` (kept in lockstep with relayEnabled by the
+    // effect above — with stdin disabled this handler never even fires for
+    // user input); the relayEnabledRef check is defense-in-depth. Bytes are
+    // relayed VERBATIM — xterm already encodes Enter as '\r', so NO '\n' is
+    // appended (the composer owns the '\n' turn semantics; appending one here
+    // would corrupt the REPL). Input type is AppRouter-inferred (no local
+    // mirror interface).
     const inputDisposable = term.onData((data) => {
       if (disposed || !relayEnabledRef.current) return;
       void trpc.cyboflow.runs.relayInput.mutate({ runId, text: data });
@@ -368,6 +398,7 @@ export function InteractiveTerminalView({
       resizeObserver.disconnect();
       inputDisposable.dispose();
       off();
+      if (termRef.current === term) termRef.current = null;
       try {
         fit.dispose();
       } catch {
