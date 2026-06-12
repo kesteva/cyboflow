@@ -185,50 +185,53 @@ export function DailyUsageChart({
 
   return (
     <div data-testid="daily-usage-chart">
-      <svg
-        width="100%"
-        height={PLOT_HEIGHT}
-        viewBox={`0 0 ${PLOT_WIDTH} ${PLOT_HEIGHT}`}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`daily token usage over ${days} days`}
-      >
-        {/* Faint y-axis max label (compact), top-left. */}
+      {/* relative wrapper so the y-axis max label can overlay the plot as HTML.
+          It must NOT live inside the SVG: preserveAspectRatio="none" stretches
+          the 480-unit viewBox to the container width, which distorts <text>
+          glyphs horizontally (rects stretch fine — text does not). */}
+      <div className="relative">
         {maxDayTotal > 0 && (
-          <text
-            x={2}
-            y={TOP_INSET + 8}
-            className="fill-text-tertiary"
-            fontSize={9}
+          <span
+            aria-hidden
+            className="pointer-events-none absolute left-0.5 top-0.5 font-mono text-[10px] leading-none text-text-tertiary"
           >
             {compactTokens(maxDayTotal)}
-          </text>
+          </span>
         )}
-        {dayKeys.map((key, col) => {
-          const row = byDay.get(key)!;
-          const x = col * slotWidth + (slotWidth - barWidth) / 2;
-          // Stack from the baseline up, in legend order (largest model first).
-          let cursor = PLOT_HEIGHT; // bottom of the plot in SVG y.
-          return legend.map((entry) => {
-            const tokens = row.get(entry.model) ?? 0;
-            if (tokens <= 0) return null;
-            const h = toHeight(tokens);
-            cursor -= h;
-            return (
-              <rect
-                key={`${key}:${entry.model}`}
-                x={x}
-                y={cursor}
-                width={barWidth}
-                height={h}
-                fill={entry.color}
-              >
-                <title>{`${entry.model} · ${key} · ${tokens} tokens`}</title>
-              </rect>
-            );
-          });
-        })}
-      </svg>
+        <svg
+          width="100%"
+          height={PLOT_HEIGHT}
+          viewBox={`0 0 ${PLOT_WIDTH} ${PLOT_HEIGHT}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={`daily token usage over ${days} days`}
+        >
+          {dayKeys.map((key, col) => {
+            const row = byDay.get(key)!;
+            const x = col * slotWidth + (slotWidth - barWidth) / 2;
+            // Stack from the baseline up, in legend order (largest model first).
+            let cursor = PLOT_HEIGHT; // bottom of the plot in SVG y.
+            return legend.map((entry) => {
+              const tokens = row.get(entry.model) ?? 0;
+              if (tokens <= 0) return null;
+              const h = toHeight(tokens);
+              cursor -= h;
+              return (
+                <rect
+                  key={`${key}:${entry.model}`}
+                  x={x}
+                  y={cursor}
+                  width={barWidth}
+                  height={h}
+                  fill={entry.color}
+                >
+                  <title>{`${entry.model} · ${key} · ${tokens} tokens`}</title>
+                </rect>
+              );
+            });
+          })}
+        </svg>
+      </div>
       <ul
         className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]"
         data-testid="daily-usage-legend"
