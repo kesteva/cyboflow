@@ -308,11 +308,11 @@ describe('JournalTailer', () => {
     ]);
   });
 
-  it('extracts promptExcerpt from array content (first text part), truncated to 200 chars', async () => {
+  it('extracts promptExcerpt from array content (first text part), truncated to the excerpt cap', async () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    const longPrompt = 'p'.repeat(300);
+    const longPrompt = 'p'.repeat(700);
     writeFileSync(
       join(dir, 'agent-a1.jsonl'),
       transcriptLine({
@@ -329,7 +329,7 @@ describe('JournalTailer', () => {
     );
     await vi.advanceTimersByTimeAsync(POLL_MS);
     const agents = onAgents.mock.calls.at(-1)?.[0];
-    expect(agents?.[0]?.promptExcerpt).toBe('p'.repeat(200));
+    expect(agents?.[0]?.promptExcerpt).toBe('p'.repeat(600));
     expect(agents?.[0]?.lastActivityAt).toBe('2026-06-11T13:00:01.000Z');
   });
 

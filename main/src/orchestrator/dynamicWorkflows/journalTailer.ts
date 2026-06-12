@@ -32,8 +32,14 @@ import type { LoggerLike } from '../types';
 const DEFAULT_POLL_MS = 1000;
 /** Default stall threshold — 1 hour with zero file activity. */
 const DEFAULT_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
-/** promptExcerpt truncation — enough for a card preview, bounded for IPC. */
-const PROMPT_EXCERPT_MAX_CHARS = 200;
+/**
+ * promptExcerpt truncation — bounded for IPC. Generous on purpose: fan-out
+ * prompts open with a long SHARED prologue, and the frontend derives agent
+ * display names from the text AFTER the common prefix — a tight cap leaves
+ * only a few divergent chars (observed live: 200-char cap − ~170-char shared
+ * prologue = every name clipped at exactly 30 chars).
+ */
+const PROMPT_EXCERPT_MAX_CHARS = 600;
 
 /** The optional live-stats slice of DynamicWorkflowAgent — keys set only when observed. */
 type AgentTranscriptStats = Pick<
