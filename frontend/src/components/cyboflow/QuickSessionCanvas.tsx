@@ -171,6 +171,21 @@ export function QuickSessionCanvas({
   }, []);
   const dynamicWorkflows = useDynamicWorkflowsForSession(session.id);
 
+  // Canvas takeover: while any dynamic workflow is RUNNING the workflow view
+  // replaces the resting-state chrome (session node + add-a-workflow picker).
+  // Running workflows render as EXPANDED panels (per-agent rows); terminal
+  // ones collapse to their compact cards below. When nothing is running the
+  // canvas reverts to the resting layout unchanged.
+  const runningDynamic = useMemo(
+    () => dynamicWorkflows.filter((wf) => wf.status === 'running'),
+    [dynamicWorkflows],
+  );
+  const terminalDynamic = useMemo(
+    () => dynamicWorkflows.filter((wf) => wf.status !== 'running'),
+    [dynamicWorkflows],
+  );
+  const dynamicTakeover = runningDynamic.length > 0;
+
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   // Planner pre-launch idea gate (migration 017): a planner click opens the
@@ -325,235 +340,260 @@ export function QuickSessionCanvas({
         </span>
       </div>
 
-      {/* ── Detected dynamic workflows — most recent first, ABOVE the picker ─── */}
-      {dynamicWorkflows.length > 0 && (
+      {dynamicTakeover ? (
+        /* ── Takeover — the running workflow view REPLACES the resting chrome ── */
         <div
           style={{
-            flexShrink: 0,
-            maxHeight: '55%',
+            flex: 1,
             overflowY: 'auto',
             display: 'flex',
             flexDirection: 'column',
             gap: 8,
             padding: '10px 12px',
-            borderBottom: '1px solid var(--color-border-primary)',
             background: 'var(--color-bg-secondary)',
           }}
-          data-testid="quick-session-dynamic-workflows"
+          data-testid="dynwf-takeover"
         >
-          {dynamicWorkflows.map((wf) => (
+          {runningDynamic.map((wf) => (
+            <DynamicWorkflowPanel key={wf.wfRunId} state={wf} expanded />
+          ))}
+          {terminalDynamic.map((wf) => (
             <DynamicWorkflowPanel key={wf.wfRunId} state={wf} />
           ))}
         </div>
-      )}
-
-      {/* ── Canvas body — 24px graph-paper grid, single node → edge → add ────── */}
-      <div
-        style={{
-          position: 'relative',
-          flex: 1,
-          overflow: 'auto',
-          display: 'flex',
-          alignItems: 'center',
-          padding: '26px 30px',
-          background:
-            'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
-            'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
-            'var(--color-bg-primary)',
-        }}
-        data-testid="quick-session-canvas-body"
-      >
-        {/* 1 · Session node */}
-        <div
-          style={{
-            width: 300,
-            flexShrink: 0,
-            background: 'var(--color-surface-primary)',
-            border: '1.4px solid var(--color-text-primary)',
-            outline: '2px solid var(--color-phase-execute)',
-            outlineOffset: 2,
-          }}
-          data-testid="quick-session-node"
-        >
+      ) : (
+        <>
+        {/* ── Detected dynamic workflows — most recent first, ABOVE the picker ─── */}
+        {dynamicWorkflows.length > 0 && (
           <div
             style={{
+              flexShrink: 0,
+              maxHeight: '55%',
+              overflowY: 'auto',
               display: 'flex',
-              alignItems: 'center',
+              flexDirection: 'column',
               gap: 8,
-              padding: '8px 12px',
-              background: 'var(--color-phase-execute)',
+              padding: '10px 12px',
+              borderBottom: '1px solid var(--color-border-primary)',
+              background: 'var(--color-bg-secondary)',
+            }}
+            data-testid="quick-session-dynamic-workflows"
+          >
+            {dynamicWorkflows.map((wf) => (
+              <DynamicWorkflowPanel key={wf.wfRunId} state={wf} />
+            ))}
+          </div>
+        )}
+
+        {/* ── Canvas body — 24px graph-paper grid, single node → edge → add ────── */}
+        <div
+          style={{
+            position: 'relative',
+            flex: 1,
+            overflow: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            padding: '26px 30px',
+            background:
+              'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+              'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+              'var(--color-bg-primary)',
+          }}
+          data-testid="quick-session-canvas-body"
+        >
+          {/* 1 · Session node */}
+          <div
+            style={{
+              width: 300,
+              flexShrink: 0,
+              background: 'var(--color-surface-primary)',
+              border: '1.4px solid var(--color-text-primary)',
+              outline: '2px solid var(--color-phase-execute)',
+              outlineOffset: 2,
+            }}
+            data-testid="quick-session-node"
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '8px 12px',
+                background: 'var(--color-phase-execute)',
+              }}
+            >
+              <span
+                className="animate-pulse motion-reduce:animate-none"
+                style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff', display: 'inline-block' }}
+              />
+              <span
+                style={{
+                  fontSize: 9,
+                  letterSpacing: '0.16em',
+                  textTransform: 'uppercase',
+                  color: '#fff',
+                  fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Session
+              </span>
+              <span
+                data-testid="quick-session-node-model"
+                style={{
+                  marginLeft: 'auto',
+                  fontSize: 9,
+                  color: 'rgba(255,255,255,0.85)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {model}
+              </span>
+            </div>
+            <div style={{ padding: '13px 14px' }}>
+              <div
+                style={{ fontSize: 10.5, color: 'var(--color-text-tertiary)' }}
+                data-testid="quick-session-node-sub"
+              >
+                {repo}
+                {branch ? ` · ⌥ ${branch}` : ''}
+              </div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: '7px 12px',
+                  marginTop: 13,
+                }}
+              >
+                <StatCell value={metrics.elapsed} label="elapsed" testId="quick-session-stat-elapsed" />
+                <StatCell value={metrics.tokens} label="tokens" testId="quick-session-stat-tokens" />
+                <StatCell value={metrics.filesSeen} label="files seen" testId="quick-session-stat-files" />
+                <StatCell
+                  testId="quick-session-stat-diff"
+                  label="diff"
+                  value={
+                    <span>
+                      <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>
+                        +{plus}
+                      </span>{' '}
+                      <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-phase-execute)' }}>
+                        −{minus}
+                      </span>
+                    </span>
+                  }
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* 2 · Dashed edge with a ＋ chip */}
+          <div
+            aria-hidden
+            style={{
+              flex: '0 0 64px',
+              height: 1.4,
+              position: 'relative',
+              background:
+                'repeating-linear-gradient(90deg, var(--color-text-disabled) 0 5px, transparent 5px 10px)',
             }}
           >
             <span
-              className="animate-pulse motion-reduce:animate-none"
-              style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff', display: 'inline-block' }}
-            />
-            <span
+              style={{
+                position: 'absolute',
+                left: '50%',
+                top: '50%',
+                transform: 'translate(-50%, -50%)',
+                background: 'var(--color-bg-primary)',
+                color: 'var(--color-text-tertiary)',
+                fontSize: 12,
+                padding: '0 3px',
+              }}
+            >
+              ＋
+            </span>
+          </div>
+
+          {/* 3 · Add-workflow node */}
+          <div
+            onMouseEnter={() => setAddHovered(true)}
+            onMouseLeave={() => setAddHovered(false)}
+            style={{
+              width: 230,
+              flexShrink: 0,
+              border: `1.4px dashed ${addHovered ? 'var(--color-phase-execute)' : 'var(--color-text-disabled)'}`,
+              // Faint translucent "ghost" fill that stays visible across themes
+              // (the design's rgba(255,255,255,.4) vanishes on a dark canvas).
+              background: addHovered ? 'var(--color-surface-primary)' : 'rgba(var(--color-interactive-rgb), 0.06)',
+              padding: '18px 16px',
+              transition: 'border-color .12s, background .12s',
+            }}
+            data-testid="quick-session-add-workflow"
+          >
+            <div
               style={{
                 fontSize: 9,
                 letterSpacing: '0.16em',
                 textTransform: 'uppercase',
-                color: '#fff',
+                color: 'var(--color-text-tertiary)',
                 fontWeight: 700,
-                whiteSpace: 'nowrap',
               }}
             >
-              Session
-            </span>
-            <span
-              data-testid="quick-session-node-model"
-              style={{
-                marginLeft: 'auto',
-                fontSize: 9,
-                color: 'rgba(255,255,255,0.85)',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {model}
-            </span>
-          </div>
-          <div style={{ padding: '13px 14px' }}>
-            <div
-              style={{ fontSize: 10.5, color: 'var(--color-text-tertiary)' }}
-              data-testid="quick-session-node-sub"
-            >
-              {repo}
-              {branch ? ` · ⌥ ${branch}` : ''}
+              Optional next step
             </div>
-            <div
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 7 }}>
+              Add a workflow
+            </div>
+            <div style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--color-text-tertiary)', marginTop: 6 }}>
+              Drop a structured pipeline onto this session at any point.
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 13 }}>
+              {ordered.map((row) => (
+                <WorkflowCmdButton
+                  key={row.id}
+                  testId={`quick-session-launch-${row.name}`}
+                  label={`/${row.name}`}
+                  dotColor={phaseDotColor(row)}
+                  disabled={isLaunching}
+                  onClick={() => handleWorkflowClick(row)}
+                />
+              ))}
+            </div>
+
+            <button
+              type="button"
+              data-testid="quick-session-browse-all"
+              onClick={onBrowseAll}
+              onMouseEnter={() => setBrowseHovered(true)}
+              onMouseLeave={() => setBrowseHovered(false)}
               style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: '7px 12px',
-                marginTop: 13,
+                width: '100%',
+                marginTop: 8,
+                fontSize: 9.5,
+                letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+                fontWeight: 700,
+                color: browseHovered ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+                border: `1px solid ${browseHovered ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
+                background: 'transparent',
+                padding: '7px 11px',
+                cursor: 'pointer',
+                transition: 'color .12s, border-color .12s',
               }}
             >
-              <StatCell value={metrics.elapsed} label="elapsed" testId="quick-session-stat-elapsed" />
-              <StatCell value={metrics.tokens} label="tokens" testId="quick-session-stat-tokens" />
-              <StatCell value={metrics.filesSeen} label="files seen" testId="quick-session-stat-files" />
-              <StatCell
-                testId="quick-session-stat-diff"
-                label="diff"
-                value={
-                  <span>
-                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-status-success)' }}>
-                      +{plus}
-                    </span>{' '}
-                    <span style={{ color: diffIsEmpty ? 'var(--color-text-tertiary)' : 'var(--color-phase-execute)' }}>
-                      −{minus}
-                    </span>
-                  </span>
-                }
-              />
-            </div>
+              {workflows.length > 0 ? `Browse all ${workflows.length} workflows →` : 'Browse all workflows →'}
+            </button>
+
+            {error && (
+              <p style={{ marginTop: 8, fontSize: 10, color: 'var(--color-status-error)' }} role="alert">
+                {error}
+              </p>
+            )}
           </div>
         </div>
-
-        {/* 2 · Dashed edge with a ＋ chip */}
-        <div
-          aria-hidden
-          style={{
-            flex: '0 0 64px',
-            height: 1.4,
-            position: 'relative',
-            background:
-              'repeating-linear-gradient(90deg, var(--color-text-disabled) 0 5px, transparent 5px 10px)',
-          }}
-        >
-          <span
-            style={{
-              position: 'absolute',
-              left: '50%',
-              top: '50%',
-              transform: 'translate(-50%, -50%)',
-              background: 'var(--color-bg-primary)',
-              color: 'var(--color-text-tertiary)',
-              fontSize: 12,
-              padding: '0 3px',
-            }}
-          >
-            ＋
-          </span>
-        </div>
-
-        {/* 3 · Add-workflow node */}
-        <div
-          onMouseEnter={() => setAddHovered(true)}
-          onMouseLeave={() => setAddHovered(false)}
-          style={{
-            width: 230,
-            flexShrink: 0,
-            border: `1.4px dashed ${addHovered ? 'var(--color-phase-execute)' : 'var(--color-text-disabled)'}`,
-            // Faint translucent "ghost" fill that stays visible across themes
-            // (the design's rgba(255,255,255,.4) vanishes on a dark canvas).
-            background: addHovered ? 'var(--color-surface-primary)' : 'rgba(var(--color-interactive-rgb), 0.06)',
-            padding: '18px 16px',
-            transition: 'border-color .12s, background .12s',
-          }}
-          data-testid="quick-session-add-workflow"
-        >
-          <div
-            style={{
-              fontSize: 9,
-              letterSpacing: '0.16em',
-              textTransform: 'uppercase',
-              color: 'var(--color-text-tertiary)',
-              fontWeight: 700,
-            }}
-          >
-            Optional next step
-          </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 7 }}>
-            Add a workflow
-          </div>
-          <div style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--color-text-tertiary)', marginTop: 6 }}>
-            Drop a structured pipeline onto this session at any point.
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 13 }}>
-            {ordered.map((row) => (
-              <WorkflowCmdButton
-                key={row.id}
-                testId={`quick-session-launch-${row.name}`}
-                label={`/${row.name}`}
-                dotColor={phaseDotColor(row)}
-                disabled={isLaunching}
-                onClick={() => handleWorkflowClick(row)}
-              />
-            ))}
-          </div>
-
-          <button
-            type="button"
-            data-testid="quick-session-browse-all"
-            onClick={onBrowseAll}
-            onMouseEnter={() => setBrowseHovered(true)}
-            onMouseLeave={() => setBrowseHovered(false)}
-            style={{
-              width: '100%',
-              marginTop: 8,
-              fontSize: 9.5,
-              letterSpacing: '0.12em',
-              textTransform: 'uppercase',
-              fontWeight: 700,
-              color: browseHovered ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
-              border: `1px solid ${browseHovered ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
-              background: 'transparent',
-              padding: '7px 11px',
-              cursor: 'pointer',
-              transition: 'color .12s, border-color .12s',
-            }}
-          >
-            {workflows.length > 0 ? `Browse all ${workflows.length} workflows →` : 'Browse all workflows →'}
-          </button>
-
-          {error && (
-            <p style={{ marginTop: 8, fontSize: 10, color: 'var(--color-status-error)' }} role="alert">
-              {error}
-            </p>
-          )}
-        </div>
-      </div>
+        </>
+      )}
 
       {/* Planner idea-selection gate (migration 017). */}
       {plannerIdForGate !== null && (

@@ -5,12 +5,24 @@
  * Covers: running badge + live agent tally + elapsed, the static phase plan,
  * optional description, and the terminal block (summary + totals) replacing
  * the elapsed ticker once the workflow completes/fails.
+ *
+ * Expanded (canvas-takeover) variant: per-agent rows with model / token / tool
+ * formatting, idle + elapsed hints, the excerpt-derived display-name fallback
+ * chain, and graceful degradation when an older main build sends bare
+ * {agentId, status} agents.
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
-import { DynamicWorkflowPanel } from '../DynamicWorkflowPanel';
-import type { DynamicWorkflowRunState } from '../../../../../shared/types/dynamicWorkflows';
+import { render, screen, within } from '@testing-library/react';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import {
+  DynamicWorkflowPanel,
+  formatModelName,
+  computeAgentDisplayNames,
+} from '../DynamicWorkflowPanel';
+import type {
+  DynamicWorkflowAgent,
+  DynamicWorkflowRunState,
+} from '../../../../../shared/types/dynamicWorkflows';
 
 function makeState(overrides: Partial<DynamicWorkflowRunState> = {}): DynamicWorkflowRunState {
   return {
@@ -115,5 +127,193 @@ describe('DynamicWorkflowPanel', () => {
     render(<DynamicWorkflowPanel state={makeState({ status: 'failed' })} />);
     expect(screen.getByTestId('dynamic-workflow-status')).toHaveTextContent('failed');
     expect(screen.queryByTestId('dynamic-workflow-totals')).not.toBeInTheDocument();
+  });
+
+  it('never renders agent rows in the default (compact) variant', () => {
+    render(
+      <DynamicWorkflowPanel
+        state={makeState({
+          agents: [{ agentId: 'a1', status: 'running', model: 'claude-fable-5' }],
+        })}
+      />,
+    );
+    expect(screen.queryByTestId('dynamic-workflow-agents')).not.toBeInTheDocument();
+  });
+});
+
+describe('DynamicWorkflowPanel — expanded agent rows', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function agentMeta(agentId: string): HTMLElement {
+    const row = screen.getByTestId(`dynamic-workflow-agent-${agentId}`);
+    return within(row).getByTestId('dynamic-workflow-agent-meta');
+  }
+
+  function agentName(agentId: string): HTMLElement {
+    const row = screen.getByTestId(`dynamic-workflow-agent-${agentId}`);
+    return within(row).getByTestId('dynamic-workflow-agent-name');
+  }
+
+  it('renders one row per agent with model / token / tool formatting', () => {
+    render(
+      <DynamicWorkflowPanel
+        expanded
+        state={makeState({
+          agents: [
+            {
+              agentId: 'a1',
+              status: 'running',
+              model: 'claude-fable-5',
+              outputTokens: 31_200,
+              toolUses: 16,
+              startedAt: '2026-06-11T10:00:05.000Z',
+              lastActivityAt: new Date().toISOString(),
+            },
+            {
+              agentId: 'a2',
+              status: 'done',
+              model: 'claude-opus-4-8',
+              outputTokens: 980,
+              toolUses: 1,
+              startedAt: '2026-06-11T10:00:00.000Z',
+              lastActivityAt: '2026-06-11T10:06:36.000Z',
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByTestId('dynamic-workflow-agents')).toBeInTheDocument();
+    // Running agent with fresh activity: no idle hint.
+    expect(agentMeta('a1')).toHaveTextContent('Fable 5 · 31.2k tok · 16 tools');
+    expect(agentMeta('a1')).not.toHaveTextContent('idle');
+    // Done agent: singular "tool" + elapsed from startedAt → lastActivityAt.
+    expect(agentMeta('a2')).toHaveTextContent('Opus 4.8 · 980 tok · 1 tool · 6m 36s');
+  });
+
+  it('flags a running agent as idle once activity is >30s stale', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-11T10:10:00.000Z'));
+    render(
+      <DynamicWorkflowPanel
+        expanded
+        state={makeState({
+          agents: [
+            {
+              agentId: 'a1',
+              status: 'running',
+              lastActivityAt: '2026-06-11T10:09:11.000Z', // 49s ago
+            },
+          ],
+        })}
+      />,
+    );
+    expect(agentMeta('a1')).toHaveTextContent('idle 49s');
+  });
+
+  it('degrades to "agent N" rows with an em-dash when fields are absent (older main build)', () => {
+    render(
+      <DynamicWorkflowPanel
+        expanded
+        state={makeState({
+          agents: [
+            { agentId: 'a1', status: 'running' },
+            { agentId: 'a2', status: 'done' },
+          ],
+        })}
+      />,
+    );
+    expect(agentName('a1')).toHaveTextContent('agent 1');
+    expect(agentName('a2')).toHaveTextContent('agent 2');
+    expect(agentMeta('a1')).toHaveTextContent('—');
+    expect(agentMeta('a2')).toHaveTextContent('—');
+  });
+
+  it('names agents by their excerpt tails after the shared prologue', () => {
+    render(
+      <DynamicWorkflowPanel
+        expanded
+        state={makeState({
+          agents: [
+            {
+              agentId: 'a1',
+              status: 'running',
+              promptExcerpt: 'You are a refactor subagent for cyboflow. Task: parser cleanup',
+            },
+            {
+              agentId: 'a2',
+              status: 'running',
+              promptExcerpt: 'You are a refactor subagent for cyboflow. Task: lexer hygiene',
+            },
+          ],
+        })}
+      />,
+    );
+    expect(agentName('a1')).toHaveTextContent('parser cleanup');
+    expect(agentName('a2')).toHaveTextContent('lexer hygiene');
+  });
+
+  it('hides the agents block when the agents array is empty', () => {
+    render(<DynamicWorkflowPanel expanded state={makeState({ agents: [] })} />);
+    expect(screen.queryByTestId('dynamic-workflow-agents')).not.toBeInTheDocument();
+  });
+});
+
+describe('computeAgentDisplayNames', () => {
+  function agent(
+    agentId: string,
+    promptExcerpt?: string,
+    status: DynamicWorkflowAgent['status'] = 'running',
+  ): DynamicWorkflowAgent {
+    return { agentId, status, promptExcerpt };
+  }
+
+  it('strips the longest common prefix and trims tails to ~60 chars', () => {
+    const prologue = 'Shared prologue every subagent prompt opens with. Focus: ';
+    const longTail = 'x'.repeat(80);
+    const names = computeAgentDisplayNames([
+      agent('a1', `${prologue}parser cleanup`),
+      agent('a2', `${prologue}${longTail}`),
+    ]);
+    expect(names.get('a1')).toBe('parser cleanup');
+    expect(names.get('a2')).toBe('x'.repeat(60));
+  });
+
+  it('collapses whitespace in tails to a single line', () => {
+    const names = computeAgentDisplayNames([
+      agent('a1', 'Prefix: fix\n  the   parser'),
+      agent('a2', 'Prefix: lint everything'),
+    ]);
+    expect(names.get('a1')).toBe('fix the parser');
+  });
+
+  it('a lone excerpt names itself — no prologue to strip', () => {
+    const names = computeAgentDisplayNames([agent('a1', 'Verify the tracker end to end')]);
+    expect(names.get('a1')).toBe('Verify the tracker end to end');
+  });
+
+  it('falls back to "agent N" by stable order for missing or fully-shared excerpts', () => {
+    const names = computeAgentDisplayNames([
+      agent('a1'),
+      agent('a2', 'identical excerpt'),
+      agent('a3', 'identical excerpt'),
+    ]);
+    expect(names.get('a1')).toBe('agent 1');
+    expect(names.get('a2')).toBe('agent 2');
+    expect(names.get('a3')).toBe('agent 3');
+  });
+});
+
+describe('formatModelName', () => {
+  it.each([
+    ['claude-fable-5', 'Fable 5'],
+    ['claude-opus-4-8', 'Opus 4.8'],
+    ['claude-haiku-4-5-20251001', 'Haiku 4.5'],
+    ['fable-5', 'Fable 5'],
+    ['claude-sonnet-4', 'Sonnet 4'],
+    ['opus', 'Opus'],
+  ])('formats %s as %s', (raw, expected) => {
+    expect(formatModelName(raw)).toBe(expected);
   });
 });

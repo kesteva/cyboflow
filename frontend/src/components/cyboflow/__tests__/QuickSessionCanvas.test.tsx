@@ -6,7 +6,7 @@
  * IdeaPickerModal is stubbed so the Planner idea-gate is observable.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession } = vi.hoisted(
@@ -192,10 +192,11 @@ describe('QuickSessionCanvas', () => {
     expect(screen.queryByTestId('quick-session-dynamic-workflows')).not.toBeInTheDocument();
   });
 
-  it('renders detected dynamic workflows above the canvas, most recent first', async () => {
+  it('renders terminal dynamic workflows above the canvas, most recent first', async () => {
     // The selector hook owns the desc sort; the canvas renders in given order.
+    // All terminal (none running) → the resting layout keeps the compact stack.
     mockUseDynamicForSession.mockReturnValue([
-      makeDynamicWorkflow({ wfRunId: 'wf_new', name: 'newest-flow' }),
+      makeDynamicWorkflow({ wfRunId: 'wf_new', name: 'newest-flow', status: 'failed' }),
       makeDynamicWorkflow({ wfRunId: 'wf_old', name: 'older-flow', status: 'completed' }),
     ]);
     renderCanvas();
@@ -209,5 +210,71 @@ describe('QuickSessionCanvas', () => {
       'dynamic-workflow-panel-wf_old',
     ]);
     expect(panels[0]).toHaveTextContent('newest-flow');
+    // No takeover when nothing is running — the resting chrome stays.
+    expect(screen.queryByTestId('dynwf-takeover')).not.toBeInTheDocument();
+    expect(screen.getByTestId('quick-session-node')).toBeInTheDocument();
+    expect(screen.getByTestId('quick-session-add-workflow')).toBeInTheDocument();
+  });
+
+  it('takes over the canvas while a dynamic workflow is running (no session node / picker)', async () => {
+    mockUseDynamicForSession.mockReturnValue([
+      makeDynamicWorkflow({
+        wfRunId: 'wf_live',
+        name: 'live-flow',
+        agents: [
+          { agentId: 'a1', status: 'running' },
+          { agentId: 'a2', status: 'done' },
+        ],
+      }),
+    ]);
+    renderCanvas();
+    // Flush the workflows.list resolution — the picker it feeds is suppressed,
+    // so there is no visible element to waitFor (act-warning hygiene only).
+    await act(async () => {});
+
+    const takeover = screen.getByTestId('dynwf-takeover');
+    expect(takeover).toBeInTheDocument();
+    expect(screen.getByTestId('dynamic-workflow-panel-wf_live')).toHaveTextContent('live-flow');
+    // Expanded variant: per-agent rows render (degraded "agent N" until the
+    // main process supplies the optional per-agent fields).
+    expect(screen.getByTestId('dynamic-workflow-agents')).toBeInTheDocument();
+    expect(screen.getByTestId('dynamic-workflow-agent-a1')).toHaveTextContent('agent 1');
+
+    // The resting-state chrome is fully suppressed.
+    expect(screen.queryByTestId('quick-session-node')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-add-workflow')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-browse-all')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-canvas-body')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('quick-session-dynamic-workflows')).not.toBeInTheDocument();
+    // The pane header survives the takeover.
+    expect(screen.getByTestId('quick-session-canvas-header')).toBeInTheDocument();
+  });
+
+  it('takeover: running workflows expand first, terminal ones collapse to compact cards below', async () => {
+    mockUseDynamicForSession.mockReturnValue([
+      makeDynamicWorkflow({
+        wfRunId: 'wf_live',
+        name: 'live-flow',
+        agents: [{ agentId: 'a1', status: 'running' }],
+      }),
+      makeDynamicWorkflow({
+        wfRunId: 'wf_done',
+        name: 'done-flow',
+        status: 'completed',
+        agents: [{ agentId: 'b1', status: 'done' }],
+      }),
+    ]);
+    renderCanvas();
+    await act(async () => {});
+
+    const panels = screen.getAllByTestId(/^dynamic-workflow-panel-/);
+    expect(panels.map((p) => p.getAttribute('data-testid'))).toEqual([
+      'dynamic-workflow-panel-wf_live',
+      'dynamic-workflow-panel-wf_done',
+    ]);
+    // Only the RUNNING panel is expanded — exactly one agent-rows block.
+    expect(screen.getAllByTestId('dynamic-workflow-agents')).toHaveLength(1);
+    expect(screen.getByTestId('dynamic-workflow-agent-a1')).toBeInTheDocument();
+    expect(screen.queryByTestId('dynamic-workflow-agent-b1')).not.toBeInTheDocument();
   });
 });
