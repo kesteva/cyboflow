@@ -4,27 +4,44 @@
  * "02 STATISTICS — how each workflow is performing." Merges the two per-workflow
  * aggregates the store carries — run-outcome stats ({@link WorkflowRunStats}) and
  * the usage rollup ({@link WorkflowUsageStats}) — by `workflowId` into one card
- * per workflow, then renders a per-step token breakdown for the busiest one.
+ * per workflow, with a 30-day daily token-use chart pinned above the grid and a
+ * click-to-drill token panel below it.
  *
- * Card content (per the mockup):
- *   - workflow name + a big avg-tokens figure (compact '184k' form).
- *   - an 'error X% · runs N · cost $Y' meta line (cost 2dp, '—' when null).
- *   - a {@link Sparkline} of the usage trend for that workflow (totalTokens).
+ * Layout (top → bottom):
+ *   1. A {@link DailyUsageChart} of the store's `dailyUsage` slice (the section's
+ *      cross-project, per-(day, model) token history for the last 30 days).
+ *   2. The card grid — one {@link WorkflowCard} per workflow:
+ *        - workflow name + a big avg-tokens figure (compact '184k' form).
+ *        - an 'error X% · runs N · cost $Y' meta line (cost 2dp, '—' when null).
+ *        - a {@link Sparkline} of the usage trend for that workflow (totalTokens).
+ *      Each card is a SELECTABLE button (aria-pressed): clicking selects the
+ *      workflow (and lazily ensures its drill-down detail exists via the store's
+ *      {@link InsightsState.ensureWorkflowDetail}, since the per-workflow fan-out
+ *      is capped); clicking the selected card again deselects.
+ *   3. A token panel whose content follows the selection:
+ *        - NO selection → "TOKEN BY FLOW": one {@link BarRow} per workflow from
+ *          {@link WorkflowUsageStats.totalTokens}, sorted DESC (null/0 skipped).
+ *        - a SELECTED flow → "TOKEN BY STEP · {name}": the selected workflow's
+ *          {@link StepTokenBucket}s (a muted note when it has none yet), with a
+ *          deselect affordance. {@link VersionHistory} follows the selection.
+ *      The busiest-workflow (most totalRuns) computation survives ONLY as the
+ *      VersionHistory fallback in the no-selection state — the step panel no
+ *      longer keys off it.
  *
- * Below the cards a "TOKEN BY STEP" panel ranks the {@link StepTokenBucket}s of
- * the workflow with the MOST totalRuns via {@link BarRow}; the panel is hidden
- * when that workflow has no step data. A small ⚠ integrity hint surfaces when
- * any workflow has `nullOutcomeRuns > 0` (terminal runs whose outcome was never
- * stamped — see the shared contract's data-integrity note).
+ * A small ⚠ integrity hint surfaces when any workflow has `nullOutcomeRuns > 0`
+ * (terminal runs whose outcome was never stamped — see the shared contract's
+ * data-integrity note).
  *
  * Formatting helpers (compactTokens / formatCost) live here because they are the
  * presentation contract for THIS section, not shared domain logic.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useInsightsStore } from '../../stores/insightsStore';
 import { BarRow } from './charts/BarRow';
 import { Sparkline } from './charts/Sparkline';
+import { DailyUsageChart } from './charts/DailyUsageChart';
 import { VersionHistory } from './VersionHistory';
+import { cn } from '../../utils/cn';
 import type {
   WorkflowRunStats,
   WorkflowUsageStats,
@@ -86,17 +103,61 @@ function mergeWorkflowCards(
   });
 }
 
-/** One workflow card — name, big avg-tokens figure, meta line, sparkline. */
+/** One by-flow token bar: a workflow with a non-null, positive totalTokens sum. */
+interface FlowTokenRow {
+  workflowId: string;
+  workflowName: string;
+  totalTokens: number;
+}
+
+/**
+ * The "token by flow" bars: every workflow whose usage rollup carried a positive
+ * `totalTokens`, sorted DESC. Workflows with a null or zero sum are dropped (no
+ * usable bar). Pure so the no-selection default panel stays deterministic.
+ */
+function selectFlowTokenRows(usage: WorkflowUsageStats[]): FlowTokenRow[] {
+  return usage
+    .filter((u): u is WorkflowUsageStats & { totalTokens: number } =>
+      u.totalTokens !== null && u.totalTokens > 0,
+    )
+    .map((u) => ({
+      workflowId: u.workflowId,
+      workflowName: u.workflowName,
+      totalTokens: u.totalTokens,
+    }))
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
+/**
+ * One workflow card — name, big avg-tokens figure, meta line, sparkline. Rendered
+ * as a selectable <button>: `selected` toggles the aria-pressed state plus the
+ * paper-theme selected affordance (emphasized border + a faint surface lift); the
+ * whole card is the click target, and `onSelect` toggles selection in the parent.
+ */
 function WorkflowCard({
   card,
   trendPoints,
+  selected,
+  onSelect,
 }: {
   card: WorkflowCardModel;
   trendPoints: number[];
+  selected: boolean;
+  onSelect: () => void;
 }): React.JSX.Element {
   return (
-    <div
-      className="rounded-card border border-border-primary bg-surface-primary p-4"
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className={cn(
+        'rounded-card border p-4 text-left transition-colors',
+        'hover:border-border-emphasized hover:bg-surface-secondary',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-interactive',
+        selected
+          ? 'border-border-emphasized bg-surface-secondary'
+          : 'border-border-primary bg-surface-primary',
+      )}
       data-testid={`stats-card-${card.workflowId}`}
     >
       <div className="eyebrow text-text-tertiary">{card.workflowName}</div>
@@ -112,7 +173,7 @@ function WorkflowCard({
       <div className="mt-3">
         <Sparkline points={trendPoints} strokeClass="text-interactive" />
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -121,10 +182,15 @@ export function StatsSection(): React.JSX.Element {
   const workflowUsage = useInsightsStore((s) => s.workflowUsage);
   const stepTokens = useInsightsStore((s) => s.stepTokens);
   const usageTrends = useInsightsStore((s) => s.usageTrends);
-  // `?? {}` tolerates a partial store mock that omits the slice (the live store
-  // always initializes it to {}); without it a non-null busiest workflow would
-  // index into undefined.
+  // `?? []` / `?? {}` tolerate a partial store mock that omits a slice (the live
+  // store always initializes dailyUsage to [] and revisionHistory to {}); without
+  // them the daily chart would read `.length` off undefined and a non-null
+  // selection would index into undefined.
+  const dailyUsage = useInsightsStore((s) => s.dailyUsage) ?? [];
   const revisionHistory = useInsightsStore((s) => s.revisionHistory) ?? {};
+
+  // Which workflow's drill-down panel is showing; null = the by-flow overview.
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
 
   const cards = useMemo(
     () => mergeWorkflowCards(workflowStats, workflowUsage),
@@ -137,7 +203,8 @@ export function StatsSection(): React.JSX.Element {
     [workflowStats],
   );
 
-  // Busiest workflow (most totalRuns) drives the per-step token panel.
+  // Busiest workflow (most totalRuns) — kept ONLY as the VersionHistory fallback
+  // in the no-selection state; the token panel no longer keys off it.
   const busiest = useMemo<WorkflowRunStats | null>(() => {
     let top: WorkflowRunStats | null = null;
     for (const s of workflowStats) {
@@ -146,12 +213,37 @@ export function StatsSection(): React.JSX.Element {
     return top;
   }, [workflowStats]);
 
-  const busiestBuckets = busiest === null ? [] : stepTokens[busiest.workflowId] ?? [];
-  const maxBucket = busiestBuckets.reduce((m, b) => Math.max(m, b.totalTokens), 0);
+  // The by-flow token bars for the no-selection overview.
+  const flowRows = useMemo(() => selectFlowTokenRows(workflowUsage), [workflowUsage]);
+  const maxFlow = flowRows.reduce((m, r) => Math.max(m, r.totalTokens), 0);
 
-  // Version history for the SAME busiest workflow that drives the token-by-step
-  // panel. Hidden (< 1 revision) when the workflow has no recorded spec revisions.
-  const busiestRevisions = busiest === null ? [] : revisionHistory[busiest.workflowId] ?? [];
+  // The selected workflow's run-stats (for its name + revision lookup) and its
+  // per-step token buckets. Both are absent until ensureWorkflowDetail resolves.
+  const selectedStats =
+    selectedWorkflowId === null
+      ? null
+      : workflowStats.find((s) => s.workflowId === selectedWorkflowId) ?? null;
+  const selectedName = selectedStats?.workflowName ?? selectedWorkflowId ?? '';
+  const selectedBuckets =
+    selectedWorkflowId === null ? [] : stepTokens[selectedWorkflowId] ?? [];
+  const maxBucket = selectedBuckets.reduce((m, b) => Math.max(m, b.totalTokens), 0);
+
+  // Version history follows the SELECTED workflow when one is chosen; otherwise it
+  // keeps the busiest-workflow fallback so the panel stays populated by default.
+  const revisionWorkflow = selectedWorkflowId ?? busiest?.workflowId ?? null;
+  const revisionName =
+    selectedWorkflowId !== null ? selectedName : busiest?.workflowName ?? '';
+  const revisions = revisionWorkflow === null ? [] : revisionHistory[revisionWorkflow] ?? [];
+
+  // Toggle selection; selecting a NEW workflow eagerly ensures its drill-down
+  // detail exists (it may sit outside the store's capped per-workflow fan-out).
+  const handleSelect = (workflowId: string): void => {
+    setSelectedWorkflowId((prev) => {
+      if (prev === workflowId) return null;
+      void useInsightsStore.getState().ensureWorkflowDetail(workflowId);
+      return workflowId;
+    });
+  };
 
   return (
     <div data-testid="stats-section">
@@ -169,6 +261,11 @@ export function StatsSection(): React.JSX.Element {
         )}
       </header>
 
+      <div className="mt-3" data-testid="stats-daily-usage">
+        <div className="eyebrow mb-2 text-text-tertiary">Token use · last 30 days</div>
+        <DailyUsageChart points={dailyUsage} />
+      </div>
+
       {cards.length === 0 ? (
         <p className="py-8 text-center text-sm text-text-muted" data-testid="stats-empty">
           No workflow runs yet — statistics appear once a flow has run.
@@ -180,37 +277,73 @@ export function StatsSection(): React.JSX.Element {
               key={card.workflowId}
               card={card}
               trendPoints={(usageTrends[card.workflowId] ?? []).map((p) => p.totalTokens)}
+              selected={selectedWorkflowId === card.workflowId}
+              onSelect={() => handleSelect(card.workflowId)}
             />
           ))}
         </div>
       )}
 
-      {busiest !== null && (busiestBuckets.length > 0 || busiestRevisions.length > 0) && (
+      {(cards.length > 0 || revisions.length > 0) && (
         <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
-          {busiestBuckets.length > 0 && (
+          {selectedWorkflowId !== null ? (
             <div data-testid="stats-token-by-step">
-              <div className="eyebrow mb-2 text-text-tertiary">
-                Token by step · {busiest.workflowName}
+              <div className="mb-2 flex items-baseline justify-between gap-2">
+                <span className="eyebrow text-text-tertiary">
+                  Token by step · {selectedName}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedWorkflowId(null)}
+                  className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
+                  data-testid="stats-deselect"
+                >
+                  ← all flows
+                </button>
               </div>
-              <div className="space-y-1.5">
-                {busiestBuckets.map((bucket) => (
-                  <BarRow
-                    key={bucket.stepId}
-                    label={bucket.stepId}
-                    value={bucket.totalTokens}
-                    max={maxBucket}
-                    valueLabel={compactTokens(bucket.totalTokens)}
-                  />
-                ))}
-              </div>
+              {selectedBuckets.length > 0 ? (
+                <div className="space-y-1.5">
+                  {selectedBuckets.map((bucket) => (
+                    <BarRow
+                      key={bucket.stepId}
+                      label={bucket.stepId}
+                      value={bucket.totalTokens}
+                      max={maxBucket}
+                      valueLabel={compactTokens(bucket.totalTokens)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-text-muted" data-testid="stats-no-steps">
+                  No step attribution for this flow yet.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div data-testid="stats-token-by-flow">
+              <div className="eyebrow mb-2 text-text-tertiary">Token by flow</div>
+              {flowRows.length > 0 ? (
+                <div className="space-y-1.5">
+                  {flowRows.map((row) => (
+                    <BarRow
+                      key={row.workflowId}
+                      label={row.workflowName}
+                      value={row.totalTokens}
+                      max={maxFlow}
+                      valueLabel={compactTokens(row.totalTokens)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-text-muted" data-testid="stats-no-flow-tokens">
+                  No token usage recorded for any flow yet.
+                </p>
+              )}
             </div>
           )}
 
-          {busiestRevisions.length > 0 && (
-            <VersionHistory
-              workflowName={busiest.workflowName}
-              revisions={busiestRevisions}
-            />
+          {revisions.length > 0 && (
+            <VersionHistory workflowName={revisionName} revisions={revisions} />
           )}
         </div>
       )}
