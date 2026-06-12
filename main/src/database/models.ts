@@ -395,3 +395,40 @@ export interface TaskExternalLinkRow {
   synced_cursor: string | null;
   baseline_json: string | null;
 }
+
+/**
+ * `run_usage` row (migration 026) — the durable per-run token/cost rollup, one
+ * row per run (run_id PRIMARY KEY, hard-FK -> workflow_runs ON DELETE CASCADE).
+ * Persisted twin of shared/types/insights.ts RunUsageRollup: insightsQueries
+ * computes the rollup from raw_events and the Phase-2 writer upserts it here.
+ * `total_tokens` is input + output. `cost_usd` / `num_turns` are nullable (NULL
+ * when no terminal result payload carried them — SDK-only).
+ */
+export interface RunUsageRow {
+  run_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_tokens: number; // input + output
+  cost_usd: number | null;
+  num_turns: number | null;
+  assistant_message_count: number;
+  computed_at: string;
+}
+
+/**
+ * `workflow_revisions` row (migration 026) — append-only snapshot of every
+ * distinct spec_json a workflow has carried, keyed by (workflow_id, spec_hash).
+ * Lets a run's frozen workflow_runs.spec_hash always resolve to the spec text
+ * that produced it after the live workflow spec_json moves on. UNIQUE(workflow_id,
+ * spec_hash) makes the writer's "record if new" an idempotent INSERT OR IGNORE;
+ * hard-FK workflow_id -> workflows ON DELETE CASCADE.
+ */
+export interface WorkflowRevisionRow {
+  id: number;
+  workflow_id: string;
+  spec_hash: string; // sha256 hex of spec_json (computeSpecHash)
+  spec_json: string;
+  created_at: string;
+}

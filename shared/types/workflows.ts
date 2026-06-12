@@ -86,6 +86,8 @@ export interface WorkflowRunRow {
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id. Stamped at launch on a session-hosted 'sprint' run seeded with taskIds (SprintLaneStore.createForRun); NULL for every other run. */
   batch_id?: string | null;
+  /** sha256 hex of the workflow's spec_json frozen at run creation (computeSpecHash; migration 026). Lets Insights bucket runs by the exact workflow revision they executed even after the workflow's spec_json is edited. NULL for historic runs / runs created before 026. */
+  spec_hash?: string | null;
   /**
    * DB-canonical close-out signal set on terminal close-out. NULL while the run
    * is in flight (migration 014). `'integrated'` (migration 022 / feat/parallel-sprint)
