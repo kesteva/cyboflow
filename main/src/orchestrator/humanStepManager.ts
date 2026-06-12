@@ -29,19 +29,13 @@
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
-import type { ReviewItemChangedEvent, ReviewItemChangeAction } from '../../../shared/types/reviews';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
   countPendingBlockingReviewItems,
   hasReviewItemsTable,
 } from './reviewItemListing';
-import {
-  ReviewItemRouter,
-  reviewItemChangeEvents,
-  reviewItemProjectChannel,
-  type ReviewItemDbRow,
-} from './reviewItemRouter';
+import { emitReviewItemChangedById } from './reviewItemRouter';
 import { runStatusEvents } from './trpc/routers/events';
 
 /** Provenance source stamped on a human-gate decision review_item. */
@@ -159,7 +153,7 @@ export class HumanStepManager {
           status: 'awaiting_review',
         } satisfies RunStatusChangedEvent);
       }
-      if (reviewItemId) this.emitReviewItemChange(reviewItemId, 'created');
+      if (reviewItemId) emitReviewItemChangedById(this.db, reviewItemId, 'created');
 
       return reviewItemId;
     })) as string | null;
@@ -206,7 +200,7 @@ export class HumanStepManager {
       });
       (txn as () => void)();
 
-      if (resolved) this.emitReviewItemChange(reviewItemId, 'resolved');
+      if (resolved) emitReviewItemChangedById(this.db, reviewItemId, 'resolved');
       if (resumed) {
         runStatusEvents.emit('changed', { runId, status: 'running' } satisfies RunStatusChangedEvent);
       }
@@ -246,28 +240,6 @@ export class HumanStepManager {
       }
       return resumed;
     })) as boolean;
-  }
-
-  /**
-   * Broadcast a review-item delta on the project-scoped channel the renderer's
-   * queue/landing stores subscribe to. The gate's co-writes happen INSIDE this
-   * manager's transactions (deliberately bypassing ReviewItemRouter), so the
-   * emit the chokepoint would otherwise own is re-issued here, reusing its
-   * shaping + channel helpers. Fail-soft: a row deleted between commit and emit
-   * broadcasts nothing.
-   */
-  private emitReviewItemChange(reviewItemId: string, action: ReviewItemChangeAction): void {
-    const row = this.db
-      .prepare('SELECT * FROM review_items WHERE id = ?')
-      .get(reviewItemId) as ReviewItemDbRow | undefined;
-    if (!row) return;
-    const event: ReviewItemChangedEvent = {
-      projectId: row.project_id,
-      reviewItemId,
-      action,
-      item: ReviewItemRouter.shapeRow(row),
-    };
-    reviewItemChangeEvents.emit(reviewItemProjectChannel(row.project_id), event);
   }
 
   /**

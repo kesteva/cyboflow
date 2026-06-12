@@ -50,6 +50,9 @@ import {
   resolveReviewItemById,
   hasReviewItemsTable,
 } from './reviewItemListing';
+import { emitReviewItemChangedById } from './reviewItemRouter';
+import { runStatusEvents } from './trpc/routers/events';
+import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
@@ -327,6 +330,13 @@ export class QuestionRouter extends EventEmitter {
 
       // Notify renderer subscribers (e.g. the question queue UI).
       this.emit('questionCreated', request);
+
+      // Renderer signals AFTER the commit — the review-item co-write bypasses
+      // the ReviewItemRouter chokepoint (it must share this transaction), so
+      // the project-scoped delta (queue chip / landing inbox) and the
+      // run-status change are re-issued here.
+      if (reviewItemId !== null) emitReviewItemChangedById(this.db, reviewItemId, 'created');
+      runStatusEvents.emit('changed', { runId, status: 'awaiting_input' } satisfies RunStatusChangedEvent);
     });
 
     return answerPromise;
@@ -397,6 +407,7 @@ export class QuestionRouter extends EventEmitter {
         // gone (run canceled), so the inbox item must not linger as blocking.
         if (reviewItemId !== null) {
           resolveReviewItemById(this.db, reviewItemId, 'system', 'superseded', now, request.runId);
+          emitReviewItemChangedById(this.db, reviewItemId, 'resolved');
         }
         // Resolve the requestQuestion promise with a synthetic empty-answers payload
         // so the awaiting caller is not left hanging.
@@ -414,7 +425,9 @@ export class QuestionRouter extends EventEmitter {
       // Resolve the folded decision review_item (idempotent) — the human answered.
       if (reviewItemId !== null) {
         resolveReviewItemById(this.db, reviewItemId, 'user', 'answered', now, request.runId);
+        emitReviewItemChangedById(this.db, reviewItemId, 'resolved');
       }
+      runStatusEvents.emit('changed', { runId: request.runId, status: 'running' } satisfies RunStatusChangedEvent);
 
       resolve(effectiveAnswer);
       socketReply(effectiveAnswer);
@@ -550,6 +563,7 @@ export class QuestionRouter extends EventEmitter {
         // Resolve the folded decision review_item too (idempotent).
         if (entry.reviewItemId !== null) {
           resolveReviewItemById(this.db, entry.reviewItemId, 'system', 'run_terminated', now, runId);
+          emitReviewItemChangedById(this.db, entry.reviewItemId, 'resolved');
         }
       } catch (err) {
         // Swallow DB errors during shutdown — do not throw.

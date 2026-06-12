@@ -49,6 +49,34 @@ export function reviewItemProjectChannel(projectId: number): string {
   return `review-project-${projectId}`;
 }
 
+/**
+ * Broadcast a review-item delta for a row written OUTSIDE the chokepoint.
+ *
+ * QuestionRouter and HumanStepManager co-write review_items rows inside their
+ * own transactions (deliberately bypassing applyReviewItem so the gate write
+ * commits atomically with the run-status flip) — which also bypasses the
+ * chokepoint's emit. They call this AFTER their commit so the renderer's
+ * queue/landing subscriptions still hear about the change. Fail-soft: a row
+ * deleted between commit and emit broadcasts nothing.
+ */
+export function emitReviewItemChangedById(
+  db: DatabaseLike,
+  reviewItemId: string,
+  action: ReviewItemChangeAction,
+): void {
+  const row = db
+    .prepare('SELECT * FROM review_items WHERE id = ?')
+    .get(reviewItemId) as ReviewItemDbRow | undefined;
+  if (!row) return;
+  const event: ReviewItemChangedEvent = {
+    projectId: row.project_id,
+    reviewItemId,
+    action,
+    item: ReviewItemRouter.shapeRow(row),
+  };
+  reviewItemChangeEvents.emit(reviewItemProjectChannel(row.project_id), event);
+}
+
 /** The (entity_type, entity_id) entity_events key reused for review items. */
 const ENTITY_EVENT_TYPE = 'review_item';
 

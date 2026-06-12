@@ -33,7 +33,7 @@ import { useReviewQueueStore } from './stores/reviewQueueStore';
 import { useReviewItemsSlice } from './stores/reviewItemsSlice';
 import { useBacklogStore } from './stores/backlogStore';
 import { useActiveRunsStore } from './stores/activeRunsStore';
-import { useLandingStore } from './stores/landingStore';
+import { useLandingStore, useAggregatedReviewItems } from './stores/landingStore';
 import type { PermissionInput } from './types/session';
 
 // Type for IPC response
@@ -62,7 +62,14 @@ function App() {
   const toggleBacklog = useNavigationStore((s) => s.toggleBacklog);
   const showInsights = useNavigationStore((s) => s.insightsOpen);
   const toggleInsights = useNavigationStore((s) => s.toggleInsights);
-  const reviewQueueCount = useReviewQueueStore((s) => s.queue.length);
+  // Human-review rail badge: pending PERMISSION approvals (global approval
+  // stream) + pending decision/human_task review items aggregated across all
+  // projects from the landing store (init'd app-wide below). Approvals alone
+  // missed every queue-backed gate — a planner human gate left the chip at 0
+  // while the review pane showed the item.
+  const pendingApprovalsCount = useReviewQueueStore((s) => s.queue.length);
+  const aggregatedReviewItems = useAggregatedReviewItems();
+  const reviewQueueCount = pendingApprovalsCount + aggregatedReviewItems.length;
   // Non-done, non-archived task count drives the backlog rail badge (mirrors the
   // review count). Cross-project by design — the board is the overall view now.
   const backlogCount = useBacklogStore(
