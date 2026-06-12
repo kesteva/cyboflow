@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Folder as FolderIcon, GitBranch, Hammer, Play } from 'lucide-react';
 import { API } from '../utils/api';
 import type { Project, CreateProjectRequest } from '../types/project';
@@ -28,7 +28,36 @@ export function CreateProjectDialog({ isOpen, onClose, onCreated }: CreateProjec
   const [newProject, setNewProject] = useState<CreateProjectRequest>(EMPTY_PROJECT);
   const [showValidationErrors, setShowValidationErrors] = useState(false);
   const [detectedBranch, setDetectedBranch] = useState<string | null>(null);
+  const [isDemoPrefill, setIsDemoPrefill] = useState(false);
   const { showError } = useErrorStore();
+
+  // Demo mode: prefill the sandbox repo so the "add a project" tour step needs
+  // no typing. Only fills untouched fields (the user can still edit them).
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    API.demo
+      .getInfo()
+      .then((response) => {
+        if (cancelled || !response.success || !response.data) return;
+        const { demoMode, sandboxPath, projectName } = response.data;
+        if (!demoMode || !sandboxPath) return;
+        setIsDemoPrefill(true);
+        setNewProject((prev) =>
+          prev.name === '' && prev.path === ''
+            ? { ...prev, name: projectName, path: sandboxPath }
+            : prev,
+        );
+        detectCurrentBranch(sandboxPath);
+      })
+      .catch(() => {
+        // Demo info is best-effort — the dialog works without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- detectCurrentBranch is stable per render and intentionally not a dep
+  }, [isOpen]);
 
   const resetForm = () => {
     setNewProject(EMPTY_PROJECT);
@@ -91,6 +120,11 @@ export function CreateProjectDialog({ isOpen, onClose, onCreated }: CreateProjec
       <ModalHeader title="Add New Project" icon={<Plus className="w-5 h-5" />} />
       <ModalBody>
         <div className="space-y-8">
+          {isDemoPrefill && (
+            <Card variant="bordered" padding="md" className="text-text-secondary bg-surface-secondary">
+              Demo mode — we prefilled the sandbox project for you. Just hit <strong>Create Project</strong>.
+            </Card>
+          )}
           {/* Project Info Section */}
           <div className="space-y-6">
             <div className="flex items-center gap-2 pb-2 border-b border-border-primary">

@@ -4,6 +4,7 @@ import type { CreateProjectRequest, UpdateProjectRequest } from '../../../fronte
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
 import { ensureGitignoreEntry } from '../utils/gitignoreWriter';
+import { seedDemoProjectEntities } from '../services/demo/demoSeed';
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -46,6 +47,7 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { databaseService, sessionManager, worktreeManager, killLiveSession } = services;
+  // (demo seeding below reads services.configManager directly)
 
   ipcMain.handle('projects:get-all', async () => {
     try {
@@ -152,6 +154,18 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       console.log('[Main] Project created successfully:', project);
+
+      // Demo mode: seed the tour backlog (idea + ready tasks) so the planner
+      // and sprint pickers have content right after the project is added.
+      // Fail-soft — a seeding error must never fail project creation.
+      if (services.configManager.isDemoMode() && project) {
+        try {
+          await seedDemoProjectEntities(project.id);
+          console.log('[Main] Demo backlog seeded for project', project.id);
+        } catch (error) {
+          console.error('[Main] Demo backlog seeding failed (continuing):', error);
+        }
+      }
 
       // Ensure .cyboflow/worktrees/ is in the project's .gitignore so that
       // worktrees created under that directory do not appear as untracked changes.
