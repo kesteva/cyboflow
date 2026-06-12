@@ -3,7 +3,7 @@
  * workflow run.
  *
  * A "quick session" is a session started WITHOUT a structured workflow (free-form
- * interactive Claude Code). This is ALSO the view a session falls back to after a
+ * Claude Code). This is ALSO the view a session falls back to after a
  * workflow run ends (cancel / complete / fail) — the session's home base, from
  * which the operator can add another workflow. It mirrors the WorkflowCanvas slot
  * (the top ~46% of the centre column) so the layout never collapses, while the
@@ -321,7 +321,7 @@ export function QuickSessionCanvas({
               display: 'inline-block',
             }}
           />
-          interactive
+          live
         </span>
       </div>
 
@@ -398,7 +398,7 @@ export function QuickSessionCanvas({
                 whiteSpace: 'nowrap',
               }}
             >
-              Interactive
+              Session
             </span>
             <span
               data-testid="quick-session-node-model"

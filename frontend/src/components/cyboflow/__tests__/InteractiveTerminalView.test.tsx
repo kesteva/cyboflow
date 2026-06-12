@@ -492,3 +492,41 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
     expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// guardFirstInteraction prop — quick sessions opt OUT of the workflow-run
+// guardrail (relay on from mount, warn dialog never mounted); the default
+// (true) keeps the workflow-run behavior byte-identical.
+// ---------------------------------------------------------------------------
+
+describe('InteractiveTerminalView — guardFirstInteraction', () => {
+  it('guardFirstInteraction={false}: relays keystrokes immediately and never opens the warn dialog', () => {
+    render(
+      <InteractiveTerminalView
+        runId="run-unguarded"
+        substrate="interactive"
+        guardFirstInteraction={false}
+      />,
+    );
+
+    // Keystrokes relay VERBATIM from mount — no "Interact anyway" opt-in needed.
+    onDataHandler?.('h');
+    expect(relayInputMutate).toHaveBeenCalledWith({ runId: 'run-unguarded', text: 'h' });
+
+    // Mousedown on the terminal surface must NOT open the warn dialog.
+    fireEvent.mouseDown(screen.getByTestId('interactive-terminal-surface'));
+    expect(screen.queryByText('Direct terminal access')).not.toBeInTheDocument();
+  });
+
+  it('default (guarded): relay stays inert and the first mousedown still opens the dialog', () => {
+    render(<InteractiveTerminalView runId="run-guarded" substrate="interactive" />);
+
+    // Inert relay until the user opts in via "Interact anyway".
+    onDataHandler?.('h');
+    expect(relayInputMutate).not.toHaveBeenCalled();
+
+    // The workflow-run guardrail is byte-identical: first mousedown warns.
+    fireEvent.mouseDown(screen.getByTestId('interactive-terminal-surface'));
+    expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
+  });
+});

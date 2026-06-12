@@ -7,12 +7,17 @@ import { ClaudeInputWithImages } from './ClaudeInputWithImages';
 import { useClaudePanel } from '../../../hooks/useClaudePanel';
 import { ClaudeSettingsPanel } from './ClaudeSettingsPanel';
 import { ClaudeMessageTransformer } from '../ai/transformers/ClaudeMessageTransformer';
-import { Settings } from 'lucide-react';
+import { Send, Settings } from 'lucide-react';
 import { useConfigStore } from '../../../stores/configStore';
 import type { ClaudePanelState } from '../../../../../shared/types/panels';
 import { ResizablePanel } from '../../ResizablePanel';
 import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun';
 import { useSession } from '../../../contexts/SessionContext';
+import { useSessionStore } from '../../../stores/sessionStore';
+import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
+import { Button } from '../../ui/Button';
+import { API } from '../../../utils/api';
+import type { IPCResponse } from '../../../utils/api';
 
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
@@ -38,6 +43,19 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // with a null runId for freshly-created quick sessions, so prefer context.
   const sessionCtx = useSession();
   const approvalRunId = sessionCtx?.session.runId ?? activeSession?.runId ?? null;
+  // Interactive-PTY render swap (PTY-backed quick sessions): when this panel's
+  // session runs on the 'interactive' substrate, the live xterm
+  // (InteractiveTerminalView, keyed by the sentinel __quick__ run id) replaces
+  // the SDK structured transcript below. Session resolution mirrors
+  // approvalRunId — prefer the SessionProvider's freshly-fetched session, fall
+  // back to the store copy keyed by the panel's sessionId. Null-safe: an
+  // interactive session whose runId has not landed yet keeps the SDK surface.
+  const panelStoreSession = useSessionStore((state) =>
+    state.sessions.find((s) => s.id === panel.sessionId),
+  );
+  const substrateSession = sessionCtx?.session ?? panelStoreSession;
+  const interactiveRunId =
+    substrateSession?.substrate === 'interactive' ? substrateSession.runId ?? null : null;
   const devModeEnabled = useConfigStore((state) => state.config?.devMode ?? false);
   const showDebugTabs = devModeEnabled;
 
@@ -105,8 +123,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background">
-      {/* Header */}
-      {showDebugTabs && (
+      {/* Header — debug tabs drive the SDK structured views only, so they are
+          dropped while the live PTY terminal owns the body. */}
+      {showDebugTabs && interactiveRunId === null && (
         <div className="border-b border-border-primary bg-surface-primary shadow-sm">
           <div className="flex items-center justify-between px-4 h-12">
             <div className="flex items-center gap-2">
@@ -173,17 +192,36 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
       )}
 
       {/* Main content area */}
-      <ClaudeMainContent
-        panelId={panel.id}
-        activeView={activeView}
-        showDebugTabs={showDebugTabs}
-        devModeEnabled={devModeEnabled}
-        activeSession={activeSession}
-        richOutputSettings={richOutputSettings}
-        handleRichOutputSettingsChange={handleRichOutputSettingsChange}
-        transformer={transformer}
-        toggleSettings={toggleSettings}
-      />
+      {interactiveRunId !== null ? (
+        /* Interactive substrate: the live PTY xterm IS the conversation
+           surface (mirrors RunChatView's swap for workflow runs). The SDK
+           structured surface stays dormant (not rendered) so the conversation
+           is never double-rendered. The composer below is the dedicated
+           InteractiveSessionComposer, which routes through the session-scoped
+           sessions:input channel (relayed into the live PTY server-side).
+           guardFirstInteraction={false}: quick sessions are user-driven, so
+           direct typing into the terminal is the expected interaction — no
+           first-mousedown warn dialog, keystroke relay on from mount (workflow
+           runs keep the guardrail because cyboflow orchestrates them). */
+        <div
+          className="flex-1 overflow-hidden relative"
+          data-testid="claude-panel-interactive-terminal"
+        >
+          <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
+        </div>
+      ) : (
+        <ClaudeMainContent
+          panelId={panel.id}
+          activeView={activeView}
+          showDebugTabs={showDebugTabs}
+          devModeEnabled={devModeEnabled}
+          activeSession={activeSession}
+          richOutputSettings={richOutputSettings}
+          handleRichOutputSettingsChange={handleRichOutputSettingsChange}
+          transformer={transformer}
+          toggleSettings={toggleSettings}
+        />
+      )}
 
       {/* Settings Panel */}
       {showSettings && (
@@ -199,35 +237,45 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           null when the session has no run or no pending approval for it. */}
       <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
 
-      {/* Claude Input - Always visible at bottom if not archived */}
+      {/* Composer - Always visible at bottom if not archived. Interactive
+          sessions get the dedicated InteractiveSessionComposer instead of
+          ClaudeInputWithImages: the latter's submit handlers hit the
+          PANEL-scoped panels:send-input / panels:continue channels, which
+          route straight to the SDK claudePanelManager with no substrate guard
+          — for an interactive session that would spawn a COMPETING SDK
+          conversation in the same worktree as the live PTY. */}
       {!activeSession.archived && (
-        <ResizablePanel
-          defaultHeight={200}
-          minHeight={140}
-          maxHeight={600}
-          storageKey="claude-input-panel-height"
-        >
-          <ClaudeInputWithImages
-            activeSession={activeSession}
-            viewMode="richOutput"
-            input={hook.input}
-            setInput={hook.setInput}
-            textareaRef={hook.textareaRef}
-            handleTerminalCommand={hook.handleTerminalCommand}
-            handleSendInput={hook.handleSendInput}
-            handleContinueConversation={hook.handleContinueConversation}
-            ultrathink={hook.ultrathink}
-            setUltrathink={hook.setUltrathink}
-            gitCommands={hook.gitCommands}
-            handleCompactContext={hook.handleCompactContext}
-            hasConversationHistory={hook.hasConversationHistory}
-            contextCompacted={hook.contextCompacted}
-            handleCancelRequest={hook.handleStopSession}
-            contextUsageDisplay={contextDisplay}
-            contextUpdating={isContextUpdating}
-            panelId={panel.id}
-          />
-        </ResizablePanel>
+        interactiveRunId !== null ? (
+          <InteractiveSessionComposer sessionId={activeSession.id} />
+        ) : (
+          <ResizablePanel
+            defaultHeight={200}
+            minHeight={140}
+            maxHeight={600}
+            storageKey="claude-input-panel-height"
+          >
+            <ClaudeInputWithImages
+              activeSession={activeSession}
+              viewMode="richOutput"
+              input={hook.input}
+              setInput={hook.setInput}
+              textareaRef={hook.textareaRef}
+              handleTerminalCommand={hook.handleTerminalCommand}
+              handleSendInput={hook.handleSendInput}
+              handleContinueConversation={hook.handleContinueConversation}
+              ultrathink={hook.ultrathink}
+              setUltrathink={hook.setUltrathink}
+              gitCommands={hook.gitCommands}
+              handleCompactContext={hook.handleCompactContext}
+              hasConversationHistory={hook.hasConversationHistory}
+              contextCompacted={hook.contextCompacted}
+              handleCancelRequest={hook.handleStopSession}
+              contextUsageDisplay={contextDisplay}
+              contextUpdating={isContextUpdating}
+              panelId={panel.id}
+            />
+          </ResizablePanel>
+        )
       )}
 
       {/* Show archived message if session is archived */}
@@ -242,6 +290,87 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
 });
 
 ClaudePanel.displayName = 'ClaudePanel';
+
+// Dedicated composer for interactive-PTY quick sessions. Routes through the
+// SESSION-scoped API.sessions.sendInput → sessions:input, which branches
+// server-side: for substrate 'interactive' the body is relayed into the live
+// PTY (followed by a separate Enter keystroke after the bracketed-paste window
+// closes). ClaudeInputWithImages is deliberately NOT used here — its handlers
+// (useClaudePanel handleSendInput / handleContinueConversation) hit the
+// panel-scoped panels:send-input / panels:continue, which have no substrate
+// guard and would spawn a competing SDK conversation alongside the live PTY.
+// Enter sends, Shift+Enter inserts a newline (mirrors ChatInput).
+const InteractiveSessionComposer: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+  const [text, setText] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  const canSend = text.trim().length > 0 && !isSending;
+
+  const handleSend = async () => {
+    if (!canSend) return;
+    setIsSending(true);
+    setSendError(null);
+    try {
+      const result: IPCResponse<void> = await API.sessions.sendInput(sessionId, text);
+      if (result.success) {
+        setText('');
+      } else {
+        setSendError(result.error ?? 'Send failed');
+      }
+    } catch (err: unknown) {
+      setSendError(err instanceof Error ? err.message : 'Send failed');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void handleSend();
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2 shrink-0"
+      data-testid="interactive-session-composer"
+    >
+      <div className="flex flex-col border border-border-primary bg-surface-primary transition-colors focus-within:border-border-hover">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Message the live session…"
+          disabled={isSending}
+          rows={2}
+          className="w-full resize-none bg-transparent px-3 pt-2 pb-1 text-xs text-text-primary placeholder-text-tertiary focus:outline-none disabled:cursor-not-allowed"
+        />
+        <div className="flex items-center justify-between gap-2 px-2 pb-2">
+          <span className="text-[10px] text-text-tertiary">
+            Enter to send · Shift+Enter for newline
+          </span>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!canSend}
+            onClick={() => void handleSend()}
+            className="gap-1.5"
+          >
+            <Send className="h-3.5 w-3.5" />
+            Send
+          </Button>
+        </div>
+      </div>
+      {sendError !== null && (
+        <p className="text-xs text-status-error" role="alert">
+          {sendError}
+        </p>
+      )}
+    </div>
+  );
+};
 
 // Memoized main content component to prevent unnecessary re-renders when input changes
 const ClaudeMainContent = React.memo<{

@@ -16,7 +16,9 @@
  *      from echoing locally, but `term.onData` relays raw keystrokes VERBATIM to
  *      `cyboflow.runs.relayInput` — ONLY while the per-run "Interact anyway" flag
  *      (set by TASK-816's warn modal) is true; otherwise it is inert and the chat
- *      composer is the sole input path. A ResizeObserver also relays geometry to
+ *      composer is the sole input path. The whole guardrail is opt-out via
+ *      `guardFirstInteraction={false}` (quick sessions): relay starts ON and the
+ *      warn dialog never mounts. A ResizeObserver also relays geometry to
  *      `cyboflow.runs.relayResize`. The relay routes to the interactive manager's
  *      live PTY and NO-OPs for the SDK substrate (Q3 byte-identical).
  *
@@ -115,12 +117,20 @@ function writeWithAutoScroll(term: Terminal, chunk: string): void {
 export function InteractiveTerminalView({
   runId,
   substrate = 'interactive',
+  guardFirstInteraction = true,
   resumeId,
   pid,
   tty,
 }: {
   runId: string;
   substrate?: RunSubstrate;
+  /** First-interaction guardrail toggle. Workflow runs keep the default `true`
+   *  (byte-identical behavior): cyboflow orchestrates them, so direct typing can
+   *  derail the orchestration loop — keystroke relay starts OFF and the first
+   *  mousedown opens InteractiveWarnDialog. Quick sessions pass `false`: they
+   *  are user-driven, so direct typing IS the expected interaction — relay
+   *  starts ON and the warn dialog is never mounted. */
+  guardFirstInteraction?: boolean;
   /** Session-identity fields for the LIVE PTY bar. Where a field is not yet
    *  plumbed, a stable placeholder is rendered (real wiring is a follow-up). */
   resumeId?: string;
@@ -137,9 +147,11 @@ export function InteractiveTerminalView({
   // mousedown once `hasWarned` is set. "Interact anyway" additionally flips the
   // per-run keystroke-relay flag that TASK-817 reads to start relaying
   // `xterm.onData`; this task SETS the flag but does NOT wire the relay.
+  // With `guardFirstInteraction={false}` (quick sessions) the relay starts ON
+  // and the warn path is skipped entirely.
   const [hasWarned, setHasWarned] = useState(false);
   const [warnOpen, setWarnOpen] = useState(false);
-  const [relayEnabled, setRelayEnabled] = useState(false);
+  const [relayEnabled, setRelayEnabled] = useState(!guardFirstInteraction);
 
   // Mirror the relay flag into a ref so the once-bound `term.onData` handler
   // (TASK-817) reads the LATEST value without a stale closure. `onData` is bound
@@ -153,14 +165,19 @@ export function InteractiveTerminalView({
 
   const handleSurfaceMouseDown = useCallback((): void => {
     // FIRST mousedown only — the per-run has-warned flag suppresses every
-    // subsequent open for this run.
-    if (!hasWarned) setWarnOpen(true);
-  }, [hasWarned]);
+    // subsequent open for this run. Unguarded surfaces (quick sessions,
+    // guardFirstInteraction={false}) never open the dialog.
+    if (guardFirstInteraction && !hasWarned) setWarnOpen(true);
+  }, [guardFirstInteraction, hasWarned]);
 
   const focusComposer = useCallback((): void => {
     // Focus the chat composer so the operator types there (relayed as a queued
     // message). The composer focus target is owned by the chat view; this is a
     // best-effort focus of the run chat input if present.
+    // KNOWN DEAD SELECTOR: nothing in the codebase renders
+    // data-testid="run-chat-input" (ChatInput's textarea carries no stable
+    // testid), so this query matches nothing and the focus is a silent no-op
+    // until a stable testid lands on the run chat composer.
     const composer = document.querySelector<HTMLElement>(
       '[data-testid="run-chat-input"] textarea, [data-testid="run-chat-input"] input',
     );
@@ -440,7 +457,8 @@ export function InteractiveTerminalView({
         </>
       )}
 
-      {/* Terminal surface — first mousedown opens the warn guardrail (once). */}
+      {/* Terminal surface — first mousedown opens the warn guardrail (once);
+          unguarded (quick-session) surfaces skip the dialog entirely. */}
       <div
         className="min-h-0 flex-1"
         onMouseDown={handleSurfaceMouseDown}
@@ -449,12 +467,14 @@ export function InteractiveTerminalView({
         <div ref={containerRef} className="h-full w-full" />
       </div>
 
-      <InteractiveWarnDialog
-        isOpen={warnOpen}
-        onClose={() => setWarnOpen(false)}
-        onUseChat={focusComposer}
-        onInteractAnyway={grantTerminalFocus}
-      />
+      {guardFirstInteraction && (
+        <InteractiveWarnDialog
+          isOpen={warnOpen}
+          onClose={() => setWarnOpen(false)}
+          onUseChat={focusComposer}
+          onInteractAnyway={grantTerminalFocus}
+        />
+      )}
     </div>
   );
 }

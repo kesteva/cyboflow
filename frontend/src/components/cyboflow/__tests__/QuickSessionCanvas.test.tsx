@@ -132,6 +132,15 @@ describe('QuickSessionCanvas', () => {
     expect(screen.getByTestId('quick-session-node-sub')).toHaveTextContent('tester-mctest');
   });
 
+  it('substrate copy: pill reads "live", node header reads "Session", no "interactive" copy', () => {
+    renderCanvas();
+    // "Interactive" naming now belongs to the PTY substrate, not quick sessions
+    // generally — the pill keeps its legacy data-testid but reads "live".
+    expect(screen.getByTestId('quick-session-interactive-pill')).toHaveTextContent('live');
+    expect(screen.getByText('Session')).toBeInTheDocument();
+    expect(screen.queryByText(/interactive/i)).not.toBeInTheDocument();
+  });
+
   it('lists the real workflow catalogue with the default (sprint) first', async () => {
     renderCanvas();
     await waitFor(() => {
