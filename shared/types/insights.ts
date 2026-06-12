@@ -101,12 +101,12 @@ export interface UsageTrendPoint {
  *
  * A "revision" is a distinct `spec_json` snapshot of a workflow, content-addressed
  * by its `spec_hash` (sha256 of the exact spec text — see specHash.ts/computeSpecHash)
- * and recorded in the migration-025 `workflow_revisions` table. Runs are bucketed
+ * and recorded in the migration-026 `workflow_revisions` table. Runs are bucketed
  * by the `workflow_runs.spec_hash` frozen at run creation, so each revision's stats
  * cover ONLY the runs that executed that precise spec text — even after the live
  * `spec_json` is later edited into a newer revision.
  *
- * Runs created before migration 025 carry `spec_hash = NULL` and are therefore
+ * Runs created before migration 026 carry `spec_hash = NULL` and are therefore
  * INVISIBLE here by design (they belong to no recorded revision); they still count
  * in the workflow-wide {@link WorkflowRunStats} aggregate.
  */

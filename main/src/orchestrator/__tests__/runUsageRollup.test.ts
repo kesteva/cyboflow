@@ -1,5 +1,5 @@
 /**
- * Unit tests for rollupRunUsage — the Insights Phase-2 (migration 025) writer
+ * Unit tests for rollupRunUsage — the Insights Phase-2 (migration 026) writer
  * that materializes a durable `run_usage` row from a run's persisted
  * `assistant` + `result` raw_events at a terminal seam.
  *
@@ -14,7 +14,7 @@
  *
  * Fixture: a single in-memory better-sqlite3 DB carrying just the two tables the
  * writer touches — raw_events (the scan source, via the shared RAW_EVENTS_DDL)
- * and run_usage (the write target, mirroring migration 025). FK enforcement is
+ * and run_usage (the write target, mirroring migration 026). FK enforcement is
  * off so we can write run_usage without seeding a parent workflow_runs row (the
  * FK is exercised in the migration's own schema-parity tests, not here).
  */
@@ -26,7 +26,7 @@ import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { RAW_EVENTS_DDL } from '../__test_fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
-// run_usage DDL — mirrors migration 025 (FK clause omitted; FKs are off in the
+// run_usage DDL — mirrors migration 026 (FK clause omitted; FKs are off in the
 // fixture so run_usage can be written without a parent workflow_runs row).
 // ---------------------------------------------------------------------------
 const RUN_USAGE_DDL = `

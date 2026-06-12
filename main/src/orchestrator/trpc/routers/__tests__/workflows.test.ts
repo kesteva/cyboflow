@@ -57,7 +57,7 @@ function createWorkflowTestDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
-  // spec-capture (migration 025): WorkflowRegistry.updateSpec / resetSpec now
+  // spec-capture (migration 026): WorkflowRegistry.updateSpec / resetSpec now
   // INSERT-OR-IGNORE a workflow_revisions snapshot (and createRun freezes
   // workflow_runs.spec_hash). Layer both additive shapes on top of
   // REGISTRY_SCHEMA — same convention as workflowRegistry.test.ts (the fixture

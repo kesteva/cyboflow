@@ -184,7 +184,7 @@ interface SeedRevisionOpts {
   createdAt?: string;
 }
 
-/** Insert a migration-025 `workflow_revisions` snapshot row. */
+/** Insert a migration-026 `workflow_revisions` snapshot row. */
 function seedRevision(db: Database.Database, opts: SeedRevisionOpts): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflow_revisions (workflow_id, spec_hash, spec_json, created_at)
@@ -218,14 +218,14 @@ interface SeedRunUsageOpts {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
-  /** When omitted, defaults to input + output to mirror the migration-025 contract. */
+  /** When omitted, defaults to input + output to mirror the migration-026 contract. */
   totalTokens?: number;
   costUsd?: number | null;
   numTurns?: number | null;
   assistantMessageCount?: number;
 }
 
-/** Insert a precomputed migration-025 `run_usage` row (the materialized tier). */
+/** Insert a precomputed migration-026 `run_usage` row (the materialized tier). */
 function seedRunUsage(db: Database.Database, opts: SeedRunUsageOpts): void {
   const input = opts.inputTokens ?? 0;
   const output = opts.outputTokens ?? 0;
@@ -247,7 +247,7 @@ function seedRunUsage(db: Database.Database, opts: SeedRunUsageOpts): void {
   );
 }
 
-/** Construct a persisted `step_transition` raw_events payload (migration 025). */
+/** Construct a persisted `step_transition` raw_events payload (migration 026). */
 function stepTransitionPayload(
   stepId: string,
   status: 'running' | 'done' = 'running',

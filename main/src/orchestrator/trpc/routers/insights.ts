@@ -225,7 +225,7 @@ export const insightsRouter = router({
   /**
    * Per-revision (per-spec_hash) run statistics for one workflow's version
    * history (mockup S6), newest revision first. `workflowId` is required — this
-   * is a per-workflow drill-down. Runs frozen before migration 025 (spec_hash
+   * is a per-workflow drill-down. Runs frozen before migration 026 (spec_hash
    * NULL) are invisible by design; see selectWorkflowRevisionStats.
    */
   revisionHistory: protectedProcedure

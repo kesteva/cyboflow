@@ -1,7 +1,7 @@
 /**
  * Unit tests for computeSpecHash — the spec_json content address (sha256 hex)
  * that backs workflow_runs.spec_hash and the workflow_revisions snapshot key
- * (spec-capture / migration 025).
+ * (spec-capture / migration 026).
  *
  * Coverage:
  *   - Determinism: same input → same digest across calls.

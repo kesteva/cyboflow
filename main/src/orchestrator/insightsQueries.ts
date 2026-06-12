@@ -19,7 +19,7 @@
  *     `num_turns`, SUMMED across results (a resumed run emits one `result` per
  *     turn-session). Null when no result ever carried the field.
  *
- * Materialized-row contract (migration 025): a `run_usage` row, when present,
+ * Materialized-row contract (migration 026): a `run_usage` row, when present,
  * is the precomputed projection of the same `assistant`/`result` scan above —
  * written once at run finalization. The two read-heavy rollup paths
  * (`selectRunUsageRollups` / `selectWorkflowUsageStats`) prefer it and skip the
@@ -234,7 +234,7 @@ interface RawEventUsageRow {
   payloadJson: string;
 }
 
-/** Shape of a migration-025 `run_usage` row (SELECT * column names). */
+/** Shape of a migration-026 `run_usage` row (SELECT * column names). */
 interface RunUsageMaterializedRow {
   run_id: string;
   input_tokens: number;
@@ -394,7 +394,7 @@ function scanRawEventRollups(
 }
 
 /**
- * Token/cost rollup per run, via a TWO-TIER read (migration 025):
+ * Token/cost rollup per run, via a TWO-TIER read (migration 026):
  *   1. Bulk-fetch the materialized `run_usage` rows for all requested ids.
  *      Any run WITH a row maps directly — no raw_events touched.
  *   2. The remaining ids (no materialized row — historic runs, runs still in
@@ -479,7 +479,7 @@ interface RunIdRow {
 /**
  * Per-workflow usage aggregate. For each workflow, take the most recent
  * `limitRunsPerWorkflow` run ids that have usage data — either a materialized
- * `run_usage` row (migration 025) OR at least one persisted raw_events row —
+ * `run_usage` row (migration 026) OR at least one persisted raw_events row —
  * roll them up via `selectRunUsageRollups`, then aggregate:
  *   - runsWithUsage = rollups whose assistantMessageCount > 0.
  *   - avgTotalTokens = mean totalTokens over those runs (null when none).
@@ -969,7 +969,7 @@ function buildToolUseFallbackStream(rows: readonly StepEventRow[]): StepStreamIt
  * `lastNRuns` runs. Within each run we walk its events in (run_id, id) order,
  * tracking a "current step" that starts at 'unattributed'.
  *
- * Two-tier attribution (migration 025), decided PER RUN:
+ * Two-tier attribution (migration 026), decided PER RUN:
  *   - Runs WITH persisted `step_transition` raw_events build their step timeline
  *     from those rows. An assistant row belongs to the most recent transition
  *     row with a smaller id (row-id interleaving) — usage before the first
@@ -1166,7 +1166,7 @@ interface WorkflowRevisionStatsRow {
  *   - isCurrent       = the revision's hash equals computeSpecHash(workflows.spec_json)
  *                       (the live spec a new run would freeze). At most one per workflow.
  *
- * INVISIBLE BY DESIGN: runs with `spec_hash IS NULL` (every pre-migration-025 run)
+ * INVISIBLE BY DESIGN: runs with `spec_hash IS NULL` (every pre-migration-026 run)
  * match no recorded revision and never appear here — they still count in the
  * workflow-wide selectWorkflowRunStats aggregate.
  *

@@ -738,7 +738,7 @@ describe('WorkflowRegistry', () => {
       }
     });
 
-    // ───── spec_hash freeze + workflow_revisions snapshot (spec-capture / migration 025) ─────
+    // ───── spec_hash freeze + workflow_revisions snapshot (spec-capture / migration 026) ─────
 
     it("stamps spec_hash = computeSpecHash(workflow.spec_json) onto the run row (frozen at creation)", async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
@@ -1092,7 +1092,7 @@ describe('WorkflowRegistry', () => {
       expect(() => registry.updateSpec('nonexistent-id', makeDefinition('x'))).toThrow('not found');
     });
 
-    // ───── revision snapshot on edit (spec-capture / migration 025) ─────
+    // ───── revision snapshot on edit (spec-capture / migration 026) ─────
 
     it('INSERT-OR-IGNOREs a workflow_revisions snapshot for the edited spec', () => {
       db.prepare(
@@ -1195,7 +1195,7 @@ describe('WorkflowRegistry', () => {
       expect(row.spec_json).toBe(customSpec);
     });
 
-    // ───── revision snapshot on reset (spec-capture / migration 025) ─────
+    // ───── revision snapshot on reset (spec-capture / migration 026) ─────
 
     it("INSERT-OR-IGNOREs a workflow_revisions snapshot for the reset-to-'{}' spec", () => {
       db.prepare(

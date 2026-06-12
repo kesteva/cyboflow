@@ -1,6 +1,6 @@
 /**
  * runUsageRollup — materialize a durable per-run token/cost rollup row in
- * `run_usage` (migration 025) at the moment a run reaches a terminal seam.
+ * `run_usage` (migration 026) at the moment a run reaches a terminal seam.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -47,7 +47,7 @@
  *
  * WRITER MUST NEVER CONSUME ITS OWN OUTPUT (the DELETE-before-scan)
  * ----------------------------------------------------------------
- * `selectRunUsageRollups` is a TWO-TIER read (migration 025): it PREFERS an
+ * `selectRunUsageRollups` is a TWO-TIER read (migration 026): it PREFERS an
  * existing materialized `run_usage` row over the raw_events scan, falling back to
  * the scan only for runs WITHOUT a row. That two-tier behavior is correct for the
  * Insights READ path — but it is poison for THIS WRITER. If we called it with a
@@ -126,7 +126,7 @@ export function rollupRunUsage(db: DatabaseLike, runId: string, logger?: LoggerL
       return;
     }
 
-    // INSERT OR REPLACE keyed on run_id (PK). Column order matches migration 025's
+    // INSERT OR REPLACE keyed on run_id (PK). Column order matches migration 026's
     // run_usage definition; computed_at is deliberately absent so it takes its
     // DEFAULT (CURRENT_TIMESTAMP) on every (re-)materialization.
     db.prepare(

@@ -940,7 +940,7 @@ export class RunExecutor {
     // escalated — task overlays must never crash the run lifecycle.
     await this.deriveTaskStageForPhase(runId, phase);
 
-    // Insights Phase-2 (migration 025) — materialize the durable run_usage rollup
+    // Insights Phase-2 (migration 026) — materialize the durable run_usage rollup
     // at EVERY terminal seam: 'drained' (clean rest in awaiting_review), 'failed',
     // and 'canceled'. Placed LAST in onLifecycleTransition so it runs after the
     // status transition + task derivation; by this point the run's raw_events log
@@ -954,7 +954,7 @@ export class RunExecutor {
   }
 
   /**
-   * Terminal-seam dispatch to the run_usage rollup writer (migration 025).
+   * Terminal-seam dispatch to the run_usage rollup writer (migration 026).
    *
    * Skips non-terminal phases (pre_spawn / post_spawn / sdk_initialized) and the
    * case where no `db` was injected (backward-compat with executor constructions
