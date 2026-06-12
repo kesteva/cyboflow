@@ -51,7 +51,9 @@ import { RunActionBar } from './RunActionBar';
 import { RunCancelDialog } from './RunCancelDialog';
 import { RunEndDialog } from './RunEndDialog';
 import { useErrorStore } from '../../stores/errorStore';
+import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { trpc } from '../../trpc/client';
+import { Flag } from 'lucide-react';
 import { SessionActionToast } from './SessionActionToast';
 
 interface CyboflowRootProps {
@@ -196,6 +198,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useEffect(() => useQuestionStore.getState().init(), []);
 
+  // In-canvas completion banner: the SAME eligibility the RunActionBar End
+  // button uses (shared hook), surfaced prominently in the flow window so a
+  // finished run's exit is not hidden in the top bar.
+  const runEndEligible = useRunEndEligibility(activeRunId, activeRun?.status);
+
   return (
     <div className="flex h-full flex-col">
       {/* Thin top header row */}
@@ -264,6 +271,33 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         <div className="flex-1 flex flex-col overflow-hidden">
           {activeRunId !== null ? (
             <>
+              {/* Completion banner — the workflow has nothing left for the
+                  operator (rested with no open gates, or self-terminated).
+                  Mirrors the top-bar End button so the exit lives in the main
+                  flow window, not just the header. */}
+              {runEndEligible && (
+                <div
+                  data-testid="run-end-banner"
+                  className="flex items-center gap-3 border-b border-border-primary bg-surface-secondary px-4 py-3"
+                >
+                  <Flag size={16} className="flex-shrink-0 text-interactive" />
+                  <div className="min-w-0 flex-1">
+                    <span className="block text-sm font-semibold text-text-primary">
+                      {activeRun?.status === 'failed' ? 'This workflow has stopped' : 'This workflow is finished'}
+                    </span>
+                    <span className="block text-xs text-text-secondary">
+                      Nothing is waiting on you — end it to return to the session and start the next workflow. The worktree and diff are preserved.
+                    </span>
+                  </div>
+                  <button
+                    data-testid="run-end-banner-button"
+                    onClick={() => setIsEndOpen(true)}
+                    className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+                  >
+                    End workflow
+                  </button>
+                </div>
+              )}
               {phaseState.definition !== null && (
                 <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
                   {activeRun?.batch_id != null ? (

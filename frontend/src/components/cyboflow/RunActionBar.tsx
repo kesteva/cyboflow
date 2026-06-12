@@ -2,8 +2,7 @@ import { Square, Pause, Play, Flag } from 'lucide-react';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useErrorStore } from '../../stores/errorStore';
-import { useReviewQueueStore } from '../../stores/reviewQueueStore';
-import { useAggregatedReviewItems } from '../../stores/landingStore';
+import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { trpc } from '../../trpc/client';
 import { TERMINAL_RUN_STATUSES } from '../../../../shared/types/cyboflow';
 
@@ -65,14 +64,6 @@ interface RunActionBarProps {
 export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-  // Open-gate probe for the rested-run End-workflow affordance (hooks must run
-  // unconditionally, before the early returns below). A run with a pending
-  // permission approval or a blocking review item is gated — ending it would
-  // silently bypass the gate, so the button hides (the backend rejects too).
-  const approvals = useReviewQueueStore((s) => s.queue);
-  const aggregatedReviewItems = useAggregatedReviewItems();
-
-  if (activeRunId === null) return null;
 
   // Resolve the active run across every tracked project (the rail is keyed by
   // project, but the active run is unique by id). We need both its status and
@@ -87,6 +78,12 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
       break;
     }
   }
+
+  // Shared end-eligibility (also drives CyboflowRoot's in-canvas completion
+  // banner). Hooks run unconditionally, before the early returns below.
+  const endEligible = useRunEndEligibility(activeRunId, status);
+
+  if (activeRunId === null) return null;
 
   // Hide entirely when the run isn't in the store (e.g. a legacy parentless run
   // not surfaced here).
@@ -130,10 +127,7 @@ export function RunActionBar({ onCancel, onEndWorkflow }: RunActionBarProps) {
   // Merge/Dismiss (the session owns git close-out), so without this a finished
   // Planner had no exit short of Cancel. Confirming completes the run via
   // runs.end and returns the pane to the resting canvas.
-  const hasOpenGate =
-    approvals.some((a) => a.runId === activeRunId) ||
-    aggregatedReviewItems.some((it) => it.run_id === activeRunId && it.blocking);
-  const showEnd = status === 'awaiting_review' && !hasOpenGate;
+  const showEnd = status === 'awaiting_review' && endEligible;
 
   // Single-click Pause — the route returns a discriminated union and NEVER throws
   // for not_found / interactive_unsupported / not_pausable / no_session / race

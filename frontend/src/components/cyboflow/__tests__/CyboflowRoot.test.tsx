@@ -702,6 +702,8 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
     expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
     expect(screen.getByTestId('run-action-end')).toBeInTheDocument();
     expect(screen.queryByTestId('run-action-cancel')).not.toBeInTheDocument();
+    // The in-canvas completion banner mirrors the top-bar End affordance.
+    expect(screen.getByTestId('run-end-banner')).toBeInTheDocument();
   });
 
   it('clicking End workflow opens RunEndDialog; confirming drops the run overlay', async () => {
@@ -713,11 +715,14 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
     fireEvent.click(endTrigger);
     expect(screen.getByText('End this workflow?')).toBeInTheDocument();
 
-    // Two buttons read 'End workflow' (the action-bar trigger + the ConfirmDialog
-    // confirm). The trigger carries the run-action-end testid, so click the other.
+    // Three buttons read 'End workflow' (the action-bar trigger, the in-canvas
+    // banner button, and the ConfirmDialog confirm). The first two carry
+    // testids, so click the remaining one — the dialog confirm.
     const confirmBtn = screen
       .getAllByRole('button', { name: 'End workflow' })
-      .find((b) => b !== endTrigger);
+      .find(
+        (b) => b !== endTrigger && b.getAttribute('data-testid') !== 'run-end-banner-button',
+      );
     await act(async () => {
       fireEvent.click(confirmBtn!);
     });
