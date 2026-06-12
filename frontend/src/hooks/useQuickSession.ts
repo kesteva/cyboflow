@@ -3,9 +3,11 @@
  *
  * Lifecycle:
  *   1. Calls API.sessions.createQuick({ prompt: '', projectId })
- *   2. On success, always creates BOTH panels in sequence:
- *      a. Claude panel
- *      b. Terminal panel (cwd = worktreePath)
+ *   2. On success, creates both panels in sequence:
+ *      a. Claude panel — SKIPPED when the response carries `claudePanelId`
+ *         (interactive sessions: the server eagerly created the panel when it
+ *         spawned the persistent PTY REPL)
+ *      b. Terminal panel (cwd = worktreePath) — always
  *   3. Calls useCyboflowStore.getState().setActiveQuickSession(sessionId, runId)
  *   4. Calls opts.onSuccess?.(sessionId)
  *   5. Clears isStarting (finally)
@@ -23,6 +25,7 @@ import { API } from '../utils/api';
 import { panelApi } from '../services/panelApi';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -34,8 +37,10 @@ interface UseQuickSessionReturn {
    * Create the quick session. An optional per-session 4-mode agent-permission
    * override (Session Start Wizard step 3) is threaded into createQuick and
    * persisted on the session; omitted → the session inherits the global default.
+   * An optional CLI substrate ('sdk'|'interactive') is likewise threaded and
+   * stamped onto sessions.substrate; omitted → SDK (legacy behavior).
    */
-  start: (agentPermissionMode?: PermissionMode) => Promise<void>;
+  start: (agentPermissionMode?: PermissionMode, substrate?: CliSubstrate) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -45,7 +50,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
   const [error, setError] = useState<string | null>(null);
 
   const start = useCallback(
-    async (agentPermissionMode?: PermissionMode): Promise<void> => {
+    async (agentPermissionMode?: PermissionMode, substrate?: CliSubstrate): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
       setError(null);
@@ -56,16 +61,21 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           prompt: '',
           projectId: opts.projectId,
           ...(agentPermissionMode ? { agentPermissionMode } : {}),
+          ...(substrate ? { substrate } : {}),
         });
 
         if (!result.success || !result.data) {
           throw new Error(result.error ?? 'Failed to create quick session');
         }
 
-        const { sessionId, worktreePath, runId } = result.data;
+        const { sessionId, worktreePath, runId, claudePanelId } = result.data;
 
-        // Always create both panels: Claude first, then Terminal.
-        await panelApi.createPanel({ sessionId, type: 'claude' });
+        // Claude panel first (unless the server eagerly created it — interactive
+        // sessions spawn the PTY REPL during create-quick and return its panel id),
+        // then Terminal.
+        if (claudePanelId === undefined) {
+          await panelApi.createPanel({ sessionId, type: 'claude' });
+        }
         await panelApi.createPanel({
           sessionId,
           type: 'terminal',

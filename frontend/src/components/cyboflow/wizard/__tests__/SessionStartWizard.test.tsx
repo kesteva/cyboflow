@@ -5,14 +5,14 @@
  * Behaviors verified:
  *   1. Locked mode opens on ② Workflow; "Next: configure" advances to ③ Configure;
  *      "Back to workflow" returns to ②.
- *   2. ③ adapts to the selection: a WORKFLOW selection shows the substrate selector
- *      + blueprint-editor buttons; a QUICK selection shows NEITHER (substrate is a
- *      no-op for quick panels; there is no workflow to edit) — only the permission
- *      selector + launch summary.
+ *   2. ③ adapts to the selection: BOTH kinds show the substrate selector (quick
+ *      sessions opt into the interactive PTY substrate here, same as workflow
+ *      launches); only a WORKFLOW selection shows the blueprint-editor buttons
+ *      (there is no workflow to edit for a quick session).
  *   3. Launching a workflow from ③ threads `substrate` + `permissionMode` into
  *      runs.start.mutate (seeded default, and an explicit per-run override).
  *   4. Launching a quick session from ③ threads the chosen `agentPermissionMode`
- *      into API.sessions.createQuick.
+ *      + `substrate` into API.sessions.createQuick.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent } from '@testing-library/react';
@@ -227,11 +227,13 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
   });
 
-  it('hides substrate + blueprint editor for a QUICK selection', async () => {
+  it('shows substrate but hides the blueprint editor for a QUICK selection', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    expect(screen.queryByLabelText('Select CLI substrate')).toBeNull();
+    // Quick sessions prompt for the CLI substrate the same way workflow
+    // launches do (opt-in interactive PTY quick sessions).
+    expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary still present.
@@ -317,6 +319,23 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockRunStart).not.toHaveBeenCalled();
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 1, agentPermissionMode: 'dontAsk' }),
+    );
+  });
+
+  it('threads the chosen substrate into a quick-session launch', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select CLI substrate'), { target: { value: 'interactive' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, substrate: 'interactive' }),
     );
   });
 });

@@ -6,18 +6,22 @@
  * so no real Electron IPC is required.
  *
  * Behaviors verified:
- *   1. start() takes no arguments.
+ *   1. start() arguments are optional (zero-arg call works).
  *   2. isStarting is boolean (not a string union).
- *   3. createQuick call sends no permissionMode or toolType.
- *   4. start() always creates both Claude panel and Terminal panel.
- *   5. setActiveQuickSession is called with the sessionId, and the runId from the
+ *   3. createQuick call sends no permissionMode, toolType, or substrate by default.
+ *   4. start(mode, substrate) threads the substrate into the createQuick payload.
+ *   5. start() creates both Claude panel and Terminal panel — UNLESS the
+ *      response carries claudePanelId (server eagerly created the claude panel
+ *      for an interactive session), in which case only the Terminal panel is
+ *      created and the success path otherwise proceeds unchanged.
+ *   6. setActiveQuickSession is called with the sessionId, and the runId from the
  *      response starts a stream subscription.
- *   6. onSuccess is invoked after successful start.
- *   7. Failure path: createQuick returns { success: false, error } →
+ *   7. onSuccess is invoked after successful start.
+ *   8. Failure path: createQuick returns { success: false, error } →
  *      error state populated; setActiveQuickSession NOT called;
  *      panelApi.createPanel NOT called.
- *   8. No-op guard: start() is a no-op when projectId is null.
- *   9. No-op guard: start() is a no-op when already isStarting.
+ *   9. No-op guard: start() is a no-op when projectId is null.
+ *  10. No-op guard: start() is a no-op when already isStarting.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -111,7 +115,7 @@ describe('useQuickSession — start() signature', () => {
     expect(mockCreateQuick).toHaveBeenCalledOnce();
   });
 
-  it('createQuick is called without toolType or permissionMode', async () => {
+  it('createQuick is called without toolType, permissionMode, or substrate', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
@@ -119,6 +123,20 @@ describe('useQuickSession — start() signature', () => {
     });
 
     expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+  });
+
+  it('threads an explicit substrate into the createQuick payload', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(undefined, 'interactive');
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      substrate: 'interactive',
+    });
   });
 
   it('isStarting is boolean (false by default)', () => {
@@ -177,6 +195,52 @@ describe('useQuickSession — always creates both panels', () => {
     });
 
     expect(callOrder).toEqual(['claude', 'terminal']);
+  });
+});
+
+describe('useQuickSession — server-created claude panel (claudePanelId)', () => {
+  beforeEach(() => {
+    // Interactive-session response: the server eagerly spawned the PTY REPL and
+    // created the claude panel itself, returning its id.
+    mockCreateQuick.mockResolvedValue({
+      success: true,
+      data: {
+        jobId: 'job-001',
+        sessionId: 'sess-001',
+        worktreePath: '/tmp/wt-001',
+        runId: 'run-001',
+        claudePanelId: 'panel-claude-srv',
+      },
+    });
+  });
+
+  it('skips the claude createPanel but still creates the terminal panel', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(mockCreatePanel).toHaveBeenCalledTimes(1);
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/wt-001' },
+    });
+  });
+
+  it('still selects the session, subscribes the run, and fires onSuccess', async () => {
+    const onSuccess = vi.fn();
+    const { result } = renderHook(() => useQuickSession({ projectId: 1, onSuccess }));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('sess-001');
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+    expect(onSuccess).toHaveBeenCalledWith('sess-001');
   });
 });
 

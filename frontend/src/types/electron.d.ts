@@ -70,7 +70,11 @@ interface ElectronAPI {
     getAllWithProjects: () => Promise<IPCResponse<unknown[]>>;
     get: (sessionId: string) => Promise<IPCResponse<Session>>;
     create: (request: CreateSessionRequest) => Promise<IPCResponse<Session>>;
-    createQuick: (request: CreateSessionRequest) => Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string }>>;
+    // claudePanelId is present only when the server eagerly created the claude
+    // panel (interactive-substrate sessions spawn the PTY REPL during create-quick);
+    // callers must then SKIP their own claude createPanel. KEEP IN SYNC with the
+    // sessions:create-quick handler (IPC handler ↔ declared T parity rule).
+    createQuick: (request: CreateSessionRequest) => Promise<IPCResponse<{ jobId: string; sessionId: string; worktreePath: string; runId: string; claudePanelId?: string }>>;
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;

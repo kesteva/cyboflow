@@ -38,9 +38,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
   const [error, setError] = useState<string | null>(null);
 
   /**
-   * The per-run CLI substrate choice. Defaults to DEFAULT_SUBSTRATE ('sdk') —
+   * The per-launch CLI substrate choice. Defaults to DEFAULT_SUBSTRATE ('sdk') —
    * the global ConfigManager.defaultSubstrate floor — and is threaded into
-   * runs.start.mutate. The mutate input type is AppRouter-inferred (no local
+   * runs.start.mutate for workflow launches AND into useQuickSession.start
+   * (→ sessions.substrate) for the Quick Session button, since both share this
+   * surface's selector. The mutate input type is AppRouter-inferred (no local
    * mirror of the substrate field), and CliSubstrate is imported from the S1
    * shared type, never re-declared here.
    */
@@ -348,7 +350,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
         <button
-          onClick={() => void startQuickSession(permissionMode)}
+          onClick={() => void startQuickSession(permissionMode, substrate)}
           disabled={isQuickStarting || isStarting}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"

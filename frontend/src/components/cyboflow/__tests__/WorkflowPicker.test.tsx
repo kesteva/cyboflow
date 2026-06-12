@@ -4,7 +4,7 @@
  * Behaviors verified:
  *   1. Renders a single "Quick Session" button below the Start Run button.
  *   2. Quick Session click calls API.sessions.createQuick with { prompt: '', projectId }
- *      (no toolType, no permissionMode).
+ *      plus the picker's agentPermissionMode + substrate (no toolType).
  *   3. Successful quick-create creates both Claude and Terminal panels.
  *   4. Successful quick-create updates cyboflowStore and fires onWorkflowStarted.
  *   5. Quick Session button is disabled while the IPC is in flight.
@@ -188,9 +188,10 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(quickIndex).toBeGreaterThan(startRunIndex);
   });
 
-  it('Quick Session click calls createQuick threading the seeded agent permission mode', async () => {
+  it('Quick Session click calls createQuick threading the seeded agent permission mode and substrate', async () => {
     // Config empty → the permission selector seeds to the 'default' floor, which
     // the quick button threads as agentPermissionMode (parity with the wizard).
+    // The substrate selector defaults to 'sdk' and is threaded alongside it.
     useConfigStore.setState({ config: null });
     render(<WorkflowPicker projectId={1} />);
 
@@ -200,7 +201,32 @@ describe('WorkflowPicker — Quick Session button', () => {
     });
 
     expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, agentPermissionMode: 'default' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 1,
+      agentPermissionMode: 'default',
+      substrate: 'sdk',
+    });
+  });
+
+  it("threads the picked 'interactive' substrate into the Quick Session create", async () => {
+    // A user selecting Interactive (PTY) then clicking Quick Session must get a
+    // PTY-backed quick session — not a silent SDK fallback (review finding F1).
+    render(<WorkflowPicker projectId={1} />);
+
+    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    await act(async () => {
+      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ substrate: 'interactive' }),
+    );
   });
 
   it('Quick Session success path creates both Claude and Terminal panels', async () => {

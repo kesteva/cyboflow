@@ -3,9 +3,10 @@
  * workflow list when the wizard was opened with `allowQuick`.
  *
  * Cream card with a terracotta border and a dark diagonal-hatch tab, a terminal
- * glyph, the title + an "INTERACTIVE" chip, and a one-line description of what an
- * interactive session is (no structured workflow, no review steps). Selected →
- * a stronger terracotta border.
+ * glyph, the title, and a one-line description of what a quick session is (no
+ * structured workflow, no review steps). The CLI substrate (SDK vs Interactive
+ * PTY) is chosen on the CONFIGURE step, so the card carries no substrate chip.
+ * Selected → a stronger terracotta border.
  */
 
 interface QuickSessionCardProps {
@@ -45,13 +46,10 @@ export function QuickSessionCard({
           >
             Start a quick session
           </span>
-          <span className="eyebrow shrink-0 border border-interactive px-1 py-0.5 text-interactive">
-            Interactive
-          </span>
         </div>
         <p className="text-xs text-text-secondary">
-          Open an interactive Claude Code session and drive it yourself — no
-          structured workflow, no review steps.
+          Open a Claude Code session and drive it yourself — no structured
+          workflow, no review steps.
         </p>
       </div>
     </button>

@@ -3,10 +3,13 @@
  * the unconditional interactive v1 caveats (IDEA-013 / TASK-812). Presentational
  * (controlled value/onChange).
  *
- * Substrate is a WORKFLOW-RUN concept only — it is honored by RunExecutor /
- * SubstrateDispatchFacade when a run is launched via runs.start. It has NO effect
- * on quick sessions (their Claude panel always uses the SDK manager), so callers
- * render this ONLY for the workflow path.
+ * Substrate is honored on BOTH launch paths:
+ *   - Workflow runs: threaded into runs.start as the `substrate` param, stamped
+ *     onto workflow_runs.substrate and honored by RunExecutor /
+ *     SubstrateDispatchFacade.
+ *   - Quick sessions: threaded via useQuickSession.start →
+ *     CreateSessionRequest.substrate → sessions.substrate (migration 025);
+ *     'interactive' spawns a PTY-backed quick session (persistent claude REPL).
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * caveats text is single-sourced (no drift).

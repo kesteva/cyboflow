@@ -13,8 +13,8 @@
  * Step ③ (Configure) is the launch surface and adapts to the selection:
  *   - workflow: agent-permission override + CLI substrate (+ caveats) + workflow
  *     blueprint editor access + a launch summary.
- *   - quick: agent-permission override + launch summary (substrate is a no-op for
- *     quick panels, and there is no workflow to edit, so both are omitted).
+ *   - quick: agent-permission override + CLI substrate (+ caveats) + launch
+ *     summary (there is no workflow to edit, so the blueprint editor is omitted).
  *
  * Launch paths (all fire from step ③):
  *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
@@ -26,8 +26,8 @@
  *     lane model; the orchestrator agent fans the tasks out as subagents in the
  *     shared session worktree), so it follows the same runs.start → setActiveRun
  *     → goToSession path with `taskIds` threaded.
- *   - quick: the {@link useQuickSession} hook — it creates the session + both
- *     panels (passing the chosen agentPermissionMode) and calls
+ *   - quick: the {@link useQuickSession} hook — it creates the session + panels
+ *     (passing the chosen agentPermissionMode + substrate) and calls
  *     setActiveQuickSession itself.
  *
  * A synchronous in-flight latch (`startInFlightRef`) guards every launch against
@@ -148,9 +148,9 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── Step ③ Configure ─────────────────────────────────────────────────────
   // Per-run/per-session agent permission (seeded from the global default, race-
-  // guarded by the shared hook) + per-run CLI substrate. Substrate is threaded
-  // into runs.start for workflow launches; for quick launches the permission
-  // mode rides useQuickSession (substrate is a no-op for quick panels).
+  // guarded by the shared hook) + per-launch CLI substrate. Substrate is
+  // threaded into runs.start for workflow launches and into useQuickSession
+  // (→ sessions.substrate) for quick launches.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
@@ -188,7 +188,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   } = useQuickSession({
     projectId: allowQuick ? selectedProjectId : null,
     onSuccess: () => {
-      setToast(`Starting interactive session on ${banner.name}`);
+      setToast(`Starting quick session on ${banner.name}`);
       useNavigationStore.getState().goToSession();
     },
   });
@@ -385,7 +385,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection === null || startInFlightRef.current) return;
 
     if (selection.kind === 'quick') {
-      void startQuickSession(permissionMode);
+      void startQuickSession(permissionMode, substrate);
       return;
     }
 
@@ -407,7 +407,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -440,7 +440,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   if (selection === null) {
     ctaLabel = 'Select a workflow';
   } else if (selection.kind === 'quick') {
-    ctaLabel = 'Start interactive session';
+    ctaLabel = 'Start quick session';
   } else {
     ctaLabel = `Run ${selectedMeta?.slashCommand ?? '/workflow'}`;
   }
@@ -572,36 +572,37 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Agent permission — shown for BOTH workflow and quick launches. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
-            {/* Workflow-only controls: CLI substrate (a no-op for quick panels)
-                and blueprint-editor access (there is no workflow to edit for a
-                quick session). */}
+            {/* CLI substrate — shown for BOTH workflow and quick launches
+                (workflow: threaded into runs.start; quick: threaded into
+                useQuickSession → sessions.substrate). */}
+            <SubstrateSelector
+              value={substrate}
+              onChange={setSubstrate}
+              id="wizard-substrate"
+              caveatsTestId="wizard-substrate-caveats"
+            />
+
+            {/* Workflow-only control: blueprint-editor access (there is no
+                workflow to edit for a quick session). */}
             {selection.kind === 'workflow' && (
-              <>
-                <SubstrateSelector
-                  value={substrate}
-                  onChange={setSubstrate}
-                  id="wizard-substrate"
-                  caveatsTestId="wizard-substrate-caveats"
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setEditorMode('edit')}
-                    data-testid="wizard-edit-flow"
-                    className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
-                  >
-                    Edit blueprint
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditorMode('create')}
-                    data-testid="wizard-new-flow"
-                    className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
-                  >
-                    New flow
-                  </button>
-                </div>
-              </>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditorMode('edit')}
+                  data-testid="wizard-edit-flow"
+                  className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                >
+                  Edit blueprint
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditorMode('create')}
+                  data-testid="wizard-new-flow"
+                  className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                >
+                  New flow
+                </button>
+              </div>
             )}
 
             {/* Launch summary */}
@@ -616,17 +617,15 @@ export default function SessionStartWizard(): React.JSX.Element {
                 label="Mode"
                 value={
                   selection.kind === 'quick'
-                    ? 'Interactive quick session'
+                    ? 'Quick session'
                     : selectedMeta?.slashCommand ?? '/workflow'
                 }
               />
               <SummaryRow label="Permission" value={permissionLabel} />
-              {selection.kind === 'workflow' && (
-                <SummaryRow
-                  label="Substrate"
-                  value={substrate === 'interactive' ? 'Interactive (PTY)' : 'SDK'}
-                />
-              )}
+              <SummaryRow
+                label="Substrate"
+                value={substrate === 'interactive' ? 'Interactive (PTY)' : 'SDK'}
+              />
             </div>
           </div>
         )}
