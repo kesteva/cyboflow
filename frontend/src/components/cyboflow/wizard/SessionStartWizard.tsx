@@ -10,6 +10,16 @@
  *   - LOCKED (lockProjectId set): the project is pinned; the wizard opens
  *     directly on ② Workflow. When `allowQuick` is set, the quick card is offered.
  *
+ * Workflow preselect (`wizardOpts.preselectWorkflowName`): the Insights "Run
+ * compounding session" CTA opens the wizard with an explicit workflow name (e.g.
+ * `'compound'`). When the workflow list loads, the matching flow is preselected
+ * BY NAME and the wizard auto-advances ② → ③ EXACTLY ONCE (latched by
+ * `preselectConsumedRef`) so the caller lands directly on the launch surface
+ * without fighting later list reloads or user back-navigation. In unlocked mode
+ * the advance naturally fires once the user picks a project (loadWorkflows runs
+ * on step ②). This is distinct from the implicit DEFAULT_WORKFLOW_NAME preselect,
+ * which only sets selection state and NEVER auto-advances.
+ *
  * Step ③ (Configure) is the launch surface and adapts to the selection:
  *   - workflow: agent-permission override + CLI substrate (+ caveats) + workflow
  *     blueprint editor access + a launch summary.
@@ -170,6 +180,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [isLaunching, setIsLaunching] = useState(false);
   const startInFlightRef = useRef(false);
 
+  // One-shot latch for the explicit `preselectWorkflowName` auto-advance. Set
+  // the moment the preselect resolves and drives ② → ③ once, so later
+  // loadWorkflows reruns (e.g. blueprint-editor saves) and user back-navigation
+  // (handleBackToWorkflow / handleChangeProject) are never fought back.
+  const preselectConsumedRef = useRef(false);
+
   // Bottom-center slide-up toast.
   const [toast, setToast] = useState<string | null>(null);
 
@@ -242,14 +258,36 @@ export default function SessionStartWizard(): React.JSX.Element {
         .then(([rows, runs]) => {
           const metas = buildWorkflowMeta(rows, runs);
           setWorkflowMetas(metas);
+          // Resolve the explicit `preselectWorkflowName` target up-front (no side
+          // effects inside the setSelection updater). It only takes effect when a
+          // matching flow exists AND it has not already been consumed — the
+          // one-shot latch keeps later reruns / back-navigation from re-forcing it.
+          const preselectName = opts?.preselectWorkflowName;
+          const preselectTarget =
+            preselectName !== undefined && !preselectConsumedRef.current
+              ? metas.find((m) => m.name === preselectName) ?? null
+              : null;
+          // Selection priority: a just-saved flow (preferId, editor save) >
+          // the existing pick > the EXPLICIT name preselect > the default flow.
           setSelection((prev) => {
             if (preferId && metas.some((m) => m.id === preferId)) {
               return { kind: 'workflow', workflowId: preferId };
             }
             if (prev !== null) return prev;
+            if (preselectTarget !== null) {
+              return { kind: 'workflow', workflowId: preselectTarget.id };
+            }
             const def = metas.find((m) => m.name === DEFAULT_WORKFLOW_NAME);
             return def ? { kind: 'workflow', workflowId: def.id } : null;
           });
+          // Auto-advance ② → ③ EXACTLY ONCE when the explicit preselect resolved.
+          // Latched so a later loadWorkflows rerun or user back-nav is not fought.
+          // (The implicit DEFAULT_WORKFLOW_NAME preselect above is selection-only —
+          // it never advances; see the WorkflowListRow onSelect comment.)
+          if (preselectTarget !== null) {
+            preselectConsumedRef.current = true;
+            setStep((s) => (s === 2 ? 3 : s));
+          }
         })
         .catch((err: unknown) => {
           setWorkflowsError(err instanceof Error ? err.message : 'Failed to load workflows');
@@ -258,7 +296,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           setWorkflowsLoading(false);
         });
     },
-    [selectedProjectId],
+    [selectedProjectId, opts?.preselectWorkflowName],
   );
 
   useEffect(() => {

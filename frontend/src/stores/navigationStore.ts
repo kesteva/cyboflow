@@ -11,6 +11,16 @@ export interface WizardOpts {
   lockProjectId?: number;
   fromAgentId?: string;
   allowQuick?: boolean;
+  /**
+   * Preselect the workflow with this `meta.name` (e.g. `'compound'`) when the
+   * wizard's workflow list loads, and auto-advance to the ③ Configure step ONCE
+   * so the caller lands directly on the launch surface. Unlike the implicit
+   * default-workflow preselect (which only sets selection state), this explicit
+   * preselect performs the one-shot ② → ③ advance. Used by the Insights "Run
+   * compounding session" CTA to drop the user straight into a `/compound`
+   * launch.
+   */
+  preselectWorkflowName?: string;
 }
 
 interface NavigationState {

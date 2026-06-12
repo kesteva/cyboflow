@@ -16,10 +16,13 @@
  * Sprint agent reports one via `cyboflow_report_finding` during a run.
  *
  * Header CTA: a "Run compounding session" button starts the center-pane start
- * wizard ({@link useNavigationStore.goToWizard}). Compound is now a built-in flow
- * the picker lists, so the button just opens the wizard (WizardOpts has no
- * workflow-preselect slot to pin); it is hidden until at least one project
- * exists, since the wizard's first step is project selection.
+ * wizard ({@link useNavigationStore.goToWizard}) with `preselectWorkflowName:
+ * 'compound'`, so the wizard preselects the built-in compound flow and
+ * auto-advances to ③ Configure (dropping the user straight into a `/compound`
+ * launch). When the Insights view is scoped to a single project (the store's
+ * `projectFilter` is set), that project id is threaded as `lockProjectId` so the
+ * wizard opens directly on the workflow step. The CTA is hidden until at least
+ * one project exists, since the wizard's first step is project selection.
  */
 import { useInsightsStore } from '../../stores/insightsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -63,7 +66,13 @@ export function FindingsSection(): React.JSX.Element {
         {hasProjects && (
           <button
             type="button"
-            onClick={() => useNavigationStore.getState().goToWizard()}
+            onClick={() => {
+              const projectFilter = useInsightsStore.getState().projectFilter;
+              useNavigationStore.getState().goToWizard({
+                preselectWorkflowName: 'compound',
+                ...(projectFilter !== null ? { lockProjectId: projectFilter } : {}),
+              });
+            }}
             data-testid="run-compounding-session"
             className="ml-auto bg-interactive px-3 py-1 font-mono text-xs uppercase tracking-wider text-text-on-interactive hover:bg-interactive-hover"
           >

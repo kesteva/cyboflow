@@ -10,8 +10,10 @@
  *
  * Behaviors verified:
  *   1. The CTA renders (monospace, uppercase) when at least one project exists.
- *   2. Clicking it calls navigationStore.goToWizard() — compound is now a
- *      built-in flow the wizard's picker lists, so no preselect arg is passed.
+ *   2. Clicking it calls navigationStore.goToWizard({ preselectWorkflowName:
+ *      'compound' }) so the wizard preselects the compound flow and auto-advances
+ *      to Configure; when the store's `projectFilter` is set it is threaded as
+ *      `lockProjectId`, and omitted entirely when the filter is null (ALL).
  *   3. The CTA is hidden when there are no projects (the wizard's first step is
  *      project selection).
  */
@@ -27,12 +29,15 @@ import type { ReviewItem } from '../../../../../shared/types/reviews';
 
 let mockReviewSummary: ReviewItemSummary | null = null;
 let mockPendingFindings: ReviewItem[] = [];
+// The CTA reads `projectFilter` via getState() to scope the launch (null = ALL).
+let mockProjectFilter: number | null = null;
 const mockRefresh = vi.fn(async () => {});
 
 function snapshot() {
   return {
     reviewSummary: mockReviewSummary,
     pendingFindings: mockPendingFindings,
+    projectFilter: mockProjectFilter,
     refresh: mockRefresh,
   };
 }
@@ -85,6 +90,7 @@ beforeEach(() => {
     pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 },
   };
   mockPendingFindings = [];
+  mockProjectFilter = null;
   mockProjectsCount = 1;
 });
 
@@ -107,12 +113,23 @@ describe('FindingsSection — Run compounding session CTA', () => {
     expect(cta.className).toContain('uppercase');
   });
 
-  it('opens the start wizard on click (goToWizard, no preselect arg)', () => {
+  it('opens the start wizard preselecting compound on click (ALL-projects filter)', () => {
     render(<FindingsSection />);
     fireEvent.click(screen.getByTestId('run-compounding-session'));
     expect(mockGoToWizard).toHaveBeenCalledTimes(1);
-    // The picker now lists compound, so the button passes no workflow-preselect.
-    expect(mockGoToWizard).toHaveBeenCalledWith();
+    // ALL-projects filter (null) → no lockProjectId, just the workflow preselect.
+    expect(mockGoToWizard).toHaveBeenCalledWith({ preselectWorkflowName: 'compound' });
+  });
+
+  it('threads the active project filter as lockProjectId when set', () => {
+    mockProjectFilter = 7;
+    render(<FindingsSection />);
+    fireEvent.click(screen.getByTestId('run-compounding-session'));
+    expect(mockGoToWizard).toHaveBeenCalledTimes(1);
+    expect(mockGoToWizard).toHaveBeenCalledWith({
+      preselectWorkflowName: 'compound',
+      lockProjectId: 7,
+    });
   });
 
   it('hides the CTA when there are no projects', () => {

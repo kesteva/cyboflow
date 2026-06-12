@@ -139,6 +139,16 @@ const SPRINT_WORKFLOW_ROW: WorkflowRow = {
   permission_mode: 'default',
   created_at: '',
 };
+/** The Compound built-in row (the Insights CTA preselect target). */
+const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-compound',
+  project_id: 1,
+  name: 'compound',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+};
 
 /** Render the wizard pinned to project 1 with quick offered, and wait for load. */
 async function renderLockedWizard(): Promise<void> {
@@ -392,5 +402,46 @@ describe('SessionStartWizard — Sprint batch gate', () => {
     expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-ensured-001');
     expect(useNavigationStore.getState().view).toBe('session');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow preselect (Insights "Run compounding session" CTA) — an explicit
+// `preselectWorkflowName` preselects the matching flow BY NAME on load and
+// auto-advances ② → ③ ONCE. Contrast with the implicit DEFAULT_WORKFLOW_NAME
+// preselect, which only sets selection state (no auto-advance).
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — workflow preselect', () => {
+  it('preselects compound BY NAME and lands directly on ③ Configure', async () => {
+    // The list carries both the default (sprint) and the preselect target so we
+    // prove the explicit name — not the default — wins and drives the advance.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: { lockProjectId: 1, preselectWorkflowName: 'compound' },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    // The preselect auto-advanced past ② Workflow straight to ③ Configure.
+    await screen.findByTestId('wizard-step3');
+    expect(screen.getByTestId('wizard-step3')).toBeInTheDocument();
+    // The compound flow is the active selection → CTA reads "Run /compound".
+    expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Run /compound');
+  });
+
+  it('does NOT auto-advance the implicit default (sprint) preselect without the opt', async () => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({ view: 'wizard', wizardOpts: { lockProjectId: 1 } });
+    });
+    render(<SessionStartWizard />);
+
+    // The workflow row resolves (sprint is pre-selected) but the wizard stays on
+    // ② Workflow — only an explicit preselect (or a user click) advances to ③.
+    await screen.findByTestId('workflow-list-row');
+    expect(screen.queryByTestId('wizard-step3')).toBeNull();
+    expect(screen.queryByTestId('wizard-cta')).toBeNull();
   });
 });
