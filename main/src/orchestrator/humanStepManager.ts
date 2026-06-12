@@ -28,12 +28,21 @@
  */
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
+import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
+import type { ReviewItemChangedEvent, ReviewItemChangeAction } from '../../../shared/types/reviews';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
   countPendingBlockingReviewItems,
   hasReviewItemsTable,
 } from './reviewItemListing';
+import {
+  ReviewItemRouter,
+  reviewItemChangeEvents,
+  reviewItemProjectChannel,
+  type ReviewItemDbRow,
+} from './reviewItemRouter';
+import { runStatusEvents } from './trpc/routers/events';
 
 /** Provenance source stamped on a human-gate decision review_item. */
 const HUMAN_GATE_SOURCE = 'gate:human-step';
@@ -113,6 +122,7 @@ export class HumanStepManager {
 
       const now = new Date().toISOString();
       let reviewItemId: string | null = null;
+      let gateOpened = false;
 
       const txn = this.db.transaction(() => {
         const info = this.db
@@ -125,6 +135,7 @@ export class HumanStepManager {
           // Run not in 'running' — already paused / terminal. Do NOT open a gate.
           return;
         }
+        gateOpened = true;
 
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
@@ -136,6 +147,19 @@ export class HumanStepManager {
         });
       });
       (txn as () => void)();
+
+      // Renderer signals AFTER the commit — the co-write deliberately bypasses
+      // the ReviewItemRouter chokepoint (it must share this transaction), so the
+      // emits the chokepoint would have owned happen here: the project-scoped
+      // review-item delta (queue chip / landing inbox) and the run-status
+      // change (rail badge / landing re-sync).
+      if (gateOpened) {
+        runStatusEvents.emit('changed', {
+          runId,
+          status: 'awaiting_review',
+        } satisfies RunStatusChangedEvent);
+      }
+      if (reviewItemId) this.emitReviewItemChange(reviewItemId, 'created');
 
       return reviewItemId;
     })) as string | null;
@@ -182,6 +206,11 @@ export class HumanStepManager {
       });
       (txn as () => void)();
 
+      if (resolved) this.emitReviewItemChange(reviewItemId, 'resolved');
+      if (resumed) {
+        runStatusEvents.emit('changed', { runId, status: 'running' } satisfies RunStatusChangedEvent);
+      }
+
       return { resolved, resumed };
     })) as { resolved: boolean; resumed: boolean };
   }
@@ -211,8 +240,34 @@ export class HumanStepManager {
             WHERE id = ? AND status = 'awaiting_review'`,
         )
         .run(now, runId) as { changes: number };
-      return info.changes > 0;
+      const resumed = info.changes > 0;
+      if (resumed) {
+        runStatusEvents.emit('changed', { runId, status: 'running' } satisfies RunStatusChangedEvent);
+      }
+      return resumed;
     })) as boolean;
+  }
+
+  /**
+   * Broadcast a review-item delta on the project-scoped channel the renderer's
+   * queue/landing stores subscribe to. The gate's co-writes happen INSIDE this
+   * manager's transactions (deliberately bypassing ReviewItemRouter), so the
+   * emit the chokepoint would otherwise own is re-issued here, reusing its
+   * shaping + channel helpers. Fail-soft: a row deleted between commit and emit
+   * broadcasts nothing.
+   */
+  private emitReviewItemChange(reviewItemId: string, action: ReviewItemChangeAction): void {
+    const row = this.db
+      .prepare('SELECT * FROM review_items WHERE id = ?')
+      .get(reviewItemId) as ReviewItemDbRow | undefined;
+    if (!row) return;
+    const event: ReviewItemChangedEvent = {
+      projectId: row.project_id,
+      reviewItemId,
+      action,
+      item: ReviewItemRouter.shapeRow(row),
+    };
+    reviewItemChangeEvents.emit(reviewItemProjectChannel(row.project_id), event);
   }
 
   /**
