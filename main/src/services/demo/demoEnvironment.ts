@@ -30,7 +30,7 @@ import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 export const DEMO_REMOTE_URL = 'https://github.com/cyboflow/demo-project.git';
 
 /** Project name prefilled in the Create Project dialog during the tour. */
-export const DEMO_PROJECT_NAME = 'Demo Project';
+export const DEMO_PROJECT_NAME = 'Acme Habits';
 
 export function getDemoRootDir(): string {
   return getCyboflowSubdirectory('demo');
@@ -58,18 +58,18 @@ function git(cwd: string, args: string): void {
  * scripted runs have believable files to read, edit, and diff.
  */
 const SEED_FILES: Record<string, string> = {
-  'README.md': `# Acme Notes
+  'README.md': `# Acme Habits
 
-A tiny note-taking service used to demo Cyboflow.
+A tiny habit-tracking service used to demo Cyboflow.
 
 ## Structure
 
 - \`src/server.ts\` — HTTP entry point
-- \`src/notes.ts\` — in-memory note store
+- \`src/habits.ts\` — in-memory habit store + check-ins
 - \`src/format.ts\` — display helpers
 `,
   'package.json': `{
-  "name": "acme-notes",
+  "name": "acme-habits",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -77,46 +77,60 @@ A tiny note-taking service used to demo Cyboflow.
   }
 }
 `,
-  'src/server.ts': `import { listNotes, addNote } from './notes';
-import { formatNote } from './format';
+  'src/server.ts': `import { listHabits, addHabit, checkIn } from './habits';
+import { formatHabit } from './format';
 
-export function handleRequest(method: string, body?: string): string {
+export function handleRequest(method: string, path: string, body?: string): string {
   if (method === 'GET') {
-    return listNotes().map(formatNote).join('\\n');
+    return listHabits().map(formatHabit).join('\\n');
   }
-  if (method === 'POST' && body) {
-    const note = addNote(body);
-    return formatNote(note);
+  if (method === 'POST' && path === '/habits' && body) {
+    const habit = addHabit(body);
+    return formatHabit(habit);
+  }
+  if (method === 'POST' && path.startsWith('/habits/') && path.endsWith('/check-in')) {
+    const id = Number(path.split('/')[2]);
+    const habit = checkIn(id);
+    return habit ? formatHabit(habit) : 'not found';
   }
   return 'unsupported';
 }
 `,
-  'src/notes.ts': `export interface Note {
+  'src/habits.ts': `export interface Habit {
   id: number;
-  text: string;
+  name: string;
   createdAt: string;
+  /** ISO timestamps of completed check-ins, newest last. */
+  completions: string[];
 }
 
-const notes: Note[] = [];
+const habits: Habit[] = [];
 
-export function addNote(text: string): Note {
-  const note: Note = {
-    id: notes.length + 1,
-    text,
+export function addHabit(name: string): Habit {
+  const habit: Habit = {
+    id: habits.length + 1,
+    name,
     createdAt: new Date().toISOString(),
+    completions: [],
   };
-  notes.push(note);
-  return note;
+  habits.push(habit);
+  return habit;
 }
 
-export function listNotes(): Note[] {
-  return notes;
+export function checkIn(id: number): Habit | undefined {
+  const habit = habits.find((h) => h.id === id);
+  habit?.completions.push(new Date().toISOString());
+  return habit;
+}
+
+export function listHabits(): Habit[] {
+  return habits;
 }
 `,
-  'src/format.ts': `import type { Note } from './notes';
+  'src/format.ts': `import type { Habit } from './habits';
 
-export function formatNote(note: Note): string {
-  return '#' + note.id + ' ' + note.text;
+export function formatHabit(habit: Habit): string {
+  return '#' + habit.id + ' ' + habit.name;
 }
 `,
 };

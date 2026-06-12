@@ -12,23 +12,23 @@
 import { TaskChangeRouter } from '../../orchestrator/taskChangeRouter';
 
 const DEMO_IDEA = {
-  title: 'Add tagging to notes',
-  summary: 'Let users attach tags to notes and filter by them.',
-  body: '## Idea\n\nNotes are piling up — users want lightweight tags to group and find them. Cover the data model, display, and filtering.',
+  title: 'Add streaks to habits',
+  summary: 'Track consecutive-day streaks per habit and surface them to users.',
+  body: '## Idea\n\nUsers check habits off but get no sense of momentum — a streak counter is the core motivator of every habit tracker. Cover the calculation, display, and edge rules.',
 };
 
 const DEMO_TASKS = [
   {
-    title: 'Add tag normalization helpers',
-    body: '## AC\n- `normalizeTag` trims + lower-cases labels\n- `uniqueTags` de-duplicates case-insensitively',
+    title: 'Add streak calculation helpers',
+    body: '## AC\n- `computeStreak(completions, today)` counts consecutive calendar days ending today\n- No check-ins → streak 0; a missed day resets the count',
   },
   {
-    title: 'Cover tag normalization with tests',
-    body: '## AC\n- Unit coverage for `normalizeTag` and `uniqueTags`\n- Edge cases: whitespace-only and duplicate labels',
+    title: 'Cover streak calculation with tests',
+    body: '## AC\n- Unit coverage for `computeStreak` and day bucketing\n- Edge cases: empty completions, multiple check-ins on one day, gap days',
   },
   {
-    title: 'Document tagging behavior',
-    body: '## AC\n- `docs/tags.md` explains normalization + de-duplication',
+    title: 'Document streak rules',
+    body: '## AC\n- `docs/streaks.md` explains day bucketing + reset behavior',
   },
 ];
 

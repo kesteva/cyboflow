@@ -22,7 +22,7 @@ describe('resetDemoEnvironment', () => {
 
     expect(env.sandboxPath).toBe(path.join(root, 'demo-project'));
     expect(env.databasePath).toBe(path.join(root, 'demo.db'));
-    expect(fs.existsSync(path.join(env.sandboxPath, 'src/notes.ts'))).toBe(true);
+    expect(fs.existsSync(path.join(env.sandboxPath, 'src/habits.ts'))).toBe(true);
     expect(fs.existsSync(path.join(env.sandboxPath, 'README.md'))).toBe(true);
 
     expect(gitOut(env.sandboxPath, 'branch --show-current')).toBe('main');

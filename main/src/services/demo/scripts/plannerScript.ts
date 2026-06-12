@@ -74,7 +74,7 @@ async function advanceIdeaStage(
 
 export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   const idea = resolveSeedIdea(ctx);
-  const ideaTitle = idea?.title ?? 'Add tagging to notes';
+  const ideaTitle = idea?.title ?? 'Add streaks to habits';
   const projectId = resolveProjectId(ctx);
   const router = TaskChangeRouter.getInstance();
 
@@ -85,35 +85,35 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   await ctx.sleep(1200);
   ctx.say(`Working on the idea **${ideaTitle}**. Let me get oriented in the codebase first.`);
   await ctx.sleep(1000);
-  ctx.tool('Glob', { pattern: 'src/**/*.ts' }, 'src/server.ts\nsrc/notes.ts\nsrc/format.ts');
+  ctx.tool('Glob', { pattern: 'src/**/*.ts' }, 'src/server.ts\nsrc/habits.ts\nsrc/format.ts');
   await ctx.sleep(1000);
-  ctx.tool('Read', { file_path: 'src/notes.ts' }, ctx.readFile('src/notes.ts') || '(empty)');
+  ctx.tool('Read', { file_path: 'src/habits.ts' }, ctx.readFile('src/habits.ts') || '(empty)');
   await ctx.sleep(1400);
 
   // AskUserQuestion gate — pauses the run (awaiting_input) until answered.
   const answer = await ctx.askQuestion([
     {
-      question: 'How should tags be assigned to notes?',
-      header: 'Tagging',
+      question: 'How should a streak be counted?',
+      header: 'Streaks',
       multiSelect: false,
       options: [
-        { label: 'Free-form labels', description: 'Users type any tag; tags are created on first use.' },
-        { label: 'Fixed set', description: 'A curated list of tags configured up front.' },
+        { label: 'Calendar days', description: 'A day counts if it has at least one check-in; simple and predictable.' },
+        { label: 'Rolling 24h windows', description: 'Each check-in must land within 24h of the previous one.' },
       ],
     },
     {
-      question: 'Should filtering by tag land in this iteration?',
+      question: 'Should a missed-day grace rule land in this iteration?',
       header: 'Scope',
       multiSelect: false,
       options: [
-        { label: 'Yes, include filtering', description: 'Tag model + filter endpoint in one pass.' },
-        { label: 'Tags only for now', description: 'Filtering becomes a follow-up idea.' },
+        { label: 'No grace for now', description: 'A missed day resets the streak; grace becomes a follow-up idea.' },
+        { label: 'One grace day', description: 'Allow a single missed day before the streak resets.' },
       ],
     },
   ]);
-  const tagStyle = answer.answers['How should tags be assigned to notes?'] ?? 'Free-form labels';
-  const scopeChoice = answer.answers['Should filtering by tag land in this iteration?'] ?? 'Yes, include filtering';
-  ctx.say(`Got it — **${tagStyle}** it is. I've captured the idea spec with that decision baked in.`);
+  const streakStyle = answer.answers['How should a streak be counted?'] ?? 'Calendar days';
+  const graceChoice = answer.answers['Should a missed-day grace rule land in this iteration?'] ?? 'No grace for now';
+  ctx.say(`Got it — **${streakStyle}** it is. I've captured the idea spec with that decision baked in.`);
   await ctx.sleep(800);
 
   // ── Plan phase · research (optional step) ─────────────────────────────────
@@ -121,11 +121,11 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   if (idea) await advanceIdeaStage(ctx, projectId, idea.id, 2); // Research
   ctx.tool(
     'WebSearch',
-    { query: 'lightweight tagging model for note apps' },
-    'Common pattern: many-to-many tags table with case-insensitive unique labels.',
+    { query: 'habit tracker streak calculation edge cases' },
+    'Common pitfalls: timezone boundaries and DST shifts; most trackers bucket check-ins by calendar day.',
   );
   await ctx.sleep(1400);
-  ctx.say('Research done — a simple label array on each note is enough at this scale; no join table needed yet.');
+  ctx.say('Research done — bucketing check-ins by calendar day sidesteps the DST traps; no scheduler needed.');
   await ctx.sleep(800);
 
   // ── Plan phase · approve-idea (human gate) ────────────────────────────────
@@ -138,21 +138,22 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
       entityType: 'idea',
       taskId: idea.id,
       fields: {
-        summary: `Tagging for notes — ${tagStyle.toLowerCase()}, ${scopeChoice === 'Tags only for now' ? 'filtering deferred' : 'filtering included'}.`,
+        summary: `Streaks per habit — ${streakStyle.toLowerCase()}, ${graceChoice === 'One grace day' ? 'one grace day' : 'no grace rule'}.`,
         body: [
           '## Idea spec',
           '',
           '### Problem',
-          'Notes pile up with no way to group or find related ones.',
+          'Users check habits off but get no sense of momentum — nothing rewards consistency.',
           '',
           '### Approach',
-          `- **Tag style:** ${tagStyle} (per the planning decision)`,
-          '- `Note` gains a `tags: string[]` field; tags render as `#tag` suffixes in formatted output',
-          `- **Filtering:** ${scopeChoice === 'Tags only for now' ? 'deferred to a follow-up idea' : '`listNotes(tag?)` filters case-insensitively in this iteration'}`,
+          `- **Streak counting:** ${streakStyle} (per the planning decision)`,
+          '- `computeStreak(completions, today)` derives the current streak from a habit\'s check-in timestamps',
+          '- Formatted output renders the streak so it shows up everywhere habits are listed',
+          `- **Missed-day grace:** ${graceChoice === 'One grace day' ? 'one grace day before the streak resets' : 'none — a missed day resets the streak (grace is a follow-up idea)'}`,
           '',
           '### Out of scope',
-          '- Tag renaming / merging',
-          '- Tag-based notifications',
+          '- Reminders / notifications',
+          '- Weekly or custom-cadence goals',
         ].join('\n'),
       },
       runId: ctx.runId,
@@ -172,29 +173,29 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   const epic = await router.applyChange(projectId, {
     actor: 'agent:demo',
     entityType: 'epic',
-    title: 'Note tagging',
-    summary: `Tagging across the notes service (${tagStyle.toLowerCase()}).`,
-    body: `## Goal\n\nLet users attach tags to notes and surface them in formatted output.\n\n**Approach:** ${tagStyle}.`,
+    title: 'Habit streaks',
+    summary: `Streak tracking across the habits service (${streakStyle.toLowerCase()}).`,
+    body: `## Goal\n\nDerive each habit's current streak from its check-ins and surface it in formatted output.\n\n**Counting:** ${streakStyle}.`,
     originatingIdeaId: idea?.id ?? undefined,
     runId: ctx.runId,
   });
-  ctx.say('Created the epic **Note tagging** on the board.');
+  ctx.say('Created the epic **Habit streaks** on the board.');
   await ctx.sleep(1200);
 
   // ── Refine phase · tasks ──────────────────────────────────────────────────
   ctx.reportStep('tasks', 'running');
   const taskSpecs = [
     {
-      title: 'Add tags field to the note model',
-      body: '## AC\n- `Note` gains a `tags: string[]` field (default empty)\n- `addNote` accepts optional tags\n- Existing call sites compile unchanged',
+      title: 'Add streak calculation to the habit model',
+      body: '## AC\n- `computeStreak(completions, today)` counts consecutive days ending today\n- Empty completions → 0; multiple check-ins on one day count once\n- Existing call sites compile unchanged',
     },
     {
-      title: 'Show tags in formatted output',
-      body: '## AC\n- `formatNote` renders `#tag` suffixes when tags exist\n- No trailing whitespace when a note has no tags',
+      title: 'Show streaks in formatted output',
+      body: '## AC\n- `formatHabit` renders a `(N-day streak)` suffix when the streak is ≥ 2\n- No suffix for habits without an active streak',
     },
     {
-      title: 'Filter notes by tag',
-      body: '## AC\n- `listNotes(tag?)` filters case-insensitively\n- GET requests accept a `tag` query parameter',
+      title: 'Track the longest streak per habit',
+      body: '## AC\n- `longestStreak(completions)` scans the full check-in history\n- GET responses include the personal best alongside the current streak',
     },
   ];
   for (const spec of taskSpecs) {
@@ -218,6 +219,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   ctx.reportStep('approve-plan', 'done');
   ctx.say(
     'Plan approved. The tasks are on the board and ready for a sprint — start one from this session, ' +
-      'pick the tagging tasks, and watch the lanes go.',
+      'pick the streak tasks, and watch the lanes go.',
   );
 }

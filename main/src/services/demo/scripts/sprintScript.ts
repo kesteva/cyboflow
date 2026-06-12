@@ -26,37 +26,49 @@ interface LaneWork {
 /** Per-lane file payloads — cycled when the batch has more tasks than entries. */
 const LANE_CHANGES: Array<Omit<LaneWork, 'taskId' | 'title'>> = [
   {
-    file: 'src/tags.ts',
-    content: `export function normalizeTag(tag: string): string {
-  return tag.trim().toLowerCase();
+    file: 'src/streaks.ts',
+    content: `/** Bucket an ISO timestamp into its calendar day (YYYY-MM-DD). */
+export function toDayKey(iso: string): string {
+  return iso.slice(0, 10);
 }
 
-export function uniqueTags(tags: string[]): string[] {
-  return [...new Set(tags.map(normalizeTag))].filter((t) => t.length > 0);
+/** Count consecutive days with a check-in, ending at \`today\` (YYYY-MM-DD). */
+export function computeStreak(completions: string[], today: string): number {
+  const days = new Set(completions.map(toDayKey));
+  let streak = 0;
+  const cursor = new Date(today + 'T00:00:00Z');
+  while (days.has(cursor.toISOString().slice(0, 10))) {
+    streak += 1;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  return streak;
 }
 `,
-    commitMessage: 'feat: tag normalization helpers',
+    commitMessage: 'feat: streak calculation helpers',
   },
   {
-    file: 'src/tags.test.ts',
-    content: `import { normalizeTag, uniqueTags } from './tags';
+    file: 'src/streaks.test.ts',
+    content: `import { computeStreak, toDayKey } from './streaks';
 
 // Demo test file — exercised by the scripted sprint verification step.
 export const cases = [
-  normalizeTag(' Urgent ') === 'urgent',
-  uniqueTags(['a', 'A', ' b ']).length === 2,
+  toDayKey('2026-06-12T08:30:00Z') === '2026-06-12',
+  computeStreak(['2026-06-11T21:00:00Z', '2026-06-12T08:30:00Z'], '2026-06-12') === 2,
+  computeStreak(['2026-06-10T09:00:00Z'], '2026-06-12') === 0,
+  computeStreak([], '2026-06-12') === 0,
 ];
 `,
-    commitMessage: 'test: cover tag normalization',
+    commitMessage: 'test: cover streak calculation',
   },
   {
-    file: 'docs/tags.md',
-    content: `# Tagging
+    file: 'docs/streaks.md',
+    content: `# Streaks
 
-Notes accept free-form tags. Tags are normalized (trimmed, lower-cased)
-and de-duplicated before storage.
+A habit's streak counts consecutive calendar days with at least one
+check-in, ending today. Multiple check-ins on one day count once; a
+missed day resets the streak to zero.
 `,
-    commitMessage: 'docs: tagging behavior',
+    commitMessage: 'docs: streak rules',
   },
 ];
 
@@ -166,20 +178,20 @@ export async function sprintScript(ctx: DemoScriptContext): Promise<void> {
   await ctx.sleep(1100);
   await ctx.createReviewItem({
     kind: 'finding',
-    title: 'normalizeTag drops inner whitespace inconsistently',
-    body: 'Tags like `"to do"` keep their inner space while comparison is exact-match — consider collapsing inner whitespace too. Low severity; not blocking the sprint.',
+    title: 'computeStreak buckets days in UTC, not local time',
+    body: 'Check-ins near midnight can land on the wrong calendar day for users far from UTC — consider bucketing by the user\'s local day. Low severity; not blocking the sprint.',
     severity: 'info',
     source: 'agent:demo-code-review',
     blocking: false,
-    payload: { kind: 'finding', category: 'consistency', suggestedFix: 'Collapse inner whitespace in normalizeTag.' },
+    payload: { kind: 'finding', category: 'correctness', suggestedFix: 'Bucket completions by the user\'s local calendar day.' },
   });
   ctx.say('Code review done — filed one **finding** (non-blocking) in the review queue.');
   await ctx.sleep(900);
 
   await ctx.createReviewItem({
     kind: 'human_task',
-    title: 'Decide the tag color palette',
-    body: 'Tags will need display colors. Pick a palette (or confirm grayscale) — resolve this item once decided.',
+    title: 'Decide the streak badge style',
+    body: 'Streaks need a display treatment. Pick one — a flame emoji with the count, or a plain `(N-day streak)` suffix — and resolve this item once decided.',
     source: 'agent:demo-orchestrator',
     blocking: true,
     payload: { kind: 'human_task' },

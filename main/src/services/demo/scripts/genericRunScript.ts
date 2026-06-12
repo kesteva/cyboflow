@@ -8,7 +8,7 @@ import { DemoScriptContext } from '../demoScriptContext';
 export async function genericRunScript(ctx: DemoScriptContext): Promise<void> {
   ctx.say('Starting this workflow in demo mode.');
   await ctx.sleep(1200);
-  ctx.tool('Glob', { pattern: 'src/**/*.ts' }, 'src/server.ts\nsrc/notes.ts\nsrc/format.ts');
+  ctx.tool('Glob', { pattern: 'src/**/*.ts' }, 'src/server.ts\nsrc/habits.ts\nsrc/format.ts');
   await ctx.sleep(1200);
   ctx.say(
     'Demo mode ships scripted runs for the built-in **Planner** and **Sprint** flows — ' +

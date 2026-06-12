@@ -6,11 +6,12 @@
 
 import { DemoScriptContext } from '../demoScriptContext';
 
-const FORMAT_TS_UPGRADED = `import type { Note } from './notes';
+const FORMAT_TS_UPGRADED = `import type { Habit } from './habits';
 
-export function formatNote(note: Note): string {
-  const when = new Date(note.createdAt).toLocaleString();
-  return '#' + note.id + ' [' + when + '] ' + note.text;
+export function formatHabit(habit: Habit): string {
+  const done = habit.completions.length;
+  const suffix = done > 0 ? ' (' + done + (done === 1 ? ' check-in)' : ' check-ins)') : '';
+  return '#' + habit.id + ' ' + habit.name + suffix;
 }
 `;
 
@@ -31,35 +32,36 @@ export async function chatTurnScript(ctx: DemoScriptContext): Promise<void> {
   ctx.tool('Read', { file_path: 'src/format.ts' }, current || '(file not found)');
   await ctx.sleep(1200);
 
-  if (!current.includes('toLocaleString')) {
-    // First turn: upgrade the formatter to include timestamps.
+  if (!current.includes('check-in')) {
+    // First turn: upgrade the formatter to show check-in counts.
     ctx.writeFile('src/format.ts', FORMAT_TS_UPGRADED);
     ctx.tool(
       'Edit',
       {
         file_path: 'src/format.ts',
-        old_string: "return '#' + note.id + ' ' + note.text;",
-        new_string: "const when = new Date(note.createdAt).toLocaleString();\n  return '#' + note.id + ' [' + when + '] ' + note.text;",
+        old_string: "return '#' + habit.id + ' ' + habit.name;",
+        new_string:
+          "const done = habit.completions.length;\n  const suffix = done > 0 ? ' (' + done + (done === 1 ? ' check-in)' : ' check-ins)') : '';\n  return '#' + habit.id + ' ' + habit.name + suffix;",
       },
       'Edit applied to src/format.ts',
     );
     await ctx.sleep(800);
-    ctx.commit('feat: show note timestamps in formatted output');
+    ctx.commit('feat: show check-in counts in formatted output');
     ctx.say(
-      'Done. I updated `formatNote` in `src/format.ts` to include each note\'s creation time and committed the change.\n\n' +
+      'Done. I updated `formatHabit` in `src/format.ts` to show each habit\'s check-in count and committed the change.\n\n' +
         'Check the **Diff** tab to review it — then you can **Merge** it back to main or open a **PR** from the session actions.',
     );
   } else {
     // Subsequent turns: extend the README so every turn still produces a diff.
     const readme = ctx.readFile('README.md');
-    ctx.writeFile('README.md', readme + '\n## Notes\n\nFormatted output now includes timestamps.\n');
+    ctx.writeFile('README.md', readme + '\n## Display\n\nFormatted output now includes check-in counts.\n');
     ctx.tool(
       'Edit',
-      { file_path: 'README.md', old_string: '(end of file)', new_string: '## Notes …' },
+      { file_path: 'README.md', old_string: '(end of file)', new_string: '## Display …' },
       'Edit applied to README.md',
     );
     await ctx.sleep(800);
-    ctx.commit('docs: document timestamped output');
-    ctx.say('I added a short section to the README documenting the timestamped output, and committed it.');
+    ctx.commit('docs: document check-in counts in output');
+    ctx.say('I added a short section to the README documenting the check-in counts, and committed it.');
   }
 }
