@@ -6,7 +6,9 @@
 import { useState } from 'react';
 import { RunView } from './RunView';
 import { RunChatView } from './RunChatView';
+import { DemoTerminalView } from './DemoTerminalView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useConfigStore } from '../../stores/configStore';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,20 +75,28 @@ export function RunBottomPane() {
   // remain available as secondary tabs.
   const [activeTab, setActiveTab] = useState<TabId>('chat');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
+  // Demo mode swaps the "coming soon" Terminal placeholder for a canned, scripted
+  // Claude Code terminal so the PTY surface can be illustrated end-to-end.
+  const demoModeEnabled = useConfigStore((s) => s.config?.demoMode ?? false);
 
   return (
     <div className="flex h-full flex-col">
       <LocalTabBar tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
       <div role="tabpanel" className="flex-1 overflow-auto">
         {activeTab === 'data-stream' && <RunView />}
-        {activeTab === 'terminal' && (
-          <div
-            data-testid="run-bottom-pane-terminal-placeholder"
-            className="p-4 text-sm text-text-secondary"
-          >
-            Terminal — coming soon
-          </div>
-        )}
+        {activeTab === 'terminal' &&
+          (demoModeEnabled ? (
+            <div className="h-full" data-testid="run-bottom-pane-terminal-demo">
+              <DemoTerminalView />
+            </div>
+          ) : (
+            <div
+              data-testid="run-bottom-pane-terminal-placeholder"
+              className="p-4 text-sm text-text-secondary"
+            >
+              Terminal — coming soon
+            </div>
+          ))}
         {activeTab === 'chat' && <RunChatView runId={activeRunId} />}
       </div>
     </div>
