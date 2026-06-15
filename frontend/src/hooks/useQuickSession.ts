@@ -38,9 +38,15 @@ interface UseQuickSessionReturn {
    * override (Session Start Wizard step 3) is threaded into createQuick and
    * persisted on the session; omitted → the session inherits the global default.
    * An optional CLI substrate ('sdk'|'interactive') is likewise threaded and
-   * stamped onto sessions.substrate; omitted → SDK (legacy behavior).
+   * stamped onto sessions.substrate; omitted → SDK (legacy behavior). An optional
+   * `effort` ('ultracode') launches the interactive REPL with `--effort
+   * ultracode` (the Ultracode wizard card); omitted → no effort flag.
    */
-  start: (agentPermissionMode?: PermissionMode, substrate?: CliSubstrate) => Promise<void>;
+  start: (
+    agentPermissionMode?: PermissionMode,
+    substrate?: CliSubstrate,
+    effort?: 'ultracode',
+  ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
 }
@@ -50,7 +56,11 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
   const [error, setError] = useState<string | null>(null);
 
   const start = useCallback(
-    async (agentPermissionMode?: PermissionMode, substrate?: CliSubstrate): Promise<void> => {
+    async (
+      agentPermissionMode?: PermissionMode,
+      substrate?: CliSubstrate,
+      effort?: 'ultracode',
+    ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
       setError(null);
@@ -62,6 +72,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           projectId: opts.projectId,
           ...(agentPermissionMode ? { agentPermissionMode } : {}),
           ...(substrate ? { substrate } : {}),
+          ...(effort ? { effort } : {}),
         });
 
         if (!result.success || !result.data) {

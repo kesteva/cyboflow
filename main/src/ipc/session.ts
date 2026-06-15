@@ -362,6 +362,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // the SDK default (byte-identical to before).
       const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
 
+      // Opt-in agent effort (the "Ultracode" wizard card). 'ultracode' launches
+      // the interactive REPL with `--effort ultracode`; any other value is
+      // ignored. Demo mode never spawns a real REPL — it drives a canned dynamic
+      // workflow instead (below) — so the flag only reaches the live spawn.
+      const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
+
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
@@ -526,7 +532,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // runId ("No claude process found").
           registerLivePanel(runId, panel.id);
           void interactiveCliManager
-            .startPanel(panel.id, session.id, session.worktreePath, QUICK_PTY_BRIEFING, session.permissionMode)
+            .startPanel(
+              panel.id,
+              session.id,
+              session.worktreePath,
+              QUICK_PTY_BRIEFING,
+              session.permissionMode,
+              undefined, // model — inherit the default
+              requestedEffort, // 'ultracode' → `--effort ultracode` (Ultracode card)
+            )
             .catch((err: unknown) => {
               // Fail-soft: a spawn failure leaves the session usable — the next
               // sessions:input re-spawns the REPL with the user's prompt.

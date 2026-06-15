@@ -151,6 +151,13 @@ export interface CreateSessionRequest {
    * FIND-SPRINT-037-5).
    */
   substrate?: CliSubstrate;
+  /**
+   * Opt-in agent effort level for the quick session. The only value today is
+   * 'ultracode' (the "Ultracode" wizard card), launching the interactive PTY
+   * REPL with `--effort ultracode`. Omitted → no effort flag. KEEP IN SYNC with
+   * the main twin in main/src/types/session.ts (request-parity rule).
+   */
+  effort?: 'ultracode';
   projectId?: number;
   folderId?: string;
   isMainRepo?: boolean;

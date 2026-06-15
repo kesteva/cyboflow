@@ -122,6 +122,11 @@ interface InteractiveClaudeSpawnOptions {
   agentPermissionMode?: PermissionMode;
   model?: string;
   /**
+   * Opt-in agent effort level. 'ultracode' emits `--effort ultracode` (the
+   * Ultracode wizard card). Omitted → no effort flag.
+   */
+  effort?: 'ultracode';
+  /**
    * The workflow_runs row ID for ApprovalRouter / the per-run RawEventsSink. For
    * workflow runs this equals panelId (RunExecutor invariant). For quick sessions
    * it is resolved from sessions.run_id and differs from panelId. Falls back to
@@ -451,6 +456,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // end-of-options `--` separator that precedes the positional prompt.
     if (options.agentPermissionMode === 'auto') {
       args.push('--permission-mode', 'auto');
+    }
+
+    // effort 'ultracode' (the "Ultracode" wizard card): launch the REPL with
+    // `--effort ultracode` so Claude Code defaults to authoring/running dynamic
+    // background workflows. Pushed before the load-bearing end-of-options `--`
+    // separator (same placement contract as --permission-mode above).
+    if (options.effort === 'ultracode') {
+      args.push('--effort', 'ultracode');
     }
 
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
@@ -1319,6 +1332,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     prompt: string,
     permissionMode?: 'approve' | 'ignore',
     model?: string,
+    effort?: 'ultracode',
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -1326,6 +1340,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       worktreePath,
       prompt,
       permissionMode,
+      effort,
       // Quick/legacy interactive sessions resolve their 4-mode agent permission
       // here (per-session override else global default) — without it the
       // settings-writer's effectiveWriterMode never sees the 4-mode and ALWAYS

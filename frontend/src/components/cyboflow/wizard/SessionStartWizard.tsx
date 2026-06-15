@@ -68,6 +68,7 @@ import type { WizardStep } from './WizardStepHeader';
 import { ProjectFilingCard } from './ProjectFilingCard';
 import { WorkflowListRow } from './WorkflowListRow';
 import { QuickSessionCard } from './QuickSessionCard';
+import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
@@ -87,7 +88,11 @@ type RunStartResult = RouterOutputs['cyboflow']['runs']['start'];
  */
 type WizardSelection =
   | { kind: 'workflow'; workflowId: string }
-  | { kind: 'quick' };
+  | { kind: 'quick' }
+  // Ultracode: opens an interactive session launched with `--effort ultracode`
+  // (no structured run). Behaves like 'quick' at launch but pins the substrate
+  // to interactive and threads the effort flag.
+  | { kind: 'ultracode' };
 
 /** The faint graph-paper grid backing the wizard surface. */
 const GRID_BG_STYLE: React.CSSProperties = {
@@ -427,6 +432,14 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
 
+    if (selection.kind === 'ultracode') {
+      // Ultracode is an interactive session in ultracode mode: pin the substrate
+      // to 'interactive' (PTY is required for the live REPL + dynamic-workflow
+      // detection) and thread `effort: 'ultracode'` → `--effort ultracode`.
+      void startQuickSession(permissionMode, 'interactive', 'ultracode');
+      return;
+    }
+
     // selection.kind === 'workflow'
     const meta = workflowMetas.find((m) => m.id === selection.workflowId);
     if (meta?.name === 'planner') {
@@ -479,6 +492,8 @@ export default function SessionStartWizard(): React.JSX.Element {
     ctaLabel = 'Select a workflow';
   } else if (selection.kind === 'quick') {
     ctaLabel = 'Start quick session';
+  } else if (selection.kind === 'ultracode') {
+    ctaLabel = 'Run /ultracode';
   } else {
     ctaLabel = `Run ${selectedMeta?.slashCommand ?? '/workflow'}`;
   }
@@ -571,6 +586,17 @@ export default function SessionStartWizard(): React.JSX.Element {
               </>
             )}
 
+            {/* Ultracode — featured peer of the workflow cards. Opens an
+                interactive session in ultracode mode rather than a structured
+                run, so it sits with the workflows but launches like quick. */}
+            <UltracodeCard
+              selected={selection?.kind === 'ultracode'}
+              onSelect={() => {
+                setSelection({ kind: 'ultracode' });
+                setStep(3);
+              }}
+            />
+
             {/* Workflow list */}
             {workflowsLoading && (
               <p className="text-xs text-text-secondary">Loading workflows…</p>
@@ -610,15 +636,18 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Agent permission — shown for BOTH workflow and quick launches. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
-            {/* CLI substrate — shown for BOTH workflow and quick launches
-                (workflow: threaded into runs.start; quick: threaded into
-                useQuickSession → sessions.substrate). */}
-            <SubstrateSelector
-              value={substrate}
-              onChange={setSubstrate}
-              id="wizard-substrate"
-              caveatsTestId="wizard-substrate-caveats"
-            />
+            {/* CLI substrate — shown for workflow + quick launches (workflow:
+                threaded into runs.start; quick: threaded into useQuickSession →
+                sessions.substrate). Hidden for Ultracode, which always runs on
+                the interactive PTY substrate. */}
+            {selection.kind !== 'ultracode' && (
+              <SubstrateSelector
+                value={substrate}
+                onChange={setSubstrate}
+                id="wizard-substrate"
+                caveatsTestId="wizard-substrate-caveats"
+              />
+            )}
 
             {/* Workflow-only control: blueprint-editor access (there is no
                 workflow to edit for a quick session). */}
@@ -656,14 +685,23 @@ export default function SessionStartWizard(): React.JSX.Element {
                 value={
                   selection.kind === 'quick'
                     ? 'Quick session'
-                    : selectedMeta?.slashCommand ?? '/workflow'
+                    : selection.kind === 'ultracode'
+                      ? 'Ultracode (/ultracode)'
+                      : selectedMeta?.slashCommand ?? '/workflow'
                 }
               />
               <SummaryRow label="Permission" value={permissionLabel} />
               <SummaryRow
                 label="Substrate"
-                value={substrate === 'interactive' ? 'Interactive (PTY)' : 'SDK'}
+                value={
+                  selection.kind === 'ultracode' || substrate === 'interactive'
+                    ? 'Interactive (PTY)'
+                    : 'SDK'
+                }
               />
+              {selection.kind === 'ultracode' && (
+                <SummaryRow label="Effort" value="ultracode (--effort ultracode)" />
+              )}
             </div>
           </div>
         )}
