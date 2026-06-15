@@ -76,7 +76,9 @@ const YELLOW = '\x1b[33m';
 const NL = '\r\n';
 
 // Visible-width helpers: ANSI SGR codes are zero display-width, so padding /
-// alignment math must measure the plain text only.
+// alignment math must measure the plain text only. Matching SGR sequences
+// requires the ESC control char, which no-control-regex flags — intentional.
+// eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const visLen = (s: string): number => s.replace(ANSI_RE, '').length;
 
