@@ -3,7 +3,7 @@
  * step, alongside the quick-session card.
  *
  * Ultracode is NOT a structured workflow (no phases/steps): selecting it opens
- * an interactive PTY Claude Code session launched with `--effort ultracode`, so
+ * an interactive PTY Claude Code session launched with the ultracode setting, so
  * Claude defaults to authoring/running dynamic background workflows. If the agent
  * fans work out, the live dynamic-workflow visualization lights up the canvas.
  *

@@ -89,7 +89,7 @@ type RunStartResult = RouterOutputs['cyboflow']['runs']['start'];
 type WizardSelection =
   | { kind: 'workflow'; workflowId: string }
   | { kind: 'quick' }
-  // Ultracode: opens an interactive session launched with `--effort ultracode`
+  // Ultracode: opens an interactive session launched with the ultracode setting
   // (no structured run). Behaves like 'quick' at launch but pins the substrate
   // to interactive and threads the effort flag.
   | { kind: 'ultracode' };
@@ -435,7 +435,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection.kind === 'ultracode') {
       // Ultracode is an interactive session in ultracode mode: pin the substrate
       // to 'interactive' (PTY is required for the live REPL + dynamic-workflow
-      // detection) and thread `effort: 'ultracode'` → `--effort ultracode`.
+      // detection) and thread `effort: 'ultracode'` → the ultracode setting.
       void startQuickSession(permissionMode, 'interactive', 'ultracode');
       return;
     }
@@ -700,7 +700,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 }
               />
               {selection.kind === 'ultracode' && (
-                <SummaryRow label="Effort" value="ultracode (--effort ultracode)" />
+                <SummaryRow label="Effort" value="ultracode (xhigh + auto workflows)" />
               )}
             </div>
           </div>

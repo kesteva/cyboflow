@@ -39,8 +39,8 @@ interface UseQuickSessionReturn {
    * persisted on the session; omitted → the session inherits the global default.
    * An optional CLI substrate ('sdk'|'interactive') is likewise threaded and
    * stamped onto sessions.substrate; omitted → SDK (legacy behavior). An optional
-   * `effort` ('ultracode') launches the interactive REPL with `--effort
-   * ultracode` (the Ultracode wizard card); omitted → no effort flag.
+   * `effort` ('ultracode') launches the interactive REPL with the ultracode
+   * setting (the Ultracode wizard card); omitted → no effort setting.
    */
   start: (
     agentPermissionMode?: PermissionMode,

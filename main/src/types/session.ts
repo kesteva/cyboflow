@@ -89,7 +89,7 @@ export interface CreateSessionRequest {
   /**
    * Opt-in agent effort level for the quick session. The only value today is
    * 'ultracode' (the "Ultracode" wizard card), which launches the interactive
-   * PTY REPL with `--effort ultracode` so Claude Code fans work out as dynamic
+   * PTY REPL with the ultracode setting so Claude Code fans work out as dynamic
    * background workflows. Omitted → no effort flag (default). KEEP IN SYNC with
    * the frontend twin in frontend/src/types/session.ts (request-parity rule).
    */

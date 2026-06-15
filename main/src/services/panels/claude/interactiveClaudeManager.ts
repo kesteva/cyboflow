@@ -122,8 +122,9 @@ interface InteractiveClaudeSpawnOptions {
   agentPermissionMode?: PermissionMode;
   model?: string;
   /**
-   * Opt-in agent effort level. 'ultracode' emits `--effort ultracode` (the
-   * Ultracode wizard card). Omitted → no effort flag.
+   * Opt-in agent effort mode. 'ultracode' (the Ultracode wizard card) launches
+   * the REPL with `--settings '{"ultracode":true}'` — the session-only setting
+   * is NOT an `--effort` value. Omitted → no effort setting.
    */
   effort?: 'ultracode';
   /**
@@ -458,12 +459,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--permission-mode', 'auto');
     }
 
-    // effort 'ultracode' (the "Ultracode" wizard card): launch the REPL with
-    // `--effort ultracode` so Claude Code defaults to authoring/running dynamic
-    // background workflows. Pushed before the load-bearing end-of-options `--`
-    // separator (same placement contract as --permission-mode above).
+    // effort 'ultracode' (the "Ultracode" wizard card). ultracode is a
+    // SESSION-ONLY setting, NOT an `--effort` value (`--effort` accepts only
+    // low|medium|high|xhigh|max — passing 'ultracode' there makes claude exit 1).
+    // The sanctioned launch mechanism is `--settings '{"ultracode":true}'`: an
+    // ADDITIVE, highest-precedence settings source, so the writer-installed
+    // PreToolUse hook in the worktree's .claude/settings.json is STILL discovered
+    // (it does not replace file-based settings). ultracode pairs xhigh reasoning
+    // with automatic workflow orchestration, so the agent fans substantive work
+    // out as dynamic background workflows (visualized by DynamicWorkflowTracker).
+    // Inline JSON is passed as a single argv element (pty spawn = no shell, so no
+    // quoting concerns); pushed before the end-of-options `--` separator.
     if (options.effort === 'ultracode') {
-      args.push('--effort', 'ultracode');
+      args.push('--settings', JSON.stringify({ ultracode: true }));
     }
 
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on

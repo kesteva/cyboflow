@@ -363,9 +363,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
 
       // Opt-in agent effort (the "Ultracode" wizard card). 'ultracode' launches
-      // the interactive REPL with `--effort ultracode`; any other value is
+      // the interactive REPL with the ultracode setting; any other value is
       // ignored. Demo mode never spawns a real REPL — it drives a canned dynamic
-      // workflow instead (below) — so the flag only reaches the live spawn.
+      // workflow instead (below) — so the setting only reaches the live spawn.
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
       const job = await taskQueue.createSession({
@@ -552,7 +552,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               QUICK_PTY_BRIEFING,
               session.permissionMode,
               undefined, // model — inherit the default
-              requestedEffort, // 'ultracode' → `--effort ultracode` (Ultracode card)
+              requestedEffort, // 'ultracode' → `--settings {ultracode:true}` (Ultracode card)
             )
             .catch((err: unknown) => {
               // Fail-soft: a spawn failure leaves the session usable — the next
