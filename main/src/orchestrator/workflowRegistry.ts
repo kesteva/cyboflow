@@ -525,11 +525,25 @@ export class WorkflowRegistry {
     // including the explicit per-run UI choice — demo runs must never spawn a
     // real agent regardless of what the launch surface requested.
     const forcedSubstrate = this.config?.getForcedSubstrate?.() ?? null;
-    const substrate = forcedSubstrate ?? resolveSubstrate({
-      requestedSubstrate,
-      globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
-      env: process.env,
-    });
+    // Demo carve-out (illustration only): the boot-profile pin is 'sdk', but a
+    // quick session that EXPLICITLY requested 'interactive' is honored so the
+    // canned PTY terminal can be shown in demo mode. This is safe because the
+    // real REPL is never spawned — the quick-session eager-spawn path and the
+    // sessions:input relay both short-circuit in demo (see ipc/session.ts), and
+    // DemoTerminalView paints a purely client-side scripted session. Scoped to
+    // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
+    // (which WOULD dispatch to the real interactive manager via the facade).
+    const demoHonorsInteractive =
+      forcedSubstrate === 'sdk' &&
+      workflow.name === QUICK_WORKFLOW_NAME &&
+      requestedSubstrate === 'interactive';
+    const substrate = demoHonorsInteractive
+      ? 'interactive'
+      : forcedSubstrate ?? resolveSubstrate({
+          requestedSubstrate,
+          globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
+          env: process.env,
+        });
 
     // Freeze the workflow's CURRENT spec onto the run as a content address
     // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and

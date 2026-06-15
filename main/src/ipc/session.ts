@@ -143,6 +143,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
     gitStatusManager,
     archiveProgressManager,
+    configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
     cyboflow
   } = services;
 
@@ -485,7 +486,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // only when the REPL EXITS (persistent-session contract) — awaiting would
       // deadlock create-quick until the session ends.
       let claudePanelId: string | undefined;
-      if (resolvedSubstrate === 'interactive') {
+      if (resolvedSubstrate === 'interactive' && configManager.isDemoMode()) {
+        // Demo mode: the session is stamped 'interactive' (so ClaudePanel swaps
+        // in the terminal surface), but the real persistent REPL is NEVER
+        // spawned — DemoTerminalView paints a canned, client-side Claude Code
+        // session. Still create the claude panel + mark running so the center
+        // pane mounts ClaudePanel (and skips the resting canvas) exactly like a
+        // live interactive quick session.
+        try {
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'claude',
+            title: 'Claude',
+          });
+          claudePanelId = panel.id;
+          await sessionManager.updateSession(session.id, { status: 'running' });
+        } catch (error) {
+          console.error(`[IPC] Failed to create Claude panel for demo interactive quick session ${session.id}:`, error);
+        }
+      } else if (resolvedSubstrate === 'interactive') {
         try {
           // NOTE: deliberately NOT registered with ClaudePanelManager (the
           // frontend panels:create handler auto-registers claude panels,
@@ -832,7 +851,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // RELAYED into the live process — never the SDK manager (whose
       // startPanel/sendInput would spawn a competing SDK conversation). The SDK
       // path below stays byte-identical for sdk/NULL sessions (Q3 invariant).
-      if (dbSession?.substrate === 'interactive') {
+      // Demo mode never spawns the real REPL (the canned DemoTerminalView owns
+      // its own client-side input), so an interactive demo session must NOT hit
+      // the real interactive manager — fall through to the SDK/demo path below.
+      if (dbSession?.substrate === 'interactive' && !configManager.isDemoMode()) {
         if (interactiveCliManager.isPanelRunning(claudePanel.id)) {
           console.log(`[IPC] Relaying input into live interactive REPL for panel ${claudePanel.id}`);
           interactiveCliManager.relayUserTurn(claudePanel.id, finalInput);
