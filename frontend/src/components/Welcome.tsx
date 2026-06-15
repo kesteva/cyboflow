@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, CheckCircle, GitBranch } from 'lucide-react';
+import { Zap, CheckCircle, GitBranch, X } from 'lucide-react';
 import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
 import { Modal, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
@@ -42,15 +42,25 @@ export default function Welcome({ isOpen, onClose }: WelcomeProps) {
   if (!isOpen) return null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="lg">
-      {/* Header with gradient */}
+    <Modal isOpen={isOpen} onClose={onClose} size="lg" showCloseButton={false}>
+      {/* Header with gradient. The shared Modal close button (muted
+          text-text-tertiary, tuned for light surfaces) is invisible on this
+          terracotta header, so it is suppressed (showCloseButton={false}) and a
+          high-contrast close button is rendered here in the on-interactive color. */}
       <div className="bg-interactive p-6 text-on-interactive rounded-t-lg">
-        <div className="flex items-center justify-between">
+        <div className="flex items-start justify-between">
           <div>
             <img src={cyboflowWordmark} alt="Cyboflow" className="h-9 w-auto mb-2" />
             <h1 className="text-2xl font-bold">Welcome</h1>
             <p className="text-interactive-text/80">Run AI coding flows in parallel — with you in the loop</p>
           </div>
+          <button
+            aria-label="Close modal"
+            onClick={onClose}
+            className="-mr-1 -mt-1 rounded p-1 text-on-interactive/70 transition-colors hover:text-on-interactive hover:bg-white/10"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
       </div>
 
