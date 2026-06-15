@@ -84,3 +84,49 @@ describe('ConfigManager.defaultSubstrate', () => {
     expect(reloaded.getDefaultSubstrate()).toBe('sdk');
   });
 });
+
+describe('ConfigManager.interactivePtyOnly (global PTY-only lock)', () => {
+  it('isInteractivePtyOnly() floors to false on a fresh instance (field not seeded)', () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    expect(mgr.isInteractivePtyOnly()).toBe(false);
+    expect(mgr.getConfig().interactivePtyOnly).toBeUndefined();
+  });
+
+  it('getForcedSubstrate() returns null when neither demo nor the lock is set', () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    expect(mgr.getForcedSubstrate()).toBeNull();
+  });
+
+  it("getForcedSubstrate() returns 'interactive' when interactivePtyOnly is on", async () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+    await mgr.updateConfig({ interactivePtyOnly: true });
+
+    expect(mgr.isInteractivePtyOnly()).toBe(true);
+    expect(mgr.getForcedSubstrate()).toBe('interactive');
+  });
+
+  it("demo mode wins: getForcedSubstrate() stays 'sdk' even when the PTY-only lock is on", async () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+    // Both on simultaneously — demo's 'sdk' pin MUST take precedence so the
+    // scripted DemoCliManager keeps handling spawns (the interactive manager is
+    // constructed-but-never-engaged in demo and would misbehave).
+    await mgr.updateConfig({ interactivePtyOnly: true, demoMode: true });
+
+    expect(mgr.isDemoMode()).toBe(true);
+    expect(mgr.isInteractivePtyOnly()).toBe(true);
+    expect(mgr.getForcedSubstrate()).toBe('sdk');
+  });
+
+  it('interactivePtyOnly persists and round-trips through a fresh initialize()', async () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+    await mgr.updateConfig({ interactivePtyOnly: true });
+
+    const reloaded = new ConfigManager('/tmp/test-git-path');
+    await reloaded.initialize();
+    expect(reloaded.getConfig().interactivePtyOnly).toBe(true);
+    expect(reloaded.getForcedSubstrate()).toBe('interactive');
+  });
+});

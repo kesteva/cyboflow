@@ -15,6 +15,11 @@ export interface AppConfig {
   defaultModel?: string;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
+  // Global hard lock: when true, every run/session is forced onto the interactive
+  // PTY substrate and the SDK is disabled (the per-run picker is hidden). Applied
+  // via getForcedSubstrate() — outranks the per-run choice and the global default.
+  // Demo mode still pins 'sdk' and wins over this. Defaults to false (allow SDK).
+  interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Theme preference
@@ -65,6 +70,9 @@ export interface UpdateConfigRequest {
   defaultModel?: string;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
+  // Global hard lock — force the interactive PTY substrate and disable the SDK
+  // (see AppConfig.interactivePtyOnly). Demo mode still wins with 'sdk'.
+  interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   theme?: 'paper' | 'light' | 'dark';

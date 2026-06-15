@@ -175,14 +175,32 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Global hard lock that forces the interactive PTY substrate and disables the
+   * SDK. Floors to false (allow SDK) when unset. Like `defaultSubstrate`, it is
+   * intentionally NOT seeded into the constructor defaults, so existing
+   * config.json files stay byte-identical for users who never opt in.
+   */
+  isInteractivePtyOnly(): boolean {
+    return this.config.interactivePtyOnly ?? false;
+  }
+
+  /**
    * Boot-profile substrate pin consumed by WorkflowRegistry.createRun (the
-   * WorkflowConfigProvider seam). Demo mode pins EVERY run/session to 'sdk' —
-   * outranking even the explicit per-run UI choice — so the scripted
-   * DemoCliManager handles all spawns and the real interactive (PTY) manager is
-   * never engaged. null = no pin (normal resolution ladder).
+   * WorkflowConfigProvider seam). A non-null result outranks the entire
+   * resolution ladder — including the explicit per-run UI choice.
+   *
+   * Precedence (demo MUST win first):
+   *   1. Demo mode pins EVERY run/session to 'sdk' so the scripted DemoCliManager
+   *      handles all spawns and the real interactive (PTY) manager — which is
+   *      constructed-but-never-engaged in demo — is never spawned.
+   *   2. The global `interactivePtyOnly` lock pins to 'interactive', forcing the
+   *      PTY substrate for every run/session and disabling the SDK.
+   *   3. null = no pin (normal resolution ladder runs).
    */
   getForcedSubstrate(): CliSubstrate | null {
-    return this.isDemoMode() ? 'sdk' : null;
+    if (this.isDemoMode()) return 'sdk';
+    if (this.isInteractivePtyOnly()) return 'interactive';
+    return null;
   }
 
   /**

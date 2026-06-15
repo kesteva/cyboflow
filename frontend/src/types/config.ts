@@ -10,6 +10,10 @@ export interface AppConfig {
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
+  // Global hard lock: when true, every run/session is forced onto the interactive
+  // PTY substrate and the SDK is disabled (the per-run picker is hidden). Demo mode
+  // still pins 'sdk' and wins. Defaults to false (allow SDK).
+  interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   theme?: 'paper' | 'light' | 'dark';
