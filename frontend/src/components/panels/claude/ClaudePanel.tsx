@@ -15,6 +15,7 @@ import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun
 import { useSession } from '../../../contexts/SessionContext';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
+import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { Button } from '../../ui/Button';
 import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
@@ -58,6 +59,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     substrateSession?.substrate === 'interactive' ? substrateSession.runId ?? null : null;
   const devModeEnabled = useConfigStore((state) => state.config?.devMode ?? false);
   const showDebugTabs = devModeEnabled;
+  // Demo mode: an interactive quick session is stamped 'interactive' so this
+  // panel swaps in a terminal surface, but the real PTY is never spawned
+  // (ipc/session.ts). Render the canned DemoTerminalView instead of the live
+  // InteractiveTerminalView (which would subscribe to an empty pty channel).
+  const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
+  const showDemoTerminal = demoModeEnabled && interactiveRunId !== null;
 
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
   const contextUsage = claudePanelState.contextUsage ?? null;
@@ -207,7 +214,11 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           className="flex-1 overflow-hidden relative"
           data-testid="claude-panel-interactive-terminal"
         >
-          <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
+          {showDemoTerminal ? (
+            <DemoTerminalView showComposer />
+          ) : (
+            <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
+          )}
         </div>
       ) : (
         <ClaudeMainContent
@@ -245,6 +256,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           — for an interactive session that would spawn a COMPETING SDK
           conversation in the same worktree as the live PTY. */}
       {!activeSession.archived && (
+        // Demo interactive sessions render the cosmetic composer INSIDE
+        // DemoTerminalView (showComposer), so suppress the relay composer here.
+        showDemoTerminal ? null :
         interactiveRunId !== null ? (
           <InteractiveSessionComposer sessionId={activeSession.id} />
         ) : (
