@@ -53,6 +53,9 @@ export function useLaunchWorkflow(
   const onLaunched = opts?.onLaunched;
   const globalPermissionMode =
     useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
+  // Global PTY-only lock: send 'interactive' so the payload matches the backend
+  // pin (getForcedSubstrate would override either way). Floors to the SDK default.
+  const ptyOnly = useConfigStore((state) => state.config?.interactivePtyOnly) ?? false;
 
   const launch = useCallback(
     async (workflowId: string, seed?: LaunchSeed): Promise<string | null> => {
@@ -67,7 +70,7 @@ export function useLaunchWorkflow(
         const base = {
           workflowId,
           projectId,
-          substrate: DEFAULT_SUBSTRATE,
+          substrate: ptyOnly ? 'interactive' : DEFAULT_SUBSTRATE,
           sessionId,
           permissionMode: globalPermissionMode,
         };
@@ -89,7 +92,7 @@ export function useLaunchWorkflow(
         inFlightRef.current = false;
       }
     },
-    [projectId, globalPermissionMode, onLaunched],
+    [projectId, globalPermissionMode, ptyOnly, onLaunched],
   );
 
   return { launch, isLaunching, error };

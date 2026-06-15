@@ -13,7 +13,8 @@ import {
   Zap,
   FileText,
   Eye,
-  ShieldCheck
+  ShieldCheck,
+  Terminal
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -40,6 +41,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
+  // Global CLI runtime: false = allow SDK (per-run picker available, default
+  // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
+  const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -74,6 +78,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
+      setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -110,6 +115,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         demoMode,
         enableCyboflowFooter,
         defaultAgentPermissionMode,
+        interactivePtyOnly,
         additionalPaths: parsedPaths,
         notifications: notificationSettings
       });
@@ -289,6 +295,40 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 </div>
                 <p className="text-xs text-text-tertiary mt-2">
                   Applies to workflow runs on both CLI substrates. "Auto" uses Claude's native permission classifier; "Don't ask" skips all permission prompts.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="CLI Runtime"
+                description="How Cyboflow runs the Claude agent — the SDK or the live interactive terminal"
+                icon={<Terminal className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { ptyOnly: false, label: 'Allow SDK', hint: 'Default · pick per run' },
+                    { ptyOnly: true, label: 'Interactive PTY only', hint: 'Force the live terminal' },
+                  ] as const).map(({ ptyOnly, label, hint }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setInteractivePtyOnly(ptyOnly)}
+                      aria-pressed={interactivePtyOnly === ptyOnly}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        interactivePtyOnly === ptyOnly
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  "Interactive PTY only" forces every new run and quick session onto the live terminal
+                  substrate and hides the per-run picker. Pause/Resume (SDK-only) become unavailable, and
+                  the interactive substrate carries v1 limits. Only affects runs started after you save;
+                  demo mode always uses the SDK.
                 </p>
               </SettingsSection>
             </CollapsibleCard>
