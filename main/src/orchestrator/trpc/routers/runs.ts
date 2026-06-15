@@ -654,7 +654,7 @@ export const runsRouter = router({
       // picker also enforces it client-side).
       taskIds: z.array(z.string().min(1)).optional(),
     }))
-    .mutation(async ({ input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
+    .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
@@ -669,11 +669,14 @@ export const runsRouter = router({
         });
       }
       // Substrate-keyed sprint selection cap (defense in depth — the batch
-      // picker also enforces it client-side). Keyed off the REQUESTED substrate
-      // (or the 'sdk' default) — the resolver ladder can only land on the same
-      // value when one is requested explicitly.
+      // picker also enforces it client-side). Keyed off the forced pin FIRST
+      // (demo 'sdk' / interactive-PTY-only lock 'interactive'), mirroring both
+      // substrates.resolveEffective and the value createRun stamps, so the cap
+      // the server enforces matches the substrate the run actually runs on; falls
+      // back to the requested substrate or the 'sdk' default.
       if (input.taskIds !== undefined) {
-        const capSubstrate: CliSubstrate = input.substrate ?? 'sdk';
+        const forced = ctx.getForcedSubstrate?.() ?? null;
+        const capSubstrate: CliSubstrate = forced ?? input.substrate ?? 'sdk';
         const max = SPRINT_BATCH_MAX_TASKS[capSubstrate];
         if (input.taskIds.length > max) {
           throw new TRPCError({
