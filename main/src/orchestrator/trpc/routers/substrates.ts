@@ -17,18 +17,24 @@ import type { CliSubstrate } from '../../../../../shared/types/substrate';
 export const substratesRouter = router({
   /**
    * Resolve the substrate the launch path would actually use given an optional
-   * per-run request. Mirrors the inputs WorkflowRegistry.createRun threads into
-   * resolveSubstrate today (requestedSubstrate + env); the remaining ladder
-   * levels resolve from env + the 'sdk' floor, so this query stays a faithful
-   * preview of the stamped value.
+   * per-run request. Mirrors what WorkflowRegistry.createRun stamps:
+   *   1. The forced pin (ctx.getForcedSubstrate) outranks everything — demo mode
+   *      ('sdk') or the global interactive-PTY-only lock ('interactive'). Applied
+   *      here so the batch-cap preview stays truthful under a lock.
+   *   2. Otherwise the resolver ladder (requestedSubstrate + env + the 'sdk'
+   *      floor); the remaining ladder levels are not threaded today, so this
+   *      stays a faithful preview of the stamped value.
    */
   resolveEffective: protectedProcedure
     .input(z.object({ requestedSubstrate: z.enum(['sdk', 'interactive']).optional() }))
-    .query(({ input }): { substrate: CliSubstrate } => {
-      const substrate = resolveSubstrate({
-        requestedSubstrate: input.requestedSubstrate,
-        env: process.env,
-      });
+    .query(({ input, ctx }): { substrate: CliSubstrate } => {
+      const forced = ctx.getForcedSubstrate?.() ?? null;
+      const substrate =
+        forced ??
+        resolveSubstrate({
+          requestedSubstrate: input.requestedSubstrate,
+          env: process.env,
+        });
       return { substrate };
     }),
 });

@@ -11,6 +11,7 @@
  */
 import type { DatabaseLike } from '../types';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 
 /**
@@ -83,6 +84,18 @@ export interface ContextDeps {
    * registry can omit it.
    */
   workflowRegistry?: WorkflowRegistryLike;
+
+  /**
+   * Reads the global forced-substrate pin (ConfigManager.getForcedSubstrate).
+   *
+   * Injected from `main/src/index.ts` as a closure over the ConfigManager
+   * singleton — kept as a plain callback (like `setDockBadge`) so the
+   * standalone-typecheck invariant holds (no 'main/src/services/*' import here).
+   * `substrates.resolveEffective` consults it so the batch-cap preview matches
+   * what WorkflowRegistry.createRun would actually stamp under a demo-mode or
+   * interactive-PTY-only pin. Defaults to `() => null` (no pin).
+   */
+  getForcedSubstrate?: () => CliSubstrate | null;
 }
 
 /**
@@ -102,9 +115,15 @@ export function createContext(deps: ContextDeps = {}): {
   setDockBadge: (count: number) => void;
   db?: DatabaseLike;
   workflowRegistry?: WorkflowRegistryLike;
+  getForcedSubstrate: () => CliSubstrate | null;
 } {
-  const { setDockBadge = (_count: number) => undefined, db, workflowRegistry } = deps;
-  return { userId: 'local' as const, setDockBadge, db, workflowRegistry };
+  const {
+    setDockBadge = (_count: number) => undefined,
+    db,
+    workflowRegistry,
+    getForcedSubstrate = () => null,
+  } = deps;
+  return { userId: 'local' as const, setDockBadge, db, workflowRegistry, getForcedSubstrate };
 }
 
 /** Shape of the tRPC context, inferred from `createContext`. */
