@@ -39,11 +39,16 @@ export async function ensureSessionForLaunch(projectId: number): Promise<string>
     throw new Error(result.error ?? 'Failed to create session for launch');
   }
 
-  const { sessionId, worktreePath } = result.data;
+  const { sessionId, worktreePath, claudePanelId } = result.data;
 
   // Bootstrap the session's default panels, mirroring useQuickSession.ts:
-  // Claude first, then a Terminal panel rooted at the worktree.
-  await panelApi.createPanel({ sessionId, type: 'claude' });
+  // Claude first (UNLESS the server eagerly created it — an interactive PTY
+  // session, e.g. under the global PTY-only lock, spawns the REPL during
+  // create-quick and returns its panel id; creating a second would orphan a
+  // process-less Claude tab), then a Terminal panel rooted at the worktree.
+  if (claudePanelId === undefined) {
+    await panelApi.createPanel({ sessionId, type: 'claude' });
+  }
   await panelApi.createPanel({
     sessionId,
     type: 'terminal',
