@@ -72,28 +72,90 @@ const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
 const BOLD = '\x1b[1m';
 const ORANGE = '\x1b[38;5;208m';
-const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
 const NL = '\r\n';
 
-/** The canned generic Claude Code session, as an ordered list of
+// Visible-width helpers: ANSI SGR codes are zero display-width, so padding /
+// alignment math must measure the plain text only.
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const visLen = (s: string): number => s.replace(ANSI_RE, '').length;
+
+/**
+ * Build the Claude Code startup banner sized to the live terminal width — the
+ * rounded box (title border + Welcome + mascot + model/account + cwd), the
+ * setup-issue line, and the input rule + prompt. Mirrors the real CLI's
+ * width-aware paint so a demo PTY session reads unmistakably as Claude Code.
+ */
+function buildWelcome(cols: number): string {
+  const boxWidth = Math.max(40, Math.min(cols, 88));
+  const inner = boxWidth - 2; // columns between the │ borders
+
+  // Centered content row within the box.
+  const row = (content: string): string => {
+    const pad = Math.max(0, inner - visLen(content));
+    const left = Math.floor(pad / 2);
+    return `${ORANGE}│${RESET}${' '.repeat(left)}${content}${' '.repeat(pad - left)}${ORANGE}│${RESET}`;
+  };
+  const blank = row('');
+
+  // Top border carries the title (✻ Claude Code vX.Y.Z), like the real CLI.
+  const title = `${ORANGE}${BOLD}✻ Claude Code${RESET} ${DIM}v2.1.36${RESET}`;
+  const titleVis = visLen(title);
+  const topDashes = Math.max(0, inner - 2 - titleVis); // 1 lead dash + 1 trailing space
+  const top = `${ORANGE}╭─${RESET} ${title} ${ORANGE}${'─'.repeat(topDashes)}╮${RESET}`;
+  const bottom = `${ORANGE}╰${'─'.repeat(inner)}╯${RESET}`;
+
+  // Small terracotta mascot — simple framed face that renders everywhere.
+  const face = [`${ORANGE}╭─────╮${RESET}`, `${ORANGE}│ ▪ ▪ │${RESET}`, `${ORANGE}╰─────╯${RESET}`];
+
+  const lines = [
+    top,
+    blank,
+    row(`${BOLD}Welcome back!${RESET}`),
+    blank,
+    ...face.map(row),
+    blank,
+    row(`${DIM}Opus 4.8 (1M context) · Claude Max${RESET}`),
+    blank,
+    row(`${DIM}~/project${RESET}`),
+    blank,
+    bottom,
+    '',
+    ` ${YELLOW}⚠${RESET} ${DIM}1 setup issue: MCP ·${RESET} ${DIM}/doctor${RESET}`,
+    '',
+    `${DIM}${'─'.repeat(Math.min(cols, boxWidth))}${RESET}`,
+    '',
+  ];
+  return lines.join(NL);
+}
+
+/** The canned opening turn that plays after the banner, as an ordered list of
  *  {@link Chunk}s. `delay` is the pause (ms) BEFORE the chunk is written, giving
- *  a streaming feel. Under reduced motion every delay is collapsed to 0. */
+ *  a streaming feel. Under reduced motion every delay is collapsed to 0.
+ *
+ *  This mirrors the cyboflow PTY preamble a real interactive quick session
+ *  receives as its first prompt (`QUICK_PTY_BRIEFING` in main/src/ipc/session.ts)
+ *  followed by the agent's brief acknowledgement — so the demo terminal reads
+ *  like a real freshly-briefed quick session. Kept in sync by hand (display-only
+ *  copy; the renderer cannot import main-process source). */
 interface Chunk {
   text: string;
   delay: number;
 }
 
-const SCRIPT: Chunk[] = [
-  { text: `${ORANGE}✻${RESET} ${BOLD}Welcome to Claude Code${RESET} ${DIM}v2.0.1${RESET}${NL}`, delay: 120 },
-  { text: `${DIM}  /help for help · cwd: ~/project${RESET}${NL}${NL}`, delay: 220 },
-  { text: `${DIM}>${RESET} Add input validation to the signup form${NL}${NL}`, delay: 500 },
-  { text: `${ORANGE}●${RESET} I'll add validation to the signup form. Let me look at the${NL}  component first.${NL}${NL}`, delay: 650 },
-  { text: `${GREEN}●${RESET} ${BOLD}Read${RESET} src/components/SignupForm.tsx ${DIM}(142 lines)${RESET}${NL}`, delay: 600 },
-  { text: `${GREEN}●${RESET} ${BOLD}Edit${RESET} src/components/SignupForm.tsx${NL}`, delay: 700 },
-  { text: `${DIM}   ⎿  Added email + password validation with inline errors${RESET}${NL}${NL}`, delay: 400 },
-  { text: `${ORANGE}●${RESET} Done. The form now validates the email format and requires an${NL}  8+ character password, surfacing inline errors before submit.${NL}${NL}`, delay: 800 },
-  { text: `${DIM}─────────────────────────────────────────────${RESET}${NL}`, delay: 300 },
-  { text: `${DIM}>${RESET} `, delay: 200 },
+const SESSION_INTRO: Chunk[] = [
+  { text: `${DIM}›${RESET} ${DIM}You are running inside cyboflow, a desktop app that manages${RESET}${NL}`, delay: 600 },
+  { text: `${DIM}  parallel AI coding sessions in isolated git worktrees.${RESET}${NL}`, delay: 60 },
+  { text: `${NL}${DIM}  Session context:${RESET}${NL}`, delay: 120 },
+  { text: `${DIM}  - This is a user-driven quick session: no predefined workflow,${RESET}${NL}`, delay: 60 },
+  { text: `${DIM}    no step ceremony — just you and the user.${RESET}${NL}`, delay: 60 },
+  { text: `${DIM}  - Your working directory is a dedicated git worktree for this${RESET}${NL}`, delay: 60 },
+  { text: `${DIM}    session; commits stay local to its branch.${RESET}${NL}`, delay: 60 },
+  { text: `${DIM}  - A "cyboflow" MCP server is connected; its tools write to${RESET}${NL}`, delay: 60 },
+  { text: `${DIM}    cyboflow's project database (tasks/backlog).${RESET}${NL}`, delay: 60 },
+  { text: `${NL}${DIM}  Acknowledge briefly and wait for the user's instructions.${RESET}${NL}${NL}`, delay: 120 },
+  { text: `${ORANGE}●${RESET} Understood — I'm set up in this cyboflow worktree on its own${NL}  branch, with the cyboflow MCP tools available. What would you${NL}  like to work on?${NL}${NL}`, delay: 900 },
+  { text: `${DIM}›${RESET} `, delay: 300 },
 ];
 
 export function DemoTerminalView({
@@ -149,13 +211,17 @@ export function DemoTerminalView({
     const fit = new FitAddon();
     term.loadAddon(fit);
 
-    // Play the canned script once the terminal is measured. Each chunk is queued
-    // at its cumulative delay; reduced motion collapses every delay to 0.
+    // Play the canned session once the terminal is measured: paint the
+    // width-aware Claude Code banner immediately, then stream the coding
+    // exchange. Each chunk is queued at its cumulative delay; reduced motion
+    // collapses every delay to 0.
     const playScript = (): void => {
       if (scriptStarted) return;
       scriptStarted = true;
+      term.write(buildWelcome(term.cols));
+      term.scrollToBottom();
       let elapsedDelay = 0;
-      for (const chunk of SCRIPT) {
+      for (const chunk of SESSION_INTRO) {
         elapsedDelay += reducedMotion ? 0 : chunk.delay;
         timers.push(
           setTimeout(() => {
