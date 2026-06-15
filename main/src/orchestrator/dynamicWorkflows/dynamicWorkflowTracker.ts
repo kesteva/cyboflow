@@ -21,8 +21,11 @@
  */
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EventRouter } from '../../services/streamParser/eventRouter';
+import { encodeCwd } from '../../services/panels/claude/transcript/encodeCwd';
+import { WorkflowScriptWatcher } from './workflowScriptWatcher';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { DynamicWorkflowDetector } from './dynamicWorkflowDetector';
@@ -69,6 +72,8 @@ export class DynamicWorkflowTracker {
   private readonly recordPaths = new Map<string, string>();
   /** runId -> EventRouter teardown returned by onRun. */
   private readonly teardowns = new Map<string, () => void>();
+  /** runId -> filesystem launch watcher (claude 2.1.177 transcript-layout fallback). */
+  private readonly scriptWatchers = new Map<string, WorkflowScriptWatcher>();
   /** Demo-mode scripted-timeline timers (injectDemoWorkflow), cleared on dispose. */
   private readonly demoTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly logger: LoggerLike | undefined;
@@ -135,6 +140,60 @@ export class DynamicWorkflowTracker {
 
     const teardown = router.onRun(ctx.runId, (event) => detector.handleEvent(event));
     this.teardowns.set(ctx.runId, teardown);
+
+    // Filesystem launch detection (claude 2.1.177+). The stream detector above
+    // only fires when the EventRouter receives the Workflow tool_result — which
+    // it does NOT on the interactive substrate, because the conversation
+    // transcript is no longer a discoverable top-level <key>/<uuid>.jsonl. The
+    // persisted workflow scripts ARE on disk, so watch for them and synthesize
+    // the launch. Idempotent with the stream path (handleLaunch dedupes by
+    // wfRunId), so the SDK substrate — where the EventRouter still works — just
+    // double-detects harmlessly.
+    this.startScriptWatcher(ctx);
+  }
+
+  /**
+   * Start the per-run {@link WorkflowScriptWatcher} over the session's claude
+   * project key dir (`~/.claude/projects/<encodeCwd(worktree)>`). Skipped (no-op)
+   * when the session's worktree path cannot be resolved. Replaces any prior
+   * watcher for the same runId.
+   */
+  private startScriptWatcher(ctx: DynamicWorkflowRunContext): void {
+    const worktreePath = this.lookupWorktreePath(ctx.sessionId);
+    if (worktreePath === null) return;
+
+    this.scriptWatchers.get(ctx.runId)?.stop();
+    const keyDir = path.join(os.homedir(), '.claude', 'projects', encodeCwd(worktreePath));
+    const watcher = new WorkflowScriptWatcher(
+      keyDir,
+      (launch) =>
+        this.handleLaunch(ctx, {
+          // The real CLI taskId is not on disk at launch; the wfRunId stands in.
+          // FS-detected runs complete via the terminal record (JournalTailer),
+          // not the taskId-keyed notification accelerator, so this is sufficient.
+          taskId: launch.wfRunId,
+          wfRunId: launch.wfRunId,
+          transcriptDir: launch.transcriptDir,
+          scriptPath: launch.scriptPath,
+        }),
+      this.logger,
+    );
+    this.scriptWatchers.set(ctx.runId, watcher);
+    watcher.start();
+  }
+
+  /** Resolve a session's worktree path for key-dir derivation. Fail-soft to null. */
+  private lookupWorktreePath(sessionId: string): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT worktree_path FROM sessions WHERE id = ?')
+        .get(sessionId) as { worktree_path: string | null } | undefined;
+      return row?.worktree_path ?? null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn(`[dynamicWorkflowTracker] worktree lookup failed for ${sessionId}: ${message}`);
+      return null;
+    }
   }
 
   /**
@@ -148,6 +207,11 @@ export class DynamicWorkflowTracker {
       teardown();
       this.teardowns.delete(runId);
     }
+    // The session is ending — no further launches to detect. In-flight
+    // JournalTailers KEEP running (they own completion); only the launch watcher
+    // stops here.
+    this.scriptWatchers.get(runId)?.stop();
+    this.scriptWatchers.delete(runId);
   }
 
   // --------------------------------------------------------------------------
@@ -551,6 +615,8 @@ export class DynamicWorkflowTracker {
   dispose(): void {
     for (const timer of this.demoTimers.values()) clearTimeout(timer);
     this.demoTimers.clear();
+    for (const watcher of this.scriptWatchers.values()) watcher.stop();
+    this.scriptWatchers.clear();
     for (const tailer of this.tailers.values()) tailer.stop();
     this.tailers.clear();
     for (const teardown of this.teardowns.values()) teardown();
