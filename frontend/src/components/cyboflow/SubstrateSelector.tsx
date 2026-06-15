@@ -26,7 +26,7 @@
  */
 import { useEffect } from 'react';
 import { type CliSubstrate } from '../../../../shared/types/substrate';
-import { useConfigStore } from '../../stores/configStore';
+import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 
 /**
  * The v1 limits of the interactive PTY substrate, surfaced when 'interactive' is
@@ -75,18 +75,24 @@ export function SubstrateSelector({
   label = 'CLI substrate',
   caveatsTestId = 'substrate-caveats',
 }: SubstrateSelectorProps): React.JSX.Element {
-  // Global hard lock (see file header). Reactive read so a config fetch that
-  // resolves AFTER mount still locks the picker; floors to false (allow SDK).
-  const ptyOnly = useConfigStore((state) => state.config?.interactivePtyOnly) ?? false;
+  // Global forced-substrate pin (see file header), mirroring the backend
+  // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
+  // Reactive read so a config fetch resolving AFTER mount still locks the picker.
+  const forced = useForcedSubstrate();
 
-  // Keep the controlled value consistent with the lock so the launch payload
-  // matches the backend pin. Runs once the flag flips on; after value reaches
-  // 'interactive' the guard stops it (safe with an unstable onChange identity).
+  // Under the interactive lock, keep the controlled value consistent so the
+  // launch payload matches the backend pin. Scoped to 'interactive' only: demo's
+  // 'sdk' pin is left alone so demo's picker behaves as before (cosmetic — the
+  // backend forces 'sdk' regardless). After value reaches 'interactive' the
+  // guard stops re-firing (safe with an unstable onChange identity).
   useEffect(() => {
-    if (ptyOnly && value !== 'interactive') onChange('interactive');
-  }, [ptyOnly, value, onChange]);
+    if (forced === 'interactive' && value !== 'interactive') onChange('interactive');
+  }, [forced, value, onChange]);
 
-  if (ptyOnly) {
+  // Only the user-facing interactive lock gets the read-only locked UI. Demo
+  // mode also pins ('sdk'), but it is a throwaway showcase profile — leave the
+  // normal select so demo never falsely renders "Interactive (PTY) — locked".
+  if (forced === 'interactive') {
     return (
       <div className="flex flex-col gap-1">
         <label className="text-xs font-medium text-text-secondary">{label}</label>

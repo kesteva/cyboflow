@@ -23,6 +23,7 @@ import { trpc } from '../trpc/client';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useConfigStore } from '../stores/configStore';
 import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
+import { useForcedSubstrate } from './useForcedSubstrate';
 import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 
 /** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
@@ -53,9 +54,10 @@ export function useLaunchWorkflow(
   const onLaunched = opts?.onLaunched;
   const globalPermissionMode =
     useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
-  // Global PTY-only lock: send 'interactive' so the payload matches the backend
-  // pin (getForcedSubstrate would override either way). Floors to the SDK default.
-  const ptyOnly = useConfigStore((state) => state.config?.interactivePtyOnly) ?? false;
+  // Global forced-substrate pin (demo 'sdk' wins, else PTY-only lock 'interactive',
+  // else null). Send it so the payload matches what the backend would stamp
+  // anyway (getForcedSubstrate overrides regardless); floors to the SDK default.
+  const forced = useForcedSubstrate();
 
   const launch = useCallback(
     async (workflowId: string, seed?: LaunchSeed): Promise<string | null> => {
@@ -70,7 +72,7 @@ export function useLaunchWorkflow(
         const base = {
           workflowId,
           projectId,
-          substrate: ptyOnly ? 'interactive' : DEFAULT_SUBSTRATE,
+          substrate: forced ?? DEFAULT_SUBSTRATE,
           sessionId,
           permissionMode: globalPermissionMode,
         };
@@ -92,7 +94,7 @@ export function useLaunchWorkflow(
         inFlightRef.current = false;
       }
     },
-    [projectId, globalPermissionMode, ptyOnly, onLaunched],
+    [projectId, globalPermissionMode, forced, onLaunched],
   );
 
   return { launch, isLaunching, error };
