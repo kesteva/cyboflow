@@ -507,6 +507,19 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           });
           claudePanelId = panel.id;
           await sessionManager.updateSession(session.id, { status: 'running' });
+
+          // Ultracode in demo: illustrate the dynamic-workflow visualization.
+          // The real feature is on-disk journal-tail driven; demo has no real
+          // agent, so drive a CANNED fan-out into the tracker — the
+          // QuickSessionCanvas takeover + landing ActiveAgents cards light up as
+          // they would for a live ultracode run. A plain interactive demo
+          // session (no effort) just shows the canned terminal.
+          if (requestedEffort === 'ultracode') {
+            DynamicWorkflowTracker.tryGetInstance()?.injectDemoWorkflow({
+              runId,
+              sessionId: session.id,
+            });
+          }
         } catch (error) {
           console.error(`[IPC] Failed to create Claude panel for demo interactive quick session ${session.id}:`, error);
         }

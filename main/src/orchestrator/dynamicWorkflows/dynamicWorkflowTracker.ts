@@ -32,6 +32,7 @@ import type { DynamicWorkflowCompletionRecord } from './journalTailer';
 import { parseScriptMeta } from './scriptMeta';
 import { DYNAMIC_WORKFLOW_REVIEW_SOURCE } from '../../../../shared/types/dynamicWorkflows';
 import type {
+  DynamicWorkflowAgent,
   DynamicWorkflowChangedEvent,
   DynamicWorkflowRunState,
 } from '../../../../shared/types/dynamicWorkflows';
@@ -68,6 +69,8 @@ export class DynamicWorkflowTracker {
   private readonly recordPaths = new Map<string, string>();
   /** runId -> EventRouter teardown returned by onRun. */
   private readonly teardowns = new Map<string, () => void>();
+  /** Demo-mode scripted-timeline timers (injectDemoWorkflow), cleared on dispose. */
+  private readonly demoTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly logger: LoggerLike | undefined;
 
   constructor(
@@ -145,6 +148,131 @@ export class DynamicWorkflowTracker {
       teardown();
       this.teardowns.delete(runId);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Demo mode (scripted, no on-disk journal)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Drive a CANNED dynamic-workflow timeline for demo mode — no real Workflow
+   * tool launch, no journal.jsonl, no agent transcripts. The normal path is
+   * strictly on-disk file-tail driven (JournalTailer); demo mode has no real
+   * agent process, so this injects state directly into the same `states` map +
+   * `dynamicWorkflowEvents` emitter the tRPC bridge reads, animating a fan-out
+   * (agents appear → progress → complete) so the QuickSessionCanvas takeover and
+   * the landing ActiveAgents cards light up exactly as they would for a live
+   * ultracode run. Completion creates the same human_task review item (so the
+   * merge/dismiss auto-resolve sweep covers it too).
+   *
+   * Idempotent per run; the scripted timers are cleared on dispose.
+   */
+  injectDemoWorkflow(ctx: DynamicWorkflowRunContext): void {
+    const wfRunId = `wf_demo_${ctx.runId}`;
+    if (this.states.has(wfRunId)) return;
+
+    const { sessionName, projectId } = this.lookupSession(ctx.sessionId);
+
+    const state: DynamicWorkflowRunState = {
+      wfRunId,
+      taskId: wfRunId,
+      runId: ctx.runId,
+      sessionId: ctx.sessionId,
+      projectId,
+      sessionName,
+      name: 'parallel-audit',
+      description: 'Fan a codebase audit out across dimensions, then adversarially verify the findings',
+      phases: [
+        { title: 'Audit', detail: 'one agent per dimension' },
+        { title: 'Verify', detail: 'confirm + dedupe findings' },
+      ],
+      agents: [],
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    };
+    this.states.set(wfRunId, state);
+    this.enforceSessionCap(ctx.sessionId);
+    this.emitChanged(state);
+
+    // Scripted agent fan-out. Each agent grows tokens/tool-uses, then flips done.
+    const mk = (
+      agentId: string,
+      model: string,
+      promptExcerpt: string,
+      status: DynamicWorkflowAgent['status'],
+      outputTokens: number,
+      toolUses: number,
+    ): DynamicWorkflowAgent => ({
+      agentId,
+      status,
+      model,
+      outputTokens,
+      toolUses,
+      startedAt: state.startedAt,
+      lastActivityAt: new Date().toISOString(),
+      promptExcerpt,
+    });
+
+    const OPUS = 'claude-opus-4-8';
+    const HAIKU = 'claude-haiku-4-5';
+    const steps: Array<{ at: number; agents: DynamicWorkflowAgent[] }> = [
+      {
+        at: 1200,
+        agents: [mk('audit-correctness', OPUS, 'Audit auth + session handling for correctness bugs', 'running', 1400, 3)],
+      },
+      {
+        at: 2600,
+        agents: [
+          mk('audit-correctness', OPUS, 'Audit auth + session handling for correctness bugs', 'running', 4200, 8),
+          mk('audit-perf', OPUS, 'Audit the habits service for N+1 queries and hot paths', 'running', 2100, 5),
+          mk('audit-validation', HAIKU, 'Audit input validation + sanitization across endpoints', 'running', 1800, 4),
+        ],
+      },
+      {
+        at: 5200,
+        agents: [
+          mk('audit-correctness', OPUS, 'Audit auth + session handling for correctness bugs', 'done', 8600, 14),
+          mk('audit-perf', OPUS, 'Audit the habits service for N+1 queries and hot paths', 'running', 6400, 11),
+          mk('audit-validation', HAIKU, 'Audit input validation + sanitization across endpoints', 'done', 5200, 9),
+        ],
+      },
+      {
+        at: 7600,
+        agents: [
+          mk('audit-correctness', OPUS, 'Audit auth + session handling for correctness bugs', 'done', 8600, 14),
+          mk('audit-perf', OPUS, 'Audit the habits service for N+1 queries and hot paths', 'done', 9100, 16),
+          mk('audit-validation', HAIKU, 'Audit input validation + sanitization across endpoints', 'done', 5200, 9),
+          mk('verify-findings', OPUS, 'Adversarially verify each finding and dedupe overlaps', 'running', 3300, 7),
+        ],
+      },
+    ];
+
+    for (const step of steps) {
+      const timer = setTimeout(() => {
+        this.demoTimers.delete(timer);
+        if (!this.states.has(wfRunId) || state.status !== 'running') return;
+        state.agents = step.agents;
+        this.emitChanged(state);
+      }, step.at);
+      this.demoTimers.add(timer);
+    }
+
+    // Terminal transition — completed with totals + a summary, then the review
+    // item (mirrors finalize()). Guarded against a mid-flight dismiss (dispose
+    // clears the timer; the states-membership check covers the race).
+    const finishTimer = setTimeout(() => {
+      this.demoTimers.delete(finishTimer);
+      if (!this.states.has(wfRunId) || state.status !== 'running') return;
+      state.agents = state.agents.map((a) => ({ ...a, status: 'done' as const }));
+      state.status = 'completed';
+      state.completedAt = new Date().toISOString();
+      state.summary =
+        'Audited 4 dimensions across the worktree. 3 findings confirmed (1 correctness, 1 N+1 query, 1 missing validation), 1 dismissed as a false positive. Fixes queued as tasks.';
+      state.totals = { agentCount: 4, totalTokens: 31200, totalToolCalls: 46, durationMs: 9500 };
+      this.emitChanged(state);
+      this.createReviewItem(state, `Dynamic workflow finished: ${state.name}`);
+    }, 9800);
+    this.demoTimers.add(finishTimer);
   }
 
   // --------------------------------------------------------------------------
@@ -421,6 +549,8 @@ export class DynamicWorkflowTracker {
 
   /** Stop all tailers + router subscriptions and clear state (for tests). */
   dispose(): void {
+    for (const timer of this.demoTimers.values()) clearTimeout(timer);
+    this.demoTimers.clear();
     for (const tailer of this.tailers.values()) tailer.stop();
     this.tailers.clear();
     for (const teardown of this.teardowns.values()) teardown();

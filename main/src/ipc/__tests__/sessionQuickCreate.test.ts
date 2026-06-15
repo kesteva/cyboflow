@@ -235,6 +235,10 @@ function makeServices(opts?: {
     registerLivePanel: fakeRegisterLivePanel,
     gitStatusManager: {},
     archiveProgressManager: undefined,
+    // Demo-mode probe used by the eager-spawn + sessions:input interactive
+    // branches (gates the real PTY spawn/relay). Off in these tests so the live
+    // interactive path runs as before.
+    configManager: { isDemoMode: () => false },
     cyboflow: {
       workflowRegistry: fakeWorkflowRegistry,
       runLauncher: {},
