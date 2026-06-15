@@ -217,6 +217,11 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
   callEnsureWorktreeExcludes(worktreePath: string): void {
     (this as unknown as { ensureWorktreeExcludesCyboflowDir(p: string): void }).ensureWorktreeExcludesCyboflowDir(worktreePath);
   }
+  callInitializeCliEnvironment(options: Record<string, unknown>): Promise<{ [key: string]: string }> {
+    return (this as unknown as {
+      initializeCliEnvironment(o: Record<string, unknown>): Promise<{ [key: string]: string }>;
+    }).initializeCliEnvironment(options);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +492,42 @@ describe('InteractiveClaudeManager', () => {
       } finally {
         fs.rmSync(wt, { recursive: true, force: true });
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // initializeCliEnvironment — forces conversation-transcript persistence so a
+  // leaked CLAUDE_CODE_CHILD_SESSION (cyboflow launched from inside a Claude
+  // Code session) can't suppress the transcript the structured pipeline tails.
+  // -------------------------------------------------------------------------
+  describe('initializeCliEnvironment', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = makeRawEventsDb();
+      const logger = createLoggerSpy();
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        logger as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    it('always sets CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1', async () => {
+      const env = await mgr.callInitializeCliEnvironment({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+      });
+      expect(env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE).toBe('1');
     });
   });
 

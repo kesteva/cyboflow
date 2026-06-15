@@ -613,6 +613,27 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       env.CYBOFLOW_RUN_ID = runId;
       env.CYBOFLOW_ORCH_SOCKET = this.orchSocketPath;
     }
+
+    // FORCE conversation-transcript persistence for the embedded REPL.
+    //
+    // claude marks a session it spawns as a CHILD session via CLAUDE_CODE_CHILD_SESSION
+    // in the child's environment, and a child session's top-level
+    // `~/.claude/projects/<encodeCwd(cwd)>/<uuid>.jsonl` conversation transcript is
+    // NOT persisted (it is excluded from --resume/--continue too). When cyboflow is
+    // itself launched from inside a Claude Code session (e.g. `pnpm dev` run from an
+    // agent shell), that marker LEAKS through the inherited environment into every
+    // `claude` PTY this manager spawns — so the transcript is silently never written.
+    //
+    // The whole interactive structured pipeline (TranscriptTailSource → EventRouter →
+    // RawEventsSink + typed-event narrowing → structured chat history, turn-end
+    // auto-rest, and dynamic-workflow LAUNCH detection) reads ONLY that file; with no
+    // file it discovers nothing (raw_events stays empty) and silently degrades to a
+    // raw-PTY-only view. claude 2.1.177 verified: setting this flag restores the
+    // top-level transcript even with CLAUDE_CODE_CHILD_SESSION still set. Harmless
+    // when the marker is absent (packaged-app launch) — it just affirms the default.
+    // Set in cliEnv (which overrides the inherited systemEnv in spawnCliProcess).
+    env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
+
     return env;
   }
 
