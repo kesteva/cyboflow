@@ -81,6 +81,16 @@ export const useDynamicWorkflowStore = create<DynamicWorkflowsState>((set) => {
     }));
   };
 
+  /** Drop a dismissed entry (onRemoved). No-op when the key is already gone. */
+  const dropEntry = (wfRunId: string): void => {
+    set((s) => {
+      if (!(wfRunId in s.byWfRunId)) return s;
+      const next = { ...s.byWfRunId };
+      delete next[wfRunId];
+      return { byWfRunId: next };
+    });
+  };
+
   return {
     byWfRunId: {},
 
@@ -109,8 +119,19 @@ export const useDynamicWorkflowStore = create<DynamicWorkflowsState>((set) => {
           console.warn('[dynamicWorkflowStore] onChanged error:', err),
       });
 
+      // Removals (dismiss CTA / superseded by continued PTY interaction): drop
+      // the keyed entry. Payload inferred from AppRouter (DynamicWorkflowRemovedEvent).
+      const removedSub = trpc.cyboflow.dynamicWorkflows.onRemoved.subscribe(undefined, {
+        onData: (event) => {
+          dropEntry(event.wfRunId);
+        },
+        onError: (err: unknown) =>
+          console.warn('[dynamicWorkflowStore] onRemoved error:', err),
+      });
+
       const unsubscribe = () => {
         changedSub.unsubscribe();
+        removedSub.unsubscribe();
         initialized = false;
         cachedUnsubscribe = null;
       };

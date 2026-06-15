@@ -248,11 +248,18 @@ export interface DynamicWorkflowPanelProps {
    * the compact card rendering is unchanged.
    */
   expanded?: boolean;
+  /**
+   * When provided AND the run is terminal, renders a dismiss "×" in the title
+   * row that calls this (the caller fires the dynamicWorkflows.dismiss
+   * mutation). Omitted while running — a live run has no dismiss affordance.
+   */
+  onDismiss?: () => void;
 }
 
 export function DynamicWorkflowPanel({
   state,
   expanded = false,
+  onDismiss,
 }: DynamicWorkflowPanelProps): React.JSX.Element {
   const isRunning = state.status === 'running';
   const accent = STATUS_COLOR[state.status];
@@ -305,12 +312,26 @@ export function DynamicWorkflowPanel({
         </span>
         <span className="eyebrow shrink-0 text-text-tertiary">dynamic workflow</span>
         <span
-          className="eyebrow ml-auto shrink-0 px-1.5 py-0.5"
+          className={`eyebrow shrink-0 px-1.5 py-0.5${onDismiss && !isRunning ? '' : ' ml-auto'}`}
           style={{ color: accent, border: `1px solid ${accent}` }}
           data-testid="dynamic-workflow-status"
         >
           {state.status}
         </span>
+        {onDismiss && !isRunning && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss workflow"
+            title="Dismiss"
+            className="ml-auto shrink-0 rounded p-0.5 leading-none text-text-tertiary transition-colors hover:bg-surface-hover hover:text-text-primary"
+            data-testid="dynamic-workflow-dismiss"
+          >
+            <span aria-hidden="true" style={{ fontSize: 13, lineHeight: 1 }}>
+              ✕
+            </span>
+          </button>
+        )}
       </div>
 
       {/* Description (script meta, when present) */}

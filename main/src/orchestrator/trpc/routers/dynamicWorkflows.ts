@@ -15,6 +15,7 @@ import { router, protectedProcedure } from '../trpc';
 import type {
   DynamicWorkflowRunState,
   DynamicWorkflowChangedEvent,
+  DynamicWorkflowRemovedEvent,
 } from '../../../../../shared/types/dynamicWorkflows';
 import { DynamicWorkflowTracker, dynamicWorkflowEvents } from '../../dynamicWorkflows';
 import { eventToAsyncIterable } from './events';
@@ -33,6 +34,18 @@ export const dynamicWorkflowsRouter = router({
     }),
 
   /**
+   * Dismiss (forget) a tracked run so its card disappears — the terminal
+   * card's dismiss CTA. Fail-soft when the tracker is uninitialized or the run
+   * is already gone; returns whether anything was dismissed.
+   */
+  dismiss: protectedProcedure
+    .input(z.object({ wfRunId: z.string() }))
+    .mutation(({ input }): { dismissed: boolean } => {
+      const dismissed = DynamicWorkflowTracker.tryGetInstance()?.dismiss(input.wfRunId) ?? false;
+      return { dismissed };
+    }),
+
+  /**
    * Subscribe to dynamic-workflow state changes (all sessions).
    *
    * Emitted by the tracker on every state change (launch detected, agent
@@ -47,6 +60,24 @@ export const dynamicWorkflowsRouter = router({
       const source = eventToAsyncIterable<DynamicWorkflowChangedEvent>(
         dynamicWorkflowEvents,
         'changed',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    }),
+
+  /**
+   * Subscribe to dynamic-workflow REMOVALS (all sessions) — emitted when a run
+   * is dismissed (CTA) or superseded by continued PTY interaction. The renderer
+   * drops the keyed entry; there is no state to merge.
+   */
+  onRemoved: protectedProcedure
+    .subscription(async function* ({ signal }): AsyncGenerator<DynamicWorkflowRemovedEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<DynamicWorkflowRemovedEvent>(
+        dynamicWorkflowEvents,
+        'removed',
         abortSignal,
       );
       for await (const ev of source) {

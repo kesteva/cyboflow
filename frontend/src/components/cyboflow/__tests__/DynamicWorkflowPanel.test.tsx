@@ -12,7 +12,7 @@
  * {agentId, status} agents.
  */
 import '@testing-library/jest-dom';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   DynamicWorkflowPanel,
@@ -127,6 +127,33 @@ describe('DynamicWorkflowPanel', () => {
     render(<DynamicWorkflowPanel state={makeState({ status: 'failed' })} />);
     expect(screen.getByTestId('dynamic-workflow-status')).toHaveTextContent('failed');
     expect(screen.queryByTestId('dynamic-workflow-totals')).not.toBeInTheDocument();
+  });
+
+  it('renders a dismiss button on a terminal card and fires onDismiss', () => {
+    const onDismiss = vi.fn();
+    render(
+      <DynamicWorkflowPanel
+        state={makeState({ status: 'completed' })}
+        onDismiss={onDismiss}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('dynamic-workflow-dismiss'));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('never renders the dismiss button while running, even with onDismiss provided', () => {
+    render(
+      <DynamicWorkflowPanel
+        state={makeState({ status: 'running' })}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('dynamic-workflow-dismiss')).not.toBeInTheDocument();
+  });
+
+  it('omits the dismiss button when no onDismiss is provided', () => {
+    render(<DynamicWorkflowPanel state={makeState({ status: 'completed' })} />);
+    expect(screen.queryByTestId('dynamic-workflow-dismiss')).not.toBeInTheDocument();
   });
 
   it('never renders agent rows in the default (compact) variant', () => {

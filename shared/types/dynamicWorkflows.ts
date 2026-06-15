@@ -115,6 +115,18 @@ export interface DynamicWorkflowChangedEvent {
 }
 
 /**
+ * Payload of the `cyboflow.dynamicWorkflows.onRemoved` subscription. Emitted
+ * when a tracked run is DISMISSED — explicitly (the terminal card's dismiss
+ * CTA) or implicitly (the operator keeps interacting with the PTY after the
+ * workflow finished). The renderer drops the keyed entry; unlike `onChanged`
+ * there is no state to merge. A dismissed `wfRunId` is never re-tracked (the
+ * detector / script-watcher dedup sets retain it).
+ */
+export interface DynamicWorkflowRemovedEvent {
+  wfRunId: string;
+}
+
+/**
  * `source` value stamped on human_task review items created at workflow
  * completion — used by the merge/dismiss auto-resolve sweep to find them.
  */

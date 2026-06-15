@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   DynamicWorkflowChangedEvent,
+  DynamicWorkflowRemovedEvent,
   DynamicWorkflowRunState,
 } from '../../../../shared/types/dynamicWorkflows';
 
@@ -22,7 +23,7 @@ import type {
 // the mock fns must come from vi.hoisted — same pattern as mcpHealthStore.test).
 // ---------------------------------------------------------------------------
 
-const { mockListQuery, mockOnChangedSubscribe } = vi.hoisted(() => ({
+const { mockListQuery, mockOnChangedSubscribe, mockOnRemovedSubscribe } = vi.hoisted(() => ({
   mockListQuery:
     vi.fn<(input: { sessionId?: string }) => Promise<DynamicWorkflowRunState[]>>(),
   mockOnChangedSubscribe: vi.fn<
@@ -30,6 +31,15 @@ const { mockListQuery, mockOnChangedSubscribe } = vi.hoisted(() => ({
       input: undefined,
       observer: {
         onData: (event: DynamicWorkflowChangedEvent) => void;
+        onError: (err: unknown) => void;
+      },
+    ) => { unsubscribe: () => void }
+  >(),
+  mockOnRemovedSubscribe: vi.fn<
+    (
+      input: undefined,
+      observer: {
+        onData: (event: DynamicWorkflowRemovedEvent) => void;
         onError: (err: unknown) => void;
       },
     ) => { unsubscribe: () => void }
@@ -42,6 +52,7 @@ vi.mock('../../trpc/client', () => ({
       dynamicWorkflows: {
         list: { query: mockListQuery },
         onChanged: { subscribe: mockOnChangedSubscribe },
+        onRemoved: { subscribe: mockOnRemovedSubscribe },
       },
     },
   },
@@ -86,13 +97,21 @@ function capturedObserver() {
   return mockOnChangedSubscribe.mock.calls[0][1];
 }
 
+/** The observer the store registered on the (mocked) onRemoved subscription. */
+function capturedRemovedObserver() {
+  expect(mockOnRemovedSubscribe).toHaveBeenCalledTimes(1);
+  return mockOnRemovedSubscribe.mock.calls[0][1];
+}
+
 let teardown: (() => void) | null = null;
 
 beforeEach(() => {
   mockListQuery.mockReset();
   mockOnChangedSubscribe.mockReset();
+  mockOnRemovedSubscribe.mockReset();
   mockListQuery.mockResolvedValue([]);
   mockOnChangedSubscribe.mockReturnValue({ unsubscribe: vi.fn() });
+  mockOnRemovedSubscribe.mockReturnValue({ unsubscribe: vi.fn() });
   useDynamicWorkflowStore.setState({ byWfRunId: {} });
 });
 
@@ -179,6 +198,24 @@ describe('dynamicWorkflowStore — onChanged snapshots', () => {
     capturedObserver().onData({ state: fresh });
 
     expect(useDynamicWorkflowStore.getState().byWfRunId).toEqual({ wf_new: fresh });
+  });
+});
+
+describe('dynamicWorkflowStore — onRemoved', () => {
+  it('(h) drops the keyed entry on removal; unknown wfRunId is a no-op', async () => {
+    const a = makeState({ wfRunId: 'wf_a' });
+    const b = makeState({ wfRunId: 'wf_b' });
+    mockListQuery.mockResolvedValue([a, b]);
+
+    teardown = useDynamicWorkflowStore.getState().init();
+    await flushMicrotasks();
+
+    capturedRemovedObserver().onData({ wfRunId: 'wf_a' });
+    expect(useDynamicWorkflowStore.getState().byWfRunId).toEqual({ wf_b: b });
+
+    // Removing an id that is not present leaves state untouched.
+    capturedRemovedObserver().onData({ wfRunId: 'wf_gone' });
+    expect(useDynamicWorkflowStore.getState().byWfRunId).toEqual({ wf_b: b });
   });
 });
 

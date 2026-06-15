@@ -171,6 +171,17 @@ export function QuickSessionCanvas({
   }, []);
   const dynamicWorkflows = useDynamicWorkflowsForSession(session.id);
 
+  // Dismiss a terminal dynamic-workflow card. The tracker drops it and emits
+  // `removed`; the store deletes the entry (the subscription, not this call,
+  // is the source of truth). Fail-soft — a failed mutation just leaves the card.
+  const dismissDynamicWorkflow = useCallback((wfRunId: string) => {
+    void trpc.cyboflow.dynamicWorkflows.dismiss
+      .mutate({ wfRunId })
+      .catch((err: unknown) =>
+        console.warn('[QuickSessionCanvas] dismiss dynamic workflow failed:', err),
+      );
+  }, []);
+
   // Canvas takeover: while any dynamic workflow is RUNNING the workflow view
   // replaces the resting-state chrome (session node + add-a-workflow picker).
   // Running workflows render as EXPANDED panels (per-agent rows); terminal
@@ -358,7 +369,11 @@ export function QuickSessionCanvas({
             <DynamicWorkflowPanel key={wf.wfRunId} state={wf} expanded />
           ))}
           {terminalDynamic.map((wf) => (
-            <DynamicWorkflowPanel key={wf.wfRunId} state={wf} />
+            <DynamicWorkflowPanel
+              key={wf.wfRunId}
+              state={wf}
+              onDismiss={() => dismissDynamicWorkflow(wf.wfRunId)}
+            />
           ))}
         </div>
       ) : (
@@ -380,7 +395,15 @@ export function QuickSessionCanvas({
             data-testid="quick-session-dynamic-workflows"
           >
             {dynamicWorkflows.map((wf) => (
-              <DynamicWorkflowPanel key={wf.wfRunId} state={wf} />
+              <DynamicWorkflowPanel
+                key={wf.wfRunId}
+                state={wf}
+                onDismiss={
+                  wf.status === 'running'
+                    ? undefined
+                    : () => dismissDynamicWorkflow(wf.wfRunId)
+                }
+              />
             ))}
           </div>
         )}

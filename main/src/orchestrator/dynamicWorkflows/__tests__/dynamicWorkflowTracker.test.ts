@@ -130,6 +130,7 @@ describe('DynamicWorkflowTracker', () => {
   let recordPath: string;
   let journalPath: string;
   let changed: DynamicWorkflowChangedEvent[];
+  let removed: string[];
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -148,11 +149,14 @@ describe('DynamicWorkflowTracker', () => {
     journalPath = join(transcriptDir, 'journal.jsonl');
 
     changed = [];
+    removed = [];
     dynamicWorkflowEvents.on('changed', (e: DynamicWorkflowChangedEvent) => changed.push(e));
+    dynamicWorkflowEvents.on('removed', (e: { wfRunId: string }) => removed.push(e.wfRunId));
   });
 
   afterEach(() => {
     dynamicWorkflowEvents.removeAllListeners('changed');
+    dynamicWorkflowEvents.removeAllListeners('removed');
     DynamicWorkflowTracker._resetForTesting();
     ReviewItemRouter._resetForTesting();
     vi.useRealTimers();
@@ -450,6 +454,55 @@ describe('DynamicWorkflowTracker', () => {
     expect(await tracker.resolveReviewItemsForSession('sess-1', 'user')).toBe(0);
     // Unknown session / session without a run resolves nothing.
     expect(await tracker.resolveReviewItemsForSession('sess-nope', 'user')).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // dismissal
+  // -------------------------------------------------------------------------
+
+  it('dismiss forgets a tracked run and emits removed; idempotent', async () => {
+    emitLaunch();
+    writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'Done' }));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(tracker.list()).toHaveLength(1);
+
+    expect(tracker.dismiss('wf_aa11-2b')).toBe(true);
+    expect(removed).toEqual(['wf_aa11-2b']);
+    expect(tracker.list()).toHaveLength(0);
+
+    // Second dismiss is a no-op (already gone) — no extra removed event.
+    expect(tracker.dismiss('wf_aa11-2b')).toBe(false);
+    expect(removed).toEqual(['wf_aa11-2b']);
+  });
+
+  it('dismissed wfRunIds are not re-tracked by a replayed launch (detector dedup retains the id)', () => {
+    emitLaunch();
+    expect(tracker.dismiss('wf_aa11-2b')).toBe(true);
+
+    // A replayed launch tool_result for the same id must NOT resurrect the card.
+    router.emitForRun('run-1', assistantToolUse('tu-replay'));
+    router.emitForRun('run-1', userToolResult('tu-replay', launchText('wabc123', transcriptDir, scriptPath, 'wf_aa11-2b')));
+    expect(tracker.list()).toHaveLength(0);
+  });
+
+  it('dismissTerminalForSession dismisses only terminal runs, leaving a running one', () => {
+    tracker.attachToRouter(router, { runId: 'run-1', sessionId: 'sess-1' });
+    const launchNth = (n: number): void => {
+      const tDir = join(base, 'subagents', 'workflows', `wf_d${n}`);
+      const sPath = join(base, 'workflows', 'scripts', `flow${n}-wf_d${n}.js`);
+      router.emitForRun('run-1', assistantToolUse(`tu-d${n}`));
+      router.emitForRun('run-1', userToolResult(`tu-d${n}`, launchText(`w${n}`, tDir, sPath, `wf_d${n}`)));
+    };
+    launchNth(1);
+    launchNth(2);
+    // Terminate #1 only; #2 stays running.
+    router.emitForRun('run-1', userToolResult('tu-x', notificationText('w1', 'completed')));
+
+    const dismissedCount = tracker.dismissTerminalForSession('sess-1');
+    expect(dismissedCount).toBe(1);
+    expect(removed).toEqual(['wf_d1']);
+    const ids = tracker.list('sess-1').map((s) => s.wfRunId);
+    expect(ids).toEqual(['wf_d2']);
   });
 
   // -------------------------------------------------------------------------

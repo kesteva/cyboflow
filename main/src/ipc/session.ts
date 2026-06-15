@@ -882,6 +882,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // its own client-side input), so an interactive demo session must NOT hit
       // the real interactive manager — fall through to the SDK/demo path below.
       if (dbSession?.substrate === 'interactive' && !configManager.isDemoMode()) {
+        // Continued interaction supersedes any FINISHED dynamic-workflow card:
+        // the operator is moving on, so dismiss this session's terminal runs
+        // (a still-running one is left in place). Fail-soft, fire-and-forget.
+        DynamicWorkflowTracker.tryGetInstance()?.dismissTerminalForSession(sessionId);
         if (interactiveCliManager.isPanelRunning(claudePanel.id)) {
           console.log(`[IPC] Relaying input into live interactive REPL for panel ${claudePanel.id}`);
           interactiveCliManager.relayUserTurn(claudePanel.id, finalInput);

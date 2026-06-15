@@ -37,6 +37,7 @@ import { DYNAMIC_WORKFLOW_REVIEW_SOURCE } from '../../../../shared/types/dynamic
 import type {
   DynamicWorkflowAgent,
   DynamicWorkflowChangedEvent,
+  DynamicWorkflowRemovedEvent,
   DynamicWorkflowRunState,
 } from '../../../../shared/types/dynamicWorkflows';
 
@@ -76,6 +77,13 @@ export class DynamicWorkflowTracker {
   private readonly scriptWatchers = new Map<string, WorkflowScriptWatcher>();
   /** Demo-mode scripted-timeline timers (injectDemoWorkflow), cleared on dispose. */
   private readonly demoTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * wfRunIds the operator has dismissed — handleLaunch refuses to re-track them.
+   * The script-watcher dedups on its own `seen` set, but the stream detector
+   * dedups by tool_use_id only, so a replayed launch banner could otherwise
+   * resurrect a dismissed card. This makes dismiss permanent across both paths.
+   */
+  private readonly dismissedWfRunIds = new Set<string>();
   private readonly logger: LoggerLike | undefined;
 
   constructor(
@@ -340,6 +348,47 @@ export class DynamicWorkflowTracker {
   }
 
   // --------------------------------------------------------------------------
+  // Dismissal
+  // --------------------------------------------------------------------------
+
+  /**
+   * Forget a tracked run and emit `removed` so the renderer drops its card.
+   * Idempotent — returns false when `wfRunId` is not (or no longer) tracked.
+   *
+   * The detector / script-watcher dedup sets retain the id, so a dismissed
+   * workflow is never re-tracked. Any live tailer is stopped defensively
+   * (terminal runs already stopped theirs in finalize()).
+   */
+  dismiss(wfRunId: string): boolean {
+    // Mark dismissed regardless so a later replayed launch can't resurrect it.
+    this.dismissedWfRunIds.add(wfRunId);
+    if (!this.states.has(wfRunId)) return false;
+    this.tailers.get(wfRunId)?.stop();
+    this.tailers.delete(wfRunId);
+    this.recordPaths.delete(wfRunId);
+    this.states.delete(wfRunId);
+    this.emitRemoved(wfRunId);
+    return true;
+  }
+
+  /**
+   * Dismiss every TERMINAL (completed/failed) run for a session, leaving any
+   * still-running one in place. Called when the operator keeps interacting with
+   * the session's PTY after a workflow finished — continued work supersedes the
+   * finished-workflow card. Returns the number dismissed.
+   */
+  dismissTerminalForSession(sessionId: string): number {
+    const terminal = [...this.states.values()].filter(
+      (s) => s.sessionId === sessionId && s.status !== 'running',
+    );
+    let dismissed = 0;
+    for (const state of terminal) {
+      if (this.dismiss(state.wfRunId)) dismissed += 1;
+    }
+    return dismissed;
+  }
+
+  // --------------------------------------------------------------------------
   // Reads
   // --------------------------------------------------------------------------
 
@@ -357,6 +406,7 @@ export class DynamicWorkflowTracker {
   private handleLaunch(ctx: DynamicWorkflowRunContext, info: DynamicWorkflowLaunchInfo): void {
     try {
       if (this.states.has(info.wfRunId)) return; // replayed launch event — already tracked
+      if (this.dismissedWfRunIds.has(info.wfRunId)) return; // dismissed — never resurrect
 
       const { sessionName, projectId } = this.lookupSession(ctx.sessionId);
       const meta = this.readScriptMeta(info.scriptPath);
@@ -623,6 +673,7 @@ export class DynamicWorkflowTracker {
     this.teardowns.clear();
     this.recordPaths.clear();
     this.states.clear();
+    this.dismissedWfRunIds.clear();
   }
 
   // --------------------------------------------------------------------------
@@ -638,5 +689,9 @@ export class DynamicWorkflowTracker {
     dynamicWorkflowEvents.emit('changed', {
       state: this.snapshot(state),
     } satisfies DynamicWorkflowChangedEvent);
+  }
+
+  private emitRemoved(wfRunId: string): void {
+    dynamicWorkflowEvents.emit('removed', { wfRunId } satisfies DynamicWorkflowRemovedEvent);
   }
 }
