@@ -1356,6 +1356,12 @@ export class McpQueryHandler {
   // shell-approval-request (interactive substrate, IDEA-013 S5 / TASK-810)
   // --------------------------------------------------------------------------
 
+  // OBSERVE-ONLY sprint-lane auto-derive lives in SprintLaneStore
+  // .deriveLaneFromTaskDispatch (substrate-agnostic, shared with the SDK
+  // PreToolUse seam in preToolUseHookHelper.ts). handleShellApprovalRequest
+  // invokes it for the INTERACTIVE substrate; see the call at the top of that
+  // method.
+
   /**
    * Async-deferred PreToolUse gate for the INTERACTIVE substrate.
    *
@@ -1402,6 +1408,23 @@ export class McpQueryHandler {
     msg: Extract<McpQueryMessage, { type: 'shell-approval-request' }>,
     client: net.Socket,
   ): void {
+    // AUTO-DERIVE sprint lane steps (observe-only). Fire-and-forget side-effect:
+    // never writes to the socket, never alters the allow/deny verdict. Runs
+    // BEFORE the gating flow so it is independent of the verdict path; the store
+    // method is a strict no-op for non-sprint runs / non-Task tools / unknown
+    // subagent_types / ambiguous attribution. getInstance() is wrapped because
+    // some handler tests never initialize SprintLaneStore — a missing store must
+    // not disturb the deny-gating contract below (byte-for-byte unchanged).
+    try {
+      SprintLaneStore.getInstance().deriveLaneFromTaskDispatch({
+        runId: msg.runId,
+        toolName: msg.toolName,
+        toolInput: msg.toolInput,
+      });
+    } catch {
+      // SprintLaneStore not initialized — auto-derive is best-effort.
+    }
+
     // (a) Orchestrator-sentinel guard — mirrors handleSubmitCheckpoint /
     // handleReportStep. The singleton MCP server runs with
     // CYBOFLOW_RUN_ID='orchestrator', which has no workflow_runs row.

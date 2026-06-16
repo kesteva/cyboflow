@@ -30,8 +30,10 @@ import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestrator
 import { stepTransitionEvents } from '../../trpc/routers/events';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
-import { SprintLaneStore, sprintLaneEvents } from '../../sprintLaneStore';
+import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../sprintLaneStore';
+import { ApprovalRouter } from '../../approvalRouter';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
+import type { SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2274,5 +2276,301 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(false);
     expect(response.error).toBe('bad_request');
+  });
+});
+
+describe('shell-approval-request -> auto-derive sprint lane', () => {
+  // Same migration-backed DB as the mcp-update-sprint-task suite: the auto-derive
+  // shim resolves the run's batch (workflow_runs.batch_id, migration 022) and
+  // writes through SprintLaneStore.updateLane (migration 023 current_step_id).
+  function buildLaneDb(): Database.Database {
+    const laneDb = new Database(':memory:');
+    laneDb.pragma('foreign_keys = ON');
+    laneDb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    laneDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    laneDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
+    laneDb.exec(readFileSync(join(migDir, '025_sprint_lane_attempts.sql'), 'utf-8'));
+    return laneDb;
+  }
+
+  function seedSprintRun(
+    laneDb: Database.Database,
+    opts: { runId: string; batchId?: string | null; status?: string },
+  ): void {
+    laneDb
+      .prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      )
+      .run();
+    laneDb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, batch_id)
+         VALUES (?, 'wf-1', 1, ?, 'execute-tasks', '{"execute-tasks":"executor"}', ?)`,
+      )
+      .run(opts.runId, opts.status ?? 'running', opts.batchId ?? null);
+  }
+
+  function seedTask(laneDb: Database.Database, id: string, ref: string, title: string): void {
+    laneDb
+      .prepare(
+        `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+         VALUES (?, 1, ?, ?, 'board-1-default', 'stage-board-1-default-5')`,
+      )
+      .run(id, ref, title);
+  }
+
+  function readLane(
+    laneDb: Database.Database,
+    batchId: string,
+    taskId: string,
+  ): { status: string; current_step_id: string | null } {
+    return laneDb
+      .prepare('SELECT status, current_step_id FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, taskId) as { status: string; current_step_id: string | null };
+  }
+
+  function taskDispatch(
+    runId: string,
+    subagentType: string,
+    prompt = '',
+    requestId = 'sa-1',
+  ): Extract<McpQueryMessage, { type: 'shell-approval-request' }> {
+    return {
+      type: 'shell-approval-request',
+      requestId,
+      runId,
+      toolName: 'Task',
+      toolInput: { subagent_type: subagentType, prompt },
+    };
+  }
+
+  let laneDb: Database.Database;
+  let laneHandler: McpQueryHandler;
+
+  beforeEach(() => {
+    laneDb = buildLaneDb();
+    SprintLaneStore.initialize(dbAdapter(laneDb));
+    // The gate path (after the observe side-effect) routes unknown runs through
+    // ApprovalRouter; initialize it so the verdict path runs without throwing.
+    ApprovalRouter.initialize(dbAdapter(laneDb));
+    laneHandler = new McpQueryHandler(dbAdapter(laneDb));
+  });
+
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    ApprovalRouter._resetForTesting();
+    sprintLaneEvents.removeAllListeners();
+    laneDb.close();
+  });
+
+  it('single-lane batch: a cyboflow-write-tests dispatch advances the lane to running/write-tests and emits the event', async () => {
+    seedTask(laneDb, 'tsk_a', 'TASK-001', 'First task');
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const received: SprintLaneChangedEvent[] = [];
+    sprintLaneEvents.on(sprintLaneChannel('run-s'), (evt: SprintLaneChangedEvent) => received.push(evt));
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(taskDispatch('run-s', 'cyboflow-write-tests', 'do the task'), socket);
+
+    const row = readLane(laneDb, batchId, 'tsk_a');
+    expect(row.status).toBe('running');
+    expect(row.current_step_id).toBe('write-tests');
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      runId: 'run-s',
+      batchId,
+      taskId: 'tsk_a',
+      status: 'running',
+      currentStepId: 'write-tests',
+    });
+  });
+
+  it('maps each of the five per-task subagent_types onto its lane step (single-lane)', async () => {
+    const cases: ReadonlyArray<[string, string]> = [
+      ['cyboflow-implement', 'implement'],
+      ['cyboflow-write-tests', 'write-tests'],
+      ['cyboflow-code-review', 'code-review'],
+      ['cyboflow-task-verify', 'task-verify'],
+      ['cyboflow-visual-verify', 'visual-verify'],
+    ];
+    for (const [subagentType, expectedStep] of cases) {
+      SprintLaneStore._resetForTesting();
+      ApprovalRouter._resetForTesting();
+      laneDb.close();
+      laneDb = buildLaneDb();
+      SprintLaneStore.initialize(dbAdapter(laneDb));
+      ApprovalRouter.initialize(dbAdapter(laneDb));
+      laneHandler = new McpQueryHandler(dbAdapter(laneDb));
+
+      const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+      seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+      const { socket } = makeSocketDouble();
+      await laneHandler.handleMessage(taskDispatch('run-s', subagentType), socket);
+
+      const row = readLane(laneDb, batchId, 'tsk_a');
+      expect(row.current_step_id).toBe(expectedStep);
+      expect(row.status).toBe('running');
+    }
+  });
+
+  it('multi-lane wave: an unambiguous ref match advances ONLY the matched lane', async () => {
+    seedTask(laneDb, 'tsk_a', 'TASK-1', 'A');
+    seedTask(laneDb, 'tsk_b', 'TASK-2', 'B');
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      taskDispatch('run-s', 'cyboflow-implement', 'Implement TASK-2: the second task'),
+      socket,
+    );
+
+    expect(readLane(laneDb, batchId, 'tsk_b')).toMatchObject({ status: 'running', current_step_id: 'implement' });
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+  });
+
+  it('multi-lane wave: a ref-prefix collision (TASK-1 vs TASK-12) attributes by boundary, not substring', async () => {
+    seedTask(laneDb, 'tsk_a', 'TASK-1', 'A');
+    seedTask(laneDb, 'tsk_b', 'TASK-12', 'B');
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      taskDispatch('run-s', 'cyboflow-implement', 'Work on TASK-12 only'),
+      socket,
+    );
+
+    expect(readLane(laneDb, batchId, 'tsk_b')).toMatchObject({ status: 'running', current_step_id: 'implement' });
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+  });
+
+  it('multi-lane wave: an ambiguous / no-match prompt is a strict no-op (no lane changed, no event)', async () => {
+    seedTask(laneDb, 'tsk_a', 'TASK-1', 'A');
+    seedTask(laneDb, 'tsk_b', 'TASK-2', 'B');
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    let emitted = 0;
+    sprintLaneEvents.on(sprintLaneChannel('run-s'), () => (emitted += 1));
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      taskDispatch('run-s', 'cyboflow-implement', 'no task ref here at all'),
+      socket,
+    );
+
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+    expect(readLane(laneDb, batchId, 'tsk_b')).toMatchObject({ status: 'queued', current_step_id: null });
+    expect(emitted).toBe(0);
+  });
+
+  it('NULL batch_id (non-sprint run) is a strict no-op but the deny-gating verdict still fires', async () => {
+    seedSprintRun(laneDb, { runId: 'run-nb', batchId: null });
+    let emitted = 0;
+    sprintLaneEvents.on(sprintLaneChannel('run-nb'), () => (emitted += 1));
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(taskDispatch('run-nb', 'cyboflow-implement', 'TASK-1'), socket);
+
+    expect(emitted).toBe(0);
+    // No sprint_batch_tasks row exists / changed — the strict no-op guarantee.
+    const any = laneDb.prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks').get() as { n: number };
+    expect(any.n).toBe(0);
+    // NOTE: we deliberately do NOT assert on `writes` here. For a non-sentinel
+    // run the gating path routes through ApprovalRouter.requestApproval, which
+    // parks in 'awaiting_review' and only writes the verdict on a later human
+    // decision — so writes.length is racily 0 at this point. The
+    // verdict-still-fires guarantee is covered by the synchronous sentinel-deny
+    // test below; here we only assert the observe side-effect is a no-op.
+  });
+
+  it("orchestrator-sentinel dispatch: no lane write, and the existing deny verdict still fires", async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+    let emitted = 0;
+    sprintLaneEvents.on(sprintLaneChannel('orchestrator'), () => (emitted += 1));
+
+    const { socket, writes } = makeSocketDouble();
+    await laneHandler.handleMessage(taskDispatch('orchestrator', 'cyboflow-implement'), socket);
+
+    expect(emitted).toBe(0);
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+    // writeShellVerdict deny for the sentinel — synchronous, unchanged.
+    const last = parseLastWrite(writes);
+    expect(last.type).toBe('mcp-query-response');
+    expect((last.data as { permissionDecision: string }).permissionDecision).toBe('deny');
+  });
+
+  it('non-Task tool (Bash) is a no-op for lane derivation', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'sa-bash',
+        runId: 'run-s',
+        toolName: 'Bash',
+        toolInput: { command: 'ls' },
+      },
+      socket,
+    );
+
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+  });
+
+  it('an unknown / phase-wide subagent_type (cyboflow-sprint-verify) is a no-op', async () => {
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(taskDispatch('run-s', 'cyboflow-sprint-verify'), socket);
+
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({ status: 'queued', current_step_id: null });
+  });
+
+  it('idempotent / monotonic: re-dispatching implement does not regress a lane already at task-verify', async () => {
+    seedTask(laneDb, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+    seedSprintRun(laneDb, { runId: 'run-s', batchId });
+
+    // Pre-advance the lane to task-verify (as a real run would have).
+    SprintLaneStore.getInstance().updateLane({
+      runId: 'run-s',
+      batchId,
+      taskId: 'tsk_a',
+      status: 'running',
+      currentStepId: 'task-verify',
+    });
+
+    const { socket } = makeSocketDouble();
+    await laneHandler.handleMessage(taskDispatch('run-s', 'cyboflow-implement'), socket);
+
+    // Stays at task-verify — never yanked back to implement.
+    expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({
+      status: 'running',
+      current_step_id: 'task-verify',
+    });
   });
 });

@@ -35,8 +35,54 @@ import type {
   SprintBatchTaskStatus,
   SprintLaneChangedEvent,
   SprintLaneRow,
+  SprintLaneStepId,
 } from '../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_CAP, SPRINT_LANE_STEP_IDS } from '../../../shared/types/sprintBatch';
+
+// ---------------------------------------------------------------------------
+// Auto-derive: parent-orchestrator subagent dispatch -> lane step
+//
+// The sprint orchestrator is SUPPOSED to advance lanes via cyboflow_update_sprint_task
+// (handleUpdateSprintTask), but in practice it skips that prose-only call while
+// busy delegating — leaving lanes stuck at queued/current_step_id=NULL. As a
+// BACKSTOP, deriveLaneFromTaskDispatch (below) observes the parent's PreToolUse
+// Task-tool dispatches and advances the matching lane WITHOUT relying on the
+// agent. It is called from BOTH PreToolUse seams (the interactive orchestrator-
+// socket handler AND the SDK in-process hook) so it fires on either substrate.
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a sprint per-task subagent_type to its lane step. ONLY the five per-task
+ * agents are mapped; the sprint-wide phase-1/phase-3 agents
+ * (cyboflow-dependency-analyzer / cyboflow-sprint-verify / cyboflow-sprint-review)
+ * have no per-task lane and are deliberately absent -> an unmapped subagent_type
+ * is a no-op.
+ */
+const SPRINT_SUBAGENT_TO_LANE_STEP: Readonly<Record<string, SprintLaneStepId>> = {
+  'cyboflow-implement': 'implement',
+  'cyboflow-write-tests': 'write-tests',
+  'cyboflow-code-review': 'code-review',
+  'cyboflow-task-verify': 'task-verify',
+  'cyboflow-visual-verify': 'visual-verify',
+};
+
+/**
+ * True when `token` appears in `prompt` as a whole token — present and NOT
+ * immediately followed by an alphanumeric char. Prevents a lane ref like
+ * "TASK-1" from matching inside "TASK-12" (and a short id from matching a longer
+ * one) during multi-lane sprint-wave attribution.
+ */
+function tokenAppearsInPrompt(prompt: string, token: string): boolean {
+  if (token.length === 0) return false;
+  let from = 0;
+  for (;;) {
+    const idx = prompt.indexOf(token, from);
+    if (idx === -1) return false;
+    const next = prompt[idx + token.length];
+    if (next === undefined || !/[0-9A-Za-z]/.test(next)) return true;
+    from = idx + 1;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Public event emitter — bridged by the tRPC lane subscription via
@@ -281,6 +327,94 @@ export class SprintLaneStore {
     sprintLaneEvents.emit(sprintLaneChannel(runId), event);
 
     return lane;
+  }
+
+  // --------------------------------------------------------------------------
+  // deriveLaneFromTaskDispatch — observe-only auto-advance (substrate-agnostic)
+  // --------------------------------------------------------------------------
+
+  /**
+   * BACKSTOP for the lane substrate: given a parent-orchestrator PreToolUse
+   * Task-tool dispatch, advance the matching lane to status='running' with the
+   * derived current step — without relying on the orchestrator calling
+   * cyboflow_update_sprint_task. Called from BOTH PreToolUse seams (the
+   * interactive orchestrator-socket handler and the SDK in-process hook) so it
+   * fires regardless of substrate. The SINGLE write goes through updateLane, so
+   * the existing sprintLaneEvents -> tRPC -> SprintLanesPanel pipeline lights up.
+   *
+   * Fully defensive (never throws — the caller's gating/verdict path must always
+   * proceed). Strict NO-OP for: the 'orchestrator' sentinel, non-Task tools,
+   * unmapped/phase-wide subagent_types, non-sprint runs (NULL batch_id), empty
+   * lane lists, ambiguous multi-lane attribution, and any lane already
+   * at-or-past the derived step (monotonic-forward — loopbacks that re-dispatch
+   * `implement` keep the further-along step; terminal lanes are never resurrected).
+   */
+  deriveLaneFromTaskDispatch(args: {
+    runId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+  }): void {
+    const { runId, toolName, toolInput } = args;
+    try {
+      if (runId === 'orchestrator') return;
+      if (toolName !== 'Task') return;
+
+      const subagentType = toolInput['subagent_type'];
+      if (typeof subagentType !== 'string') return;
+      const step = SPRINT_SUBAGENT_TO_LANE_STEP[subagentType];
+      if (step === undefined) return;
+
+      // Resolve the run's batch (migration 022). NULL/absent batch = non-sprint
+      // run -> strict no-op (mirrors handleUpdateSprintTask's read).
+      const runRow = this.db
+        .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { batchId?: unknown } | undefined;
+      const batchId =
+        typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
+      if (!batchId) return;
+
+      // Attribution -> the lane's taskId. Single-lane batch is trivial; a
+      // multi-lane wave needs an UNAMBIGUOUS ref/taskId match in the dispatch
+      // prompt (0 or >1 matches -> skip safely; never guess).
+      const lanes = this.listLanes(batchId);
+      if (lanes.length === 0) return;
+
+      let lane: SprintLaneRow | undefined;
+      if (lanes.length === 1) {
+        lane = lanes[0];
+      } else {
+        const prompt = typeof toolInput['prompt'] === 'string' ? toolInput['prompt'] : '';
+        if (prompt === '') return;
+        const matches = lanes.filter((l) => {
+          const byRef = typeof l.ref === 'string' && tokenAppearsInPrompt(prompt, l.ref);
+          const byId = tokenAppearsInPrompt(prompt, l.taskId);
+          return byRef || byId;
+        });
+        if (matches.length !== 1) return;
+        lane = matches[0];
+      }
+      if (lane === undefined) return;
+
+      // Monotonic-forward guard: never resurrect a terminal lane; never regress a
+      // lane already at-or-past this step (applies to running AND blocked; a
+      // queued lane has currentStepId=null -> index -1 -> always advances).
+      if (lane.status === 'integrated' || lane.status === 'failed') return;
+      const existingIdx =
+        lane.currentStepId === null
+          ? -1
+          : (SPRINT_LANE_STEP_IDS as readonly string[]).indexOf(lane.currentStepId);
+      const derivedIdx = (SPRINT_LANE_STEP_IDS as readonly string[]).indexOf(step);
+      if (existingIdx >= derivedIdx) return;
+
+      this.updateLane({ runId, batchId, taskId: lane.taskId, status: 'running', currentStepId: step });
+    } catch (err) {
+      // Best-effort UI backstop — a lane read/write failure must never disturb
+      // the caller's PreToolUse gating/verdict path.
+      this.logger?.debug('[SprintLaneStore] auto-derive skipped', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // --------------------------------------------------------------------------

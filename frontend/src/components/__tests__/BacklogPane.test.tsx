@@ -61,7 +61,9 @@ vi.mock('../../stores/backlogStore', () => {
 // trpc client mock for run-launch (workflows.list, runs.start) + create.
 const mockStart = vi.fn().mockResolvedValue({ runId: 'run-1' });
 const mockCreate = vi.fn().mockResolvedValue({ taskId: 'tsk_new' });
-const mockWorkflowsList = vi.fn().mockResolvedValue([{ id: 'wf-1', name: 'planner' }]);
+const mockWorkflowsList = vi
+  .fn()
+  .mockResolvedValue([{ id: 'wf-1', name: 'planner' }, { id: 'wf-sprint', name: 'sprint' }]);
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -419,7 +421,7 @@ describe('BacklogPane', () => {
     expect(screen.getAllByTestId('list-group')).toHaveLength(1);
   });
 
-  it('launches a run in the TASK own project (not the pane prop)', async () => {
+  it('launches a TASK run as Sprint (taskIds) in the TASK own project (not the pane prop)', async () => {
     mockProjects = [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }];
     mockTasks = [task({ id: 'tsk_run', stage_id: 's-ready', project_id: 2 })];
     render(<BacklogPane projectId={1} />);
@@ -428,7 +430,16 @@ describe('BacklogPane', () => {
     });
     // Allow the workflows.list + runs.start promise chain to settle.
     await vi.waitFor(() => expect(mockStart).toHaveBeenCalled());
-    expect(mockStart).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'tsk_run', projectId: 2, workflowId: 'wf-1', sessionId: 'sess-backlog' }));
+    // A task resolves the Sprint flow by name and seeds via taskIds (batch of
+    // one), in the task's OWN project (2), not the pane prop (1).
+    expect(mockStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskIds: ['tsk_run'],
+        projectId: 2,
+        workflowId: 'wf-sprint',
+        sessionId: 'sess-backlog',
+      }),
+    );
   });
 
   it('opens the New task dialog from the + New affordance', () => {

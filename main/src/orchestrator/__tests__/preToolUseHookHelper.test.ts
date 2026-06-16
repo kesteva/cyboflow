@@ -18,6 +18,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from '../approvalRouter';
+import { SprintLaneStore } from '../sprintLaneStore';
 import { routePreToolUseThroughApprovalRouter } from '../preToolUseHookHelper';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
@@ -30,11 +31,14 @@ import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
  * Cast via `as unknown as PreToolUseHookInput` to avoid runtime-shape drift
  * from BaseHookInput required fields (session_id, transcript_path, cwd).
  */
-function makePreToolInput(toolName: string): PreToolUseHookInput {
+function makePreToolInput(
+  toolName: string,
+  toolInput: Record<string, unknown> = {},
+): PreToolUseHookInput {
   return {
     hook_event_name: 'PreToolUse',
     tool_name: toolName,
-    tool_input: {},
+    tool_input: toolInput,
     tool_use_id: 'test-tool-use-id',
     session_id: 'test-session',
     transcript_path: '/tmp/test.jsonl',
@@ -51,6 +55,7 @@ const CALLER_ID = 'run-abc-123';
 describe('routePreToolUseThroughApprovalRouter', () => {
   afterEach(() => {
     ApprovalRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
     vi.restoreAllMocks();
   });
 
@@ -230,5 +235,64 @@ describe('routePreToolUseThroughApprovalRouter', () => {
     // The two prefixes must be distinct
     expect(errorCallsA[0].message).not.toContain('[ClaudeCodeManager]');
     expect(errorCallsB[0].message).not.toContain('[PermissionModeMapper]');
+  });
+
+  // ─── Test 7: SDK-substrate sprint-lane auto-derive is wired here ──────────
+  // The SDK PreToolUse seam must forward a parent orchestrator Task dispatch to
+  // SprintLaneStore.deriveLaneFromTaskDispatch so lanes advance on the SDK
+  // substrate too (not only the interactive socket handler). Observe-only — the
+  // verdict is unaffected.
+
+  it('forwards a Task dispatch to SprintLaneStore.deriveLaneFromTaskDispatch (SDK lane auto-derive)', async () => {
+    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    const deriveLaneFromTaskDispatch = vi.fn();
+    vi.spyOn(SprintLaneStore, 'getInstance').mockReturnValue({
+      deriveLaneFromTaskDispatch,
+    } as unknown as SprintLaneStore);
+
+    const toolInput = { subagent_type: 'cyboflow-implement', prompt: 'Implement TASK-1' };
+    const result = await routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Task', toolInput),
+      CALLER_ID,
+      'ClaudeCodeManager',
+    );
+
+    expect(deriveLaneFromTaskDispatch).toHaveBeenCalledTimes(1);
+    expect(deriveLaneFromTaskDispatch).toHaveBeenCalledWith({
+      runId: CALLER_ID,
+      toolName: 'Task',
+      toolInput,
+    });
+    // The observe call never alters the verdict.
+    expect(result).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    });
+  });
+
+  it('a missing/erroring SprintLaneStore never disturbs the gating verdict', async () => {
+    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({
+      requestApproval,
+    } as unknown as ApprovalRouter);
+
+    // Store not initialized — getInstance throws; the wrapped call must swallow it.
+    vi.spyOn(SprintLaneStore, 'getInstance').mockImplementation(() => {
+      throw new Error('SprintLaneStore has not been initialized');
+    });
+
+    const result = await routePreToolUseThroughApprovalRouter(
+      makePreToolInput('Task', { subagent_type: 'cyboflow-implement' }),
+      CALLER_ID,
+      'ClaudeCodeManager',
+    );
+
+    expect(result).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    });
+    expect(requestApproval).toHaveBeenCalledTimes(1);
   });
 });

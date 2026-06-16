@@ -13,6 +13,7 @@
  */
 import type { HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from './approvalRouter';
+import { SprintLaneStore } from './sprintLaneStore';
 import type { LoggerLike } from './types';
 
 /**
@@ -35,6 +36,22 @@ export async function routePreToolUseThroughApprovalRouter(
   callerLabel: string,
   logger?: LoggerLike,
 ): Promise<HookJSONOutput> {
+  // AUTO-DERIVE sprint lane steps (observe-only) for the SDK substrate — the
+  // in-process twin of the interactive socket handler's call. When the parent
+  // orchestrator dispatches a per-task sprint subagent (Task tool), advance the
+  // matching lane so SprintLanesPanel reflects progress without relying on the
+  // agent calling cyboflow_update_sprint_task. Strict no-op off the sprint path;
+  // wrapped so a missing/erroring store never disturbs the gating verdict.
+  try {
+    SprintLaneStore.getInstance().deriveLaneFromTaskDispatch({
+      runId: callerId,
+      toolName: pretool.tool_name,
+      toolInput: pretool.tool_input as Record<string, unknown>,
+    });
+  } catch {
+    // SprintLaneStore not initialized / read failure — auto-derive is best-effort.
+  }
+
   try {
     const decision = await ApprovalRouter.getInstance().requestApproval(
       callerId,
