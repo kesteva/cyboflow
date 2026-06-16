@@ -338,7 +338,7 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   // Launch in the task's OWN project — in All-projects mode the pane prop may
   // point at a different (or no) project.
   const handleRun = (task: BacklogTaskItem): void => {
-    void launch(task.id, task.project_id);
+    void launch(task.id, task.project_id, task.type);
   };
 
   return (
