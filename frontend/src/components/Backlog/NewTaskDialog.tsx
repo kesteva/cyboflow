@@ -15,9 +15,14 @@
  */
 import { useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
+import { IdeaAttachmentStrip } from '../cyboflow/IdeaAttachmentStrip';
+import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
-import type { Priority, TaskType } from '../../../../shared/types/tasks';
+import type { IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
+
+/** Empty seed for the attachment hook (stable reference). */
+const NO_ATTACHMENTS: IdeaAttachment[] = [];
 
 interface NewTaskDialogProps {
   isOpen: boolean;
@@ -49,6 +54,10 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const [projectOverride, setProjectOverride] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Attachments (ideas only, migration 028). The item has no id yet, so images
+  // save under a stable pending key; their paths ride the create mutation.
+  const [pendingKey] = useState(() => `pending_${Math.random().toString(36).slice(2)}`);
+  const attachmentsCtl = useIdeaAttachments(pendingKey, NO_ATTACHMENTS);
 
   const defaultProjectId = filterProjectId ?? projectId ?? projects[0]?.id ?? null;
   const selectedProjectId = projectOverride ?? defaultProjectId;
@@ -60,6 +69,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
     setPriority('P2');
     setProjectOverride(null);
     setError(null);
+    attachmentsCtl.reset();
   };
 
   const handleClose = (): void => {
@@ -77,6 +87,8 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
         type,
         title: title.trim(),
         summary: summary.trim().length > 0 ? summary.trim() : null,
+        // Attachments are ideas-only; the chokepoint ignores them otherwise.
+        ...(type === 'idea' ? { attachments: attachmentsCtl.attachments } : {}),
         priority,
       });
       onCreated?.(result.taskId);
@@ -145,12 +157,30 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
             <textarea
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
+              onPaste={type === 'idea' ? attachmentsCtl.handlePaste : undefined}
+              onDrop={type === 'idea' ? attachmentsCtl.handleDrop : undefined}
+              onDragOver={type === 'idea' ? (e) => e.preventDefault() : undefined}
               rows={3}
-              placeholder="Optional — a sentence or two of context"
+              placeholder={
+                type === 'idea'
+                  ? 'Optional — a sentence or two of context. Paste or drop an image to attach it.'
+                  : 'Optional — a sentence or two of context'
+              }
               className="resize-none rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text placeholder:text-input-placeholder"
               aria-label="Task summary"
             />
           </label>
+
+          {/* Attachments — ideas only (the only entity with an attachments column). */}
+          {type === 'idea' && (
+            <IdeaAttachmentStrip
+              previews={attachmentsCtl.previews}
+              busy={attachmentsCtl.busy}
+              error={attachmentsCtl.error}
+              onAddFiles={(files) => void attachmentsCtl.addFiles(files)}
+              onRemove={attachmentsCtl.remove}
+            />
+          )}
 
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Priority
