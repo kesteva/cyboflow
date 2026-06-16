@@ -637,6 +637,7 @@ describe('McpQueryHandler', () => {
       taskDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1295,6 +1296,7 @@ describe('McpQueryHandler', () => {
       reviewDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
       reviewDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+      reviewDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
       return reviewDb;
     }
 
@@ -1780,6 +1782,7 @@ describe('mcp-report-step does not pause on human steps', () => {
     gateDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
     return gateDb;
   }
 
@@ -1879,6 +1882,7 @@ describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () 
     seedDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     seedDb.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     seedDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+    seedDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
     return seedDb;
   }
 

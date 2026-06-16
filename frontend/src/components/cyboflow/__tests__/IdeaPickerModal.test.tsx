@@ -147,6 +147,7 @@ describe('IdeaPickerModal — new idea', () => {
       type: 'idea',
       title: 'Brand new idea',
       body: 'Some prose body.',
+      attachments: [],
       priority: 'P2',
     });
     expect(onPicked).toHaveBeenCalledWith('IDEA-NEW');

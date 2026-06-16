@@ -17,13 +17,33 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import '@testing-library/jest-dom';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
-const { mockUpdate } = vi.hoisted(() => ({
+const { mockUpdate, mockGetAttachments } = vi.hoisted(() => ({
   mockUpdate: vi.fn().mockResolvedValue({ taskId: 'idea_1' }),
+  mockGetAttachments: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('../../trpc/client', () => ({
-  trpc: { cyboflow: { tasks: { update: { mutate: mockUpdate } } } },
+  trpc: {
+    cyboflow: {
+      tasks: {
+        update: { mutate: mockUpdate },
+        getAttachments: { query: mockGetAttachments },
+      },
+    },
+  },
 }));
+
+// Attachment file IO goes through window.electronAPI.ideas — stub it so the
+// useIdeaAttachments hook has something to call (no attachments in these tests).
+Object.defineProperty(window, 'electronAPI', {
+  configurable: true,
+  value: {
+    ideas: {
+      saveAttachments: vi.fn().mockResolvedValue([]),
+      loadAttachments: vi.fn().mockResolvedValue([]),
+    },
+  },
+});
 
 vi.mock('../MarkdownPreview', () => ({
   MarkdownPreview: ({ content }: { content: string }) => (
@@ -97,6 +117,7 @@ describe('IdeaDetailEditor', () => {
       summary: 'Original summary',
       body: '# New body\n\nUpdated markdown.',
       scope: 'large',
+      attachments: [],
       expectedVersion: 3,
     });
     // Modal lifecycle: a successful save fires onSaved and closes the modal.
