@@ -5,8 +5,40 @@ import * as path from 'path';
 import { commandExecutor } from '../utils/commandExecutor';
 import { getCurrentWorktreeName } from '../utils/worktreeUtils';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
+import { AppUpdater } from '../services/appUpdater';
 
-export function registerUpdaterHandlers(ipcMain: IpcMain, { app }: AppServices): void {
+export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices): void {
+  const { app, getMainWindow, logger } = services;
+
+  // The in-app auto-updater (electron-updater → updates.cyboflow.com). Constructed
+  // + wired once here; a no-op in dev (see AppUpdater.init). Lifecycle events reach
+  // the renderer over the 'updater:event' channel; check/download/install are
+  // user-triggered from the UI (About dialog).
+  const appUpdater = new AppUpdater(app, getMainWindow, logger);
+  appUpdater.init();
+
+  ipcMain.handle('updater:check', async () => {
+    try {
+      return { success: true, data: await appUpdater.check() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Update check failed' };
+    }
+  });
+
+  ipcMain.handle('updater:download', async () => {
+    try {
+      await appUpdater.download();
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Update download failed' };
+    }
+  });
+
+  ipcMain.handle('updater:install', () => {
+    appUpdater.install();
+    return { success: true };
+  });
+
   ipcMain.handle('version:get-info', () => {
     try {
       console.log('🚀 [WORKTREE DEBUG] version:get-info called - NEW BUILD!');
