@@ -7,7 +7,6 @@ import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
-import Help from './components/Help';
 import Welcome from './components/Welcome';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
@@ -48,7 +47,6 @@ interface PermissionRequest {
 }
 
 function App() {
-  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWelcomeOpen, setIsWelcomeOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
@@ -306,14 +304,12 @@ function App() {
           searchQuery={globalSearch}
           onSearchChange={setGlobalSearch}
           onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
-          onHelpClick={() => setIsHelpOpen(true)}
         />
         {/* Shell geometry: [agent rail | center]. Human review folds into the
             rail as a primary item that swaps the center to a full-width review
             pane (see docs/SHELL-LAYOUT.md). */}
         <div className="flex flex-1 overflow-hidden">
           <Sidebar
-            onHelpClick={() => setIsHelpOpen(true)}
             onAboutClick={() => setIsAboutOpen(true)}
             onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
             width={sidebarWidth}
@@ -393,7 +389,6 @@ function App() {
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />
-        <Help isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
         <Welcome isOpen={isWelcomeOpen} onClose={() => setIsWelcomeOpen(false)} />
         <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
         <ErrorDialog

@@ -1,11 +1,10 @@
-import { Search, Clock, HelpCircle } from 'lucide-react';
+import { Search, Clock } from 'lucide-react';
 
 interface TitleBarProps {
   /** Global search query (sessions / agents / files). */
   searchQuery: string;
   onSearchChange: (value: string) => void;
   onPromptHistoryClick: () => void;
-  onHelpClick: () => void;
 }
 
 // Width reserved at the left for the native macOS traffic lights
@@ -24,7 +23,6 @@ export function TitleBar({
   searchQuery,
   onSearchChange,
   onPromptHistoryClick,
-  onHelpClick,
 }: TitleBarProps) {
   return (
     <div
@@ -64,15 +62,6 @@ export function TitleBar({
           className="flex h-[22px] w-6 items-center justify-center text-text-secondary hover:bg-bg-primary hover:text-text-primary"
         >
           <Clock className="h-3.5 w-3.5" strokeWidth={1.6} />
-        </button>
-        <button
-          type="button"
-          onClick={onHelpClick}
-          title="Help"
-          aria-label="Help"
-          className="flex h-[22px] w-6 items-center justify-center text-text-secondary hover:bg-bg-primary hover:text-text-primary"
-        >
-          <HelpCircle className="h-3.5 w-3.5" strokeWidth={1.6} />
         </button>
       </div>
     </div>

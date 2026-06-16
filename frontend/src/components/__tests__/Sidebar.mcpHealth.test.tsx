@@ -73,7 +73,6 @@ import { Sidebar } from '../Sidebar';
 function renderSidebar() {
   return render(
     <Sidebar
-      onHelpClick={() => undefined}
       onAboutClick={() => undefined}
       onPromptHistoryClick={() => undefined}
       width={240}
