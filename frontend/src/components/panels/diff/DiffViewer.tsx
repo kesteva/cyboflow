@@ -228,26 +228,22 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
                       originalDiffOldValue: file.oldValue
                     };
                   } else {
-                    // File might not exist in the base revision (e.g., new file)
-                    console.warn(`Failed to load ${baseRevision} content for ${file.path}, file may not exist in ${baseRevision}`);
-                    return {
-                      ...file,
-                      oldValue: '',  // File doesn't exist in base revision
-                      newValue: result.content,       // Current working directory content
-                      originalDiffNewValue: file.newValue,
-                      originalDiffOldValue: file.oldValue
-                    };
+                    // The base-revision read FAILED. We must NOT pair the full new
+                    // content with an empty old side — for a modified file that
+                    // renders the whole file as green additions even though only a
+                    // few lines changed (the +N/-M stat from the parsed hunk then
+                    // disagrees with the body). Fall back to the parsed unified-diff
+                    // hunk (consistent old/new sides) so the change shows correctly.
+                    // A genuinely new file already parsed as type='added' with an
+                    // empty oldValue, so returning it as-is stays correct there too.
+                    console.warn(`Failed to load ${baseRevision} content for ${file.path}; falling back to the parsed hunk diff`);
+                    return file;
                   }
                 } catch (headError) {
                   console.error(`Error loading ${baseRevision} content for ${file.path}:`, headError);
-                  // File likely doesn't exist in base revision
-                  return {
-                    ...file,
-                    oldValue: '',  // File doesn't exist in base revision
-                    newValue: result.content,       // Current working directory content
-                    originalDiffNewValue: file.newValue,
-                    originalDiffOldValue: file.oldValue
-                  };
+                  // Same fallback as above — keep the parsed hunk diff rather than
+                  // fabricating an empty old side (which mis-renders as a full add).
+                  return file;
                 }
               } else {
                 console.warn(`Failed to load full content for ${file.path}:`, result.error);
