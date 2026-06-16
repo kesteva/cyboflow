@@ -591,18 +591,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           return customState?.panelStatus === 'running' || customState?.panelStatus === 'waiting';
         });
 
-        // [exit-diag] Temporary instrumentation for the "creating a quick session
-        // makes another running session disappear" report. Static analysis found
-        // no cross-session stop, so capture the exit decision live: which panel
-        // exited, the exit code, whether the panel was active, whether any AI
-        // panel is still running, and the session's status before the transition.
-        // Grep `[exit-diag]` in cyboflow-backend-debug.log on the next repro.
-        console.log(
-          `[exit-diag] exit panel=${panelId ?? 'none'} session=${sessionId} exitCode=${exitCode} ` +
-            `signal=${signalText} aiPanels=${aiPanels.length} hasRunningPanels=${hasRunningPanels} ` +
-            `dbStatus=${dbSession?.status ?? 'none'} -> ${hasRunningPanels ? 'keep-running' : exitCode === 0 ? 'completed' : 'stopped'}`,
-        );
-
         // Only update session status if no panels are still running
         if (!hasRunningPanels) {
           // If exit code is 0 (successful completion), mark as completed
