@@ -94,11 +94,26 @@ type WizardSelection =
   // to interactive and threads the effort flag.
   | { kind: 'ultracode' };
 
-/** The faint graph-paper grid backing the wizard surface. */
+/**
+ * The faint graph-paper grid backing the wizard surface. Matches the
+ * human-review-queue home (LandingHome) hairline exactly — 35%-alpha #d8cfb8
+ * lines on a 24px grid — so the wizard's white focused-paper card reads as the
+ * same surface family.
+ */
 const GRID_BG_STYLE: React.CSSProperties = {
   backgroundImage:
-    'linear-gradient(to right, #d8cfb8 1px, transparent 1px), linear-gradient(to bottom, #d8cfb8 1px, transparent 1px)',
+    'linear-gradient(to right, rgba(216,207,184,0.35) 1px, transparent 1px),' +
+    'linear-gradient(to bottom, rgba(216,207,184,0.35) 1px, transparent 1px)',
   backgroundSize: '24px 24px',
+};
+
+/**
+ * The green hazard-stripe tab that caps the focused-paper card, mirroring
+ * {@link CaughtUpHero}. Kept as a module constant so the wizard card and the
+ * review-queue hero stay pixel-identical.
+ */
+const HAZARD_STRIPE_STYLE: React.CSSProperties = {
+  backgroundImage: 'repeating-linear-gradient(135deg, #2d8a5b 0 8px, #26764e 8px 16px)',
 };
 
 /** The dashed "add project" tile fill cue. */
@@ -528,14 +543,22 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   return (
     <div className="relative h-full w-full overflow-y-auto" style={GRID_BG_STYLE}>
-      <div className="mx-auto flex max-w-[720px] flex-col gap-4 px-6 py-8">
-        <WizardStepHeader
-          locked={locked}
-          step={step}
-          onBackToQueue={handleBackToQueue}
-          onChangeProject={handleChangeProject}
-          onBackToWorkflow={handleBackToWorkflow}
-        />
+      <div className="mx-auto w-full max-w-[720px] px-6 py-8">
+        {/* Focused-paper card — a white sheet capped with the green hazard
+            stripe, floating on the graph-paper grid. Mirrors the review-queue
+            home (CaughtUpHero) so every page of the wizard reads as the same
+            surface. All step content (header + step body) lives inside it. */}
+        <div className="border border-border-primary bg-surface-primary">
+          <div className="h-2 w-full" style={HAZARD_STRIPE_STYLE} />
+
+          <div className="flex flex-col gap-4 px-6 py-6">
+            <WizardStepHeader
+              locked={locked}
+              step={step}
+              onBackToQueue={handleBackToQueue}
+              onChangeProject={handleChangeProject}
+              onBackToWorkflow={handleBackToWorkflow}
+            />
 
         {/* ── Step 1: project grid (unlocked only) ── */}
         {!locked && step === 1 && (
@@ -570,25 +593,18 @@ export default function SessionStartWizard(): React.JSX.Element {
 
             {/* Quick session (featured, allowQuick only) */}
             {allowQuick && (
-              <>
-                <QuickSessionCard
-                  selected={selection?.kind === 'quick'}
-                  onSelect={() => {
-                    setSelection({ kind: 'quick' });
-                    setStep(3);
-                  }}
-                />
-                <div className="flex items-center gap-3" aria-hidden="true">
-                  <span className="h-px flex-1 border-t border-dashed border-border-primary" />
-                  <span className="eyebrow text-text-muted">or run a workflow</span>
-                  <span className="h-px flex-1 border-t border-dashed border-border-primary" />
-                </div>
-              </>
+              <QuickSessionCard
+                selected={selection?.kind === 'quick'}
+                onSelect={() => {
+                  setSelection({ kind: 'quick' });
+                  setStep(3);
+                }}
+              />
             )}
 
-            {/* Ultracode — featured peer of the workflow cards. Opens an
-                interactive session in ultracode mode rather than a structured
-                run, so it sits with the workflows but launches like quick. */}
+            {/* Ultracode — featured peer of Quick session: an interactive
+                session in ultracode mode (launches like quick), so it sits with
+                the featured options above the "run a workflow" divider. */}
             <UltracodeCard
               selected={selection?.kind === 'ultracode'}
               onSelect={() => {
@@ -596,6 +612,16 @@ export default function SessionStartWizard(): React.JSX.Element {
                 setStep(3);
               }}
             />
+
+            {/* Divider — separates the featured launchers from the structured
+                workflow list (shown only when quick launches are allowed). */}
+            {allowQuick && (
+              <div className="flex items-center gap-3" aria-hidden="true">
+                <span className="h-px flex-1 border-t border-dashed border-border-primary" />
+                <span className="eyebrow text-text-muted">or run a workflow</span>
+                <span className="h-px flex-1 border-t border-dashed border-border-primary" />
+              </div>
+            )}
 
             {/* Workflow list */}
             {workflowsLoading && (
@@ -630,7 +656,7 @@ export default function SessionStartWizard(): React.JSX.Element {
 
         {/* ── Step 3: configure session settings + launch ── */}
         {step === 3 && selectedProjectId !== null && selection !== null && (
-          <div className="flex flex-col gap-4 pb-24" data-testid="wizard-step3">
+          <div className="flex flex-col gap-4" data-testid="wizard-step3">
             {projectBannerCard}
 
             {/* Agent permission — shown for BOTH workflow and quick launches. */}
@@ -672,7 +698,8 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* Launch summary */}
+            {/* Launch summary — a warm sub-box inside the white card (mirrors
+                the EndCta box pattern in the review-queue home). */}
             <div
               data-testid="wizard-launch-summary"
               className="flex flex-col gap-1.5 border border-border-primary bg-surface-secondary p-3"
@@ -703,32 +730,29 @@ export default function SessionStartWizard(): React.JSX.Element {
                 <SummaryRow label="Effort" value="ultracode (xhigh + auto workflows)" />
               )}
             </div>
+
+            {/* Launch CTA — last element inside the card. */}
+            <div className="flex flex-col gap-2 pt-1">
+              {combinedError !== null && combinedError !== undefined && (
+                <p className="text-xs text-status-error" role="alert">
+                  {combinedError}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleStart}
+                disabled={selection === null || ctaBusy}
+                data-testid="wizard-cta"
+                className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {ctaLabel}
+              </button>
+            </div>
           </div>
         )}
-      </div>
-
-      {/* ── Sticky launch CTA (configure step). Step ② auto-advances on
-            selection, so it has no CTA of its own. ── */}
-      {step === 3 && selectedProjectId !== null && (
-        <div className="sticky bottom-0 left-0 right-0 border-t border-border-primary bg-bg-primary/95 px-6 py-3 backdrop-blur">
-          <div className="mx-auto flex max-w-[720px] flex-col gap-2">
-            {combinedError !== null && combinedError !== undefined && (
-              <p className="text-xs text-status-error" role="alert">
-                {combinedError}
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={handleStart}
-              disabled={selection === null || ctaBusy}
-              data-testid="wizard-cta"
-              className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {ctaLabel}
-            </button>
           </div>
         </div>
-      )}
+      </div>
 
       {/* ── Bottom-center slide-up launch toast ── */}
       {toast !== null && (
