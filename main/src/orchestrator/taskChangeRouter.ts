@@ -42,6 +42,7 @@ import type { DatabaseLike } from './types';
 import type {
   BacklogTaskItem,
   FlowOverlay,
+  IdeaAttachment,
   IdeaScope,
   Priority,
   TaskChangeAction,
@@ -86,12 +87,14 @@ interface EntityTableDescriptor {
   hasEntryStage: boolean;
   /** This entity may carry a scope (only ideas). */
   hasScope: boolean;
+  /** This entity may carry image attachments (only ideas, migration 028). */
+  hasAttachments: boolean;
 }
 
 const ENTITY_TABLES: Record<TaskType, EntityTableDescriptor> = {
-  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true },
-  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false },
-  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false },
+  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true },
+  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false },
+  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false },
 };
 
 /** Resolve a descriptor for an entity type. */
@@ -140,6 +143,12 @@ export interface TaskFieldChanges {
   repo?: string | null;
   /** Idea size hint — only valid on type='idea'. */
   scope?: IdeaScope | null;
+  /**
+   * Image attachments — only valid on type='idea' (migration 028). The whole
+   * array is replaced wholesale (the editor sends the full desired set); null or
+   * [] clears it. Persisted as JSON in the ideas.attachments column.
+   */
+  attachments?: IdeaAttachment[] | null;
   /**
    * Execution-entry capture (type='task' only). Set by the launch hook the
    * FIRST time a task leaves a planning stage into execution. Treated as an
@@ -208,6 +217,8 @@ export interface TaskChange {
   repo?: string | null;
   /** Initial scope for the create path (ideas only). */
   scope?: IdeaScope | null;
+  /** Initial image attachments for the create path (ideas only, migration 028). */
+  attachments?: IdeaAttachment[] | null;
   /** Board to create the entity on. Defaults to the project's default board. */
   boardId?: string;
   /** Stage to create the entity at. Defaults to the board's position-1 stage. */
@@ -237,6 +248,8 @@ interface EntityDbRow {
   priority: Priority;
   repo: string | null;
   archived_at: string | null;
+  /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
+  attachments: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -505,6 +518,13 @@ export class TaskChangeRouter {
       const priority: Priority = change.priority ?? change.fields?.priority ?? 'P2';
       const repo = change.repo ?? change.fields?.repo ?? null;
       const scope = desc.hasScope ? (change.scope ?? change.fields?.scope ?? null) : null;
+      // Attachments (ideas-only): serialize the array to JSON for the column; a
+      // null/empty set stays NULL so the no-attachments case has no JSON noise.
+      const attachmentsArr = desc.hasAttachments
+        ? (change.attachments ?? change.fields?.attachments ?? null)
+        : null;
+      const attachments =
+        attachmentsArr && attachmentsArr.length > 0 ? JSON.stringify(attachmentsArr) : null;
 
       this.insertEntity(desc, {
         id: taskId,
@@ -518,6 +538,7 @@ export class TaskChangeRouter {
         boardId,
         stageId,
         scope,
+        attachments,
         parentEpicId,
         originatingIdeaId,
         now,
@@ -531,6 +552,7 @@ export class TaskChangeRouter {
       if (parentEpicId !== null) changes.push({ field: 'parent_epic_id', from: null, to: parentEpicId });
       if (originatingIdeaId !== null) changes.push({ field: 'originating_idea_id', from: null, to: originatingIdeaId });
       if (scope !== null) changes.push({ field: 'scope', from: null, to: scope });
+      if (attachments !== null) changes.push({ field: 'attachments', from: null, to: attachments });
 
       const ev = this.insertEvent(type, taskId, change.kind ?? 'created', change.actor, change.runId ?? null, changes, now);
       eventId = ev.id;
@@ -557,6 +579,8 @@ export class TaskChangeRouter {
       boardId: string;
       stageId: string;
       scope: IdeaScope | null;
+      /** Pre-serialized JSON IdeaAttachment[] (ideas-only) or null. */
+      attachments: string | null;
       parentEpicId: string | null;
       originatingIdeaId: string | null;
       now: string;
@@ -568,6 +592,10 @@ export class TaskChangeRouter {
     if (desc.hasScope) {
       cols.push('scope');
       vals.push(v.scope);
+    }
+    if (desc.hasAttachments) {
+      cols.push('attachments');
+      vals.push(v.attachments);
     }
     if (desc.hasEntryStage) {
       cols.push('entry_stage_id');
@@ -743,6 +771,17 @@ export class TaskChangeRouter {
           sets.push('scope = ?');
           params.push(f.scope);
           deltas.push({ field: 'scope', from: current.scope, to: f.scope });
+        }
+        if (f.attachments !== undefined && desc.hasAttachments) {
+          // Whole-array replace; serialize to JSON (null/[] -> NULL) and compare
+          // against the stored JSON so an unchanged set is a no-op.
+          const nextAttachments =
+            f.attachments && f.attachments.length > 0 ? JSON.stringify(f.attachments) : null;
+          if (nextAttachments !== current.attachments) {
+            sets.push('attachments = ?');
+            params.push(nextAttachments);
+            deltas.push({ field: 'attachments', from: current.attachments, to: nextAttachments });
+          }
         }
         if (f.entryStageId !== undefined && desc.hasEntryStage && f.entryStageId !== current.entry_stage_id) {
           sets.push('entry_stage_id = ?');
@@ -1090,10 +1129,11 @@ export class TaskChangeRouter {
     const originatingIdea = desc.hasOriginatingIdea ? 'originating_idea_id' : 'NULL AS originating_idea_id';
     const entryStage = desc.hasEntryStage ? 'entry_stage_id' : 'NULL AS entry_stage_id';
     const scope = desc.hasScope ? 'scope' : 'NULL AS scope';
+    const attachments = desc.hasAttachments ? 'attachments' : 'NULL AS attachments';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}
+                version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;

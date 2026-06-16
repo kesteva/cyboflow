@@ -31,6 +31,24 @@ export type IdeaScope = 'small' | 'large';
 export type Priority = 'P0' | 'P1' | 'P2';
 
 /**
+ * One user-attached image on an idea (migration 028). The image BYTES live on
+ * disk (CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file>, written by the
+ * ideas:save-attachments IPC); only this metadata is persisted, as a JSON array
+ * in the ideas.attachments column. `path` is the absolute on-disk file path.
+ */
+export interface IdeaAttachment {
+  id: string;
+  /** Original filename (or a synthesized name for pasted images). */
+  name: string;
+  /** Absolute on-disk path to the saved image file. */
+  path: string;
+  /** MIME type, e.g. 'image/png'. */
+  type: string;
+  /** Byte size of the saved file. */
+  size: number;
+}
+
+/**
  * AUTHORITY axis for a board stage:
  *  - 'asserted' = user/agent-settable planning stage.
  *  - 'derived'  = orchestrator-only execution stage (user/agent rejected).
