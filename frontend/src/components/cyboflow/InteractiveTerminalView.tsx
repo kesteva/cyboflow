@@ -34,6 +34,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
+import { useTheme } from '../../contexts/ThemeContext';
 import { subscribeToPtyBytes } from '../../utils/cyboflowApi';
 import { cn } from '../../utils/cn';
 import { trpc } from '../../trpc/client';
@@ -144,6 +145,11 @@ export function InteractiveTerminalView({
 
   const isInteractive = substrate === 'interactive';
   const reducedMotion = usePrefersReducedMotion();
+  // Active theme (paper | dark | light). The xterm palette is read from CSS vars
+  // ONCE at construction, so a theme switch (Settings) — or a dev-time CSS token
+  // edit — would otherwise leave the live terminal painting the stale palette
+  // until it is reconstructed. Re-applied below on every theme change.
+  const { theme } = useTheme();
 
   // First-interaction warn guardrail (IDEA-030). The dialog opens on the FIRST
   // mousedown on the terminal surface and is suppressed for every subsequent
@@ -182,6 +188,18 @@ export function InteractiveTerminalView({
     const term = termRef.current;
     if (term) term.options.disableStdin = !relayEnabled;
   }, [relayEnabled]);
+
+  // Re-apply the terminal palette when the active theme changes. xterm caches
+  // the resolved colors at construction, so setting `options.theme` is what
+  // pushes the new CSS-variable values into the renderer; `refresh()` repaints
+  // already-written cells (e.g. a user-message banner) with the new palette.
+  // Mirrors TerminalPanel's theme effect. Skipped until the terminal exists.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = getTerminalTheme();
+    if (term.rows > 0) term.refresh(0, term.rows - 1);
+  }, [theme]);
 
   const elapsed = useElapsed(isInteractive);
 

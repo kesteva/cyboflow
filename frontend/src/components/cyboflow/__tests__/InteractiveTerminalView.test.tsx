@@ -89,6 +89,12 @@ globalThis.ResizeObserver = class {
 
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 
+// useTheme drives the live-palette re-apply effect; mock it so the component
+// renders without a ThemeProvider wrapper (theme value is inert for these tests).
+vi.mock('../../../contexts/ThemeContext', () => ({
+  useTheme: () => ({ theme: 'paper', setTheme: vi.fn() }),
+}));
+
 // ---------------------------------------------------------------------------
 // Mock the tRPC client — the keystroke + resize relay (TASK-817) call
 // runs.relayInput / runs.relayResize. We assert verbatim relay gating + resize.
