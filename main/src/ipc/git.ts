@@ -267,6 +267,15 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         comparisonBranch = mainBranch;
         useFallback = true;
       }
+    } else if (session.baseCommit) {
+      // Worktree sessions: compare against the branch point captured at session
+      // creation, NOT the live main tip. Diffing against live main makes a
+      // session's diff go blank after its commits are fast-forward-merged into
+      // main (main advances to include them, so `main..HEAD` is empty even though
+      // the session did real work). base_commit..HEAD is the stable "what this
+      // session changed since it branched" view and survives merges. Falls back
+      // to mainBranch below if the recorded base commit is no longer resolvable.
+      comparisonBranch = session.baseCommit;
     }
 
     let commits: GitCommit[] = [];
@@ -280,6 +289,11 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           useFallback = true;
           historySource = 'local';
           comparisonBranch = mainBranch;
+        } else if (comparisonBranch !== mainBranch) {
+          // base_commit unresolvable (e.g. gc'd) — retry against main before giving up.
+          console.warn(`[IPC:git] base_commit ${comparisonBranch} unresolvable for session ${session.id}; comparing against ${mainBranch}:`, error);
+          comparisonBranch = mainBranch;
+          commits = gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch);
         } else {
           throw error;
         }
