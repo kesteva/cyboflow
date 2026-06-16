@@ -8,6 +8,7 @@ import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
+import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 
 interface LogEntry {
   timestamp: string;
@@ -63,6 +64,15 @@ interface ElectronAPI {
     buildTimestamp?: number;
     worktreeName?: string;
   }>>;
+
+  // In-app auto-updater (electron-updater → updates.cyboflow.com).
+  // KEEP IN SYNC with main/src/preload.ts `updater` + the updater IPC handlers.
+  updater: {
+    check: () => Promise<IPCResponse<UpdateCheckResult>>;
+    download: () => Promise<IPCResponse<void>>;
+    install: () => Promise<IPCResponse<void>>;
+    onEvent: (callback: (event: UpdaterEvent) => void) => () => void;
+  };
 
   // System utilities
   openExternal: (url: string) => Promise<void>;

@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'react';
-import { X, ExternalLink } from 'lucide-react';
+import { X, ExternalLink, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
+
+// Mirrors the lifecycle of the in-app auto-updater (see shared/types/updater).
+// 'unsupported' = dev / unpackaged build where the updater is a no-op.
+type UpdateUiState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'available'; version: string }
+  | { status: 'downloading'; percent: number }
+  | { status: 'downloaded'; version: string }
+  | { status: 'up-to-date' }
+  | { status: 'unsupported' }
+  | { status: 'error'; message: string };
 
 interface VersionInfo {
   current: string;
@@ -19,13 +31,71 @@ interface AboutDialogProps {
 
 export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+  const [update, setUpdate] = useState<UpdateUiState>({ status: 'idle' });
 
   useEffect(() => {
     if (isOpen) {
       // Get current version info immediately
       loadCurrentVersion();
+    } else {
+      setUpdate({ status: 'idle' });
     }
   }, [isOpen]);
+
+  // Stream the async download lifecycle (progress/downloaded/error) while open.
+  // The discrete check verdict is settled by checkForUpdates() below.
+  useEffect(() => {
+    if (!isOpen) return;
+    return window.electronAPI.updater.onEvent((event) => {
+      switch (event.kind) {
+        case 'download-progress':
+          setUpdate({ status: 'downloading', percent: Math.round(event.percent) });
+          break;
+        case 'downloaded':
+          setUpdate({ status: 'downloaded', version: event.version });
+          break;
+        case 'error':
+          setUpdate({ status: 'error', message: event.message });
+          break;
+        case 'available':
+          setUpdate((prev) => (prev.status === 'idle' ? { status: 'available', version: event.version } : prev));
+          break;
+      }
+    });
+  }, [isOpen]);
+
+  const checkForUpdates = async () => {
+    setUpdate({ status: 'checking' });
+    try {
+      const result = await window.electronAPI.updater.check();
+      if (!result.success || !result.data) {
+        setUpdate({ status: 'error', message: result.error || 'Update check failed' });
+        return;
+      }
+      if (!result.data.supported) {
+        setUpdate({ status: 'unsupported' });
+      } else if (result.data.updateAvailable && result.data.latestVersion) {
+        setUpdate({ status: 'available', version: result.data.latestVersion });
+      } else {
+        setUpdate({ status: 'up-to-date' });
+      }
+    } catch (error) {
+      setUpdate({ status: 'error', message: error instanceof Error ? error.message : 'Update check failed' });
+    }
+  };
+
+  const downloadUpdate = async () => {
+    setUpdate({ status: 'downloading', percent: 0 });
+    const result = await window.electronAPI.updater.download();
+    if (!result.success) {
+      setUpdate({ status: 'error', message: result.error || 'Update download failed' });
+    }
+    // progress + 'downloaded' arrive via the event stream
+  };
+
+  const installUpdate = () => {
+    void window.electronAPI.updater.install();
+  };
 
   const loadCurrentVersion = async () => {
     try {
@@ -168,6 +238,81 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               </div>
             )}
 
+          </div>
+
+          {/* Software Updates */}
+          <div className="pt-4 border-t border-border-primary space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium text-text-secondary">Software Updates</span>
+              {update.status === 'available' ? (
+                <button
+                  onClick={downloadUpdate}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-interactive-on-dark hover:bg-interactive-hover transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download {update.version}</span>
+                </button>
+              ) : update.status === 'downloaded' ? (
+                <button
+                  onClick={installUpdate}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-interactive-on-dark hover:bg-interactive-hover transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>Restart to update</span>
+                </button>
+              ) : (
+                <button
+                  onClick={checkForUpdates}
+                  disabled={update.status === 'checking' || update.status === 'downloading'}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md border border-border-primary text-text-secondary hover:text-text-primary hover:bg-surface-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-4 h-4 ${update.status === 'checking' ? 'animate-spin' : ''}`} />
+                  <span>{update.status === 'checking' ? 'Checking…' : 'Check for updates'}</span>
+                </button>
+              )}
+            </div>
+
+            {update.status === 'downloading' && (
+              <div className="space-y-1.5">
+                <div className="h-1.5 w-full rounded-full bg-surface-secondary overflow-hidden">
+                  <div
+                    className="h-full bg-interactive transition-all duration-200"
+                    style={{ width: `${update.percent}%` }}
+                  />
+                </div>
+                <p className="text-xs text-text-tertiary">Downloading update… {update.percent}%</p>
+              </div>
+            )}
+
+            {update.status === 'up-to-date' && (
+              <p className="flex items-center space-x-1.5 text-xs text-text-tertiary">
+                <CheckCircle className="w-3.5 h-3.5 text-status-success" />
+                <span>You're on the latest version.</span>
+              </p>
+            )}
+
+            {update.status === 'available' && (
+              <p className="text-xs text-text-tertiary">Version {update.version} is available.</p>
+            )}
+
+            {update.status === 'downloaded' && (
+              <p className="text-xs text-text-tertiary">
+                Version {update.version} is ready. Restart to finish updating.
+              </p>
+            )}
+
+            {update.status === 'unsupported' && (
+              <p className="text-xs text-text-tertiary">
+                Auto-update is available in packaged builds only.
+              </p>
+            )}
+
+            {update.status === 'error' && (
+              <p className="flex items-center space-x-1.5 text-xs text-status-error">
+                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>{update.message}</span>
+              </p>
+            )}
           </div>
 
           {/* Discord Community Button */}

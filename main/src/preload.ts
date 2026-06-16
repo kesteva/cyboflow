@@ -4,6 +4,7 @@ import type { CreateSessionRequest, Session } from './types/session';
 import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
 import type { ToolPanel } from '../../shared/types/panels';
+import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 
 interface LogEntry {
   timestamp: string;
@@ -167,6 +168,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Version info
   getVersionInfo: (): Promise<IPCResponse> => ipcRenderer.invoke('version:get-info'),
+
+  // In-app auto-updater (electron-updater → updates.cyboflow.com). check/download/
+  // install are user-triggered; onEvent streams the lifecycle (see shared/types/updater).
+  updater: {
+    check: (): Promise<IPCResponse<UpdateCheckResult>> => ipcRenderer.invoke('updater:check'),
+    download: (): Promise<IPCResponse<void>> => ipcRenderer.invoke('updater:download'),
+    install: (): Promise<IPCResponse<void>> => ipcRenderer.invoke('updater:install'),
+    onEvent: (callback: (event: UpdaterEvent) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, payload: UpdaterEvent) => callback(payload);
+      ipcRenderer.on('updater:event', wrappedCallback);
+      return () => ipcRenderer.removeListener('updater:event', wrappedCallback);
+    },
+  },
 
   // System utilities
   openExternal: (url: string): Promise<IPCResponse> => ipcRenderer.invoke('openExternal', url),
