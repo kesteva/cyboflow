@@ -54,6 +54,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   return db;
 }
 
@@ -61,7 +62,7 @@ function columnsOf(db: Database.Database, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as TableInfoRow[]).map((r) => r.name).sort();
 }
 
-describe('entity schema parity (migrations 015 + 024)', () => {
+describe('entity schema parity (migrations 015 + 024 + 028)', () => {
   it('IdeaRow field names match the `ideas` columns exactly', () => {
     const db = buildDb();
     const ideaRowKeys: Array<keyof IdeaRow> = [
@@ -80,6 +81,7 @@ describe('entity schema parity (migrations 015 + 024)', () => {
       'created_at',
       'updated_at',
       'archived_at',
+      'attachments',
     ];
     expect([...ideaRowKeys].sort()).toEqual(columnsOf(db, 'ideas'));
     db.close();

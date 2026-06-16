@@ -256,6 +256,7 @@ export interface IdeaRow {
   created_at: string;
   updated_at: string;
   archived_at: string | null; // 024 ALTER appends — archive-in-place stamp
+  attachments: string | null; // 028 ALTER appends — JSON IdeaAttachment[] (ideas-only); NULL = none
 }
 
 /**

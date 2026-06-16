@@ -1,0 +1,28 @@
+-- Migration 028: image attachments on ideas (`attachments` JSON column).
+--
+-- An idea may carry one or more user-attached images (pasted into / dropped on
+-- the idea editor's body field, or picked from disk). The image BYTES live on
+-- disk under CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file> (written by the
+-- ideas:save-attachments IPC handler, the same artifact machinery as
+-- sessions:save-images). This column stores only the small JSON METADATA array
+-- — one IdeaAttachment object per image:
+--   [{ "id", "name", "path", "type", "size" }, ...]
+-- (`path` is the absolute on-disk file path; NULL/absent = no attachments).
+--
+-- Ideas-only by design: the flow agents never mint image attachments (humans
+-- paste them), so epics/tasks get no such column and the cyboflow_* MCP tools
+-- are NOT extended. The column is written exclusively through the chokepoint
+-- (TaskChangeRouter.applyChange) like every other entity field, so each change
+-- still bumps `version` and appends an `entity_events` delta.
+--
+-- NUMBERING: 028 is the next free file after 027_session_substrate.sql.
+--
+-- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support
+-- it. Re-running this file (after a ledger reset) fails on the ALTER with
+-- 'duplicate column name: attachments', which runFileBasedMigrations() treats as
+-- the idempotency signal (same mechanism as 013/017/018/024).
+--
+-- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in
+-- a this.transaction(...) call, so an inner BEGIN would nest.
+
+ALTER TABLE ideas ADD COLUMN attachments TEXT;
