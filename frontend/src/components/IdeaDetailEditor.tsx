@@ -50,6 +50,10 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
   // Attachments live in their own column and are NOT on the BacklogTaskItem read
   // model — fetch them when the editor opens and feed the attachment hook.
   const [initialAttachments, setInitialAttachments] = useState<IdeaAttachment[]>([]);
+  // Guards the save from clobbering existing attachments with [] before the
+  // fetch above resolves: attachments are only included in the update once loaded
+  // (undefined = "no change" at the chokepoint, so existing ones are preserved).
+  const [attachmentsLoaded, setAttachmentsLoaded] = useState(false);
   const attachmentsCtl = useIdeaAttachments(idea.id, initialAttachments);
 
   // Reseed the form whenever a different idea (or a new version of it) opens.
@@ -61,6 +65,7 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
     setBody(idea.body ?? '');
     setBodyMode('write');
     setError(null);
+    setAttachmentsLoaded(false);
     let cancelled = false;
     trpc.cyboflow.tasks.getAttachments
       .query({ ideaId: idea.id })
@@ -69,6 +74,9 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
       })
       .catch(() => {
         if (!cancelled) setInitialAttachments([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAttachmentsLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -87,7 +95,8 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
         summary: summary.trim().length > 0 ? summary.trim() : null,
         body: body.length > 0 ? body : null,
         scope: scope === '' ? null : scope,
-        attachments: attachmentsCtl.attachments,
+        // Only send attachments once loaded — otherwise omit (preserve existing).
+        ...(attachmentsLoaded ? { attachments: attachmentsCtl.attachments } : {}),
         expectedVersion: idea.version,
       });
       onSaved?.(result.taskId);

@@ -103,6 +103,10 @@ describe('IdeaDetailEditor', () => {
     const onSaved = vi.fn();
     render(<IdeaDetailEditor idea={makeIdea()} isOpen onClose={onClose} onSaved={onSaved} />);
 
+    // Let the attachments fetch resolve so the save includes attachments (the
+    // editor omits them until loaded, to avoid clobbering existing ones).
+    await waitFor(() => expect(mockGetAttachments).toHaveBeenCalled());
+
     fireEvent.change(screen.getByTestId('idea-body-input'), {
       target: { value: '# New body\n\nUpdated markdown.' },
     });
