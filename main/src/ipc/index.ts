@@ -20,6 +20,7 @@ import { registerClaudePanelHandlers } from './claudePanel';
 import { registerEditorPanelHandlers } from './editorPanel';
 import { registerNimbalystHandlers } from './nimbalyst';
 import { registerCyboflowHandlers } from './cyboflow';
+import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 
 
 export function registerIpcHandlers(services: AppServices): void {
@@ -43,4 +44,5 @@ export function registerIpcHandlers(services: AppServices): void {
   registerEditorPanelHandlers(ipcMain, services);
   registerNimbalystHandlers(ipcMain, services);
   registerCyboflowHandlers(ipcMain, services);
+  registerIdeaAttachmentHandlers(ipcMain, services);
 }

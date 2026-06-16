@@ -158,6 +158,15 @@ interface ElectronAPI {
     saveLargeText: (sessionId: string, text: string) => Promise<string>;
   };
 
+  // Idea image attachments (migration 028) — raw file IO (not IPCResponse).
+  ideas: {
+    saveAttachments: (
+      ownerKey: string,
+      images: Array<{ name: string; dataUrl: string; type: string }>,
+    ) => Promise<Array<{ id: string; name: string; path: string; type: string; size: number }>>;
+    loadAttachments: (paths: string[]) => Promise<Array<{ path: string; dataUrl: string }>>;
+  };
+
   // Project management
   projects: {
     // IPCDataResponse so callers can do response.data.find(...) directly after success check

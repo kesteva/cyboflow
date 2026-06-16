@@ -260,6 +260,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     addLog: (sessionId: string, entry: LogEntry): Promise<IPCResponse> => ipcRenderer.invoke('sessions:add-log', sessionId, entry),
   },
 
+  // Idea image attachments (migration 028) — raw file IO, returns plain values
+  // (NOT IPCResponse), mirroring sessions.saveImages.
+  ideas: {
+    saveAttachments: (
+      ownerKey: string,
+      images: Array<{ name: string; dataUrl: string; type: string }>,
+    ): Promise<Array<{ id: string; name: string; path: string; type: string; size: number }>> =>
+      ipcRenderer.invoke('ideas:save-attachments', ownerKey, images),
+    loadAttachments: (paths: string[]): Promise<Array<{ path: string; dataUrl: string }>> =>
+      ipcRenderer.invoke('ideas:load-attachments', paths),
+  },
+
   // Project management
   projects: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-all'),
