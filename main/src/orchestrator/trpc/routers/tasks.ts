@@ -29,7 +29,7 @@
 import { TRPCError } from '@trpc/server';
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
-import type { BacklogTaskItem, Board, TaskChangedEvent } from '../../../../../shared/types/tasks';
+import type { BacklogTaskItem, Board, IdeaAttachment, TaskChangedEvent } from '../../../../../shared/types/tasks';
 import {
   TaskChangeRouter,
   TaskChangeError,
@@ -37,7 +37,7 @@ import {
   taskProjectChannel,
   TASK_ALL_CHANNEL,
 } from '../../taskChangeRouter';
-import { selectProjectBacklog, selectTaskById, boardsForProject } from '../../taskListing';
+import { selectProjectBacklog, selectTaskById, boardsForProject, selectIdeaAttachments } from '../../taskListing';
 import { eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,19 @@ const taskTypeSchema = z.enum(['idea', 'epic', 'task']);
 const prioritySchema = z.enum(['P0', 'P1', 'P2']);
 const scopeSchema = z.enum(['small', 'large']);
 
+/**
+ * One idea image attachment (migration 028). Mirrors the IdeaAttachment shared
+ * type; `path` is the absolute on-disk path returned by the ideas:save-attachments
+ * IPC. Ideas-only — the chokepoint ignores it on epics/tasks.
+ */
+const attachmentSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  path: z.string().min(1),
+  type: z.string(),
+  size: z.number().int().nonnegative(),
+});
+
 export const tasksRouter = router({
   /**
    * List the full backlog — top-level items with epics nesting their child
@@ -123,6 +136,25 @@ export const tasksRouter = router({
     }),
 
   /**
+   * Fetch the image attachments (migration 028) for a single idea. Kept OUT of
+   * the BacklogTaskItem read model (attachments are only needed when the idea
+   * editor opens), so the editor fetches them on demand. Returns [] for a
+   * non-idea / missing id / no attachments. The image BYTES are loaded
+   * separately via the ideas:load-attachments IPC (renderer → dataURL).
+   */
+  getAttachments: protectedProcedure
+    .input(z.object({ ideaId: z.string().min(1) }))
+    .query(async ({ input, ctx }): Promise<IdeaAttachment[]> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: '[tasks.getAttachments] db not wired into tRPC context',
+        });
+      }
+      return selectIdeaAttachments(ctx.db, input.ideaId);
+    }),
+
+  /**
    * List boards with their ordered stages, so the UI can render one Kanban
    * column per stage. `projectId: null` returns EVERY project's boards
    * (ordered project_id, is_default DESC) for the cross-project board; a number
@@ -158,6 +190,8 @@ export const tasksRouter = router({
         body: z.string().nullable().optional(),
         priority: prioritySchema.optional(),
         repo: z.string().nullable().optional(),
+        /** Image attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
+        attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
         boardId: z.string().optional(),
         initialStageId: z.string().optional(),
@@ -173,6 +207,7 @@ export const tasksRouter = router({
           body: input.body,
           priority: input.priority,
           repo: input.repo,
+          attachments: input.attachments,
           parentEpicId: input.parentEpicId,
           boardId: input.boardId,
           initialStageId: input.initialStageId,
@@ -204,6 +239,8 @@ export const tasksRouter = router({
         repo: z.string().nullable().optional(),
         /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         scope: scopeSchema.nullable().optional(),
+        /** Image attachments — whole-array replace; only meaningful on type='idea'. */
+        attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
         expectedVersion: z.number().int().optional(),
       }),
@@ -220,6 +257,7 @@ export const tasksRouter = router({
             ...(input.priority !== undefined ? { priority: input.priority } : {}),
             ...(input.repo !== undefined ? { repo: input.repo } : {}),
             ...(input.scope !== undefined ? { scope: input.scope } : {}),
+            ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
           },
           ...(input.parentEpicId !== undefined ? { parentEpicId: input.parentEpicId } : {}),
           ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),

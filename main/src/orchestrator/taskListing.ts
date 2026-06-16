@@ -45,12 +45,33 @@ import type {
   Board,
   BoardStage,
   FlowOverlay,
+  IdeaAttachment,
   TaskDependencyRef,
 } from '../../../shared/types/tasks';
 import type { DatabaseLike } from './types';
 
 /** The board stage position considered "done" — a blocking prereq is satisfied here. */
 const DONE_POSITION = 9;
+
+/**
+ * Read the image attachments (migration 028) for a single idea. Attachments are
+ * an ideas-only concern kept OUT of the BacklogTaskItem UNION read model (they
+ * are only needed when the idea editor opens), so the editor fetches them on
+ * demand via tasks.getAttachments → here. Returns [] for a missing idea, a NULL
+ * column, or unparseable JSON (defensive — never throws on bad stored data).
+ */
+export function selectIdeaAttachments(db: DatabaseLike, ideaId: string): IdeaAttachment[] {
+  const row = db
+    .prepare('SELECT attachments FROM ideas WHERE id = ?')
+    .get(ideaId) as { attachments: string | null } | undefined;
+  if (!row || !row.attachments) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.attachments);
+    return Array.isArray(parsed) ? (parsed as IdeaAttachment[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal DB row shapes for the SELECTs below. SQLite BOOLEAN columns surface
