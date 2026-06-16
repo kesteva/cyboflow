@@ -634,6 +634,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Set in cliEnv (which overrides the inherited systemEnv in spawnCliProcess).
     env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
 
+    // Signal the terminal background luminance so claude picks a theme that
+    // matches cyboflow's xterm — most visibly the user-message banner, which
+    // claude fills with ANSI "white": light + subtle on a light terminal, but
+    // glaring on a dark one if claude wrongly assumes a light background.
+    // COLORFGBG is the conventional `fg;bg` colour-index signal read by many
+    // TUIs: a light terminal is "0;15" (dark text on light bg), a dark terminal
+    // "15;0". cliEnv overrides the inherited systemEnv (see spawnCliProcess), so
+    // this asserts cyboflow's ACTUAL bg rather than the launching shell's.
+    //
+    // Detection happens once at spawn: a live theme toggle cannot restyle a
+    // running REPL, so the banner only matches when the session is (re)started
+    // under that theme. Defaults to the app's default paper (light) when unset.
+    const theme = this.configManager?.getConfig()?.theme;
+    env.COLORFGBG = theme === 'dark' ? '15;0' : '0;15';
+
     return env;
   }
 

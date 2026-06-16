@@ -245,9 +245,13 @@ function createMockSessionManager(overrides?: Partial<Omit<SessionManager, 'db'>
   } as unknown as SessionManager;
 }
 
-function createMockConfigManager(claudeExecutablePath?: string, defaultAgentPermissionMode?: PermissionMode): ConfigManager {
+function createMockConfigManager(
+  claudeExecutablePath?: string,
+  defaultAgentPermissionMode?: PermissionMode,
+  theme?: 'paper' | 'light' | 'dark',
+): ConfigManager {
   return {
-    getConfig: vi.fn(() => ({ claudeExecutablePath })),
+    getConfig: vi.fn(() => ({ claudeExecutablePath, theme })),
     // Global 4-mode default consumed by resolveSessionAgentPermissionMode (the
     // quick/legacy-session seam mirrored from the SDK twin).
     getDefaultAgentPermissionMode: vi.fn(() => defaultAgentPermissionMode),
@@ -528,6 +532,38 @@ describe('InteractiveClaudeManager', () => {
         prompt: 'hi',
       });
       expect(env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE).toBe('1');
+    });
+
+    // COLORFGBG signals the terminal background luminance so claude picks a
+    // matching theme (notably the user-message banner fill). Light bg → "0;15",
+    // dark bg → "15;0".
+    const opts = { panelId: 'p1', sessionId: 's1', worktreePath: '/tmp/wt', prompt: 'hi' };
+
+    function mgrWithTheme(theme?: 'paper' | 'light' | 'dark'): TestableInteractiveClaudeManager {
+      return new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(undefined, undefined, theme),
+        db,
+      );
+    }
+
+    it('sets COLORFGBG="15;0" (dark) when config theme is dark', async () => {
+      const env = await mgrWithTheme('dark').callInitializeCliEnvironment(opts);
+      expect(env.COLORFGBG).toBe('15;0');
+    });
+
+    it.each(['paper', 'light'] as const)(
+      'sets COLORFGBG="0;15" (light) when config theme is %s',
+      async (theme) => {
+        const env = await mgrWithTheme(theme).callInitializeCliEnvironment(opts);
+        expect(env.COLORFGBG).toBe('0;15');
+      },
+    );
+
+    it('defaults COLORFGBG to light ("0;15") when theme is unset', async () => {
+      const env = await mgr.callInitializeCliEnvironment(opts);
+      expect(env.COLORFGBG).toBe('0;15');
     });
   });
 
