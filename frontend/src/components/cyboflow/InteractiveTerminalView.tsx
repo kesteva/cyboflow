@@ -193,12 +193,22 @@ export function InteractiveTerminalView({
   // the resolved colors at construction, so setting `options.theme` is what
   // pushes the new CSS-variable values into the renderer; `refresh()` repaints
   // already-written cells (e.g. a user-message banner) with the new palette.
-  // Mirrors TerminalPanel's theme effect. Skipped until the terminal exists.
+  //
+  // Deferred one frame: ThemeProvider applies the paper/dark/light class to
+  // <html> in its OWN effect, and as a PARENT its effect runs AFTER this child's
+  // (React fires child effects first). Reading getTerminalTheme() synchronously
+  // here would resolve the CSS variables against the OUTGOING theme's class —
+  // one toggle stale. requestAnimationFrame runs after both effects + the class
+  // swap, so the palette read is current.
   useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    term.options.theme = getTerminalTheme();
-    if (term.rows > 0) term.refresh(0, term.rows - 1);
+    if (!termRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      const term = termRef.current;
+      if (!term) return;
+      term.options.theme = getTerminalTheme();
+      if (term.rows > 0) term.refresh(0, term.rows - 1);
+    });
+    return () => cancelAnimationFrame(raf);
   }, [theme]);
 
   const elapsed = useElapsed(isInteractive);
