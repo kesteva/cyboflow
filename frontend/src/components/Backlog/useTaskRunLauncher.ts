@@ -4,18 +4,20 @@
  * launch-task param `taskId`.
  *
  * The run-launch entrypoint requires a workflowId. The backlog card has no
- * workflow picker of its own, so we resolve the project's workflow list and pick
- * the built-in **Planner** flow BY NAME — ideas are decomposed by the Planner,
- * and that was the historical default before `compound` was added as a built-in.
- * Resolving by name keeps a newly-added flow that lands first in the list from
- * hijacking the one-click Run. Falls back to the first workflow when no
- * `planner` exists (e.g. a custom-only project).
+ * workflow picker of its own, so we resolve the built-in flow BY NAME from the
+ * entity type — resolving by name keeps a newly-added flow that lands first in
+ * the list (e.g. `compound`) from hijacking the one-click Run. Falls back to the
+ * first workflow when the chosen flow doesn't exist (e.g. a custom-only project):
+ *   - idea / epic → **Planner**  (an idea is decomposed; an epic is elaborated)
+ *   - task        → **Sprint**   (Sprint is the task-execution flow)
  *
- * SEED PARAM by entity type: an IDEA seeds the Planner via `ideaId` (the run
- * records `seed_idea_id`; RunExecutor.getPrompt injects a `# Selected idea`
- * block, including any attachment paths). Other entities link via `taskId` so
- * the task's execution stage derives once the run is wired through the
- * orchestrator.
+ * SEED PARAM by entity type:
+ *   - idea → `ideaId`        — the run records `seed_idea_id`; RunExecutor
+ *                              .getPrompt injects a `# Selected idea` block,
+ *                              including any attachment paths.
+ *   - task → `taskIds:[id]`  — Sprint seeds from a batch; a single-task run is a
+ *                              batch of one (creates the lane + `batch_id`).
+ *   - epic → `taskId`        — links the run for execution-stage derivation.
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
@@ -41,9 +43,11 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
       setLaunchingTaskId(taskId);
       try {
         const workflows = await trpc.cyboflow.workflows.list.query({ projectId });
-        // Resolve the Planner by name (NOT workflows[0] — built-in ordering is not
-        // a contract; `compound` now lands first). Fall back to the first flow.
-        const workflowId = workflows.find((w) => w.name === 'planner')?.id ?? workflows[0]?.id;
+        // Resolve the flow BY NAME from the entity type (NOT workflows[0] —
+        // built-in ordering is not a contract; `compound` now lands first).
+        // Tasks → Sprint, ideas/epics → Planner. Fall back to the first flow.
+        const wantName = type === 'task' ? 'sprint' : 'planner';
+        const workflowId = workflows.find((w) => w.name === wantName)?.id ?? workflows[0]?.id;
         if (!workflowId) {
           setError('No workflow available to run');
           return null;
@@ -53,9 +57,14 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
         // fresh one) so the run executes in the session worktree and Diff/File-Explorer
         // can follow it. Without this the run takes the legacy parentless path.
         const sessionId = await ensureSessionForLaunch(projectId);
-        // Ideas seed the Planner via ideaId (→ `# Selected idea` block + attachment
-        // paths); other entities link via taskId for execution-stage derivation.
-        const seed = type === 'idea' ? { ideaId: taskId } : { taskId };
+        // Seed by entity type: idea → ideaId (`# Selected idea` block + attachment
+        // paths); task → Sprint batch of one (taskIds); epic → taskId link.
+        const seed =
+          type === 'idea'
+            ? { ideaId: taskId }
+            : type === 'task'
+              ? { taskIds: [taskId] }
+              : { taskId };
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
