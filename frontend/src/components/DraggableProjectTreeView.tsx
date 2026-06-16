@@ -1131,6 +1131,21 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                     </button>
                   </div>
 
+                  {/* Start-new-session — always available beneath every project,
+                      whether expanded/collapsed or with/without children. */}
+                  <div className="ml-6 mt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
+                      }}
+                      className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Start new session</span>
+                    </button>
+                  </div>
+
                   {isExpanded && hasChildren && (
                     <div className="relative mt-1 space-y-1">
                       <div className="absolute top-0 bottom-0 w-px bg-border-secondary" style={{ left: '8px' }} />
@@ -1251,18 +1266,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         );
                       })}
 
-                      {/* Start-session + Add-folder buttons */}
+                      {/* Add-folder button */}
                       <div className="ml-6 mt-2 border-t border-border-primary pt-2 space-y-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
-                          }}
-                          className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>Start new session</span>
-                        </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1276,22 +1281,6 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                           <span>Add Folder</span>
                         </button>
                       </div>
-                    </div>
-                  )}
-
-                  {/* Empty state for expanded project with zero children — Start new session CTA */}
-                  {isExpanded && !hasChildren && (
-                    <div className="px-4 py-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
-                        }}
-                        className="w-full px-2 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center justify-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>Start new session</span>
-                      </button>
                     </div>
                   )}
                 </div>
