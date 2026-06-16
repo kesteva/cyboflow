@@ -59,7 +59,7 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike } from './orchestrator/runExecutor';
-import { selectTaskById } from './orchestrator/taskListing';
+import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -799,6 +799,12 @@ async function initializeServices() {
             body: item.body,
             scope: item.scope,
             ref: item.ref,
+            // Attachments are ideas-only (migration 028) and kept off the read
+            // model — resolve them directly so getPrompt can list their paths.
+            attachments:
+              item.type === 'idea'
+                ? selectIdeaAttachments(cyboflowDb, id).map((a) => ({ name: a.name, path: a.path }))
+                : null,
           }
         : null;
     },

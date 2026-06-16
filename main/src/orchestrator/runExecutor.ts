@@ -63,6 +63,13 @@ export interface IdeaBodyReaderLike {
      * seed-tasks renderer falls back to the raw entity id.
      */
     ref?: string | null;
+    /**
+     * Image attachments on the entity (ideas only, migration 028). When present,
+     * getPrompt() appends their absolute on-disk paths to the `# Selected idea`
+     * block so the planner can read the images with its Read tool. OPTIONAL so
+     * pre-existing stubs/adapters keep compiling.
+     */
+    attachments?: Array<{ name: string; path: string }> | null;
   } | null;
 }
 
@@ -732,6 +739,20 @@ export class RunExecutor {
     if (title !== '') parts.push(`## ${title}`);
     if (summary !== '') parts.push(summary);
     if (body !== '') parts.push(body);
+
+    // Attachments (ideas only, migration 028): surface the absolute on-disk
+    // paths so the planner can open the images with its Read tool. Skip entries
+    // missing a path; render nothing when there are none.
+    const attachments = (idea.attachments ?? []).filter((a) => a.path?.trim());
+    if (attachments.length > 0) {
+      const lines = attachments.map(
+        (a) => `- ${a.name?.trim() || 'image'}: ${a.path.trim()}`,
+      );
+      parts.push(
+        ['### Attached images', 'The user attached these images — read them with the Read tool:', ...lines].join('\n'),
+      );
+    }
+
     return parts.join('\n\n');
   }
 

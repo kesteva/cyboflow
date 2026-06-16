@@ -678,6 +678,41 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
     expect(prompt.indexOf('# Selected idea')).toBeLessThan(prompt.indexOf('PLAN BODY'));
   });
 
+  it('lists attachment paths in the `# Selected idea` block when the idea has images (migration 028)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-ATT' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-ATT': {
+        type: 'idea',
+        title: 'Idea with images',
+        summary: null,
+        body: 'Body.',
+        scope: null,
+        attachments: [
+          { name: 'mock.png', path: '/cy/artifacts/ideas/IDEA-ATT/att_1.png' },
+          { name: 'flow.jpg', path: '/cy/artifacts/ideas/IDEA-ATT/att_2.jpg' },
+        ],
+      },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt).toContain('### Attached images');
+    expect(prompt).toContain('- mock.png: /cy/artifacts/ideas/IDEA-ATT/att_1.png');
+    expect(prompt).toContain('- flow.jpg: /cy/artifacts/ideas/IDEA-ATT/att_2.jpg');
+    // Still a valid Selected-idea block with the base prompt preserved after it.
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt.indexOf('### Attached images')).toBeLessThan(prompt.indexOf('PLAN BODY'));
+  });
+
   it('omits the summary line when the idea has no summary', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-2' });
     const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
