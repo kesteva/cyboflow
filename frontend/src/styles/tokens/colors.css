@@ -233,7 +233,7 @@
      expecting a near-bg light tone. Mapping them to dark inks (the old
      --ink-2 / --ink) inverted that and painted a dark brown band behind each
      sent message. Keep brightness order: black < bright-black < white < bright-white. */
-  --color-terminal-white: var(--paper-2);
+  --color-terminal-white: #dccfb1;
   --color-terminal-bright-black: var(--ink-3);
   --color-terminal-bright-red: var(--terracotta);
   --color-terminal-bright-green: #3fa56f;
