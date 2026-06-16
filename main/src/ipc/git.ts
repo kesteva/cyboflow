@@ -13,7 +13,7 @@ import type { GitCommit } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
-import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
+import { stampSessionRunsOutcome, stampSessionRunsPrOpen } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 
 // Extended type for git system virtual panels
@@ -1353,6 +1353,26 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         data: successMessage,
         timestamp: new Date()
       });
+
+      // Create-PR close-out (mirrors the session-merge close-out, outcome='pr_open'):
+      // a successful push delivers the session's artifact to origin, so its runs are
+      // a SUCCESS — not a dismiss. The Create-PR dialog follows this push with a
+      // `sessions:delete`; that dismiss path's `cancelHostedRuns` would otherwise
+      // stamp the still-running run `status='canceled', outcome='canceled'` (the bug
+      // where a successful Create-PR showed CANCELED). Completing the run HERE — to
+      // the same `completed`/`pr_open` terminal the run-scoped `runs.createPr`
+      // records — makes that later cancel a no-op (it only touches non-terminal
+      // runs). Sprint lanes are finalized exactly as the merge close-out does.
+      // Fail-soft: this bookkeeping must never fail the push response.
+      try {
+        await finalizeSprintLanesOnSessionMerge(sessionId);
+        const closed = stampSessionRunsPrOpen(makeDatabaseLike(databaseService), sessionId);
+        if (closed > 0) {
+          console.log(`[IPC:git] Create-PR close-out: marked ${closed} run(s) completed/pr_open for session ${sessionId}`);
+        }
+      } catch (closeoutError) {
+        console.error(`[IPC:git] Create-PR close-out failed for session ${sessionId} (push unaffected):`, closeoutError);
+      }
 
       // Check if this is a main repo session pushing to main branch
       if (session.isMainRepo && session.projectId !== undefined) {

@@ -243,3 +243,34 @@ export function stampSessionRunsOutcome(
     .run(outcome, sessionId) as { changes: number };
   return info.changes;
 }
+
+/**
+ * Close out a session's runs as a SUCCESSFUL pull request, used by the
+ * session-scoped Create-PR flow (ipc/git.ts `sessions:git-push`).
+ *
+ * Unlike {@link stampSessionRunsOutcome} (outcome only), this marks each
+ * non-terminal run TERMINAL as `status='completed', outcome='pr_open'` — the
+ * same success terminal the run-scoped `runs.createPr` records. It is invoked
+ * AFTER a successful push but BEFORE the Create-PR dialog's follow-up
+ * `sessions:delete`. That matters: the dismiss path's `cancelHostedRuns` only
+ * acts on NON-terminal runs, so completing the run here makes the subsequent
+ * cancel a no-op instead of overwriting the run to `status='canceled',
+ * outcome='canceled'` — the bug where a successful Create-PR showed CANCELED.
+ *
+ * The `status NOT IN (terminal)` guard means a run that already reached a
+ * terminal state (incl. its own recorded outcome) is left untouched. Returns
+ * the number of rows completed so callers can log it.
+ */
+export function stampSessionRunsPrOpen(db: DatabaseLike, sessionId: string): number {
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET status = 'completed',
+              outcome = 'pr_open',
+              ended_at = CURRENT_TIMESTAMP,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+    )
+    .run(sessionId) as { changes: number };
+  return info.changes;
+}

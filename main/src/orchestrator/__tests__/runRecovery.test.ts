@@ -27,6 +27,7 @@ import {
   recoverArchivedSessionRunOrphans,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
+  stampSessionRunsPrOpen,
 } from '../runRecovery';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -446,5 +447,74 @@ describe('stampSessionRunsOutcome', () => {
     const db = makeDb();
     const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-empty', 'dismissed');
     expect(stamped).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stampSessionRunsPrOpen — the session-scoped Create-PR close-out. Marks a
+// session's NON-terminal runs TERMINAL as completed/pr_open so the dismiss that
+// the Create-PR dialog issues next no-ops instead of re-stamping them canceled.
+// ---------------------------------------------------------------------------
+
+describe('stampSessionRunsPrOpen', () => {
+  function makeDb() {
+    return createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+  }
+
+  function setSession(db: ReturnType<typeof createTestDb>, runId: string, sessionId: string): void {
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run(sessionId, runId);
+  }
+
+  function readRow(db: ReturnType<typeof createTestDb>, runId: string): { status: string; outcome: string | null } {
+    return db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get(runId) as {
+      status: string;
+      outcome: string | null;
+    };
+  }
+
+  it("completes a session's non-terminal runs as completed/pr_open", () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-pr-a', status: 'running' });
+    seedRun(db, { id: 'run-pr-b', status: 'awaiting_review' });
+    setSession(db, 'run-pr-a', 'sess-pr');
+    setSession(db, 'run-pr-b', 'sess-pr');
+
+    const closed = stampSessionRunsPrOpen(dbAdapter(db), 'sess-pr');
+
+    expect(closed).toBe(2);
+    expect(readRow(db, 'run-pr-a')).toMatchObject({ status: 'completed', outcome: 'pr_open' });
+    expect(readRow(db, 'run-pr-b')).toMatchObject({ status: 'completed', outcome: 'pr_open' });
+  });
+
+  it('leaves already-terminal runs untouched (the later dismiss-cancel is a no-op)', () => {
+    const db = makeDb();
+    // A run already canceled must NOT be revived to completed.
+    seedRun(db, { id: 'run-pr-term', status: 'canceled' });
+    db.prepare("UPDATE workflow_runs SET outcome = 'canceled' WHERE id = ?").run('run-pr-term');
+    setSession(db, 'run-pr-term', 'sess-pr-term');
+
+    const closed = stampSessionRunsPrOpen(dbAdapter(db), 'sess-pr-term');
+
+    expect(closed).toBe(0);
+    expect(readRow(db, 'run-pr-term')).toMatchObject({ status: 'canceled', outcome: 'canceled' });
+  });
+
+  it('does not touch runs belonging to a different session', () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-pr-mine', status: 'running' });
+    seedRun(db, { id: 'run-pr-other', status: 'running' });
+    setSession(db, 'run-pr-mine', 'sess-pr-mine');
+    setSession(db, 'run-pr-other', 'sess-pr-other');
+
+    const closed = stampSessionRunsPrOpen(dbAdapter(db), 'sess-pr-mine');
+
+    expect(closed).toBe(1);
+    expect(readRow(db, 'run-pr-mine')).toMatchObject({ status: 'completed', outcome: 'pr_open' });
+    expect(readRow(db, 'run-pr-other')).toMatchObject({ status: 'running', outcome: null });
+  });
+
+  it('returns 0 when a session has no runs', () => {
+    const db = makeDb();
+    expect(stampSessionRunsPrOpen(dbAdapter(db), 'sess-pr-empty')).toBe(0);
   });
 });
