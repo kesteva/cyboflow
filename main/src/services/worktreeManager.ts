@@ -1076,7 +1076,13 @@ export class WorktreeManager {
 
   async gitPush(worktreePath: string): Promise<{ output: string }> {
     try {
-      const { stdout, stderr } = await execWithShellPath('git push', { cwd: worktreePath });
+      // Push the current branch and SET its upstream in one shot. A worktree
+      // branch (e.g. a quick-session `quick-…` branch) has never been pushed and
+      // has no tracking upstream, so a bare `git push` fails with "The current
+      // branch … has no upstream branch". `-u origin HEAD` pushes the current
+      // branch to origin/<same-name> and records the tracking ref; it is
+      // idempotent for an already-tracked branch (re-affirms the same upstream).
+      const { stdout, stderr } = await execWithShellPath('git push -u origin HEAD', { cwd: worktreePath });
       const output = stdout || stderr || 'Push completed successfully';
       
       return { output };
