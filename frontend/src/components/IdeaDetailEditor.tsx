@@ -18,8 +18,10 @@
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { MarkdownPreview } from './MarkdownPreview';
+import { IdeaAttachmentStrip } from './cyboflow/IdeaAttachmentStrip';
+import { useIdeaAttachments } from '../hooks/useIdeaAttachments';
 import { trpc } from '../trpc/client';
-import type { BacklogTaskItem, IdeaScope } from '../../../shared/types/tasks';
+import type { BacklogTaskItem, IdeaAttachment, IdeaScope } from '../../../shared/types/tasks';
 
 interface IdeaDetailEditorProps {
   /** The idea being edited (its current field values seed the form). */
@@ -45,6 +47,10 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
   const [bodyMode, setBodyMode] = useState<'write' | 'preview'>('write');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Attachments live in their own column and are NOT on the BacklogTaskItem read
+  // model — fetch them when the editor opens and feed the attachment hook.
+  const [initialAttachments, setInitialAttachments] = useState<IdeaAttachment[]>([]);
+  const attachmentsCtl = useIdeaAttachments(idea.id, initialAttachments);
 
   // Reseed the form whenever a different idea (or a new version of it) opens.
   useEffect(() => {
@@ -55,6 +61,18 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
     setBody(idea.body ?? '');
     setBodyMode('write');
     setError(null);
+    let cancelled = false;
+    trpc.cyboflow.tasks.getAttachments
+      .query({ ideaId: idea.id })
+      .then((rows) => {
+        if (!cancelled) setInitialAttachments(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setInitialAttachments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, idea.id, idea.version, idea.title, idea.summary, idea.scope, idea.body]);
 
   const handleSubmit = async (): Promise<void> => {
@@ -69,6 +87,7 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
         summary: summary.trim().length > 0 ? summary.trim() : null,
         body: body.length > 0 ? body : null,
         scope: scope === '' ? null : scope,
+        attachments: attachmentsCtl.attachments,
         expectedVersion: idea.version,
       });
       onSaved?.(result.taskId);
@@ -161,8 +180,11 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
               <textarea
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
+                onPaste={attachmentsCtl.handlePaste}
+                onDrop={attachmentsCtl.handleDrop}
+                onDragOver={(e) => e.preventDefault()}
                 rows={10}
-                placeholder="# Idea&#10;&#10;Markdown body — the full spec / notes for this idea."
+                placeholder="# Idea&#10;&#10;Markdown body — the full spec / notes for this idea.&#10;Paste or drop an image to attach it."
                 className="resize-y rounded-input border border-border-primary bg-input-bg px-2 py-1.5 font-mono text-sm text-input-text placeholder:text-input-placeholder"
                 aria-label="Idea body"
                 data-testid="idea-body-input"
@@ -180,6 +202,14 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
               </div>
             )}
           </div>
+
+          <IdeaAttachmentStrip
+            previews={attachmentsCtl.previews}
+            busy={attachmentsCtl.busy}
+            error={attachmentsCtl.error}
+            onAddFiles={(files) => void attachmentsCtl.addFiles(files)}
+            onRemove={attachmentsCtl.remove}
+          />
 
           {error && (
             <p className="text-xs text-status-error" role="alert">

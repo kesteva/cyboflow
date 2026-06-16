@@ -13,8 +13,13 @@
  */
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
+import { IdeaAttachmentStrip } from './IdeaAttachmentStrip';
+import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+
+/** Empty seed for the create-form attachment hook (stable reference). */
+const NO_ATTACHMENTS: never[] = [];
 
 interface IdeaPickerModalProps {
   isOpen: boolean;
@@ -35,6 +40,10 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
   const [body, setBody] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The idea has no id yet, so attachments are saved under a stable pending key;
+  // the resulting file paths are persisted with the create mutation.
+  const [pendingKey] = useState(() => `pending_${Math.random().toString(36).slice(2)}`);
+  const attachmentsCtl = useIdeaAttachments(pendingKey, NO_ATTACHMENTS);
 
   // Load the project's ideas whenever the modal opens.
   useEffect(() => {
@@ -71,6 +80,7 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
     setBody('');
     setError(null);
     setSubmitting(false);
+    attachmentsCtl.reset();
   };
 
   const handleClose = (): void => {
@@ -96,6 +106,7 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
         // The free-text prose lands in the injectable `body` column so the
         // planner's `# Selected idea` block carries the user's intent.
         body: body.trim().length > 0 ? body.trim() : null,
+        attachments: attachmentsCtl.attachments,
         priority: 'P2',
       });
       onPicked(result.taskId);
@@ -198,12 +209,22 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
                 <textarea
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
+                  onPaste={attachmentsCtl.handlePaste}
+                  onDrop={attachmentsCtl.handleDrop}
+                  onDragOver={(e) => e.preventDefault()}
                   rows={5}
-                  placeholder="Describe the idea — the planner refines this into a spec, epics, and tasks."
+                  placeholder="Describe the idea — the planner refines this into a spec, epics, and tasks. Paste or drop an image to attach it."
                   className="resize-none rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text placeholder:text-input-placeholder"
                   aria-label="Idea body"
                 />
               </label>
+              <IdeaAttachmentStrip
+                previews={attachmentsCtl.previews}
+                busy={attachmentsCtl.busy}
+                error={attachmentsCtl.error}
+                onAddFiles={(files) => void attachmentsCtl.addFiles(files)}
+                onRemove={attachmentsCtl.remove}
+              />
             </>
           )}
 
