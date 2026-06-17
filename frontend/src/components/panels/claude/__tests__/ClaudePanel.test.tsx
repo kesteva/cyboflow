@@ -190,8 +190,13 @@ beforeEach(() => {
 // Tests — substrate render swap
 // ---------------------------------------------------------------------------
 
+// The interactive composer is hidden by default; summon it via the Ctrl+G hint bar.
+function openInteractiveComposer(): void {
+  fireEvent.click(screen.getByTestId('interactive-composer-hint'));
+}
+
 describe('ClaudePanel — interactive-PTY render swap', () => {
-  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView + dedicated composer, drops the SDK surface AND ClaudeInputWithImages, keeps approvals", () => {
+  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView, hides the composer behind a Ctrl+G hint, drops the SDK surface AND ClaudeInputWithImages, keeps approvals", () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
 
     const terminal = screen.getByTestId('interactive-terminal-view');
@@ -204,11 +209,27 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
     // ClaudeInputWithImages must NOT mount — its handlers hit the panel-scoped
     // panels:send-input / panels:continue (no substrate guard → competing SDK
-    // conversation). The dedicated session-scoped composer replaces it.
+    // conversation).
     expect(screen.queryByTestId('claude-input')).not.toBeInTheDocument();
+    // The composer is hidden by default (type into the terminal); a hint bar
+    // advertises Ctrl+G. The composer mounts only once summoned.
+    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
+    expect(screen.getByTestId('interactive-composer-hint')).toBeInTheDocument();
+    openInteractiveComposer();
     expect(screen.getByTestId('interactive-session-composer')).toBeInTheDocument();
     // Approvals stay mounted exactly as before.
     expect(screen.getByTestId('pending-approvals-for-run')).toHaveTextContent('run-q1');
+  });
+
+  it('Ctrl+G toggles the composer open and closed', () => {
+    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
+    expect(screen.getByTestId('interactive-session-composer')).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
+    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
   });
 
   it('substrate undefined: renders the SDK surface, no InteractiveTerminalView, ClaudeInputWithImages composer', () => {
@@ -248,6 +269,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
 describe('ClaudePanel — InteractiveSessionComposer', () => {
   it('submits via API.sessions.sendInput with (sessionId, text) and clears on success', async () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+    openInteractiveComposer();
 
     const textarea = screen.getByPlaceholderText('Message the live session…');
     fireEvent.change(textarea, { target: { value: 'run the tests' } });
@@ -263,6 +285,7 @@ describe('ClaudePanel — InteractiveSessionComposer', () => {
 
   it('Enter submits; Shift+Enter does not (newline stays local)', async () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+    openInteractiveComposer();
 
     const textarea = screen.getByPlaceholderText('Message the live session…');
     fireEvent.change(textarea, { target: { value: 'first line' } });
@@ -281,6 +304,7 @@ describe('ClaudePanel — InteractiveSessionComposer', () => {
   it('surfaces a failed send inline and keeps the draft text', async () => {
     mockSendInput.mockResolvedValue({ success: false, error: 'PTY relay failed' });
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+    openInteractiveComposer();
 
     const textarea = screen.getByPlaceholderText('Message the live session…');
     fireEvent.change(textarea, { target: { value: 'doomed message' } });

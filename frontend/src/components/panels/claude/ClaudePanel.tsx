@@ -66,6 +66,29 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const showDemoTerminal = demoModeEnabled && interactiveRunId !== null;
 
+  // Interactive quick sessions are driven by typing DIRECTLY into the live PTY
+  // terminal above, so the separate "Message the live session" composer is
+  // redundant and is hidden by default. Ctrl+G summons it for rich multi-line
+  // text entry (a slim hint bar advertises the shortcut while it is hidden).
+  // Captured at the window level (capture phase) so the keystroke toggles the
+  // composer instead of reaching xterm as a BEL (\x07).
+  const [composerOpen, setComposerOpen] = useState(false);
+  useEffect(() => {
+    if (interactiveRunId === null) {
+      setComposerOpen(false);
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        e.stopPropagation();
+        setComposerOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey, { capture: true });
+    return () => window.removeEventListener('keydown', onKey, { capture: true });
+  }, [interactiveRunId]);
+
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
   const contextUsage = claudePanelState.contextUsage ?? null;
   const autoContextRunState = claudePanelState.autoContextRunState ?? 'idle';
@@ -260,7 +283,26 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         // DemoTerminalView (showComposer), so suppress the relay composer here.
         showDemoTerminal ? null :
         interactiveRunId !== null ? (
-          <InteractiveSessionComposer sessionId={activeSession.id} />
+          // Live PTY quick session: hidden by default (type into the terminal),
+          // toggled open with Ctrl+G for rich text entry.
+          composerOpen ? (
+            <InteractiveSessionComposer
+              sessionId={activeSession.id}
+              autoFocus
+              onClose={() => setComposerOpen(false)}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setComposerOpen(true)}
+              data-testid="interactive-composer-hint"
+              className="flex shrink-0 items-center justify-center gap-2 border-t border-border-primary bg-bg-primary px-3 py-1.5 text-[10px] text-text-tertiary hover:text-text-secondary"
+            >
+              Type in the terminal above · press
+              <kbd className="rounded border border-border-primary px-1 py-0.5 font-mono text-[9px] text-text-secondary">⌃G</kbd>
+              for rich text entry
+            </button>
+          )
         ) : (
           <ResizablePanel
             defaultHeight={200}
@@ -314,10 +356,19 @@ ClaudePanel.displayName = 'ClaudePanel';
 // panel-scoped panels:send-input / panels:continue, which have no substrate
 // guard and would spawn a competing SDK conversation alongside the live PTY.
 // Enter sends, Shift+Enter inserts a newline (mirrors ChatInput).
-const InteractiveSessionComposer: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+const InteractiveSessionComposer: React.FC<{
+  sessionId: string;
+  autoFocus?: boolean;
+  onClose?: () => void;
+}> = ({ sessionId, autoFocus = false, onClose }) => {
   const [text, setText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (autoFocus) textareaRef.current?.focus();
+  }, [autoFocus]);
 
   const canSend = text.trim().length > 0 && !isSending;
 
@@ -343,6 +394,9 @@ const InteractiveSessionComposer: React.FC<{ sessionId: string }> = ({ sessionId
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void handleSend();
+    } else if (e.key === 'Escape' && onClose) {
+      e.preventDefault();
+      onClose();
     }
   };
 
@@ -353,6 +407,7 @@ const InteractiveSessionComposer: React.FC<{ sessionId: string }> = ({ sessionId
     >
       <div className="flex flex-col border border-border-primary bg-surface-primary transition-colors focus-within:border-border-hover">
         <textarea
+          ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -363,7 +418,7 @@ const InteractiveSessionComposer: React.FC<{ sessionId: string }> = ({ sessionId
         />
         <div className="flex items-center justify-between gap-2 px-2 pb-2">
           <span className="text-[10px] text-text-tertiary">
-            Enter to send · Shift+Enter for newline
+            Enter to send · Shift+Enter for newline{onClose ? ' · Esc to close' : ''}
           </span>
           <Button
             size="sm"
