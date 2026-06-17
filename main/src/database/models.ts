@@ -439,3 +439,28 @@ export interface WorkflowRevisionRow {
   spec_json: string;
   created_at: string;
 }
+
+/**
+ * `agent_overrides` row (migration 028) — a per-project override of a built-in
+ * agent (`base_agent_key === agent_key`, `is_custom 0`) OR a brand-new custom
+ * agent (`base_agent_key NULL`, `is_custom 1`). One row per (project_id,
+ * agent_key). `name` is always the frontmatter name `cyboflow-<agent_key>` and is
+ * never user-editable. `tools_json` is a JSON-encoded `CliTool[]`. There is NO
+ * `enabled` column and NO model column — agents inherit the run's model.
+ * Validation lives in code (mirrors migrations 016/026), not CHECK constraints.
+ */
+export interface AgentOverrideRow {
+  id: string; // "ago_" + 10-byte hex
+  project_id: number;
+  agent_key: string;
+  base_agent_key: string | null; // NULL = custom; else == agent_key (the builtin it shadows)
+  name: string; // == "cyboflow-" + agent_key
+  role: string | null;
+  description: string;
+  system_prompt: string;
+  tools_json: string; // JSON-encoded CliTool[]
+  is_custom: number; // 0 | 1
+  version: number;
+  created_at: string;
+  updated_at: string;
+}

@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { IdeaRow, EpicRow, TaskRow, EntityEventRow, ReviewItemRow } from '../models';
+import type { IdeaRow, EpicRow, TaskRow, EntityEventRow, ReviewItemRow, AgentOverrideRow } from '../models';
 
 interface TableInfoRow {
   cid: number;
@@ -55,6 +55,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '028_agent_overrides.sql'), 'utf-8'));
   return db;
 }
 
@@ -174,6 +175,51 @@ describe('entity schema parity (migrations 015 + 024 + 028)', () => {
       'resolution',
     ];
     expect([...reviewItemRowKeys].sort()).toEqual(columnsOf(db, 'review_items'));
+    db.close();
+  });
+
+  it('AgentOverrideRow field names match the agent_overrides columns exactly (migration 028)', () => {
+    const db = buildDb();
+    const agentOverrideRowKeys: Array<keyof AgentOverrideRow> = [
+      'id',
+      'project_id',
+      'agent_key',
+      'base_agent_key',
+      'name',
+      'role',
+      'description',
+      'system_prompt',
+      'tools_json',
+      'is_custom',
+      'version',
+      'created_at',
+      'updated_at',
+    ];
+    expect([...agentOverrideRowKeys].sort()).toEqual(columnsOf(db, 'agent_overrides'));
+    db.close();
+  });
+
+  it('the agent_overrides UNIQUE(project_id, agent_key) constraint exists (migration 028)', () => {
+    const db = buildDb();
+    interface IndexListRow {
+      seq: number;
+      name: string;
+      unique: number;
+      origin: string;
+      partial: number;
+    }
+    interface IndexInfoRow {
+      seqno: number;
+      cid: number;
+      name: string;
+    }
+    const indexes = db.prepare(`PRAGMA index_list(agent_overrides)`).all() as IndexListRow[];
+    const uniqueCols = indexes
+      .filter((idx) => idx.unique === 1 && idx.origin === 'u')
+      .map((idx) =>
+        (db.prepare(`PRAGMA index_info(${idx.name})`).all() as IndexInfoRow[]).map((c) => c.name).sort(),
+      );
+    expect(uniqueCols).toContainEqual(['agent_key', 'project_id']);
     db.close();
   });
 

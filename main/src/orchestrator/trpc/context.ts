@@ -13,6 +13,26 @@ import type { DatabaseLike } from '../types';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { WorkflowDescriptor } from '../workflowRegistry';
+import type { AgentOverrideRow } from '../../database/models';
+
+/**
+ * Narrow structural interface for AgentOverrideRouter used in tRPC context.
+ *
+ * Defined here (rather than importing the concrete AgentOverrideRouter class)
+ * so the tRPC subtree never takes a hard dependency on the chokepoint's full
+ * surface — preserves test substitutability and the standalone-typecheck
+ * invariant (no 'better-sqlite3' or fs imports pulled transitively).
+ *
+ * `applyChange`'s change argument is typed `unknown` here (the `agents` router
+ * builds its discriminated op objects literally and the concrete router accepts
+ * the real `AgentOverrideChange` union) so this file does not import the concrete
+ * union from the router module — the standalone-typecheck invariant holds.
+ */
+export interface AgentOverrideRouterLike {
+  listByProject(projectId: number): AgentOverrideRow[];
+  getByKey(projectId: number, agentKey: string): AgentOverrideRow | null;
+  applyChange(projectId: number, change: unknown): Promise<{ agentKey: string }>;
+}
 
 /**
  * Narrow structural interface for WorkflowRegistry used in tRPC context.
@@ -86,6 +106,21 @@ export interface ContextDeps {
   workflowRegistry?: WorkflowRegistryLike;
 
   /**
+   * Live AgentOverrideRouter instance — the single write chokepoint for
+   * `agent_overrides` (migration 028).
+   *
+   * Injected from `main/src/index.ts` via `AgentOverrideRouter.getInstance()`.
+   * Using the narrow `AgentOverrideRouterLike` interface (rather than importing
+   * the concrete class) preserves the standalone-typecheck invariant and test
+   * substitutability.
+   *
+   * Handlers must explicitly check `ctx.agentOverrideRouter` before use —
+   * `undefined` is the intentional default so unit tests that do not need agent
+   * overrides can omit it.
+   */
+  agentOverrideRouter?: AgentOverrideRouterLike;
+
+  /**
    * Reads the global forced-substrate pin (ConfigManager.getForcedSubstrate).
    *
    * Injected from `main/src/index.ts` as a closure over the ConfigManager
@@ -115,15 +150,24 @@ export function createContext(deps: ContextDeps = {}): {
   setDockBadge: (count: number) => void;
   db?: DatabaseLike;
   workflowRegistry?: WorkflowRegistryLike;
+  agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
     db,
     workflowRegistry,
+    agentOverrideRouter,
     getForcedSubstrate = () => null,
   } = deps;
-  return { userId: 'local' as const, setDockBadge, db, workflowRegistry, getForcedSubstrate };
+  return {
+    userId: 'local' as const,
+    setDockBadge,
+    db,
+    workflowRegistry,
+    agentOverrideRouter,
+    getForcedSubstrate,
+  };
 }
 
 /** Shape of the tRPC context, inferred from `createContext`. */

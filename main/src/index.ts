@@ -29,6 +29,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
+import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
@@ -595,6 +596,10 @@ async function initializeServices() {
   // it opens a blocking decision review_item (pausing the run) and applies
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
   ReviewItemRouter.initialize(cyboflowDb);
+  // Single write chokepoint for `agent_overrides` (migration 028) — the
+  // cyboflow.agents tRPC router reaches it via getInstance(). Serializes
+  // per-project; emits AgentChangedEvent post-commit on the per-project channel.
+  AgentOverrideRouter.initialize(cyboflowDb);
   HumanStepManager.initialize(cyboflowDb);
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
@@ -1044,7 +1049,7 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count), workflowRegistry, getForcedSubstrate: () => configManager.getForcedSubstrate() }),
+      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count), workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), getForcedSubstrate: () => configManager.getForcedSubstrate() }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 

@@ -20,6 +20,7 @@ import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { resolveWorkflowBundle } from '../../../orchestrator/workflows/workflowBundle';
 import type { WorkflowBundleWriter } from './workflowBundleWriter';
+import { installAgentOverlay } from './agentOverlayWriter';
 
 /**
  * Read the run's `workflow_path` (the prose `.md`) from `workflow_runs JOIN
@@ -61,6 +62,11 @@ export function installWorkflowBundle(
     const workflowPath = getRunWorkflowPath(db, runId, logger);
     const bundle = resolveWorkflowBundle(workflowPath);
     writer.write(worktreePath, bundle);
+    // Overlay the project's FULL effective agent set (built-ins + agent_overrides)
+    // on top of the flow bundle, so a custom/quick flow still gets the project's
+    // agents and an overridden builtin gets its override body. Synchronous +
+    // fail-soft (see agentOverlayWriter doc-comment for the plan deviation).
+    installAgentOverlay(db, runId, worktreePath, logger);
   } catch (err) {
     logger?.warn(
       `[WorkflowBundleInstall] install failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
