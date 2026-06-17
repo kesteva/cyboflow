@@ -1029,6 +1029,17 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               );
               const sessionCount = projectSessions.length;
               const runCount = projectActiveRuns.length;
+              // Group active runs under their parent session (workflow_runs.session_id).
+              // A run nests beneath its session row; runs with no session (legacy
+              // parentless) — or whose parent session isn't in the active list — render
+              // as their own top-level rows after the session list, as before.
+              const sessionIdSet = new Set(projectSessions.map((s) => s.id));
+              const runsForSession = (sid: string): typeof projectActiveRuns =>
+                projectActiveRuns.filter((r) => r.session_id === sid);
+              const parentlessRuns = projectActiveRuns.filter(
+                (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
+              );
+              const parentlessRunCount = parentlessRuns.length;
               const folderCount = project.folders?.length ?? 0;
               const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
@@ -1152,15 +1163,18 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
 
                       {/* Folder tree */}
                       {buildFolderTree(project.folders ?? []).map((folder, index, arr) => {
-                        const isLastItem = index === arr.length - 1 && sessionCount === 0 && runCount === 0;
+                        const isLastItem = index === arr.length - 1 && sessionCount === 0 && parentlessRunCount === 0;
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
-                      {/* Active session rows */}
+                      {/* Active session rows, each with its workflow runs nested beneath */}
                       {projectSessions.map((session, index) => {
-                        // A session is "last" only when no run rows follow it — keeps
-                        // the vertical connector line continuous down to the runs.
-                        const isLastSession = index === projectSessions.length - 1 && runCount === 0;
+                        const childRuns = runsForSession(session.id);
+                        // A session is "last" (no continuing vertical line) only when no
+                        // further top-level rows follow it: the final session AND no
+                        // parentless run rows after the session list.
+                        const isLastSession =
+                          index === projectSessions.length - 1 && parentlessRunCount === 0;
                         const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
                         const isActive = selectedSessionId === session.id;
 
@@ -1206,14 +1220,70 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                                 {relativeTime}
                               </span>
                             </div>
+
+                            {/* Workflow runs nested under this session (indented one
+                                level). The session-name suffix is dropped here since the
+                                parent session row already names it. */}
+                            {childRuns.length > 0 && (
+                              <div className="relative mt-1 space-y-1">
+                                {childRuns.map((run, runIndex) => {
+                                  const isLastChildRun = runIndex === childRuns.length - 1;
+                                  const isActiveRun = activeRunId === run.id;
+
+                                  return (
+                                    <div
+                                      key={`run-${run.id}`}
+                                      className="relative"
+                                      style={{ marginLeft: '24px' }}
+                                    >
+                                      <div className="absolute inset-0 pointer-events-none">
+                                        {!isLastChildRun && (
+                                          <div
+                                            className="absolute top-0 bottom-0 w-px bg-border-secondary"
+                                            style={{ left: '8px' }}
+                                          />
+                                        )}
+                                        <div
+                                          className="absolute h-px bg-border-secondary"
+                                          style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
+                                        />
+                                      </div>
+
+                                      <div
+                                        className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                                          isActiveRun ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                                        }`}
+                                        style={{ paddingLeft: '24px' }}
+                                        onClick={() => handleActiveRunClick(run.id, project.id)}
+                                        role="button"
+                                        tabIndex={0}
+                                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleActiveRunClick(run.id, project.id); }}
+                                      >
+                                        <span
+                                          className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(run.status)}`}
+                                          title={run.status}
+                                        />
+                                        <WorkflowIcon className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                                        <span className="text-sm text-text-primary truncate" title={run.workflowName}>
+                                          {run.workflowName}
+                                        </span>
+                                        <span className="text-xs text-text-tertiary truncate ml-auto">
+                                          {run.status}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
 
-                      {/* Active workflow-run rows (workflow_runs table — no session row).
-                          Clicking opens the workflow-run pane via setActiveRun. */}
-                      {projectActiveRuns.map((run, index) => {
-                        const isLastRun = index === projectActiveRuns.length - 1;
+                      {/* Parentless workflow-run rows: no session, or parent not in the
+                          active list. Clicking opens the workflow-run pane via setActiveRun. */}
+                      {parentlessRuns.map((run, index) => {
+                        const isLastRun = index === parentlessRuns.length - 1;
                         const shortId = run.id.slice(0, 8);
                         const branchSuffix = run.branch_name ? ` · ${run.branch_name}` : ` · ${shortId}`;
                         const label = `${run.workflowName}${branchSuffix}`;

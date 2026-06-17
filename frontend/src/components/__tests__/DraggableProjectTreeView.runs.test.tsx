@@ -12,7 +12,7 @@
  *   (f) empty session list renders the per-project "Start new session" CTA
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import React from 'react';
 import type { Session } from '../../types/session';
@@ -502,5 +502,48 @@ describe('DraggableProjectTreeView — workflow-run status dots', () => {
 
     expect(inputDot.className).toContain('bg-status-warning');
     expect(inputDot.className).toContain('animate-pulse');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Run nesting under the parent session (workflow_runs.session_id)
+// ---------------------------------------------------------------------------
+
+describe('DraggableProjectTreeView — runs nest under their session', () => {
+  it('nests a run with a matching session_id under its session row (label drops the redundant session suffix)', async () => {
+    mockSessions = [makeSession({ id: 'sess-A', name: 'quick-A', projectId: 1 })];
+    mockRunsByProject = {
+      1: [makeRun({ session_id: 'sess-A', workflowName: 'sprint', branch_name: 'quick-A' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('quick-A')).toBeInTheDocument());
+
+    // The run is rendered INSIDE the session's wrapper (the marginLeft:16px div
+    // that holds the session row), not as a top-level sibling.
+    const sessionRow = screen.getByText('quick-A').closest('[role="button"]');
+    expect(sessionRow).not.toBeNull();
+    const sessionWrapper = sessionRow!.parentElement;
+    expect(sessionWrapper).not.toBeNull();
+
+    // Nested label is JUST the workflow name (no "· quick-A" suffix), and it lives
+    // within the session wrapper.
+    const nestedRun = within(sessionWrapper as HTMLElement).getByText('sprint');
+    expect(nestedRun).toBeInTheDocument();
+    expect(screen.queryByText('sprint · quick-A')).toBeNull();
+  });
+
+  it('renders a run whose parent session is absent as a top-level row with the branch suffix', async () => {
+    // session_id points at a session not in the active list → treated as parentless.
+    mockSessions = [];
+    mockRunsByProject = {
+      1: [makeRun({ session_id: 'sess-gone', workflowName: 'planner', branch_name: 'orphan-br' })],
+    };
+
+    await renderExpanded();
+
+    await waitFor(() => {
+      expect(screen.getByText('planner · orphan-br')).toBeInTheDocument();
+    });
   });
 });
