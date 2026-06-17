@@ -20,12 +20,17 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
   const [strategy, setStrategy] = useState<MergeStrategy | null>(null);
   const [commitMessage, setCommitMessage] = useState('');
   const [isMerging, setIsMerging] = useState(false);
+  // Set when the merge is BLOCKED because main has advanced and a rebase is
+  // needed first. Distinct from a generic merge error — shown inline so the
+  // operator can rebase (via chat) and retry without losing the dialog.
+  const [rebaseNotice, setRebaseNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setStrategy(null);
       setCommitMessage('');
       setIsMerging(false);
+      setRebaseNotice(null);
     }
   }, [isOpen]);
 
@@ -60,11 +65,24 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
   const handleConfirm = useCallback(async () => {
     if (!canConfirm || isMerging) return;
     setIsMerging(true);
+    setRebaseNotice(null);
 
     try {
       const result = strategy === 'squash'
         ? await API.sessions.squashAndRebaseToMain(sessionId, commitMessage.trim())
         : await API.sessions.rebaseToMain(sessionId);
+
+      if (!result.success && result.needsRebase) {
+        // Merge blocked: main moved ahead. Surface inline and keep the dialog
+        // open — do NOT delete the session or fire onSuccess. The operator
+        // rebases the worktree (e.g. via chat), then merges again.
+        setRebaseNotice(
+          result.error ??
+            'Main has new commits since this branch started. Rebase this worktree onto main before merging.',
+        );
+        setIsMerging(false);
+        return;
+      }
 
       if (!result.success) {
         useErrorStore.getState().showError({
@@ -105,6 +123,20 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
     <Modal isOpen={isOpen} onClose={onClose} size="md">
       <div className="p-6">
         <h2 className="text-lg font-semibold text-text-primary mb-4">Merge session changes</h2>
+
+        {rebaseNotice && (
+          <div
+            data-testid="merge-rebase-notice"
+            role="alert"
+            className="mb-4 flex items-start gap-2 rounded-lg border border-status-warning/40 bg-status-warning/10 p-3"
+          >
+            <GitBranch size={16} className="mt-0.5 flex-shrink-0 text-status-warning" />
+            <div className="text-sm text-text-primary">
+              <span className="font-medium">Rebase required before merging.</span>{' '}
+              <span className="text-text-secondary">{rebaseNotice}</span>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 mb-4">
           <button

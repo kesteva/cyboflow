@@ -30,6 +30,12 @@ interface IPCResponse<T = unknown> {
   error?: string;
   details?: string;
   command?: string;
+  /**
+   * Set by the merge handlers when the merge was BLOCKED because main has
+   * advanced past the branch (a rebase is needed first). Keep in sync with the
+   * dual declaration in frontend/src/utils/api.ts.
+   */
+  needsRebase?: boolean;
 }
 
 // IPCDataResponse<T> is like IPCResponse<T> but with data required (non-optional).

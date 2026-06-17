@@ -1057,6 +1057,19 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         new Promise((_, reject) => setTimeout(() => reject(new Error('getProjectMainBranch timeout')), 30000))
       ]) as string;
 
+      // Pre-merge guard: if main has advanced past this branch, a rebase is
+      // needed first. We do NOT auto-rebase here — the merge methods would
+      // silently rebase the worktree onto main (surprising the operator with
+      // extra commits in the merge / PR). Block and report so the user can
+      // rebase via chat, then merge.
+      if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
+        return {
+          success: false,
+          needsRebase: true,
+          error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
+        };
+      }
+
       // Emit git operation started event to all sessions in project
       const startMessage = `🔄 GIT OPERATION\nSquashing commits and merging to ${mainBranch}...\nCommit message: ${commitMessage.split('\n')[0]}${commitMessage.includes('\n') ? '...' : ''}`;
       emitGitOperationToProject(sessionId, 'git:operation_started', startMessage, {
@@ -1162,6 +1175,19 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
       // Get the effective main branch (override or auto-detected)
       const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
+
+      // Pre-merge guard: if main has advanced past this branch, a rebase is
+      // needed first. We do NOT auto-rebase here — mergeWorktreeToMain would
+      // silently rebase the worktree onto main (surprising the operator with
+      // extra commits in the merge / PR). Block and report so the user can
+      // rebase via chat, then merge.
+      if (await worktreeManager.hasChangesToRebase(session.worktreePath, mainBranch)) {
+        return {
+          success: false,
+          needsRebase: true,
+          error: `${mainBranch} has new commits since this branch started. Rebase this worktree onto ${mainBranch} before merging — you can ask the agent to do it in chat.`,
+        };
+      }
 
       // Emit git operation started event to all sessions in project
       const startMessage = `🔄 GIT OPERATION\nMerging to ${mainBranch} (preserving all commits)...`;

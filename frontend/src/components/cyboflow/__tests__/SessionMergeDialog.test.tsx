@@ -133,6 +133,31 @@ describe('SessionMergeDialog', () => {
     expect(defaultProps.onSuccess).not.toHaveBeenCalled();
   });
 
+  it('needsRebase block: shows the inline rebase notice, keeps the dialog open, and skips delete/onSuccess', async () => {
+    vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({
+      success: false,
+      needsRebase: true,
+      error: 'main has new commits since this branch started. Rebase this worktree onto main before merging.',
+    });
+
+    render(<SessionMergeDialog {...defaultProps} />);
+    fireEvent.click(screen.getByTestId('strategy-preserve'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('merge-confirm'));
+    });
+
+    // Inline notice surfaces (NOT the generic error modal); merge is blocked.
+    expect(screen.getByTestId('merge-rebase-notice')).toBeInTheDocument();
+    expect(screen.getByTestId('merge-rebase-notice')).toHaveTextContent('Rebase required before merging');
+    expect(mockShowError).not.toHaveBeenCalled();
+    expect(API.sessions.delete).not.toHaveBeenCalled();
+    expect(defaultProps.onSuccess).not.toHaveBeenCalled();
+    expect(defaultProps.onClose).not.toHaveBeenCalled();
+    // Dialog stays usable — confirm is re-enabled for a retry after rebasing.
+    expect(screen.getByTestId('merge-confirm')).not.toBeDisabled();
+  });
+
   it('shows loading state on confirm button during merge', async () => {
     let resolveSquash: (v: { success: boolean }) => void;
     vi.mocked(API.sessions.squashAndRebaseToMain).mockReturnValue(

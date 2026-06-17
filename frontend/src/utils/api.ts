@@ -13,6 +13,14 @@ export interface IPCResponse<T = unknown> {
   error?: string;
   details?: string;
   command?: string;
+  /**
+   * Set by the merge handlers (sessions:squash-and-rebase-to-main /
+   * sessions:rebase-to-main) when the merge was BLOCKED because main has
+   * advanced past the branch — a rebase is needed first. Distinguishes the
+   * "rebase required" block from a generic git failure. Keep in sync with the
+   * dual declaration in frontend/src/types/electron.d.ts.
+   */
+  needsRebase?: boolean;
 }
 
 // Type for Git error response.
