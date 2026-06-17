@@ -86,6 +86,20 @@ describe('ensureSessionForLaunch', () => {
     expect(mockCreatePanel).not.toHaveBeenCalled();
   });
 
+  it('forceNew: creates a fresh session even when the selected session is FREE', async () => {
+    mockGetState.mockReturnValue({ selectedSessionId: 'sess-existing' });
+    // Selection is free (no active run in it), so without forceNew it would be
+    // reused — forceNew must override that and create a new session anyway. This
+    // backs the PTY "Add a workflow" flow (a second workflow runs in its own session).
+    useActiveRunsStore.setState({ runsByProject: {} });
+
+    const id = await ensureSessionForLaunch(7, { forceNew: true });
+
+    expect(id).toBe('sess-new');
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7 });
+    expect(mockCreatePanel).toHaveBeenCalled();
+  });
+
   it('does NOT reuse a BUSY selected session — creates a fresh session instead', async () => {
     mockGetState.mockReturnValue({ selectedSessionId: 'sess-busy' });
     // An active run already executes in the selected session → it is busy.

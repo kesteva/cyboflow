@@ -43,6 +43,13 @@ interface QuickSessionCanvasProps {
   projectName?: string;
   /** Open the full workflow chooser (CyboflowRoot's WorkflowPicker modal). */
   onBrowseAll: () => void;
+  /**
+   * Invoked instead of launching when THIS session is interactive (PTY): running
+   * a second workflow inside a live-REPL session is descoped, so every
+   * add-a-workflow affordance routes here to confirm + configure a workflow in a
+   * SEPARATE new session (CyboflowRoot owns the confirm dialog + force-new picker).
+   */
+  onAddWorkflowToNewSession?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,9 +163,14 @@ export function QuickSessionCanvas({
   projectId,
   projectName,
   onBrowseAll,
+  onAddWorkflowToNewSession,
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId);
+  // Interactive (PTY) sessions can't host a second workflow inside their live
+  // REPL (descoped) — every add-a-workflow click routes to the confirm + config
+  // flow that launches in a SEPARATE session instead of the fast-lane launch.
+  const isInteractive = session.substrate === 'interactive';
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.
@@ -244,6 +256,14 @@ export function QuickSessionCanvas({
   const handleWorkflowClick = useCallback(
     (row: WorkflowRow) => {
       if (isLaunching) return;
+      // Interactive (PTY) session: a second workflow is descoped here — route to
+      // the confirm + config flow that launches in a SEPARATE session, rather
+      // than the in-session fast-lane launch (which would collide with the live
+      // REPL or silently run SDK in a stray session).
+      if (isInteractive) {
+        onAddWorkflowToNewSession?.();
+        return;
+      }
       // Planner is idea-gated, Sprint is task-batch-gated — open the matching
       // picker; other workflows launch directly.
       if (row.name === 'planner') {
@@ -256,7 +276,7 @@ export function QuickSessionCanvas({
       }
       void launch(row.id);
     },
-    [isLaunching, launch],
+    [isLaunching, launch, isInteractive, onAddWorkflowToNewSession],
   );
 
   const handleIdeaPicked = useCallback(
@@ -587,7 +607,7 @@ export function QuickSessionCanvas({
             <button
               type="button"
               data-testid="quick-session-browse-all"
-              onClick={onBrowseAll}
+              onClick={isInteractive ? () => onAddWorkflowToNewSession?.() : onBrowseAll}
               onMouseEnter={() => setBrowseHovered(true)}
               onMouseLeave={() => setBrowseHovered(false)}
               style={{

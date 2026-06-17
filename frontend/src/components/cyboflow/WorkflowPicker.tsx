@@ -28,9 +28,16 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/s
 interface WorkflowPickerProps {
   projectId: number;
   onWorkflowStarted?: (runId: string) => void;
+  /**
+   * Force the launch into a brand-new session, never reusing the current
+   * selection. Set by the "Add a workflow" flow on an interactive (PTY) session,
+   * where a second workflow is descoped from the live-REPL session and must run
+   * in its own separate session. Threaded into {@link ensureSessionForLaunch}.
+   */
+  forceNewSession?: boolean;
 }
 
-export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerProps) {
+export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession = false }: WorkflowPickerProps) {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -151,8 +158,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         // Ensure the run executes INSIDE a session (active one if selected, else
         // a freshly created session). The id is threaded into runs.start so the
         // run runs in that session's worktree, and used to nest the run under
-        // the session in the store (setActiveRun's parentSessionId).
-        const sessionId = await ensureSessionForLaunch(projectId);
+        // the session in the store (setActiveRun's parentSessionId). forceNew
+        // bypasses reuse for the PTY add-workflow flow (separate session).
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
         const result = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
             ? { workflowId, projectId, substrate, sessionId, permissionMode }
@@ -167,7 +175,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate, permissionMode, onWorkflowStarted],
+    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession],
   );
 
   /**
@@ -187,7 +195,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
       setError(null);
       setIsStarting(true);
       try {
-        const sessionId = await ensureSessionForLaunch(projectId);
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
@@ -205,7 +213,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted }: WorkflowPickerP
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate, permissionMode, onWorkflowStarted],
+    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession],
   );
 
   const handleStartRun = async () => {

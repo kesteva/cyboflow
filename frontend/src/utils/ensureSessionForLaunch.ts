@@ -25,11 +25,22 @@
  * RunLauncher executes the run in that session's worktree and dual-writes
  * `sessions.run_id`, which lets `useLifecycleSession` resolve close-out
  * (Merge / PR / Dismiss) back to the session.
+ *
+ * `forceNew` skips the reuse short-circuit entirely and ALWAYS creates a fresh
+ * session. Used by the "Add a workflow" flow on an interactive (PTY) session,
+ * where running a second workflow inside the live-REPL session is descoped — the
+ * workflow must launch in its own separate session even though the current PTY
+ * session is "free" of workflow runs.
  */
 import { API } from './api';
 import { panelApi } from '../services/panelApi';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
+
+export interface EnsureSessionForLaunchOptions {
+  /** Always create a fresh session, never reuse the current selection. */
+  forceNew?: boolean;
+}
 
 /**
  * Resolve the session a workflow run should execute in: the currently-selected
@@ -38,14 +49,18 @@ import { useActiveRunsStore } from '../stores/activeRunsStore';
  *
  * @throws Error when the quick-session create IPC fails.
  */
-export async function ensureSessionForLaunch(projectId: number): Promise<string> {
+export async function ensureSessionForLaunch(
+  projectId: number,
+  opts: EnsureSessionForLaunchOptions = {},
+): Promise<string> {
   // Launch into the active session if one is already selected — but ONLY when it
-  // is free. Reusing a session that already hosts a running workflow would trip
-  // the backend's one-active-workflow-per-session guard in RunLauncher.launch.
-  // Active runs in `runsByProject` are already terminal-filtered, so a row whose
-  // session_id matches the selection means that session is busy.
+  // is free (and the caller hasn't forced a new session). Reusing a session that
+  // already hosts a running workflow would trip the backend's
+  // one-active-workflow-per-session guard in RunLauncher.launch. Active runs in
+  // `runsByProject` are already terminal-filtered, so a row whose session_id
+  // matches the selection means that session is busy.
   const sel = useCyboflowStore.getState().selectedSessionId;
-  if (sel) {
+  if (sel && !opts.forceNew) {
     const activeRuns = useActiveRunsStore.getState().runsByProject[projectId] ?? [];
     const selectionIsBusy = activeRuns.some((run) => run.session_id === sel);
     if (!selectionIsBusy) return sel;

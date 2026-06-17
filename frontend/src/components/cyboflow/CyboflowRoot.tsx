@@ -52,6 +52,7 @@ import { RunActionBar } from './RunActionBar';
 import { RunCancelDialog } from './RunCancelDialog';
 import { disposeInteractiveTerminal } from './InteractiveTerminalView';
 import { RunEndDialog } from './RunEndDialog';
+import { ConfirmDialog } from '../ConfirmDialog';
 import { useErrorStore } from '../../stores/errorStore';
 import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { trpc } from '../../trpc/client';
@@ -66,6 +67,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+  // "Add a workflow" on an interactive (PTY) session: a second workflow can't run
+  // in the live-REPL session (descoped), so the affordance first confirms it will
+  // launch in a SEPARATE session, then opens the picker with forceNewSession set.
+  const [addWorkflowConfirmOpen, setAddWorkflowConfirmOpen] = useState(false);
+  const [pickerForceNew, setPickerForceNew] = useState(false);
 
   // Resolve the active run's worktree folder + branch for the canvas meta row.
   // Sourced from activeRunsStore (workflow_runs.worktree_path / branch_name);
@@ -371,6 +377,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     projectId={projectId}
                     projectName={projectName}
                     onBrowseAll={() => setIsPickerOpen(true)}
+                    onAddWorkflowToNewSession={() => setAddWorkflowConfirmOpen(true)}
                   />
                 </div>
               )}
@@ -417,17 +424,42 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       {projectId !== null && (
         <Modal
           isOpen={isPickerOpen}
-          onClose={() => setIsPickerOpen(false)}
+          onClose={() => {
+            setIsPickerOpen(false);
+            setPickerForceNew(false);
+          }}
           size="md"
         >
           <div className="p-6">
             <WorkflowPicker
               projectId={projectId}
-              onWorkflowStarted={() => setIsPickerOpen(false)}
+              forceNewSession={pickerForceNew}
+              onWorkflowStarted={() => {
+                setIsPickerOpen(false);
+                setPickerForceNew(false);
+              }}
             />
           </div>
         </Modal>
       )}
+
+      {/* Add-a-workflow confirm (interactive/PTY session) — a second workflow is
+          descoped from the live-REPL session, so confirm the launch will be in a
+          new, separate session, then open the picker with forceNewSession set. */}
+      <ConfirmDialog
+        isOpen={addWorkflowConfirmOpen}
+        onClose={() => setAddWorkflowConfirmOpen(false)}
+        onConfirm={() => {
+          setAddWorkflowConfirmOpen(false);
+          setPickerForceNew(true);
+          setIsPickerOpen(true);
+        }}
+        title="Start workflow in a new session?"
+        message="This is an interactive (PTY) session, which can't host a second workflow alongside its live terminal. The workflow will start in a new, separate session — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
+        confirmText="Choose workflow"
+        cancelText="Cancel"
+        confirmButtonClass="bg-interactive hover:bg-interactive-hover text-text-on-interactive"
+      />
 
       {/* Workflow blueprint editor — opened from the "Edit flow" header button /
           ⌘E for the active run's workflow. Only mounted when a run with a

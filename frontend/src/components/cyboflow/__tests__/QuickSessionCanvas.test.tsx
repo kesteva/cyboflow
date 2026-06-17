@@ -278,3 +278,51 @@ describe('QuickSessionCanvas', () => {
     expect(screen.queryByTestId('dynamic-workflow-agent-b1')).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Interactive (PTY) session — a second workflow is descoped from the live-REPL
+// session, so every add-a-workflow click routes to onAddWorkflowToNewSession
+// (CyboflowRoot's confirm + force-new picker), never the in-session fast lane.
+// ---------------------------------------------------------------------------
+
+describe('QuickSessionCanvas — interactive (PTY) add-workflow routing', () => {
+  const INTERACTIVE_SESSION = { ...SESSION, substrate: 'interactive' } as Session;
+
+  function renderInteractive(onAdd = vi.fn(), onBrowseAll = vi.fn()) {
+    render(
+      <QuickSessionCanvas
+        session={INTERACTIVE_SESSION}
+        projectId={3}
+        projectName="tester-mctest"
+        onBrowseAll={onBrowseAll}
+        onAddWorkflowToNewSession={onAdd}
+      />,
+    );
+    return { onAdd, onBrowseAll };
+  }
+
+  it('a workflow click routes to onAddWorkflowToNewSession — no launch, no in-session gate', async () => {
+    const { onAdd } = renderInteractive();
+    await waitFor(() => screen.getByTestId('quick-session-launch-sprint'));
+
+    fireEvent.click(screen.getByTestId('quick-session-launch-sprint'));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    // The fast-lane launch and the in-session task/idea gates are bypassed.
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('mock-pick-tasks')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mock-pick-idea')).not.toBeInTheDocument();
+  });
+
+  it('Browse all routes to onAddWorkflowToNewSession, NOT the in-session onBrowseAll', async () => {
+    const onAdd = vi.fn();
+    const onBrowseAll = vi.fn();
+    renderInteractive(onAdd, onBrowseAll);
+    await waitFor(() => screen.getByTestId('quick-session-browse-all'));
+
+    fireEvent.click(screen.getByTestId('quick-session-browse-all'));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onBrowseAll).not.toHaveBeenCalled();
+  });
+});
