@@ -194,6 +194,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         void useActiveRunsStore.getState().refresh(projectId);
       }
     }
+    // Clearing the selection alone leaves the center surface on the now-dead
+    // session view (stale chat + Continue composer). The session's work has been
+    // resolved, so transition the center pane back to the landing/human-review
+    // home — the same surface the "← Cyboflow home" pill returns to.
+    useNavigationStore.getState().goHome();
   }, [projectId]);
 
   useEffect(() => useQuestionStore.getState().init(), []);
