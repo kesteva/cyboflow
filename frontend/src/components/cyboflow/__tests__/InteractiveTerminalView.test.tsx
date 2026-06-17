@@ -36,7 +36,16 @@ let onDataHandler: ((data: string) => void) | undefined;
 const onDataDispose = vi.fn();
 
 const termMock = {
-  open: vi.fn(),
+  open: vi.fn((parent?: HTMLElement) => {
+    // Mirror xterm: open() creates `this.element` and parents it. The keep-alive
+    // re-attach path reads term.element to decide first-open vs re-parent.
+    if (!termMock.element) {
+      termMock.element = document.createElement('div');
+    }
+    if (parent && termMock.element.parentElement !== parent) {
+      parent.appendChild(termMock.element);
+    }
+  }),
   write: vi.fn(),
   loadAddon: vi.fn(),
   dispose: vi.fn(),
@@ -53,6 +62,8 @@ const termMock = {
   // Live-mutable options bag — the component flips `options.disableStdin` when
   // the relay (un)blocks; seeded from the constructor opts per render below.
   options: {} as Record<string, unknown>,
+  // xterm's DOM element (set by open()); the keep-alive cache re-parents it.
+  element: undefined as HTMLDivElement | undefined,
 };
 
 let lastTerminalOptions: Record<string, unknown> | undefined;
@@ -145,7 +156,11 @@ const offSpy = vi.fn();
 // Imports after mocks
 // ---------------------------------------------------------------------------
 
-import { InteractiveTerminalView } from '../InteractiveTerminalView';
+import {
+  InteractiveTerminalView,
+  disposeInteractiveTerminal,
+  __resetInteractiveTerminalCacheForTests,
+} from '../InteractiveTerminalView';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 
 // ---------------------------------------------------------------------------
@@ -176,6 +191,9 @@ function stubMatchMedia(reduce: boolean): void {
 }
 
 beforeEach(() => {
+  // The keep-alive xterm cache is module-level and persists across tests; reset
+  // it so each test starts with no cached terminal (ISSUE B keep-alive cache).
+  __resetInteractiveTerminalCacheForTests();
   stubMatchMedia(false);
   termMock.open.mockClear();
   termMock.write.mockClear();
@@ -183,6 +201,7 @@ beforeEach(() => {
   termMock.dispose.mockClear();
   termMock.scrollToBottom.mockClear();
   termMock.onData.mockClear();
+  termMock.element = undefined;
   onDataDispose.mockClear();
   onDataHandler = undefined;
   relayInputMutate.mockClear();
@@ -328,16 +347,50 @@ describe('InteractiveTerminalView', () => {
     expect(termMock.scrollToBottom).toHaveBeenCalledTimes(1);
   });
 
-  it('cleans up on unmount: off()s the SAME channel + handler and disposes the terminal', () => {
+  it('keep-alive (ISSUE B): a tab/flow switch (unmount) does NOT off() the channel or dispose the terminal', () => {
     const { unmount } = render(<InteractiveTerminalView runId="run-cleanup" />);
+    expect(registered?.handler).toBeDefined();
+
+    // An unmount models a tab/flow switch away. The PTY must persist, so the
+    // cached terminal is kept alive: NO channel off(), NO term.dispose(), and the
+    // onData relay binding is NOT disposed — only the per-mount DOM detaches.
+    unmount();
+
+    expect(offSpy).not.toHaveBeenCalled();
+    expect(termMock.dispose).not.toHaveBeenCalled();
+    expect(onDataDispose).not.toHaveBeenCalled();
+  });
+
+  it('keep-alive: re-mounting the same runId reuses the cached terminal (no new Terminal, scrollback preserved)', () => {
+    const { unmount } = render(<InteractiveTerminalView runId="run-keepalive" />);
+    // First mount builds exactly one Terminal + binds onData once.
+    expect(termMock.onData).toHaveBeenCalledTimes(1);
+
+    unmount(); // switch away — cache keeps the entry
+
+    onSpy.mockClear();
+    termMock.onData.mockClear();
+    render(<InteractiveTerminalView runId="run-keepalive" />);
+
+    // Re-attach reuses the cached terminal: the onData relay is NOT re-bound and
+    // NO fresh subscription is registered (the entry's subscription stayed alive).
+    expect(termMock.onData).not.toHaveBeenCalled();
+    expect(onSpy).not.toHaveBeenCalled();
+  });
+
+  it('disposeInteractiveTerminal (real end-of-life) off()s the channel + disposes term + onData', () => {
+    render(<InteractiveTerminalView runId="run-endoflife" />);
     const handler = registered?.handler;
     expect(handler).toBeDefined();
 
-    unmount();
+    // A REAL teardown (panel close / Cancel / Dismiss / session close-out) calls
+    // this — the backend PTY is killed and the cached xterm is fully released.
+    disposeInteractiveTerminal('run-endoflife');
 
     expect(offSpy).toHaveBeenCalledTimes(1);
-    expect(offSpy).toHaveBeenCalledWith('cyboflow:pty:run-cleanup', handler);
+    expect(offSpy).toHaveBeenCalledWith('cyboflow:pty:run-endoflife', handler);
     expect(termMock.dispose).toHaveBeenCalledTimes(1);
+    expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -508,9 +561,13 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
     }
   });
 
-  it('disposes the onData binding on unmount', () => {
+  it('keeps the onData binding alive across a switch (unmount), disposing it only on real end-of-life', () => {
     const { unmount } = render(<InteractiveTerminalView runId="run-relay-dispose" substrate="interactive" />);
+    // A switch-away (unmount) must NOT dispose the relay — the PTY persists.
     unmount();
+    expect(onDataDispose).not.toHaveBeenCalled();
+    // The real teardown disposes it.
+    disposeInteractiveTerminal('run-relay-dispose');
     expect(onDataDispose).toHaveBeenCalledTimes(1);
   });
 });

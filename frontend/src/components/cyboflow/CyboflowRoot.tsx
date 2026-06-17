@@ -26,6 +26,7 @@ import { RunBottomPane } from './RunBottomPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { useLandingStore } from '../../stores/landingStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -49,6 +50,7 @@ import { SessionCreatePrDialog } from './SessionCreatePrDialog';
 import { SessionDismissDialog } from './SessionDismissDialog';
 import { RunActionBar } from './RunActionBar';
 import { RunCancelDialog } from './RunCancelDialog';
+import { disposeInteractiveTerminal } from './InteractiveTerminalView';
 import { RunEndDialog } from './RunEndDialog';
 import { useErrorStore } from '../../stores/errorStore';
 import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
@@ -187,8 +189,19 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     // also refresh the active-runs rail so the closed-out run drops from it.
     const store = useCyboflowStore.getState();
     if (store.selectedSessionId) {
+      // Quick session retired by merge/PR/dismiss — its worktree + PTY are gone,
+      // so evict the keep-alive xterm cache for the session's interactive run id
+      // (resolved from the session store). Without this the cached terminal would
+      // leak past close-out. The backend PTY kill is owned by the close-out route.
+      const closedSession = useSessionStore
+        .getState()
+        .sessions.find((s) => s.id === store.selectedSessionId);
+      if (closedSession?.runId) disposeInteractiveTerminal(closedSession.runId);
       store.clearActiveQuickSession();
     } else if (store.activeRunId) {
+      // Workflow run retired — evict its keep-alive xterm cache (the worktree is
+      // gone after merge/PR/dismiss). Capture before clearActiveRun nulls it.
+      disposeInteractiveTerminal(store.activeRunId);
       store.clearActiveRun();
       if (projectId !== null) {
         void useActiveRunsStore.getState().refresh(projectId);

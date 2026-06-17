@@ -23,6 +23,7 @@ import { panelApi } from '../services/panelApi';
 import { API } from '../utils/api';
 import { useSessionStore } from '../stores/sessionStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
+import { disposeInteractiveTerminal } from '../components/cyboflow/InteractiveTerminalView';
 
 export interface UsePanelSurfaceOptions {
   autoCreatePermanentPanels: boolean;
@@ -271,6 +272,17 @@ export function usePanelSurface(
         if (next && next.id !== panel.id) {
           setActivePanelInStore(effectiveSessionId, next.id);
           await panelApi.setActivePanel(effectiveSessionId, next.id);
+        }
+        // Explicit panel close is a REAL end-of-life: the backend kills the PTY
+        // (panels:delete → stopPanel + unregisterPanel). Evict the keep-alive
+        // xterm cache for this session's interactive run id so the cached
+        // terminal does not leak or stale-restore a dead run (ISSUE B). The
+        // cache key is the run id; resolve it from the closing panel's session.
+        if (panel.type === 'claude') {
+          const closedSession = useSessionStore
+            .getState()
+            .sessions.find((s) => s.id === panel.sessionId);
+          if (closedSession?.runId) disposeInteractiveTerminal(closedSession.runId);
         }
         await panelApi.deletePanel(panel.id);
       };
