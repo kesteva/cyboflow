@@ -20,6 +20,7 @@ import { useEffect, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { WorkflowStepState } from '../../../../shared/types/workflows';
+import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 
 // ---------------------------------------------------------------------------
@@ -315,7 +316,7 @@ export function WorkflowProgressTimeline({
 
                     {/* Agent label */}
                     <div className="mt-0.5 pl-4 text-text-tertiary">
-                      {step.agent}
+                      {resolveStepAgentKey(step.id, step.agent) ?? step.agent}
                     </div>
 
                     {/* Log lines — only for non-pending steps */}

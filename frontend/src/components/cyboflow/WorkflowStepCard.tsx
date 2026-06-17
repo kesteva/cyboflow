@@ -7,6 +7,7 @@
  * TASK-769 / IDEA-026
  */
 import type { WorkflowStep, WorkflowPhase } from '../../../../shared/types/workflows';
+import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,8 +98,8 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
       ? 'var(--color-status-error)'
       : '#c8bea3';
 
-  // ── Agent short name — first segment before hyphen ─────────────────────────
-  const agentShortName = step.agent.split('-')[0];
+  // ── Agent short name — resolved canonical key (legacy labels mapped) ───────
+  const agentShortName = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
 
   return (
     <div style={rootStyle} data-testid={`step-card-${step.id}`}>
@@ -166,8 +167,17 @@ export function WorkflowStepCard({ step, phase, stepIndex, status }: WorkflowSte
             justifyContent: 'space-between',
           }}
         >
-          <span>{agentShortName}</span>
-          <span>×{step.retries}</span>
+          <span
+            style={{
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              minWidth: 0,
+            }}
+          >
+            {agentShortName}
+          </span>
+          <span style={{ flexShrink: 0 }}>×{step.retries}</span>
         </div>
       </div>
 

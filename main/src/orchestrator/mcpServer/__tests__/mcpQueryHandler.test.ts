@@ -1345,6 +1345,9 @@ describe('McpQueryHandler', () => {
     });
 
     it('happy path: replies ok:true immediately and inserts a finding row attributed to the agent actor', async () => {
+      // The legacy snapshot label 'executor' normalizes to the canonical key
+      // 'implement' via resolveStepAgentKey (P0 agent-identity reconciliation),
+      // so the actor is 'agent:implement'.
       seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'implement', stepsSnapshot: { implement: 'executor' } });
 
       const { socket, writes } = makeSocketDouble();
@@ -1382,7 +1385,7 @@ describe('McpQueryHandler', () => {
       expect(row!.blocking).toBe(0);
       expect(row!.title).toBe('Hardcoded secret');
       expect(row!.severity).toBe('warning');
-      expect(row!.source).toBe('agent:executor');
+      expect(row!.source).toBe('agent:implement');
 
       // A polymorphic review_item entity_events row was logged.
       const ev = reviewDb
@@ -1391,7 +1394,7 @@ describe('McpQueryHandler', () => {
         )
         .get() as { actor: string; kind: string } | undefined;
       expect(ev).toBeDefined();
-      expect(ev!.actor).toBe('agent:executor');
+      expect(ev!.actor).toBe('agent:implement');
       expect(ev!.kind).toBe('created');
     });
 

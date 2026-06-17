@@ -293,7 +293,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'context',
             name: 'Get context on user idea',
-            agent: 'idea-extractor',
+            agent: 'context',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
             human: true,
@@ -302,7 +302,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'research',
             name: 'Research',
-            agent: 'researcher',
+            agent: 'research',
             mcps: ['web-search', 'context7'],
             retries: 1,
             optional: true,
@@ -327,7 +327,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'epics',
             name: 'Create epics',
-            agent: 'task-refiner',
+            agent: 'epics',
             mcps: ['filesystem'],
             retries: 0,
             desc: 'Decompose the idea into epics with dependency edges.',
@@ -335,7 +335,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'tasks',
             name: 'Fill out task details',
-            agent: 'task-refiner',
+            agent: 'tasks',
             mcps: ['filesystem'],
             retries: 0,
             desc: 'Capture each task via cyboflow_create_task with acceptance criteria.',
@@ -395,7 +395,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'execute-tasks',
             name: 'Execute tasks',
-            agent: 'executor',
+            agent: 'implement',
             mcps: ['filesystem'],
             retries: 3,
             desc: 'Parallel per-task fan-out — per-task progress in sprint lanes',
@@ -410,7 +410,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'sprint-verify',
             name: 'Sprint verification',
-            agent: 'verifier',
+            agent: 'sprint-verify',
             mcps: ['filesystem', 'bash', 'playwright'],
             retries: 1,
             desc: 'Runs the full suite after the last task is archived.',
@@ -418,7 +418,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'sprint-review',
             name: 'Code review',
-            agent: 'code-reviewer',
+            agent: 'sprint-review',
             mcps: ['filesystem', 'git'],
             retries: 0,
             desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',

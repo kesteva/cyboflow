@@ -48,6 +48,7 @@ import type {
   IdeaAttachment,
   TaskDependencyRef,
 } from '../../../shared/types/tasks';
+import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { DatabaseLike } from './types';
 
 /** The board stage position considered "done" — a blocking prereq is satisfied here. */
@@ -273,7 +274,7 @@ function resolveAgentLabel(run: RunOverlayRow): string {
     try {
       const snapshot = JSON.parse(run.steps_snapshot_json) as Record<string, unknown>;
       const agent = snapshot[run.current_step_id];
-      if (typeof agent === 'string' && agent.length > 0) return agent;
+      if (typeof agent === 'string' && agent.length > 0) return resolveStepAgentKey(run.current_step_id, agent) ?? agent;
     } catch {
       // ignore malformed snapshot — fall through to defaults
     }

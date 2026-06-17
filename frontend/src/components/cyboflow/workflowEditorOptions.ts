@@ -8,22 +8,18 @@
  * allows arbitrary values too (rendered as an extra option when the current
  * agent is not in `AGENT_OPTIONS`).
  *
+ * The agent suggestions are derived from the canonical source of truth
+ * (`CANONICAL_AGENT_KEYS` in shared/types/agentIdentity.ts) plus the human gate
+ * (`HUMAN_GATE_AGENT`), so they stay in sync with the agent identity registry.
+ *
  * The authoritative write-path validation lives in the main-process zod schema
  * (`workflowDefinitionSchema`); these lists only shape the editing UI.
  */
 
+import { CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
+
 /** Suggested agent ids for the AGENT tab <select> (free text also allowed). */
-export const AGENT_OPTIONS = [
-  'idea-extractor',
-  'researcher',
-  'human',
-  'task-refiner',
-  'executor',
-  'test-writer',
-  'code-reviewer',
-  'verifier',
-  'visual-verifier',
-] as const;
+export const AGENT_OPTIONS = [...CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT] as const;
 
 /** Suggested MCP / tool ids for the MCP tab toggle rows. */
 export const MCP_OPTIONS = [

@@ -49,6 +49,7 @@ import type {
   TaskChangedEvent,
   TaskType,
 } from '../../../shared/types/tasks';
+import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -1477,7 +1478,7 @@ export class TaskChangeRouter {
       try {
         const snapshot = JSON.parse(run.steps_snapshot_json) as Record<string, unknown>;
         const agent = snapshot[run.current_step_id];
-        if (typeof agent === 'string' && agent.length > 0) return agent;
+        if (typeof agent === 'string' && agent.length > 0) return resolveStepAgentKey(run.current_step_id, agent) ?? agent;
       } catch {
         // ignore malformed snapshot — fall through to defaults
       }

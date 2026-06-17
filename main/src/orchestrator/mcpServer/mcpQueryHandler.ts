@@ -60,6 +60,7 @@ import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
 import type { Priority, TaskType } from '../../../../shared/types/tasks';
+import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
   FindingPayload,
   ReviewItemEntityType,
@@ -761,7 +762,7 @@ export class McpQueryHandler {
         const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
         const agent = snapshot[currentStepId];
         if (typeof agent === 'string' && agent.length > 0) {
-          label = agent;
+          label = resolveStepAgentKey(currentStepId, agent) ?? agent;
         } else {
           label = currentStepId;
         }
@@ -1195,7 +1196,7 @@ export class McpQueryHandler {
         const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
         const agent = snapshot[currentStepId];
         if (typeof agent === 'string' && agent.length > 0) {
-          label = agent;
+          label = resolveStepAgentKey(currentStepId, agent) ?? agent;
         } else {
           label = currentStepId;
         }

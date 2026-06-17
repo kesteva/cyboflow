@@ -23,6 +23,7 @@
  * FEATURE: user-editable workflow blueprint editor.
  */
 import type { WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
+import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type { WorkflowEditorAction } from '../../hooks/useWorkflowEditorState';
 import { PHASE_COLORS } from './workflowEditorOptions';
 
@@ -384,7 +385,7 @@ function StepNode({ phase, step, stepIndex, stepCount, selected, dispatch }: Ste
         >
           <span>
             <span style={{ display: 'inline-block', width: 42, color: 'var(--color-text-tertiary)' }}>agent</span>
-            <b style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{step.agent}</b>
+            <b style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{resolveStepAgentKey(step.id, step.agent) ?? step.agent}</b>
           </span>
           <span>
             <span style={{ display: 'inline-block', width: 42, color: 'var(--color-text-tertiary)' }}>retry</span>
