@@ -525,7 +525,15 @@ export function InteractiveTerminalView({
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeObserver = new ResizeObserver(() => {
       if (detached) return;
-      if (!activeEntry.opened) {
+      // Drive (re-)attach whenever the xterm element is not parented in THIS
+      // mount's container — not only on the very first open. On a switch-back the
+      // cached entry is already `opened === true`, so without the parent check the
+      // observer would skip ensureAttached() and the preserved element (holding the
+      // full scrollback) would never be re-parented into the new container — the
+      // terminal renders blank (ISSUE B). The single openRaf below can lose the
+      // 0×0 race on a freshly-committed flex child; this observer is the retrying
+      // backstop that re-parents once the container gets a non-zero box.
+      if (!activeEntry.opened || term.element?.parentElement !== container) {
         ensureAttached();
         return;
       }

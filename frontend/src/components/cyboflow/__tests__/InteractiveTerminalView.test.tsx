@@ -378,6 +378,35 @@ describe('InteractiveTerminalView', () => {
     expect(onSpy).not.toHaveBeenCalled();
   });
 
+  it('keep-alive (ISSUE B): switching back RE-PARENTS the cached xterm into the NEW container (re-attach driver fix)', () => {
+    const first = render(<InteractiveTerminalView runId="run-reparent" />);
+    makeRenderable(); // first open() builds + parents the element into container #1
+    const firstContainer = termMock.element?.parentElement ?? null;
+    expect(firstContainer).toBeTruthy();
+    expect(termMock.open).toHaveBeenCalledTimes(1);
+
+    // Switch away: the per-mount cleanup DETACHES the element (removeChild) but the
+    // cached terminal + its scrollback survive (the element is orphaned, not gone).
+    first.unmount();
+    expect(termMock.element?.parentElement).toBeNull();
+
+    // Switch back: a fresh mount with a NEW container. The cached element MUST be
+    // re-parented into it via appendChild — NOT a second open() (real xterm 5.x
+    // open() early-returns once element exists). The ResizeObserver backstop must
+    // drive this even though the cached entry is already `opened` (the bug: the
+    // observer used to skip ensureAttached when opened===true, leaving the element
+    // orphaned and the terminal blank on return).
+    render(<InteractiveTerminalView runId="run-reparent" />);
+    act(() => {
+      resizeObserverCb?.();
+    });
+
+    expect(termMock.open).toHaveBeenCalledTimes(1); // re-parented, never re-opened
+    const secondContainer = termMock.element?.parentElement ?? null;
+    expect(secondContainer).toBeTruthy();
+    expect(secondContainer).not.toBe(firstContainer);
+  });
+
   it('disposeInteractiveTerminal (real end-of-life) off()s the channel + disposes term + onData', () => {
     render(<InteractiveTerminalView runId="run-endoflife" />);
     const handler = registered?.handler;
