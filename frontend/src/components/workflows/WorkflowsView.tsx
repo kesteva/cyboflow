@@ -23,15 +23,20 @@
  * Init is idempotent (the store's first call fetches + subscribes); a remount
  * reuses the live subscription.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useWorkflowsStore } from '../../stores/workflowsStore';
 import { API } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { CreateProjectDialog } from '../CreateProjectDialog';
 import { GalleryStacked } from './GalleryStacked';
+import { GalleryNew, type GalleryNewTemplate } from './GalleryNew';
 import { WorkflowsProjectFilter } from './WorkflowsProjectFilter';
+import { WorkflowEditorModal } from '../cyboflow/WorkflowEditorModal';
+import { AgentEditorModal } from '../cyboflow/agents/AgentEditorModal';
 import type { WorkflowGalleryEntry, AgentGalleryEntry } from '../../stores/workflowsStore';
+import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 
 /** First-load skeleton — two placeholder section blocks under the header. */
 function LoadingSkeleton(): React.JSX.Element {
@@ -136,31 +141,149 @@ export function WorkflowsView(): React.JSX.Element {
 
   const showSkeleton = (loading && !initialized) || hasProjects === null;
 
-  // Thin action props — handler bodies wired in P4 / the editor integration.
+  // ── Locally-hosted editor/picker modal state ──────────────────────────────
+  // All open/close state lives in this view; the gallery cards stay purely
+  // presentational. After any create/edit/duplicate/agent-save we refresh the
+  // workflows store so the gallery reflects the change.
+
+  /** Workflow blueprint editor — `mode` + seeds drive edit vs create. */
+  interface WfEditorState {
+    mode: 'edit' | 'create';
+    projectId: number;
+    /** Edit mode: the row to edit. Create mode: '' (ignored). */
+    workflowId: string;
+    initialDefinition?: WorkflowDefinition;
+    initialPermissionMode?: PermissionMode;
+    initialName?: string;
+  }
+  const [wfEditor, setWfEditor] = useState<WfEditorState | null>(null);
+
+  /** "New workflow" template picker; carries the project the new flow lands in. */
+  const [newWorkflowProjectId, setNewWorkflowProjectId] = useState<number | null>(null);
+
+  /** Agent editor — edit (existing key) vs create (blank key). */
+  interface AgentEditorOpen {
+    mode: 'edit' | 'create';
+    projectId: number;
+    agentKey: string;
+  }
+  const [agentEditor, setAgentEditor] = useState<AgentEditorOpen | null>(null);
+
+  // Synchronous in-flight latch for the direct-duplicate action: the `disabled`
+  // attribute on a card isn't involved here, so two clicks in the same tick
+  // would both fire createCustom. A ref flips synchronously and rejects the
+  // second invocation before it can issue a duplicate create.
+  const duplicateInFlightRef = useRef(false);
+
+  /**
+   * Resolve the project the New / cross-project actions target (v1):
+   * the active `projectFilter` when set, else the single/first enumerated
+   * project. Returns null when there are no projects (the New cards become
+   * no-ops). Derived from the store's already-fetched slices — no extra fetch.
+   */
+  const resolveTargetProjectId = (): number | null => {
+    if (projectFilter !== null) return projectFilter;
+    // The gallery slices carry the owning project id per workflow row; use the
+    // first one as the lone/first enumerated project. (Agents alone don't carry
+    // a project id, so workflows are the source of truth here.)
+    const first = workflows[0]?.row.project_id;
+    return first ?? null;
+  };
+
+  /**
+   * Resolve the project that owns an agent for the Edit-agent action (v1):
+   * agents are deduped across projects by key, so the AgentGalleryEntry carries
+   * no project id. We use the active `projectFilter` when set, else fall back to
+   * the first enumerated project (the same target the New actions use). The
+   * agent catalogue reconciles built-ins per project, so the first project is a
+   * safe default; a precise per-key project map is out of scope for v1.
+   */
+  const resolveAgentProjectId = (_entry: AgentGalleryEntry): number | null => {
+    return resolveTargetProjectId();
+  };
+
   const onRunWorkflow = (entry: WorkflowGalleryEntry): void => {
-    // TODO(P4): launch a run of entry.row via the start-session wizard.
-    console.warn('[WorkflowsView] Run not yet wired', entry.row.id);
+    // Land the start-session wizard locked to this workflow's project with the
+    // flow preselected BY ROW ID. goToWizard's nav mutual-exclusion closes the
+    // Workflows pane.
+    useNavigationStore.getState().goToWizard({
+      lockProjectId: entry.row.project_id,
+      preselectWorkflowId: entry.row.id,
+    });
   };
+
   const onEditWorkflow = (entry: WorkflowGalleryEntry): void => {
-    // TODO(P4): open entry.row in the workflow editor.
-    console.warn('[WorkflowsView] Edit workflow not yet wired', entry.row.id);
+    setWfEditor({
+      mode: 'edit',
+      projectId: entry.row.project_id,
+      workflowId: entry.row.id,
+    });
   };
+
   const onDuplicateWorkflow = (entry: WorkflowGalleryEntry): void => {
-    // TODO(P4): duplicate entry.row into a new editable draft.
-    console.warn('[WorkflowsView] Duplicate workflow not yet wired', entry.row.id);
+    if (duplicateInFlightRef.current) return;
+    duplicateInFlightRef.current = true;
+    void (async () => {
+      const isConflict = (err: unknown): boolean =>
+        err instanceof Error && err.message.includes('already exists');
+      try {
+        try {
+          await trpc.cyboflow.workflows.createCustom.mutate({
+            projectId: entry.row.project_id,
+            name: entry.row.name + '-copy',
+            definition: entry.definition,
+            permissionMode: entry.row.permission_mode,
+          });
+        } catch (err: unknown) {
+          // Retry ONCE with a distinct name on a name-collision conflict.
+          if (!isConflict(err)) throw err;
+          await trpc.cyboflow.workflows.createCustom.mutate({
+            projectId: entry.row.project_id,
+            name: entry.row.name + '-copy-2',
+            definition: entry.definition,
+            permissionMode: entry.row.permission_mode,
+          });
+        }
+        await useWorkflowsStore.getState().refresh();
+      } catch (err: unknown) {
+        console.warn('[WorkflowsView] Duplicate workflow failed', err);
+      } finally {
+        duplicateInFlightRef.current = false;
+      }
+    })();
   };
+
   const onNewWorkflow = (): void => {
-    // TODO(P4): open the create-workflow gallery.
-    console.warn('[WorkflowsView] New workflow not yet wired');
+    const targetProjectId = resolveTargetProjectId();
+    if (targetProjectId === null) return; // No projects — no-op.
+    setNewWorkflowProjectId(targetProjectId);
   };
+
   const onEditAgent = (entry: AgentGalleryEntry): void => {
-    // TODO(editor): open the agent editor for entry.id.
-    console.warn('[WorkflowsView] Edit agent not yet wired', entry.id);
+    const agentProjectId = resolveAgentProjectId(entry);
+    if (agentProjectId === null) return; // No projects — no-op.
+    setAgentEditor({ mode: 'edit', projectId: agentProjectId, agentKey: entry.id });
   };
+
   const onNewAgent = (): void => {
-    // TODO(editor): open the create-agent editor.
-    console.warn('[WorkflowsView] New agent not yet wired');
+    const targetProjectId = resolveTargetProjectId();
+    if (targetProjectId === null) return; // No projects — no-op.
+    setAgentEditor({ mode: 'create', projectId: targetProjectId, agentKey: '' });
   };
+
+  // Template list for the New-workflow picker — the store's workflows, deduped
+  // by name (GalleryNew dedupes again defensively, but we pre-thin so the picker
+  // never receives an entry per project).
+  const newWorkflowTemplates: GalleryNewTemplate[] = (() => {
+    const seen = new Set<string>();
+    const out: GalleryNewTemplate[] = [];
+    for (const w of workflows) {
+      if (seen.has(w.row.name)) continue;
+      seen.add(w.row.name);
+      out.push({ row: w.row, definition: w.definition });
+    }
+    return out;
+  })();
 
   return (
     <div
@@ -221,6 +344,64 @@ export function WorkflowsView(): React.JSX.Element {
           />
         )}
       </div>
+
+      {/* ── Locally-hosted modals ──────────────────────────────────────────── */}
+
+      {/* New-workflow template picker. Choosing a template opens the editor in
+          create mode seeded with that template; "blank canvas" opens it with no
+          seed (the editor's own skeleton). */}
+      {newWorkflowProjectId !== null && (
+        <GalleryNew
+          isOpen
+          templates={newWorkflowTemplates}
+          onClose={() => setNewWorkflowProjectId(null)}
+          onSelect={(def, pm, name) => {
+            const projectId = newWorkflowProjectId;
+            setNewWorkflowProjectId(null);
+            setWfEditor({
+              mode: 'create',
+              projectId,
+              workflowId: '',
+              initialDefinition: def,
+              initialPermissionMode: pm,
+              initialName: name,
+            });
+          }}
+        />
+      )}
+
+      {/* Workflow blueprint editor (edit or create). */}
+      {wfEditor !== null && (
+        <WorkflowEditorModal
+          isOpen
+          mode={wfEditor.mode}
+          workflowId={wfEditor.workflowId}
+          projectId={wfEditor.projectId}
+          initialDefinition={wfEditor.initialDefinition}
+          initialPermissionMode={wfEditor.initialPermissionMode}
+          initialName={wfEditor.initialName}
+          onClose={() => setWfEditor(null)}
+          onSaved={() => {
+            setWfEditor(null);
+            void useWorkflowsStore.getState().refresh();
+          }}
+        />
+      )}
+
+      {/* Agent editor (edit or create). */}
+      {agentEditor !== null && (
+        <AgentEditorModal
+          isOpen
+          mode={agentEditor.mode}
+          projectId={agentEditor.projectId}
+          agentKey={agentEditor.agentKey}
+          onClose={() => setAgentEditor(null)}
+          onSaved={() => {
+            setAgentEditor(null);
+            void useWorkflowsStore.getState().refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

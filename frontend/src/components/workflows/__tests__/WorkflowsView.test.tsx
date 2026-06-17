@@ -18,7 +18,7 @@
  *   6. The no-projects probe drives the create-project CTA.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
@@ -87,6 +87,34 @@ vi.mock('../../../utils/api', () => ({
 vi.mock('../../CreateProjectDialog', () => ({
   CreateProjectDialog: ({ isOpen }: { isOpen: boolean }) =>
     isOpen ? <div data-testid="create-project-dialog" /> : null,
+}));
+
+// ---------------------------------------------------------------------------
+// Mocks for the P4 card-action wiring (nav, tRPC, the hosted modals).
+// ---------------------------------------------------------------------------
+
+const mockGoToWizard = vi.fn();
+vi.mock('../../../stores/navigationStore', () => ({
+  useNavigationStore: { getState: () => ({ goToWizard: mockGoToWizard }) },
+}));
+
+const mockCreateCustom = vi.fn(async (_args: unknown) => ({ id: 'wf-copy' }));
+vi.mock('../../../trpc/client', () => ({
+  trpc: { cyboflow: { workflows: { createCustom: { mutate: (args: unknown) => mockCreateCustom(args) } } } },
+}));
+
+// Inert modals — only render markers when open; never touch tRPC at mount.
+vi.mock('../../cyboflow/WorkflowEditorModal', () => ({
+  WorkflowEditorModal: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="wf-editor-modal" /> : null,
+}));
+vi.mock('../../cyboflow/agents/AgentEditorModal', () => ({
+  AgentEditorModal: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="agent-editor-modal" /> : null,
+}));
+vi.mock('../GalleryNew', () => ({
+  GalleryNew: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="gallery-new-modal" /> : null,
 }));
 
 import { WorkflowsView } from '../WorkflowsView';
@@ -267,5 +295,35 @@ describe('AgentCard', () => {
   it('renders the token estimate when present', () => {
     render(<AgentCard entry={buildAgentEntry({ tokensEstimate: 12500 })} />);
     expect(screen.getByTestId('agent-card-tokens')).toBeInTheDocument();
+  });
+});
+
+describe('WorkflowsView card-action wiring (P4)', () => {
+  it('Run preselects the wizard BY ROW ID, locked to the card project', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('workflow-card-run-wf-planner'));
+    expect(mockGoToWizard).toHaveBeenCalledTimes(1);
+    expect(mockGoToWizard).toHaveBeenCalledWith({ lockProjectId: 1, preselectWorkflowId: 'wf-planner' });
+  });
+
+  it('Duplicate calls createCustom with a -copy name then refreshes the store', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('workflow-card-duplicate-wf-planner'));
+    await waitFor(() => expect(mockCreateCustom).toHaveBeenCalledTimes(1));
+    expect(mockCreateCustom).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, name: 'Planner-copy', permissionMode: 'default' }),
+    );
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
+  });
+
+  it('Duplicate is guarded by a synchronous in-flight latch (two rapid clicks create once)', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    const btn = screen.getByTestId('workflow-card-duplicate-wf-planner');
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(mockCreateCustom).toHaveBeenCalledTimes(1));
   });
 });

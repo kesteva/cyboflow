@@ -227,7 +227,7 @@ export function workflowEditorReducer(
       const newStep: WorkflowStep = {
         id: newId,
         name: 'New step',
-        agent: 'executor',
+        agent: 'implement',
         mcps: [],
         retries: 0,
       };
@@ -290,7 +290,7 @@ export function workflowEditorReducer(
           {
             id: newStepId,
             name: 'New step',
-            agent: 'executor',
+            agent: 'implement',
             mcps: [],
             retries: 0,
           },

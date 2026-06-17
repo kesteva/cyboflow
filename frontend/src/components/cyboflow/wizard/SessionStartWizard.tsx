@@ -278,17 +278,28 @@ export default function SessionStartWizard(): React.JSX.Element {
         .then(([rows, runs]) => {
           const metas = buildWorkflowMeta(rows, runs);
           setWorkflowMetas(metas);
-          // Resolve the explicit `preselectWorkflowName` target up-front (no side
-          // effects inside the setSelection updater). It only takes effect when a
+          // Resolve the explicit preselect target up-front (no side effects
+          // inside the setSelection updater). It only takes effect when a
           // matching flow exists AND it has not already been consumed — the
           // one-shot latch keeps later reruns / back-navigation from re-forcing it.
+          //
+          // By-ROW-ID preselect (`preselectWorkflowId`) TAKES PRECEDENCE over the
+          // by-name path: the gallery Run action passes the unambiguous workflow
+          // row id, which avoids the cross-project name-collision footgun where
+          // `preselectWorkflowName` silently falls back to DEFAULT_WORKFLOW_NAME
+          // ("sprint"). `WorkflowCardMeta.id` IS the workflow row id.
+          // `preselectWorkflowName` is kept for the Insights compound CTA.
+          const preselectId = opts?.preselectWorkflowId;
           const preselectName = opts?.preselectWorkflowName;
-          const preselectTarget =
-            preselectName !== undefined && !preselectConsumedRef.current
-              ? metas.find((m) => m.name === preselectName) ?? null
-              : null;
+          const preselectTarget = preselectConsumedRef.current
+            ? null
+            : preselectId !== undefined
+              ? metas.find((m) => m.id === preselectId) ?? null
+              : preselectName !== undefined
+                ? metas.find((m) => m.name === preselectName) ?? null
+                : null;
           // Selection priority: a just-saved flow (preferId, editor save) >
-          // the existing pick > the EXPLICIT name preselect > the default flow.
+          // the existing pick > the EXPLICIT preselect > the default flow.
           setSelection((prev) => {
             if (preferId && metas.some((m) => m.id === preferId)) {
               return { kind: 'workflow', workflowId: preferId };
@@ -316,7 +327,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           setWorkflowsLoading(false);
         });
     },
-    [selectedProjectId, opts?.preselectWorkflowName],
+    [selectedProjectId, opts?.preselectWorkflowId, opts?.preselectWorkflowName],
   );
 
   useEffect(() => {

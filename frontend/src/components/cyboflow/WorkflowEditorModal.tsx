@@ -42,6 +42,16 @@ export interface WorkflowEditorModalProps {
   mode?: 'edit' | 'create';
   /** Called after a successful save / reset / create with the affected workflow id. */
   onSaved?: (workflowId: string) => void;
+  /**
+   * Optional seed for create mode — pre-populates the editor with this
+   * definition instead of the blank skeleton (e.g. forking an existing flow).
+   * Ignored in edit mode (the persisted row definition always wins).
+   */
+  initialDefinition?: WorkflowDefinition;
+  /** Optional permission_mode seed for create mode (defaults to 'default'). */
+  initialPermissionMode?: PermissionMode;
+  /** Optional name seed for create mode; suffixed with '-copy' when present. */
+  initialName?: string;
 }
 
 /** Minimal skeleton seeded for a brand-new custom flow (create mode). */
@@ -56,7 +66,7 @@ const SKELETON_DEFINITION: WorkflowDefinition = {
         {
           id: 'step-1',
           name: 'New step',
-          agent: 'executor',
+          agent: 'implement',
           mcps: [],
           retries: 0,
         },
@@ -72,6 +82,9 @@ export function WorkflowEditorModal({
   projectId,
   mode = 'edit',
   onSaved,
+  initialDefinition,
+  initialPermissionMode,
+  initialName,
 }: WorkflowEditorModalProps) {
   // Editor reducer — seeded with the skeleton, re-seeded once the fetch resolves.
   const { state, dispatch } = useWorkflowEditorState(SKELETON_DEFINITION, '');
@@ -146,8 +159,8 @@ export function WorkflowEditorModal({
       // in the 2-flow rework; users build their custom graph from scratch (or
       // edit a built-in via 'edit' mode). A forked flow inherits no source row,
       // so the permission mode defaults to 'default'.
-      setSourcePermissionMode('default');
-      seed(SKELETON_DEFINITION, '');
+      setSourcePermissionMode(initialPermissionMode ?? 'default');
+      seed(initialDefinition ?? SKELETON_DEFINITION, initialName ? initialName + '-copy' : '');
     };
 
     if (mode === 'create') {
@@ -160,7 +173,7 @@ export function WorkflowEditorModal({
       cancelled = true;
     };
     // Re-seed whenever the modal opens or its target changes.
-  }, [isOpen, mode, workflowId, projectId, dispatch]);
+  }, [isOpen, mode, workflowId, projectId, dispatch, initialDefinition, initialPermissionMode, initialName]);
 
   // ── Dirty tracking ─────────────────────────────────────────────────────────
   useEffect(() => {
