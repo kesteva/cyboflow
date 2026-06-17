@@ -1,0 +1,271 @@
+/**
+ * WorkflowsView / GalleryStacked render tests.
+ *
+ * The workflows store is mocked (mirrors InsightsView.test) so we render against
+ * a fixed snapshot without a live tRPC connection. CreateProjectDialog is
+ * stubbed to an inert marker so the no-projects CTA renders without the real
+ * dialog's project-load effects.
+ *
+ * Behaviors verified:
+ *   1. Renders both gallery sections with count pills sourced from the store
+ *      (EXCLUDING the dashed New card).
+ *   2. Shows the first-load skeleton when loading && !initialized.
+ *   3. Surfaces a NON-FATAL error banner (with a Retry control) while still
+ *      rendering the gallery.
+ *   4. AgentCard shows the read-only "inherits run model" chip and renders NO
+ *      model-picker control.
+ *   5. The Agents section feature-gates to an empty-state when no agents.
+ *   6. The no-projects probe drives the create-project CTA.
+ */
+import '@testing-library/jest-dom';
+import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Project } from '../../../types/project';
+import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
+import type {
+  WorkflowGalleryEntry,
+  AgentGalleryEntry,
+} from '../../../stores/workflowsStore';
+import { wfMeta } from '../wfMeta';
+
+// ---------------------------------------------------------------------------
+// Mutable store snapshot shared with the mock factory.
+// ---------------------------------------------------------------------------
+
+let mockInitialized = true;
+let mockLoading = false;
+let mockError: string | null = null;
+let mockProjectFilter: number | null = null;
+let mockWorkflows: WorkflowGalleryEntry[] = [];
+let mockAgents: AgentGalleryEntry[] = [];
+
+const mockInit = vi.fn(async () => {});
+const mockRefresh = vi.fn(async () => {});
+const mockSetProjectFilter = vi.fn(async () => {});
+
+function snapshot() {
+  return {
+    initialized: mockInitialized,
+    loading: mockLoading,
+    error: mockError,
+    projectFilter: mockProjectFilter,
+    workflows: mockWorkflows,
+    agents: mockAgents,
+    init: mockInit,
+    refresh: mockRefresh,
+    setProjectFilter: mockSetProjectFilter,
+  };
+}
+
+vi.mock('../../../stores/workflowsStore', async (importOriginal) => {
+  // Keep the real pure helpers/types; only replace the hook.
+  const actual = await importOriginal<typeof import('../../../stores/workflowsStore')>();
+  const useWorkflowsStore = (selector: (s: ReturnType<typeof snapshot>) => unknown) =>
+    selector(snapshot());
+  useWorkflowsStore.getState = () => snapshot();
+  return { ...actual, useWorkflowsStore };
+});
+
+// ---------------------------------------------------------------------------
+// API mock — drives the project-count probe + the filter's project load.
+// ---------------------------------------------------------------------------
+
+let mockGetAll: () => Promise<{ success: boolean; data?: Project[]; error?: string }> = async () => ({
+  success: true,
+  data: [{ id: 1, name: 'Acme', path: '/tmp/acme', active: true, created_at: '', updated_at: '' }],
+});
+
+vi.mock('../../../utils/api', () => ({
+  API: {
+    projects: {
+      getAll: () => mockGetAll(),
+    },
+  },
+}));
+
+// Inert CreateProjectDialog so the no-projects CTA renders without real effects.
+vi.mock('../../CreateProjectDialog', () => ({
+  CreateProjectDialog: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="create-project-dialog" /> : null,
+}));
+
+import { WorkflowsView } from '../WorkflowsView';
+import { GalleryStacked } from '../GalleryStacked';
+import { AgentCard } from '../AgentCard';
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+function buildDefinition(over: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
+  return {
+    id: 'planner',
+    phases: [
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#3b6dd6',
+        steps: [
+          { id: 's1', name: 'Draft', agent: 'planner', mcps: [], retries: 0 },
+          { id: 's2', name: 'Gate', agent: 'human', mcps: [], retries: 0, human: true },
+        ],
+      },
+      {
+        id: 'execute',
+        label: 'Execute',
+        color: '#c96442',
+        steps: [{ id: 's3', name: 'Build', agent: 'executor', mcps: [], retries: 1 }],
+      },
+    ],
+    ...over,
+  };
+}
+
+function buildWorkflowEntry(over: Partial<WorkflowGalleryEntry> = {}): WorkflowGalleryEntry {
+  const definition = over.definition ?? buildDefinition();
+  return {
+    row: {
+      id: 'wf-planner',
+      project_id: 1,
+      name: 'Planner',
+      workflow_path: null,
+      permission_mode: 'default',
+      spec_json: '{}',
+      created_at: '2026-06-10T00:00:00.000Z',
+    },
+    definition,
+    meta: wfMeta(definition),
+    lastUsedAt: null,
+    projectName: 'Acme',
+    ...over,
+  };
+}
+
+function buildAgentEntry(over: Partial<AgentGalleryEntry> = {}): AgentGalleryEntry {
+  return {
+    id: 'executor',
+    name: 'Executor',
+    role: 'execute',
+    description: 'Implements the planned changes.',
+    tools: ['Read', 'Edit', 'Bash'],
+    isCustom: false,
+    isOverride: false,
+    tokensEstimate: null,
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockInitialized = true;
+  mockLoading = false;
+  mockError = null;
+  mockProjectFilter = null;
+  mockWorkflows = [buildWorkflowEntry()];
+  mockAgents = [buildAgentEntry()];
+  mockGetAll = async () => ({
+    success: true,
+    data: [{ id: 1, name: 'Acme', path: '/tmp/acme', active: true, created_at: '', updated_at: '' }],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('WorkflowsView', () => {
+  it('calls the store init() once on mount', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    expect(mockInit).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders both sections with count pills from the store (excluding the New card)', async () => {
+    mockWorkflows = [buildWorkflowEntry(), buildWorkflowEntry({ row: { ...buildWorkflowEntry().row, id: 'wf-2', name: 'Sprint' } })];
+    mockAgents = [buildAgentEntry(), buildAgentEntry({ id: 'verifier', name: 'Verifier' })];
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+    // Pills equal the real entry counts, NOT counting the dashed New card.
+    expect(screen.getByTestId('gallery-section-workflows-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('gallery-section-agents-count')).toHaveTextContent('2');
+    // The New cards are present (so the pill genuinely excludes them).
+    expect(screen.getByTestId('new-workflow-card')).toBeInTheDocument();
+    expect(screen.getByTestId('new-agent-card')).toBeInTheDocument();
+  });
+
+  it('shows the first-load skeleton when loading && !initialized', async () => {
+    mockInitialized = false;
+    mockLoading = true;
+    render(<WorkflowsView />);
+    expect(screen.getByTestId('workflows-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('gallery-stacked')).not.toBeInTheDocument();
+    // Let the async project-count probe settle so its state update is flushed
+    // inside act() (the skeleton persists because loading && !initialized holds).
+    await waitFor(() => expect(screen.getByTestId('workflows-loading')).toBeInTheDocument());
+  });
+
+  it('surfaces a non-fatal error banner with a Retry control while rendering the gallery', async () => {
+    mockError = 'network down';
+    render(<WorkflowsView />);
+    const banner = await screen.findByTestId('workflows-error');
+    expect(banner).toHaveTextContent(/network down/);
+    expect(screen.getByTestId('workflows-retry')).toBeInTheDocument();
+    expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument();
+  });
+
+  it('drives the create-project CTA when no projects exist', async () => {
+    mockGetAll = async () => ({ success: true, data: [] });
+    render(<WorkflowsView />);
+    expect(await screen.findByTestId('workflows-no-projects')).toBeInTheDocument();
+    expect(screen.queryByTestId('gallery-stacked')).not.toBeInTheDocument();
+  });
+});
+
+describe('GalleryStacked', () => {
+  it('feature-gates the Agents section to an empty-state when no agents', () => {
+    render(
+      <GalleryStacked
+        workflows={[buildWorkflowEntry()]}
+        agents={[]}
+        showProjectChip={false}
+        agentsUnavailable={true}
+      />,
+    );
+    expect(screen.getByTestId('gallery-agents-empty')).toBeInTheDocument();
+    // Pill reads 0 and no agent card renders, but the New-agent card stays.
+    expect(screen.getByTestId('gallery-section-agents-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('new-agent-card')).toBeInTheDocument();
+  });
+
+  it('shows the owning-project chip only in the all-projects view', () => {
+    const { rerender } = render(
+      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} showProjectChip={true} agentsUnavailable={true} />,
+    );
+    expect(screen.getByTestId('workflow-card-project-chip')).toHaveTextContent('Acme');
+    rerender(
+      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} showProjectChip={false} agentsUnavailable={true} />,
+    );
+    expect(screen.queryByTestId('workflow-card-project-chip')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentCard', () => {
+  it('shows the read-only "inherits run model" chip and no model picker', () => {
+    render(<AgentCard entry={buildAgentEntry()} />);
+    expect(screen.getByTestId('agent-card-model-chip')).toHaveTextContent('inherits run model');
+    // No interactive model-selection control exists on the card.
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  it('shows tools count as "N of 8" and omits tokens when the estimate is null', () => {
+    render(<AgentCard entry={buildAgentEntry({ tools: ['Read', 'Edit', 'Bash'], tokensEstimate: null })} />);
+    expect(screen.getByText(/of/)).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-card-tokens')).not.toBeInTheDocument();
+  });
+
+  it('renders the token estimate when present', () => {
+    render(<AgentCard entry={buildAgentEntry({ tokensEstimate: 12500 })} />);
+    expect(screen.getByTestId('agent-card-tokens')).toBeInTheDocument();
+  });
+});

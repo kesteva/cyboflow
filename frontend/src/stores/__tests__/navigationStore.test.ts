@@ -28,6 +28,7 @@ function reset(): void {
     humanReviewOpen: false,
     backlogOpen: false,
     insightsOpen: false,
+    workflowsOpen: false,
   });
 }
 
@@ -262,6 +263,121 @@ describe('navigationStore — insightsOpen mutual exclusion', () => {
     useNavigationStore.getState().closeInsights();
     const s = useNavigationStore.getState();
     expect(s.insightsOpen).toBe(false);
+    expect(s.activeProjectId).toBe(42);
+    expect(s.activeView).toBe('project');
+  });
+});
+
+describe('navigationStore — workflowsOpen mutual exclusion', () => {
+  beforeEach(reset);
+
+  it('defaults to closed', () => {
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+  });
+
+  it('openWorkflows / closeWorkflows set the flag and force home', () => {
+    useNavigationStore.getState().goToSession();
+    useNavigationStore.getState().openWorkflows();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(true);
+    expect(useNavigationStore.getState().view).toBe('home');
+
+    useNavigationStore.getState().closeWorkflows();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+  });
+
+  it('toggleWorkflows flips the flag and forces home', () => {
+    useNavigationStore.getState().goToWizard();
+    useNavigationStore.getState().toggleWorkflows();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(true);
+    expect(useNavigationStore.getState().view).toBe('home');
+    useNavigationStore.getState().toggleWorkflows();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+  });
+
+  it('toggleWorkflows closes all three sibling overlays (humanReview/backlog/insights)', () => {
+    useNavigationStore.getState().openHumanReview();
+    useNavigationStore.setState({ backlogOpen: true, insightsOpen: true });
+    useNavigationStore.getState().toggleWorkflows();
+    const s = useNavigationStore.getState();
+    expect(s.workflowsOpen).toBe(true);
+    expect(s.humanReviewOpen).toBe(false);
+    expect(s.backlogOpen).toBe(false);
+    expect(s.insightsOpen).toBe(false);
+  });
+
+  it('opening any sibling overlay closes workflows (reverse exclusion)', () => {
+    useNavigationStore.getState().openWorkflows();
+    useNavigationStore.getState().openHumanReview();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    useNavigationStore.getState().openWorkflows();
+    useNavigationStore.getState().openBacklog();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    useNavigationStore.getState().openWorkflows();
+    useNavigationStore.getState().openInsights();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+  });
+
+  // For EACH of the 11 sibling-clearing actions, workflowsOpen ends false.
+  it('every sibling-clearing nav/overlay action leaves workflowsOpen false', () => {
+    const open = (): void => {
+      reset();
+      useNavigationStore.getState().openWorkflows();
+      expect(useNavigationStore.getState().workflowsOpen).toBe(true);
+    };
+
+    open();
+    useNavigationStore.getState().goHome();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().goToWizard();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().goToSession();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().navigateToProject(7);
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().navigateToSessions();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().openHumanReview();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().toggleHumanReview();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().openBacklog();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().toggleBacklog();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().openInsights();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+
+    open();
+    useNavigationStore.getState().toggleInsights();
+    expect(useNavigationStore.getState().workflowsOpen).toBe(false);
+  });
+
+  it('closeWorkflows leaves project navigation state untouched (rail-click contract)', () => {
+    useNavigationStore.getState().navigateToProject(42);
+    useNavigationStore.getState().openWorkflows();
+    useNavigationStore.getState().closeWorkflows();
+    const s = useNavigationStore.getState();
+    expect(s.workflowsOpen).toBe(false);
     expect(s.activeProjectId).toBe(42);
     expect(s.activeView).toBe('project');
   });

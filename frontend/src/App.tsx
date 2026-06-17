@@ -25,6 +25,7 @@ import LandingHome from './components/landing/LandingHome';
 import SessionStartWizard from './components/cyboflow/wizard/SessionStartWizard';
 import BacklogPane from './components/BacklogPane';
 import { InsightsView } from './components/Insights/InsightsView';
+import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { StatusBar } from './components/StatusBar';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
@@ -60,6 +61,8 @@ function App() {
   const toggleBacklog = useNavigationStore((s) => s.toggleBacklog);
   const showInsights = useNavigationStore((s) => s.insightsOpen);
   const toggleInsights = useNavigationStore((s) => s.toggleInsights);
+  const showWorkflows = useNavigationStore((s) => s.workflowsOpen);
+  const toggleWorkflows = useNavigationStore((s) => s.toggleWorkflows);
   // Human-review rail badge: pending PERMISSION approvals (global approval
   // stream) + pending decision/human_task review items aggregated across all
   // projects from the landing store (init'd app-wide below). Approvals alone
@@ -323,6 +326,8 @@ function App() {
             insightsCount={insightsCount}
             insightsActive={showInsights}
             onToggleInsights={toggleInsights}
+            workflowsActive={showWorkflows}
+            onToggleWorkflows={toggleWorkflows}
           />
           {/* Center-surface state machine, keyed off navigationStore.view:
                 • 'session' → CyboflowRoot (the active run/session workspace, the
@@ -361,6 +366,17 @@ function App() {
                 </div>
               )}>
                 <InsightsView />
+              </ErrorBoundary>
+            ) : showWorkflows ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Workflows error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <WorkflowsView />
               </ErrorBoundary>
             ) : showBacklog ? (
               <ErrorBoundary fallback={(error) => (
