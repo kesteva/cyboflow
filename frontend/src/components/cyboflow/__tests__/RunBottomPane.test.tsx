@@ -2,9 +2,9 @@
  * RunBottomPane component tests (TASK-756, updated TASK-761).
  *
  * Behaviors verified:
- *   1. Renders three tab buttons with labels Chat, Terminal, Data Stream.
- *   2. Chat is the default active tab; RunChatView is mounted on first render.
- *   3. Clicking Terminal tab shows the "Terminal — coming soon" placeholder and hides the chat.
+ *   1. An SDK run shows only Chat + Data Stream (no Terminal tab — SDK has no PTY).
+ *   2. An interactive run offers a Terminal tab that mounts the live terminal.
+ *   3. Chat is the default active tab; RunChatView is mounted on first render.
  *   4. Clicking Data Stream tab mounts RunView (raw event log) and hides the chat.
  *   5. Clicking Chat tab after switching away restores RunChatView.
  */
@@ -67,9 +67,28 @@ vi.mock('../RunChatView', () => ({
   RunChatView: () => <div data-testid="run-chat-view-mock">RunChatView</div>,
 }));
 
+// Mock InteractiveTerminalView so the interactive Terminal tab does not boot a
+// real xterm/PTY subscription in jsdom.
+vi.mock('../InteractiveTerminalView', () => ({
+  InteractiveTerminalView: ({ runId }: { runId: string }) => (
+    <div data-testid="interactive-terminal-mock">{runId}</div>
+  ),
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { RunBottomPane } from '../RunBottomPane';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+import type { ActiveRunRow } from '../../../stores/activeRunsStore';
+
+/** Seed the active-runs store so RunBottomPane resolves a run's substrate. */
+function seedRun(id: string, substrate: 'sdk' | 'interactive'): void {
+  act(() => {
+    useActiveRunsStore.setState({
+      runsByProject: { 1: [{ id, substrate } as unknown as ActiveRunRow] },
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -78,6 +97,7 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
+    useActiveRunsStore.setState({ runsByProject: {} });
   });
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
   // useEffect does not throw and tests can focus on rendering behaviour.
@@ -89,14 +109,34 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('RunBottomPane', () => {
-  it('renders three tabs with labels Chat, Terminal, Data Stream', () => {
+  it('an SDK run shows only Chat + Data Stream (no Terminal tab — SDK has no PTY)', () => {
+    seedRun('run-xyz', 'sdk');
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-xyz');
+    });
     render(<RunBottomPane />);
     expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Data Stream' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Terminal' })).not.toBeInTheDocument();
+  });
+
+  it('an interactive run offers a Terminal tab that mounts the live terminal', () => {
+    seedRun('run-pty', 'interactive');
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-pty');
+    });
+    render(<RunBottomPane />);
+
+    const terminalTab = screen.getByRole('tab', { name: 'Terminal' });
+    expect(terminalTab).toBeInTheDocument();
+
+    fireEvent.click(terminalTab);
+    expect(screen.getByTestId('interactive-terminal-mock')).toHaveTextContent('run-pty');
+    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
   it('defaults to Chat tab and mounts RunChatView', () => {
+    seedRun('run-xyz', 'sdk');
     act(() => {
       useCyboflowStore.getState().setActiveRun('run-xyz');
     });
@@ -104,24 +144,6 @@ describe('RunBottomPane', () => {
     // RunChatView (mocked) is mounted on first render; RunView is not.
     expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
     expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
-  });
-
-  it('clicking Terminal tab shows "Terminal — coming soon" and hides the chat', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-xyz');
-    });
-    render(<RunBottomPane />);
-
-    // Default: RunChatView is visible
-    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
-
-    // Click Terminal tab
-    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
-
-    // Terminal placeholder visible
-    expect(screen.getByText('Terminal — coming soon')).toBeInTheDocument();
-    // Chat content gone
-    expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
   it('clicking Data Stream tab mounts RunView and hides the chat', () => {
