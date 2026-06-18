@@ -136,6 +136,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       ? MODEL_LABELS[modelId] ?? modelId
       : null;
 
+  // Read-only effort pill (set at session start; migration 029). Today the only
+  // value is 'ultracode' — an interactive-only opt-in, so it shows on the PTY
+  // composer (where the SDK-gated model pill never appears). null → no pill.
+  const effortLabel = activeSession.effort === 'ultracode' ? 'ultracode' : null;
+
   const checkpointSlot = !interactive ? (
     <CommitModePill
       sessionId={activeSession.id}
@@ -177,9 +182,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       onTogglePtyOpen={interactive ? onTogglePtyOpen : undefined}
       supportsAttachments={!interactive}
       modelLabel={modelLabel}
-      // effort is not persisted on the Session yet — task 4 adds it to session
-      // config + surfaces it here as a read-only pill.
-      effortLabel={null}
+      effortLabel={effortLabel}
       onToggleSettings={!interactive ? onToggleSettings : undefined}
       checkpointSlot={checkpointSlot}
       compactSlot={compactSlot}

@@ -105,6 +105,13 @@ export interface Session {
    * undefined/NULL → sdk (legacy). Mirror of main/src/types/session.ts Session.
    */
   substrate?: CliSubstrate;
+  /**
+   * Agent effort the session was launched with ('ultracode' | undefined).
+   * Stamped by sessions:create-quick (sessions.effort, migration 029) and shown
+   * READ-ONLY in the unified chat composer. undefined/NULL → no effort (default).
+   * Mirror of main/src/types/session.ts Session.
+   */
+  effort?: 'ultracode';
 }
 
 export interface GitStatus {

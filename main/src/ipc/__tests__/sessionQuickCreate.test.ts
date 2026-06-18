@@ -404,6 +404,41 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(stamp?.args).toEqual(['interactive', 'sess-001']);
   });
 
+  it('persists sessions.effort = ultracode when the Ultracode card is chosen (migration 029)', async () => {
+    const { services, dbRunCalls } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+      effort: 'ultracode',
+    });
+
+    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET effort'));
+    expect(stamp).toBeDefined();
+    expect(stamp?.args).toEqual(['ultracode', 'sess-001']);
+  });
+
+  it('stamps sessions.effort = null for a non-ultracode (or invalid effort) quick session', async () => {
+    const { services, dbRunCalls } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      effort: 'bogus',
+    });
+
+    const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET effort'));
+    expect(stamps).toHaveLength(2);
+    expect(stamps.map((c) => c.args)).toEqual([
+      [null, 'sess-001'],
+      [null, 'sess-001'],
+    ]);
+  });
+
   it('eagerly spawns the interactive REPL (fire-and-forget) and returns claudePanelId', async () => {
     const { services, fakeInteractiveCliManager, fakeSessionManager, fakeRegisterLivePanel } =
       makeServices();

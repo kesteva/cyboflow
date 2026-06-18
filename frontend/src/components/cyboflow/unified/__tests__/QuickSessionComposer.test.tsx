@@ -133,3 +133,33 @@ describe('QuickSessionComposer — interactive (PTY)', () => {
     expect(mockGetModel).not.toHaveBeenCalled();
   });
 });
+
+describe('QuickSessionComposer — read-only effort pill (migration 029)', () => {
+  it('shows "effort: ultracode" for an ultracode session once the PTY composer is revealed', () => {
+    render(
+      <Harness
+        session={makeSession({ status: 'running', substrate: 'interactive', effort: 'ultracode' })}
+        interactive
+      />,
+    );
+
+    // The PTY composer (and its toolbar) is ⌃G-hidden by default — reveal it.
+    act(() => {
+      fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    });
+
+    expect(screen.getByText('effort: ultracode')).toBeInTheDocument();
+  });
+
+  it('omits the effort pill for an interactive session with no effort', () => {
+    render(
+      <Harness session={makeSession({ status: 'running', substrate: 'interactive' })} interactive />,
+    );
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    });
+
+    expect(screen.queryByText('effort: ultracode')).toBeNull();
+  });
+});

@@ -63,7 +63,9 @@ export interface UnifiedComposerProps {
   supportsAttachments?: boolean;
   /** read-only model label (e.g. "Sonnet 4.5"), SDK only. */
   modelLabel?: string | null;
-  /** read-only effort label (e.g. "medium"), SDK only. */
+  /** read-only effort label (e.g. "ultracode"). Shown whenever set, independent
+   *  of substrate — cyboflow's only effort value is the interactive-only
+   *  'ultracode', so it must not be gated on the SDK-only model affordance. */
   effortLabel?: string | null;
 
   /** ⚙ display-settings toggle (SDK); omitted → no settings button. */
@@ -329,13 +331,14 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
           </>
         )}
 
-        {/* read-only model + effort (SDK; session config) */}
+        {/* read-only model (SDK selector per design) + effort. cyboflow's only
+            effort value is 'ultracode', an interactive-only opt-in, so the
+            effort pill is decoupled from the SDK-gated model pill and renders
+            whenever the session carries one (session config; edit deferred). */}
         {visibility.showModelEffort && modelLabel && (
           <ReadonlyPill label={modelLabel} />
         )}
-        {visibility.showModelEffort && effortLabel && (
-          <ReadonlyPill label={`effort: ${effortLabel}`} />
-        )}
+        {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
         {/* checkpoint / commit-mode (quick) */}
         {visibility.showCheckpoint && checkpointSlot}

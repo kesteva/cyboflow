@@ -484,6 +484,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         session.id,
       );
 
+      // Persist the per-session agent effort (migration 029) so the unified
+      // chat composer can surface it as a read-only pill (set at session start;
+      // mid-session change deferred). The only value is 'ultracode' (the
+      // Ultracode wizard card); any other request resolved to undefined above,
+      // and a non-ultracode session stamps NULL. Independent of substrate on the
+      // row, though the wizard only ever pairs 'ultracode' with 'interactive'.
+      db.prepare(`UPDATE sessions SET effort = ? WHERE id = ?`).run(
+        requestedEffort ?? null,
+        session.id,
+      );
+
       // EAGER PTY SPAWN (interactive substrate only): create the claude panel
       // server-side (same pattern sessions:input uses) and boot the persistent
       // REPL now, with the cyboflow context briefing as its first prompt, so the
