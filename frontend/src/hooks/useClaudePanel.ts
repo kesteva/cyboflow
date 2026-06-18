@@ -26,7 +26,6 @@ export const useClaudePanel = (
 
   // States specific to Claude functionality
   const [input, setInput] = useState('');
-  const [ultrathink, setUltrathink] = useState(false);
   const [isLoadingOutput, setIsLoadingOutput] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [outputLoadState, setOutputLoadState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
@@ -224,7 +223,7 @@ export const useClaudePanel = (
       return;
     }
     
-    let finalInput = ultrathink ? `${input}\nultrathink` : input;
+    let finalInput = input;
     
     // Check if we have compacted context to inject
     if (contextCompacted && compactedContext) {
@@ -285,7 +284,6 @@ export const useClaudePanel = (
     const response = await API.panels.sendInput(panelId, `${finalInput}\n`);
     if (response.success) {
       setInput('');
-      setUltrathink(false);
     }
   };
 
@@ -299,7 +297,7 @@ export const useClaudePanel = (
     // Mark that we're continuing a conversation to prevent output reload
     isContinuingConversationRef.current = true;
     
-    let finalInput = ultrathink ? `${input}\nultrathink` : input;
+    let finalInput = input;
     
     // Check if we have compacted context to inject
     if (contextCompacted && compactedContext) {
@@ -360,7 +358,6 @@ export const useClaudePanel = (
     const response = await API.panels.continue(panelId, finalInput, modelOverride);
     if (response.success) {
       setInput('');
-      setUltrathink(false);
       // Output will be loaded automatically when session status changes
     }
   };
@@ -418,8 +415,6 @@ export const useClaudePanel = (
     theme,
     input,
     setInput,
-    ultrathink,
-    setUltrathink,
     isLoadingOutput,
     outputLoadState,
     loadError,
