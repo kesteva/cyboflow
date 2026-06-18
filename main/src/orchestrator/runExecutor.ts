@@ -29,13 +29,16 @@ import { rollupRunUsage } from './runUsageRollup';
 // ---------------------------------------------------------------------------
 
 /**
- * Narrow interface for reading a workflow prompt file.
- * The real implementation delegates to readWorkflowPrompt(); tests inject a stub.
+ * Narrow interface for reading a workflow prompt.
+ * The real implementation delegates to readWorkflowPrompt() for built-in / edited
+ * built-in flows (non-null `workflow_path`) and to renderCustomFlowPrompt() for
+ * custom flows (null `workflow_path`, graph in `spec_json`); tests inject a stub.
  * Synchronous — matches the existing readWorkflowPrompt API.
- * Throws WorkflowPromptReadError when the file is missing or the body is empty.
+ * Throws WorkflowPromptReadError when a built-in `.md` is missing/empty or when a
+ * custom flow has no resolvable definition.
  */
 export interface WorkflowPromptReaderLike {
-  read(workflowPath: string): { prompt: string; systemPromptAppend: string };
+  read(workflow: WorkflowRow): { prompt: string; systemPromptAppend: string };
 }
 
 /**
@@ -654,10 +657,7 @@ export class RunExecutor {
     if (!this.promptReader) {
       throw new Error('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected — pass a promptReader to the constructor or override getPrompt in a subclass');
     }
-    if (!workflow.workflow_path) {
-      throw new Error(`RunExecutor.getPrompt: workflow_path is null for workflowId=${workflow.id}`);
-    }
-    const { prompt, systemPromptAppend } = this.promptReader.read(workflow.workflow_path);
+    const { prompt, systemPromptAppend } = this.promptReader.read(workflow);
     this.pendingSystemPromptAppend.set(runId, systemPromptAppend);
 
     // Piece C — idle-chat nudge. When a pending nudge exists, return JUST the

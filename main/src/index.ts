@@ -59,7 +59,7 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
@@ -68,9 +68,7 @@ import {
   transitionToFailed,
   transitionToCanceled,
 } from './services/cyboflow/transitions';
-import { readWorkflowPrompt } from './orchestrator/workflowPromptReader';
-import { buildStepReportingAppend } from './orchestrator/prompts/step-reporting-instructions';
-import { resolveWorkflowDefinition } from '../../shared/types/workflows';
+import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAdapter';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes } from './orchestrator/runRecovery';
 import * as fs from 'fs';
@@ -676,34 +674,14 @@ async function initializeServices() {
     getNodePath: async () => process.execPath,
   };
 
-  // Concrete WorkflowPromptReaderLike adapter — delegates to readWorkflowPrompt()
-  // while keeping RunExecutor free of direct fs/concrete-module imports.
+  // Concrete WorkflowPromptReaderLike adapter — keeps RunExecutor free of direct
+  // fs/concrete-module imports while branching on the run's workflow row.
   //
-  // TASK-803: on top of the `.md` body + its `system_prompt_append` frontmatter,
-  // concatenate the per-run cyboflow step-reporting instructions. The adapter
-  // resolves the workflow row by `workflow_path` (the only key RunExecutor.getPrompt
-  // passes through the read-only WorkflowPromptReaderLike seam), then resolves the
-  // EFFECTIVE definition via resolveWorkflowDefinition(name, spec_json) — honoring
-  // user edits in spec_json, never WORKFLOW_DEFINITIONS[name] directly — and passes
-  // the resolved def to buildStepReportingAppend. Fail-soft: an unresolved row or a
-  // non-SoloFlow/broken-spec workflow yields '' so nothing extra is injected.
-  const promptReader = {
-    read: (workflowPath: string) => {
-      const base = readWorkflowPrompt(workflowPath);
-      const row = databaseService
-        .getDb()
-        .prepare('SELECT name, spec_json FROM workflows WHERE workflow_path = ? LIMIT 1')
-        .get(workflowPath) as { name: string; spec_json: string } | undefined;
-      if (!row) return base;
-      const resolvedDef = resolveWorkflowDefinition(row.name, row.spec_json);
-      const stepReportingAppend = buildStepReportingAppend(resolvedDef);
-      if (stepReportingAppend === '') return base;
-      const systemPromptAppend =
-        base.systemPromptAppend.length > 0
-          ? `${base.systemPromptAppend}\n\n${stepReportingAppend}`
-          : stepReportingAppend;
-      return { prompt: base.prompt, systemPromptAppend };
-    },
+  // The branch logic (built-in / edited built-in `.md` + step-reporting append vs
+  // custom-flow rendered-graph prompt) lives in readWorkflowPromptForRow so it is
+  // unit-testable without bootstrapping Electron — see workflowPromptReaderAdapter.ts.
+  const promptReader: WorkflowPromptReaderLike = {
+    read: readWorkflowPromptForRow,
   };
 
   // SubstrateDispatchFacade — the substrate-aware ClaudeSpawnerLike that replaces

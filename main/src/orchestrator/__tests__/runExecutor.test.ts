@@ -539,13 +539,19 @@ describe('RunExecutor.buildOptionsOverrides — agentPermissionMode threading', 
 // TASK-661: New tests for WorkflowPromptReaderLike wiring and systemPromptAppend
 // ---------------------------------------------------------------------------
 
-/** Stub reader backed by an in-memory map for unit tests. */
+/**
+ * Stub reader backed by an in-memory map for unit tests. Keyed by
+ * `workflow.workflow_path` (built-in / edited built-in flows). A row with a null
+ * `workflow_path` (custom flow) has no entry and throws — mirroring the real
+ * adapter, which never resolves a custom flow through this path-keyed stub.
+ */
 function makeStubReader(entries: Record<string, { prompt: string; systemPromptAppend: string }>): WorkflowPromptReaderLike {
   return {
-    read: (workflowPath: string) => {
-      const entry = entries[workflowPath];
+    read: (workflow: WorkflowRow) => {
+      const key = workflow.workflow_path ?? '';
+      const entry = entries[key];
       if (!entry) {
-        const err = new Error(`WorkflowPromptReadError: no entry for ${workflowPath}`);
+        const err = new Error(`WorkflowPromptReadError: no entry for ${key}`);
         err.name = 'WorkflowPromptReadError';
         throw err;
       }
@@ -606,6 +612,63 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
     const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(opts.systemPromptAppend).toBe('always use TypeScript');
+  });
+
+  // Custom-flow routing (workflow_path === null): getPrompt no longer throws on a
+  // null path — it passes the full WorkflowRow to the reader, which renders the
+  // custom-flow prompt. Proves the reader receives the row (not a path string) and
+  // that the no-throw path reaches spawnCliProcess.
+  it('getPrompt does NOT throw on a null workflow_path — routes the row through the reader', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: null, name: 'my-custom-flow' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    // Row-typed reader that branches on workflow_path like the real adapter.
+    const reader: WorkflowPromptReaderLike = {
+      read: (wf: WorkflowRow) =>
+        wf.workflow_path === null
+          ? { prompt: 'CUSTOM FLOW PROMPT', systemPromptAppend: 'custom-append' }
+          : { prompt: 'BUILT-IN', systemPromptAppend: '' },
+    };
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+
+    await expect(executor.execute(run.id)).resolves.not.toThrow();
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.prompt).toBe('CUSTOM FLOW PROMPT');
+    expect(opts.systemPromptAppend).toBe('custom-append');
+  });
+
+  // Downstream injection branches still apply for a null-workflow_path (custom)
+  // run: a pending resume short-circuits to the CONTINUE prompt exactly as it does
+  // for a built-in run — proving the custom-flow change left the downstream seam
+  // untouched.
+  it('downstream resume branch still applies for a null-workflow_path run', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: null, name: 'my-custom-flow' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader: WorkflowPromptReaderLike = {
+      read: () => ({ prompt: 'CUSTOM FLOW PROMPT', systemPromptAppend: '' }),
+    };
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+    // Stage a pending resume so getPrompt's resume branch must win.
+    executor.setPendingResume(run.id);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    // The base custom prompt is NOT re-sent on a resumed turn.
+    expect(opts.prompt).not.toBe('CUSTOM FLOW PROMPT');
+    expect(opts.prompt).toBe(RESUME_CONTINUE_PROMPT);
   });
 });
 
