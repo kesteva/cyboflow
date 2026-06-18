@@ -21,9 +21,8 @@
  * test (same treatment as RunChatView.test.tsx).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ReactNode } from 'react';
 
 // ---------------------------------------------------------------------------
 // Hoisted mutable holder — the useClaudePanel mock reads activeSession from it
@@ -105,8 +104,19 @@ vi.mock('../SessionStats', () => ({
   SessionStats: () => <div data-testid="session-stats">SessionStats</div>,
 }));
 
-vi.mock('../ClaudeInputWithImages', () => ({
-  ClaudeInputWithImages: () => <div data-testid="claude-input">ClaudeInputWithImages</div>,
+// The composer is now the shared QuickSessionComposer; its send behavior lives
+// in QuickSessionComposer.test / UnifiedComposer.test. Here we only assert the
+// substrate-swap branch logic mounts it with the right `interactive`/`ptyOpen`.
+vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
+  QuickSessionComposer: ({ interactive, ptyOpen }: { interactive: boolean; ptyOpen?: boolean }) => (
+    <div
+      data-testid="quick-session-composer"
+      data-interactive={String(interactive)}
+      data-pty-open={String(ptyOpen)}
+    >
+      QuickSessionComposer
+    </div>
+  ),
 }));
 
 vi.mock('../ClaudeSettingsPanel', () => ({
@@ -115,10 +125,6 @@ vi.mock('../ClaudeSettingsPanel', () => ({
 
 vi.mock('../../ai/transformers/ClaudeMessageTransformer', () => ({
   ClaudeMessageTransformer: class ClaudeMessageTransformer {},
-}));
-
-vi.mock('../../../ResizablePanel', () => ({
-  ResizablePanel: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
 
 vi.mock('../../../ReviewQueue/PendingApprovalsForRun', () => ({
@@ -190,55 +196,44 @@ beforeEach(() => {
 // Tests — substrate render swap
 // ---------------------------------------------------------------------------
 
-// The interactive composer is hidden by default; summon it via the Ctrl+G hint bar.
-function openInteractiveComposer(): void {
-  fireEvent.click(screen.getByTestId('interactive-composer-hint'));
-}
-
 describe('ClaudePanel — interactive-PTY render swap', () => {
-  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView, hides the composer behind a Ctrl+G hint, drops the SDK surface AND ClaudeInputWithImages, keeps approvals", () => {
+  it("substrate 'interactive' + runId: renders the unguarded InteractiveTerminalView, drops the SDK surface, mounts the interactive composer, keeps approvals", () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
 
     const terminal = screen.getByTestId('interactive-terminal-view');
-    expect(terminal).toBeInTheDocument();
     expect(terminal).toHaveTextContent('InteractiveTerminalView:run-q1');
     // Quick sessions are user-driven: the first-interaction guardrail is off.
     expect(terminal).toHaveTextContent('guard=false');
     expect(screen.getByTestId('claude-panel-interactive-terminal')).toBeInTheDocument();
     // The SDK structured surface stays dormant (not in the DOM).
     expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
-    // ClaudeInputWithImages must NOT mount — its handlers hit the panel-scoped
-    // panels:send-input / panels:continue (no substrate guard → competing SDK
-    // conversation).
-    expect(screen.queryByTestId('claude-input')).not.toBeInTheDocument();
-    // The composer is hidden by default (type into the terminal); a hint bar
-    // advertises Ctrl+G. The composer mounts only once summoned.
-    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
-    expect(screen.getByTestId('interactive-composer-hint')).toBeInTheDocument();
-    openInteractiveComposer();
-    expect(screen.getByTestId('interactive-session-composer')).toBeInTheDocument();
+    // The unified composer mounts in interactive mode (⌃G handling lives inside
+    // it; it is hidden by default — ptyOpen starts false).
+    const composer = screen.getByTestId('quick-session-composer');
+    expect(composer).toHaveAttribute('data-interactive', 'true');
+    expect(composer).toHaveAttribute('data-pty-open', 'false');
     // Approvals stay mounted exactly as before.
     expect(screen.getByTestId('pending-approvals-for-run')).toHaveTextContent('run-q1');
   });
 
-  it('Ctrl+G toggles the composer open and closed', () => {
+  it('Ctrl+G toggles the composer ptyOpen flag', () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
-    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
+    const get = () => screen.getByTestId('quick-session-composer');
+    expect(get()).toHaveAttribute('data-pty-open', 'false');
 
     fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
-    expect(screen.getByTestId('interactive-session-composer')).toBeInTheDocument();
+    expect(get()).toHaveAttribute('data-pty-open', 'true');
 
     fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
-    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
+    expect(get()).toHaveAttribute('data-pty-open', 'false');
   });
 
-  it('substrate undefined: renders the SDK surface, no InteractiveTerminalView, ClaudeInputWithImages composer', () => {
+  it('substrate undefined: renders the SDK surface + the SDK (non-interactive) composer', () => {
     renderWithProvider(makeSession({ runId: 'run-q1' }));
 
     expect(screen.getByTestId('sdk-rich-output')).toBeInTheDocument();
     expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
-    expect(screen.getByTestId('claude-input')).toBeInTheDocument();
-    expect(screen.queryByTestId('interactive-session-composer')).not.toBeInTheDocument();
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'false');
   });
 
   it("substrate 'interactive' + null runId: falls through to the SDK surface (no crash)", () => {
@@ -259,61 +254,5 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       'InteractiveTerminalView:run-q2',
     );
     expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests — InteractiveSessionComposer (the session-scoped composer)
-// ---------------------------------------------------------------------------
-
-describe('ClaudePanel — InteractiveSessionComposer', () => {
-  it('submits via API.sessions.sendInput with (sessionId, text) and clears on success', async () => {
-    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
-    openInteractiveComposer();
-
-    const textarea = screen.getByPlaceholderText('Message the live session…');
-    fireEvent.change(textarea, { target: { value: 'run the tests' } });
-    fireEvent.click(screen.getByRole('button', { name: /send/i }));
-
-    await waitFor(() => {
-      expect(mockSendInput).toHaveBeenCalledTimes(1);
-    });
-    expect(mockSendInput).toHaveBeenCalledWith('s1', 'run the tests');
-    // Cleared on success.
-    await waitFor(() => expect(textarea).toHaveValue(''));
-  });
-
-  it('Enter submits; Shift+Enter does not (newline stays local)', async () => {
-    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
-    openInteractiveComposer();
-
-    const textarea = screen.getByPlaceholderText('Message the live session…');
-    fireEvent.change(textarea, { target: { value: 'first line' } });
-
-    // Shift+Enter must NOT send.
-    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
-    expect(mockSendInput).not.toHaveBeenCalled();
-
-    // Bare Enter sends.
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-    await waitFor(() => {
-      expect(mockSendInput).toHaveBeenCalledWith('s1', 'first line');
-    });
-  });
-
-  it('surfaces a failed send inline and keeps the draft text', async () => {
-    mockSendInput.mockResolvedValue({ success: false, error: 'PTY relay failed' });
-    renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
-    openInteractiveComposer();
-
-    const textarea = screen.getByPlaceholderText('Message the live session…');
-    fireEvent.change(textarea, { target: { value: 'doomed message' } });
-    fireEvent.click(screen.getByRole('button', { name: /send/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent('PTY relay failed');
-    });
-    // The draft is NOT cleared on failure.
-    expect(textarea).toHaveValue('doomed message');
   });
 });

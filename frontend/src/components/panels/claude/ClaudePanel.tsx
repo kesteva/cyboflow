@@ -3,22 +3,20 @@ import { AIPanelProps, RichOutputSettings } from '../ai/AbstractAIPanel';
 import { RichOutputWithSidebar } from './RichOutputWithSidebar';
 import { MessagesView } from '../ai/MessagesView';
 import { SessionStats } from './SessionStats';
-import { ClaudeInputWithImages } from './ClaudeInputWithImages';
 import { useClaudePanel } from '../../../hooks/useClaudePanel';
 import { ClaudeSettingsPanel } from './ClaudeSettingsPanel';
 import { ClaudeMessageTransformer } from '../ai/transformers/ClaudeMessageTransformer';
-import { Send, Settings } from 'lucide-react';
+import { Settings } from 'lucide-react';
 import { useConfigStore } from '../../../stores/configStore';
 import type { ClaudePanelState } from '../../../../../shared/types/panels';
-import { ResizablePanel } from '../../ResizablePanel';
 import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun';
 import { useSession } from '../../../contexts/SessionContext';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
-import { Button } from '../../ui/Button';
-import { API } from '../../../utils/api';
-import type { IPCResponse } from '../../../utils/api';
+import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
+import { ModeIdentityStrip } from '../../cyboflow/unified/ModeIdentityStrip';
+import { ChatMetaStrip } from '../../cyboflow/unified/ChatMetaStrip';
 
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
@@ -90,10 +88,8 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }, [interactiveRunId]);
 
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
+  // SDK substrate emits a "54k/200k tokens (27%)" string; null for PTY/empty.
   const contextUsage = claudePanelState.contextUsage ?? null;
-  const autoContextRunState = claudePanelState.autoContextRunState ?? 'idle';
-  const isContextUpdating = autoContextRunState === 'running';
-  const contextDisplay = contextUsage ?? '-- tokens (--%)';
 
   // Extract and store slash commands when we get JSON messages with init
   useEffect(() => {
@@ -151,8 +147,24 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     );
   }
 
+  // Unified-chat chrome derivations for this quick session.
+  const isInteractive = interactiveRunId !== null;
+  const sessionRunning = activeSession.status === 'running';
+  const worktreePath = activeSession.worktreePath ?? null;
+  const folderLabel =
+    worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
+  const branchName = hook.gitCommands?.currentBranch ?? null;
+
   return (
     <div className="flex-1 flex flex-col h-full bg-background">
+      {/* Mode-identity strip — constant across SDK / PTY quick sessions. */}
+      <ModeIdentityStrip
+        name={isInteractive ? 'Terminal' : 'Claude'}
+        transport={isInteractive ? 'interactive' : 'sdk'}
+        mode="quick"
+        running={sessionRunning}
+      />
+
       {/* Header — debug tabs drive the SDK structured views only, so they are
           dropped while the live PTY terminal owns the body. */}
       {showDebugTabs && interactiveRunId === null && (
@@ -266,71 +278,46 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         />
       )}
 
+      {/* Meta strip — folder · branch · token/context meter, directly above the
+          approvals + composer (consolidates the old ClaudeInputWithImages
+          context bar). */}
+      <ChatMetaStrip
+        folderLabel={folderLabel}
+        folderTitle={worktreePath}
+        branchName={branchName}
+        contextUsage={contextUsage}
+      />
+
       {/* Inline permission prompts — surfaces ApprovalRouter approvals directly
           above the input (instead of only in the detached Review Queue). Returns
           null when the session has no run or no pending approval for it. */}
       <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
 
-      {/* Composer - Always visible at bottom if not archived. Interactive
-          sessions get the dedicated InteractiveSessionComposer instead of
-          ClaudeInputWithImages: the latter's submit handlers hit the
-          PANEL-scoped panels:send-input / panels:continue channels, which
-          route straight to the SDK claudePanelManager with no substrate guard
-          — for an interactive session that would spawn a COMPETING SDK
-          conversation in the same worktree as the live PTY. */}
+      {/* Composer — unified across SDK + PTY quick sessions. The interactive
+          (PTY) variant routes through API.sessions.sendInput (relayed into the
+          live PTY) and is hidden behind ⌃G; the SDK variant uses the
+          panel-scoped handlers. The substrate-specific send is owned by
+          QuickSessionComposer, never the panel. */}
       {!activeSession.archived && (
         // Demo interactive sessions render the cosmetic composer INSIDE
         // DemoTerminalView (showComposer), so suppress the relay composer here.
-        showDemoTerminal ? null :
-        interactiveRunId !== null ? (
-          // Live PTY quick session: hidden by default (type into the terminal),
-          // toggled open with Ctrl+G for rich text entry.
-          composerOpen ? (
-            <InteractiveSessionComposer
-              sessionId={activeSession.id}
-              autoFocus
-              onClose={() => setComposerOpen(false)}
-            />
-          ) : (
-            <button
-              type="button"
-              onClick={() => setComposerOpen(true)}
-              data-testid="interactive-composer-hint"
-              className="flex shrink-0 items-center justify-center gap-2 border-t border-border-primary bg-bg-primary px-3 py-1.5 text-[10px] text-text-tertiary hover:text-text-secondary"
-            >
-              Type in the terminal above · press
-              <kbd className="rounded border border-border-primary px-1 py-0.5 font-mono text-[9px] text-text-secondary">⌃G</kbd>
-              for rich text entry
-            </button>
-          )
-        ) : (
-          <ResizablePanel
-            defaultHeight={200}
-            minHeight={140}
-            maxHeight={600}
-            storageKey="claude-input-panel-height"
-          >
-            <ClaudeInputWithImages
-              activeSession={activeSession}
-              viewMode="richOutput"
-              input={hook.input}
-              setInput={hook.setInput}
-              textareaRef={hook.textareaRef}
-              handleTerminalCommand={hook.handleTerminalCommand}
-              handleSendInput={hook.handleSendInput}
-              handleContinueConversation={hook.handleContinueConversation}
-              ultrathink={hook.ultrathink}
-              setUltrathink={hook.setUltrathink}
-              gitCommands={hook.gitCommands}
-              handleCompactContext={hook.handleCompactContext}
-              hasConversationHistory={hook.hasConversationHistory}
-              contextCompacted={hook.contextCompacted}
-              handleCancelRequest={hook.handleStopSession}
-              contextUsageDisplay={contextDisplay}
-              contextUpdating={isContextUpdating}
-              panelId={panel.id}
-            />
-          </ResizablePanel>
+        showDemoTerminal ? null : (
+          <QuickSessionComposer
+            activeSession={activeSession}
+            input={hook.input}
+            setInput={hook.setInput}
+            textareaRef={hook.textareaRef}
+            handleSendInput={hook.handleSendInput}
+            handleContinueConversation={hook.handleContinueConversation}
+            handleStopSession={hook.handleStopSession}
+            handleCompactContext={hook.handleCompactContext}
+            hasConversationHistory={hook.hasConversationHistory}
+            onToggleSettings={toggleSettings}
+            panelId={panel.id}
+            interactive={isInteractive}
+            ptyOpen={composerOpen}
+            onTogglePtyOpen={() => setComposerOpen((v) => !v)}
+          />
         )
       )}
 
@@ -346,100 +333,6 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
 });
 
 ClaudePanel.displayName = 'ClaudePanel';
-
-// Dedicated composer for interactive-PTY quick sessions. Routes through the
-// SESSION-scoped API.sessions.sendInput → sessions:input, which branches
-// server-side: for substrate 'interactive' the body is relayed into the live
-// PTY (followed by a separate Enter keystroke after the bracketed-paste window
-// closes). ClaudeInputWithImages is deliberately NOT used here — its handlers
-// (useClaudePanel handleSendInput / handleContinueConversation) hit the
-// panel-scoped panels:send-input / panels:continue, which have no substrate
-// guard and would spawn a competing SDK conversation alongside the live PTY.
-// Enter sends, Shift+Enter inserts a newline (mirrors ChatInput).
-const InteractiveSessionComposer: React.FC<{
-  sessionId: string;
-  autoFocus?: boolean;
-  onClose?: () => void;
-}> = ({ sessionId, autoFocus = false, onClose }) => {
-  const [text, setText] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (autoFocus) textareaRef.current?.focus();
-  }, [autoFocus]);
-
-  const canSend = text.trim().length > 0 && !isSending;
-
-  const handleSend = async () => {
-    if (!canSend) return;
-    setIsSending(true);
-    setSendError(null);
-    try {
-      const result: IPCResponse<void> = await API.sessions.sendInput(sessionId, text);
-      if (result.success) {
-        setText('');
-      } else {
-        setSendError(result.error ?? 'Send failed');
-      }
-    } catch (err: unknown) {
-      setSendError(err instanceof Error ? err.message : 'Send failed');
-    } finally {
-      setIsSending(false);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      void handleSend();
-    } else if (e.key === 'Escape' && onClose) {
-      e.preventDefault();
-      onClose();
-    }
-  };
-
-  return (
-    <div
-      className="flex flex-col gap-1 border-t border-border-primary bg-bg-primary p-2 shrink-0"
-      data-testid="interactive-session-composer"
-    >
-      <div className="flex flex-col border border-border-primary bg-surface-primary transition-colors focus-within:border-border-hover">
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Message the live session…"
-          disabled={isSending}
-          rows={2}
-          className="w-full resize-none bg-transparent px-3 pt-2 pb-1 text-xs text-text-primary placeholder-text-tertiary focus:outline-none disabled:cursor-not-allowed"
-        />
-        <div className="flex items-center justify-between gap-2 px-2 pb-2">
-          <span className="text-[10px] text-text-tertiary">
-            Enter to send · Shift+Enter for newline{onClose ? ' · Esc to close' : ''}
-          </span>
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={!canSend}
-            onClick={() => void handleSend()}
-            className="gap-1.5"
-          >
-            <Send className="h-3.5 w-3.5" />
-            Send
-          </Button>
-        </div>
-      </div>
-      {sendError !== null && (
-        <p className="text-xs text-status-error" role="alert">
-          {sendError}
-        </p>
-      )}
-    </div>
-  );
-};
 
 // Memoized main content component to prevent unnecessary re-renders when input changes
 const ClaudeMainContent = React.memo<{
