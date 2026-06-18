@@ -1855,12 +1855,14 @@ describe('mcp-report-step does not pause on human steps', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. FIX-STAGE-MODEL (C): mcp-report-step advances the run's SEED idea stage.
+// 9. FIX-STAGE-MODEL (C): mcp-report-step advances EVERY idea the run owns —
+//    its seed idea AND every idea it created during the run (entity_events) —
+//    to the planning stage mapped to the step.
 //    context->Idea(1), research->Research(2), approve-idea->Idea spec(3).
-//    NON-PAUSING (run stays 'running'); fail-soft when there is no seed idea.
+//    NON-PAUSING (run stays 'running'); fail-soft when the run owns no ideas.
 // ---------------------------------------------------------------------------
 
-describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () => {
+describe('mcp-report-step advances run-owned idea stages (FIX-STAGE-MODEL C)', () => {
   // Migration-backed DB through 017 (adds workflow_runs.seed_idea_id) so the
   // report path can resolve + move the seed idea via the TaskChangeRouter.
   function buildSeedDb(): Database.Database {
@@ -1977,6 +1979,53 @@ describe('mcp-report-step advances the seed idea stage (FIX-STAGE-MODEL C)', () 
     expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
       stage(3),
     );
+  });
+
+  it('advances a run-CREATED idea (no seed_idea_id) to the mapped stage on approve-idea', async () => {
+    // A raw-prompt run has NO seed_idea_id but mints an idea during the run; that
+    // idea is "owned" via an entity_events created row tagged with the run id, and
+    // must advance to Idea spec (position 3) on approve-idea — proving the report
+    // path now drives EVERY run-owned idea, not only the legacy seed.
+    const ideaId = await createSeedIdea(); // starts at the idea type-default (position 1)
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(1),
+    );
+    seedPlannerRun(seedDb, 'run-p', null); // raw-prompt run — NO seed idea linked
+
+    // Link the idea to the run via a 'created' entity_events row. createSeedIdea
+    // already wrote a seq=1 created event (run_id NULL, actor 'user'); use seq=2 to
+    // respect the UNIQUE(entity_type, entity_id, seq) constraint.
+    seedDb
+      .prepare(
+        `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id)
+         VALUES ('idea', ?, 2, 'created', 'agent:context', 'run-p')`,
+      )
+      .run(ideaId);
+
+    const { socket, writes } = makeSocketDouble();
+    await seedHandler.handleMessage(
+      { type: 'mcp-report-step', requestId: 'sc-created', runId: 'run-p', stepId: 'approve-idea', status: 'running' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    // Observational shape is unchanged — no idea field leaks into the reply.
+    expect(response.data).toEqual({ step_id: 'approve-idea', status: 'running' });
+
+    // The run-created idea advanced to Idea spec (position 3)...
+    expect((seedDb.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id).toBe(
+      stage(3),
+    );
+    // ...the run is STILL running (non-pausing)...
+    expect((seedDb.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-p') as { status: string }).status).toBe(
+      'running',
+    );
+    // ...and the move is orchestrator-attributed.
+    const ev = seedDb
+      .prepare("SELECT actor FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(ideaId) as { actor: string };
+    expect(ev.actor).toBe('orchestrator');
   });
 
   it('fail-soft: a run with no seed_idea_id reports normally and touches no idea', async () => {

@@ -48,6 +48,7 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
+import { listRunOwnedIdeaIds } from '../runEntityOwnership';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
@@ -597,13 +598,15 @@ export class McpQueryHandler {
       return;
     }
 
-    // FIX-STAGE-MODEL (C): advance the run's SEED idea to the planning stage that
-    // matches this step (context->Idea, research->Research, approve-idea->Idea
-    // spec). NON-PAUSING — the run stays 'running'; this opens NO gate. Fail-soft:
-    // no seed_idea_id / sentinel / unmapped step → no-op. Awaited so the move
-    // commits before we reply (keeps the board consistent with the rail), but any
-    // failure is swallowed so a stage hiccup never breaks the observational report.
-    await this.advanceSeedIdeaStageForStep(msg.runId, msg.stepId);
+    // FIX-STAGE-MODEL (C): advance EVERY idea the run owns (its seed idea AND any
+    // ideas it created during the run) to the planning stage that matches this step
+    // (context->Idea, research->Research, approve-idea->Idea spec). This covers
+    // raw-prompt and multi-idea runs that have no single seed_idea_id. NON-PAUSING —
+    // the run stays 'running'; this opens NO gate. Fail-soft: sentinel / unmapped
+    // step / no owned ideas → no-op. Awaited so the moves commit before we reply
+    // (keeps the board consistent with the rail), but any failure is swallowed so a
+    // stage hiccup never breaks the observational report.
+    await this.advanceRunIdeasStageForStep(msg.runId, msg.stepId);
 
     // Report-step is OBSERVATIONAL: it records the run's current step for the
     // progress rail and never changes the run's lifecycle state. Human steps
@@ -624,54 +627,64 @@ export class McpQueryHandler {
   }
 
   /**
-   * FIX-STAGE-MODEL (C): move the run's SEED idea to the board stage mapped to
-   * `stepId` via PLANNER_STEP_TO_IDEA_POSITION. The write goes through the
-   * TaskChangeRouter chokepoint with actor='orchestrator' (non-pausing — it never
-   * touches workflow_runs.status). Fully fail-soft: returns silently when the run
-   * is the sentinel, has no seed_idea_id (or the column is absent on an older
-   * DB), the step is unmapped, the idea/board/stage cannot be resolved, or the
-   * chokepoint rejects. NEVER throws — the report-step response is unaffected.
+   * FIX-STAGE-MODEL (C): move EVERY idea the run owns — its seed idea (if any)
+   * AND every idea it created during the run (listRunOwnedIdeaIds) — to the board
+   * stage mapped to `stepId` via PLANNER_STEP_TO_IDEA_POSITION. This advances the
+   * board for raw-prompt and multi-idea runs that have no single seed_idea_id, not
+   * only the legacy seed. Each write goes through the TaskChangeRouter chokepoint
+   * with actor='orchestrator' (non-pausing — it never touches workflow_runs.status).
+   * Fully fail-soft: returns silently when the run is the sentinel, owns no ideas
+   * (or the seed_idea_id / entity_events surfaces are absent on an older DB), the
+   * step is unmapped, or a given idea/board/stage cannot be resolved; an
+   * already-at-target idea is skipped. NEVER throws — the report-step response is
+   * unaffected.
    */
-  private async advanceSeedIdeaStageForStep(runId: string, stepId: string): Promise<void> {
+  private async advanceRunIdeasStageForStep(runId: string, stepId: string): Promise<void> {
     if (runId === 'orchestrator') return;
 
     const position = PLANNER_STEP_TO_IDEA_POSITION[stepId];
     if (position === undefined) return; // unmapped step — no-op
 
     try {
-      // seed_idea_id is migration 017; read defensively so a pre-017 DB (or a run
-      // with no selected idea) is a clean no-op rather than a thrown error.
-      const runRow = this.db
-        .prepare('SELECT project_id AS projectId, seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?')
-        .get(runId) as { projectId?: unknown; seedIdeaId?: unknown } | undefined;
-      const seedIdeaId = typeof runRow?.seedIdeaId === 'string' ? runRow.seedIdeaId : null;
-      if (!runRow || !seedIdeaId) return;
+      // Ownership = seed_idea_id (migration 017) UNION ideas created during the
+      // run (entity_events). listRunOwnedIdeaIds is itself fail-soft, so a pre-017
+      // DB / missing entity_events degrades to [] (a clean no-op) here.
+      const ideaIds = listRunOwnedIdeaIds(this.db, runId);
+      if (ideaIds.length === 0) return;
 
+      const runRow = this.db
+        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { projectId?: unknown } | undefined;
+      if (!runRow) return;
       const projectId = typeof runRow.projectId === 'number' ? runRow.projectId : Number(runRow.projectId);
 
-      // Resolve the idea's board → the stage id at the mapped position.
-      const ideaRow = this.db
-        .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
-        .get(seedIdeaId) as { boardId?: unknown; stageId?: unknown } | undefined;
-      const boardId = typeof ideaRow?.boardId === 'string' ? ideaRow.boardId : null;
-      if (!ideaRow || !boardId) return;
+      const router = TaskChangeRouter.getInstance();
 
-      const stageRow = this.db
-        .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-        .get(boardId, position) as { id?: unknown } | undefined;
-      const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
-      if (!targetStageId || targetStageId === ideaRow.stageId) return; // unresolved or already there
+      for (const ideaId of ideaIds) {
+        // Resolve THIS idea's board → the stage id at the mapped position.
+        const ideaRow = this.db
+          .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
+          .get(ideaId) as { boardId?: unknown; stageId?: unknown } | undefined;
+        const boardId = typeof ideaRow?.boardId === 'string' ? ideaRow.boardId : null;
+        if (!ideaRow || !boardId) continue;
 
-      await TaskChangeRouter.getInstance().applyChange(projectId, {
-        actor: 'orchestrator',
-        entityType: 'idea',
-        taskId: seedIdeaId,
-        stageId: targetStageId,
-        runId,
-        kind: 'seed-idea-stage',
-      });
+        const stageRow = this.db
+          .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+          .get(boardId, position) as { id?: unknown } | undefined;
+        const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
+        if (!targetStageId || targetStageId === ideaRow.stageId) continue; // unresolved or already there
+
+        await router.applyChange(projectId, {
+          actor: 'orchestrator',
+          entityType: 'idea',
+          taskId: ideaId,
+          stageId: targetStageId,
+          runId,
+          kind: 'seed-idea-stage',
+        });
+      }
     } catch (err) {
-      this.logger?.debug('[Cyboflow MCP Query] seed-idea stage advance skipped (fail-soft)', {
+      this.logger?.debug('[Cyboflow MCP Query] run-ideas stage advance skipped (fail-soft)', {
         runId,
         stepId,
         error: err instanceof Error ? err.message : String(err),
