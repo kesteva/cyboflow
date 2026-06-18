@@ -613,8 +613,11 @@ describe('QuestionRouter', () => {
 
 // ---------------------------------------------------------------------------
 // FIX-STAGE-MODEL (D): answering the approve-plan gate with Approve flips the
-// run's tasks (originating_idea_id === seed_idea_id) to Ready for development
-// (position 6). Backend-deterministic + idempotent; Revise/Reject is a no-op.
+// tasks the run CREATED (entity_events kind='created', run_id=<run>) to Ready
+// for development (position 6). Ownership is derived from the created-event
+// projection (listRunCreatedTaskIds), NOT seed_idea_id / originating_idea_id —
+// the agent never stamps those. Backend-deterministic + idempotent; Revise/
+// Reject is a no-op.
 // ---------------------------------------------------------------------------
 
 describe('QuestionRouter approve-plan promotes tasks to Ready for development (FIX-STAGE-MODEL D)', () => {
@@ -680,10 +683,40 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
   });
 
   /**
-   * Seed an idea + N tasks originating from it through the chokepoint, then
-   * settle the auto-decompose follow-on. Returns the idea id + task ids.
+   * Append a run-attributed `created` entity_event for an entity so the
+   * created-event projection (listRunCreatedTaskIds / listRunOwnedIdeaIds) links
+   * it to `runId`. The chokepoint already wrote a seq-1 `created` row with
+   * run_id=NULL; this adds a second `created` row (next seq) carrying the run id,
+   * mirroring how the agent would attribute creates during a real run.
    */
-  async function seedIdeaWithTasks(taskRouter: TaskChangeRouter, count: number): Promise<{ ideaId: string; taskIds: string[] }> {
+  function markCreatedByRun(
+    db: Database.Database,
+    entityType: 'idea' | 'task',
+    entityId: string,
+    runId: string,
+  ): void {
+    const maxRow = db
+      .prepare('SELECT MAX(seq) AS maxSeq FROM entity_events WHERE entity_type = ? AND entity_id = ?')
+      .get(entityType, entityId) as { maxSeq: number | null };
+    const seq = (maxRow.maxSeq ?? 0) + 1;
+    db.prepare(
+      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
+       VALUES (?, ?, ?, 'created', 'agent:planner', ?, '[]', ?)`,
+    ).run(entityType, entityId, seq, runId, new Date().toISOString());
+  }
+
+  /**
+   * Seed an idea + N tasks originating from it through the chokepoint, then
+   * settle the auto-decompose follow-on. When `runId` is provided, every created
+   * entity is attributed to that run via a `created` entity_event so the
+   * created-event ownership projection resolves them. Returns the idea id + task ids.
+   */
+  async function seedIdeaWithTasks(
+    db: Database.Database,
+    taskRouter: TaskChangeRouter,
+    count: number,
+    runId?: string,
+  ): Promise<{ ideaId: string; taskIds: string[] }> {
     const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
     const taskIds: string[] = [];
     for (let i = 0; i < count; i++) {
@@ -696,6 +729,10 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
       taskIds.push(t.taskId);
     }
     await taskRouter._queueForProject(1).onIdle();
+    if (runId) {
+      markCreatedByRun(db, 'idea', idea.taskId, runId);
+      for (const id of taskIds) markCreatedByRun(db, 'task', id, runId);
+    }
     return { ideaId: idea.taskId, taskIds };
   }
 
@@ -726,7 +763,10 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 2);
+    // Seed the run FIRST so the run-attributed `created` entity_events satisfy
+    // the entity_events.run_id FK (foreign_keys=ON).
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 2, 'run-p');
     // Tasks created at Tasks extracted (position 5).
     for (const id of taskIds) {
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
@@ -734,7 +774,6 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
       );
     }
 
-    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
     for (const id of taskIds) {
@@ -756,8 +795,8 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 2);
-    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 2, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Revise');
 
     for (const id of taskIds) {
@@ -773,9 +812,9 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 1);
     // current_step_id is the EARLIER approve-idea gate, not approve-plan.
-    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-idea', seedIdeaId: ideaId });
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-idea', seedIdeaId: null });
+    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 1, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
     expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
@@ -789,8 +828,8 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    const { ideaId, taskIds } = await seedIdeaWithTasks(taskRouter, 1);
-    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: ideaId });
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 1, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
     const versionAfterFirst = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskIds[0]) as { version: number })
@@ -804,6 +843,240 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(versionAfterSecond).toBe(versionAfterFirst);
     expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
       stageId(6),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate. Answering at
+// the `decompose` step COMPLETES the run; choosing Archive first retires the
+// run's owned ideas to the terminal Decomposed stage (position 12). The
+// completion is held back while a blocking review_item is still pending.
+// ---------------------------------------------------------------------------
+
+describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MODEL decompose)', () => {
+  // Same migration chain as the approve-plan block so the entity tables +
+  // seed_idea_id + review_items all exist.
+  function buildDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '007_add_stuck_reason.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '010_questions.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+    return db;
+  }
+
+  function stageId(position: number): string {
+    return `stage-board-1-default-${position}`;
+  }
+
+  function seedPlannerRun(
+    db: Database.Database,
+    opts: { runId: string; currentStepId: string },
+  ): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-p', 1, 'planner', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id)
+       VALUES (?, 'wf-p', 1, 'running', ?)`,
+    ).run(opts.runId, opts.currentStepId);
+  }
+
+  /**
+   * Append a run-attributed `created` entity_event so the created-event
+   * ownership projection (listRunOwnedIdeaIds) links the idea to `runId`.
+   */
+  function markCreatedByRun(
+    db: Database.Database,
+    entityType: 'idea' | 'task',
+    entityId: string,
+    runId: string,
+  ): void {
+    const maxRow = db
+      .prepare('SELECT MAX(seq) AS maxSeq FROM entity_events WHERE entity_type = ? AND entity_id = ?')
+      .get(entityType, entityId) as { maxSeq: number | null };
+    const seq = (maxRow.maxSeq ?? 0) + 1;
+    db.prepare(
+      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
+       VALUES (?, ?, ?, 'created', 'agent:planner', ?, '[]', ?)`,
+    ).run(entityType, entityId, seq, runId, new Date().toISOString());
+  }
+
+  /** Seed a pending blocking finding review_item for the run. */
+  function seedBlockingFinding(db: Database.Database, runId: string): void {
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'finding', 'pending', 1, 'Blocking finding', NULL, 'warning', 'test', NULL,
+               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL)`,
+    ).run(`rvw_block_${Math.random().toString(36).slice(2)}`, runId);
+  }
+
+  const DECOMPOSE_QUESTIONS: QuestionPayload[] = [
+    {
+      question: 'Finish the planner run?',
+      header: 'Finish',
+      multiSelect: false,
+      options: [{ label: 'Archive & finish' }, { label: 'Keep ideas & finish' }],
+    },
+  ];
+
+  afterEach(() => {
+    QuestionRouter._resetForTesting();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  /** Seed an idea via the chokepoint and attribute it to the run. Returns the idea id. */
+  async function seedOwnedIdea(
+    db: Database.Database,
+    taskRouter: TaskChangeRouter,
+    runId: string,
+  ): Promise<string> {
+    const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Owned idea' });
+    await taskRouter._queueForProject(1).onIdle();
+    markCreatedByRun(db, 'idea', idea.taskId, runId);
+    return idea.taskId;
+  }
+
+  async function answerDecomposeGate(
+    db: Database.Database,
+    router: QuestionRouter,
+    runId: string,
+    chosen: string,
+  ): Promise<void> {
+    const questionPromise = router.requestQuestion(
+      runId,
+      `tu-${runId}-${Math.random().toString(36).slice(2)}`,
+      DECOMPOSE_QUESTIONS,
+      vi.fn(),
+    );
+    await router['getQuestionQueue'](runId).onIdle();
+    const questionId = (
+      db
+        .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(runId) as { id: string }
+    ).id;
+    await router.respond(questionId, { answers: { 'Finish the planner run?': chosen } });
+    await questionPromise;
+    // Settle any TaskChangeRouter follow-on (idea moves).
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+  }
+
+  it('Archive on decompose retires owned ideas to Decomposed (position 12) and completes the run', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
+    const ideaB = await seedOwnedIdea(db, taskRouter, 'run-d');
+    // Ideas start at Idea (position 1).
+    for (const id of [ideaA, ideaB]) {
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
+        stageId(1),
+      );
+    }
+
+    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+
+    for (const id of [ideaA, ideaB]) {
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+    }
+    // The idea retirement is orchestrator-attributed.
+    const ev = db
+      .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(ideaA) as { actor: string; kind: string };
+    expect(ev.actor).toBe('orchestrator');
+    expect(ev.kind).toBe('decomposed');
+
+    // The run is completed.
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
+      'completed',
+    );
+  });
+
+  it('Keep on decompose completes the run WITHOUT moving the ideas', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
+
+    await answerDecomposeGate(db, router, 'run-d', 'Keep ideas & finish');
+
+    // The idea stays where it was (position 1) — NOT retired.
+    expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaA) as { stage_id: string }).stage_id).toBe(
+      stageId(1),
+    );
+    // The run still completes.
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
+      'completed',
+    );
+  });
+
+  it('answering on a NON-decompose step does NOT complete the run', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    // current_step_id is an earlier gate, not decompose.
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'approve-idea' });
+    const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
+
+    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+
+    // Not completed — respond() flipped it back to 'running' and finalize is a no-op.
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
+      'running',
+    );
+    // The idea is untouched.
+    expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaA) as { stage_id: string }).stage_id).toBe(
+      stageId(1),
+    );
+  });
+
+  it('does NOT complete the run while a blocking review_item is still pending', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    await seedOwnedIdea(db, taskRouter, 'run-d');
+    // A separate blocking finding stays pending even after the decision gate resolves.
+    seedBlockingFinding(db, 'run-d');
+
+    await answerDecomposeGate(db, router, 'run-d', 'Keep ideas & finish');
+
+    // The aggregate-unblock gate holds the run open (back at 'running' after respond()).
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
+      'running',
     );
   });
 });

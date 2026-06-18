@@ -49,11 +49,13 @@ import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
   hasReviewItemsTable,
+  countPendingBlockingReviewItems,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 import { runStatusEvents } from './trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
+import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
@@ -64,6 +66,15 @@ export type { QuestionRequest, QuestionAnswer, QuestionPayload };
  */
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
 const READY_FOR_DEVELOPMENT_POSITION = 6;
+
+/**
+ * FIX-STAGE-MODEL (decompose): the planner step id whose answer is the separate
+ * final gate (Archive vs Keep the decomposed ideas + finish), and the terminal
+ * board position retired ideas land on when the user chooses Archive. Verified
+ * against database.ts seedDefaultBoard (position 12 = 'Decomposed').
+ */
+const DECOMPOSE_STEP_ID = 'decompose';
+const DECOMPOSED_POSITION = 12;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -439,62 +450,70 @@ export class QuestionRouter extends EventEmitter {
       // rely on the agent calling cyboflow_set_task_stage). Fail-soft + idempotent;
       // runs AFTER the resume so a stage hiccup never delays the agent.
       await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
+      await this.finalizePlannerRun(request.runId, effectiveAnswer);
     });
   }
 
   /**
-   * FIX-STAGE-MODEL (D): move ALL tasks originating from the run's seed idea to
+   * FIX-STAGE-MODEL (D): move ALL tasks the run CREATED during execution to
    * Ready for development (position 6) when the just-answered gate is the
    * planner's `approve-plan` step and the chosen answer is the Approve option.
+   *
+   * Ownership is derived from the entity_events created-event projection
+   * (listRunCreatedTaskIds), NOT from seed_idea_id / originating_idea_id — the
+   * planner agent never stamps those run→entity link columns, so a seed-idea
+   * lineage read would always come up empty in practice.
    *
    * "Approve vs Revise/Reject" rule: case-insensitively, the chosen answer value
    * must START WITH 'approve' (matches the planner.md `Approve` option label and
    * tolerates trailing chips/attachment text), and must NOT contain 'revise' or
    * 'reject'. Any other answer (Revise / Reject / unrecognized) is a no-op.
    *
-   * Backend-deterministic + fail-soft: reads current_step_id + seed_idea_id
-   * defensively (older test DBs lack these columns → the SELECT throws → caught →
-   * no-op). The task moves route through TaskChangeRouter.applyChange with
-   * actor='orchestrator'; the chokepoint is idempotent (a task already at
-   * position 6 is a no-op delta). NEVER throws — respond() is unaffected.
+   * Backend-deterministic + fail-soft: reads current_step_id defensively (older
+   * test DBs lack the column → the SELECT throws → caught → no-op). The task
+   * moves route through TaskChangeRouter.applyChange with actor='orchestrator';
+   * the chokepoint is idempotent (a task already at position 6 is a no-op delta).
+   * NEVER throws — respond() is unaffected.
    */
   private async promoteTasksOnPlanApproval(runId: string, answer: QuestionAnswer): Promise<void> {
     try {
-      // Defensive read — current_step_id (mig 011) + seed_idea_id (mig 017) may be
-      // absent on a minimal test DB. A throw here means "not applicable" → no-op.
+      // Defensive read — current_step_id (mig 011) may be absent on a minimal
+      // test DB. A throw here means "not applicable" → no-op.
       const run = this.db
         .prepare(
-          'SELECT project_id AS projectId, current_step_id AS currentStepId, seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?',
+          'SELECT project_id AS projectId, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?',
         )
-        .get(runId) as { projectId?: unknown; currentStepId?: unknown; seedIdeaId?: unknown } | undefined;
+        .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
       if (!run) return;
       if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
-
-      const seedIdeaId = typeof run.seedIdeaId === 'string' ? run.seedIdeaId : null;
-      if (!seedIdeaId) return;
       if (!this.isApproveAnswer(answer)) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
 
-      // All tasks originating from the seed idea (read-only; writes go through the
-      // chokepoint). Resolve the target stage id from each task's own board.
-      const tasks = this.db
-        .prepare('SELECT id, board_id AS boardId, stage_id AS stageId FROM tasks WHERE originating_idea_id = ?')
-        .all(seedIdeaId) as Array<{ id: string; boardId: string; stageId: string }>;
-      if (tasks.length === 0) return;
+      // The tasks this run created during execution (read-only; writes go through
+      // the chokepoint). Resolve the target stage id from each task's own board.
+      const taskIds = listRunCreatedTaskIds(this.db, runId);
+      if (taskIds.length === 0) return;
 
       const router = TaskChangeRouter.getInstance();
-      for (const task of tasks) {
+      for (const taskId of taskIds) {
+        const taskRow = this.db
+          .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM tasks WHERE id = ?')
+          .get(taskId) as { boardId?: unknown; stageId?: unknown } | undefined;
+        const boardId = typeof taskRow?.boardId === 'string' ? taskRow.boardId : null;
+        const currentStageId = typeof taskRow?.stageId === 'string' ? taskRow.stageId : null;
+        if (!boardId) continue;
+
         const stageRow = this.db
           .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-          .get(task.boardId, READY_FOR_DEVELOPMENT_POSITION) as { id?: unknown } | undefined;
+          .get(boardId, READY_FOR_DEVELOPMENT_POSITION) as { id?: unknown } | undefined;
         const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
-        if (!targetStageId || targetStageId === task.stageId) continue; // unresolved or already there
+        if (!targetStageId || targetStageId === currentStageId) continue; // unresolved or already there
 
         await router.applyChange(projectId, {
           actor: 'orchestrator',
           entityType: 'task',
-          taskId: task.id,
+          taskId,
           stageId: targetStageId,
           runId,
           kind: 'plan-approved',
@@ -503,6 +522,88 @@ export class QuestionRouter extends EventEmitter {
     } catch (err) {
       console.warn(
         `[QuestionRouter] promoteTasksOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate, answered at
+   * the `decompose` step. The gate offers two options:
+   *  - "Archive & finish": the run's owned ideas (listRunOwnedIdeaIds — seed idea
+   *    UNION run-created ideas) are retired to the terminal Decomposed stage
+   *    (position 12) on each idea's own board, then the run completes.
+   *  - "Keep ideas & finish": the ideas stay where they are; the run completes.
+   *
+   * In BOTH cases the run then COMPLETES — respond() has already flipped the run
+   * back to 'running' (the standard answer transition), so a guarded UPDATE here
+   * lands it in its terminal 'completed' state. The completion is gated by the
+   * aggregate-unblock invariant: if any blocking review_item is still pending the
+   * run must NOT complete yet (it waits for the human to clear the inbox).
+   *
+   * Backend-deterministic + idempotent + fail-soft: reads current_step_id
+   * defensively (older DBs lack the column → the SELECT throws → caught → no-op);
+   * idea moves route through TaskChangeRouter.applyChange (a no-op delta when the
+   * idea is already at position 12); the completion UPDATE is guarded by
+   * `status='running'` so a re-answer is a no-op. NEVER throws — respond() is
+   * unaffected.
+   */
+  private async finalizePlannerRun(runId: string, answer: QuestionAnswer): Promise<void> {
+    try {
+      const run = this.db
+        .prepare(
+          'SELECT project_id AS projectId, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?',
+        )
+        .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
+      if (!run) return;
+      if (run.currentStepId !== DECOMPOSE_STEP_ID) return;
+
+      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+
+      if (this.isArchiveAnswer(answer)) {
+        const router = TaskChangeRouter.getInstance();
+        for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+          const ideaRow = this.db
+            .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
+            .get(ideaId) as { boardId?: unknown; stageId?: unknown } | undefined;
+          const boardId = typeof ideaRow?.boardId === 'string' ? ideaRow.boardId : null;
+          const currentStageId = typeof ideaRow?.stageId === 'string' ? ideaRow.stageId : null;
+          if (!boardId) continue;
+
+          const stageRow = this.db
+            .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+            .get(boardId, DECOMPOSED_POSITION) as { id?: unknown } | undefined;
+          const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
+          if (!targetStageId || targetStageId === currentStageId) continue; // unresolved or already there
+
+          await router.applyChange(projectId, {
+            actor: 'orchestrator',
+            entityType: 'idea',
+            taskId: ideaId,
+            stageId: targetStageId,
+            runId,
+            kind: 'decomposed',
+          });
+        }
+      }
+
+      // Aggregate-unblock gate: a run may only complete once ALL its blocking
+      // review items are resolved/dismissed. If any remain pending, leave the run
+      // running (it stays open for the human to clear the inbox).
+      if (countPendingBlockingReviewItems(this.db, runId) > 0) return;
+
+      const now = new Date().toISOString();
+      const info = this.db
+        .prepare(
+          `UPDATE workflow_runs SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = ?
+           WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, runId) as { changes: number };
+      if (info.changes > 0) {
+        runStatusEvents.emit('changed', { runId, status: 'completed' } satisfies RunStatusChangedEvent);
+      }
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] finalizePlannerRun skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -518,6 +619,15 @@ export class QuestionRouter extends EventEmitter {
     if (values.length === 0) return false;
     if (values.some((v) => v.includes('revise') || v.includes('reject'))) return false;
     return values.some((v) => v.startsWith('approve'));
+  }
+
+  /**
+   * Decide whether a decompose-gate answer is the Archive option (vs Keep).
+   * Case-insensitive: at least one answer value (trimmed, lowercased) starts
+   * with 'archive'. So 'Archive & finish' → true; 'Keep ideas & finish' → false.
+   */
+  private isArchiveAnswer(answer: QuestionAnswer): boolean {
+    return Object.values(answer.answers).some((v) => v.trim().toLowerCase().startsWith('archive'));
   }
 
   /**
