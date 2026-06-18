@@ -284,6 +284,12 @@ whether to enable the signed + notarized build posture. All five must be set
 in the shell that invokes `pnpm run build:mac:universal` (or `release:mac`);
 if any are missing, the script silently downgrades to an unsigned build.
 
+> These five live alongside the three R2 publish vars in the single gitignored
+> file **`~/Developer/cyboflow/.envrc.local`**, sourced manually before a release
+> (no `direnv`). Use the `cyborelease` wrapper to source + guard + build in one
+> step — see the release runbook in [`../UPDATES.md`](../UPDATES.md) ("Cutting a
+> release"), which is the canonical end-to-end process.
+
 | Variable                       | Source                                                     |
 | ------------------------------ | ---------------------------------------------------------- |
 | `APPLE_ID`                     | Your Apple ID email (`<APPLE_ID>`)                         |
