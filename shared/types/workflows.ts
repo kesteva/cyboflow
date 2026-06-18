@@ -281,7 +281,7 @@ export interface WorkflowStepTransitionEvent {
  */
 export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, WorkflowDefinition>> = {
 
-  // planner — idea → epics → tasks (board stages 1-6); writes via cyboflow_* MCP tools
+  // planner — idea → epics → tasks (board stages 1-6), terminal decompose archives the idea; writes via cyboflow_* MCP tools
   planner: {
     id: 'planner',
     phases: [
@@ -348,6 +348,15 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: 'You sign off on scope before tasks queue for sprint.',
+          },
+          {
+            id: 'decompose',
+            name: 'Archive idea',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'Confirm archiving the idea(s) to Decomposed; ends the run.',
           },
         ],
       },

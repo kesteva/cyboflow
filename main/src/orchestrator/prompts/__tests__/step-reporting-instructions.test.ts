@@ -148,7 +148,7 @@ describe('buildStepReportingAppend', () => {
     for (const id of flat) {
       expect(append).toContain(`\`${id}\``);
     }
-    expect(flat).toEqual(['kickoff', 'approve-idea', 'epics', 'tasks', 'approve-plan']);
+    expect(flat).toEqual(['kickoff', 'approve-idea', 'epics', 'tasks', 'approve-plan', 'decompose']);
   });
 
   it('tracks a fully CUSTOM flow def whose ids are user-authored', () => {
