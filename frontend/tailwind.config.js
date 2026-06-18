@@ -75,6 +75,8 @@ export default {
         'surface': {
           'primary': 'var(--color-surface-primary)',
           'secondary': 'var(--color-surface-secondary)',
+          'tertiary': 'var(--color-surface-tertiary)',
+          'sunken': 'var(--color-surface-sunken)',
           'hover': 'var(--color-surface-hover)',
           'interactive': 'var(--color-surface-interactive)',
           'interactive-hover': 'var(--color-surface-interactive-hover)',

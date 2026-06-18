@@ -53,6 +53,7 @@
   --paper:       #f5f1e8;  /* primary background / canvas */
   --paper-2:     #ebe4d2;  /* rails, headers, title bar */
   --paper-3:     #efeadc;  /* pending / disabled fill */
+  --paper-4:     #e1d8c0;  /* sunken fills — meter tracks, recessed wells */
   --paper-white: #ffffff;  /* cards / inputs sit on white */
   --ink:         #1a1815;  /* primary text, emphasized borders, dark buttons */
   --ink-2:       #6a5e44;  /* secondary text */
@@ -105,6 +106,7 @@
   --color-surface-primary: var(--paper-white);
   --color-surface-secondary: var(--paper-2);
   --color-surface-tertiary: var(--paper-3);
+  --color-surface-sunken: var(--paper-4);   /* recessed wells, meter tracks */
   --color-surface-hover: var(--paper);
 
   /* Text */
@@ -257,6 +259,7 @@
   --color-surface-primary: var(--gray-800);
   --color-surface-secondary: var(--gray-700);
   --color-surface-tertiary: var(--gray-750);
+  --color-surface-sunken: var(--gray-900);
   --color-surface-hover: var(--gray-700);
 
   /* Semantic Tokens - Text */
@@ -415,6 +418,7 @@
   --color-surface-primary: var(--warm-white); /* Warm white cards */
   --color-surface-secondary: var(--lilac-50); /* Light lilac surface */
   --color-surface-tertiary: var(--warm-gray-100); /* Subtle depth */
+  --color-surface-sunken: var(--warm-gray-200); /* recessed wells, meter tracks */
   --color-surface-hover: var(--lilac-100);    /* Light lilac hover */
   
   /* Semantic Tokens - Text */
