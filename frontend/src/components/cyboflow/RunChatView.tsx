@@ -33,6 +33,8 @@ import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, t
 import { History } from 'lucide-react';
 import { ChatInput } from './ChatInput';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
+import { ModeIdentityStrip } from './unified/ModeIdentityStrip';
+import { ChatMetaStrip } from './unified/ChatMetaStrip';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -88,6 +90,10 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     return null;
   }, [runId, runsByProject]);
   const isInteractive = run?.substrate === 'interactive';
+  const running = run?.status === 'running' || run?.status === 'starting';
+  const worktreePath = run?.worktree_path ?? null;
+  const branchName = run?.branch_name ?? null;
+  const folderLabel = worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
 
   // -------------------------------------------------------------------------
   // Messages + load state
@@ -407,24 +413,31 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // runId is non-null — full conversation view (transcript column + right prompt rail).
   return (
     <div className="flex h-full">
-      {/* Main column: transcript + approvals + input. */}
-      <div className="relative flex flex-1 min-w-0 flex-col">
-        {/* Prompt-rail toggle — only meaningful for the structured transcript;
-            dropped in interactive mode (live terminal has no prompt history). */}
-        {!isInteractive && (
-          <button
-            type="button"
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
-            aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
-            data-testid="run-chat-prompt-rail-toggle"
-            className="absolute right-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
-          >
-            <History className="h-4 w-4" />
-          </button>
-        )}
+      {/* Main column: identity strip + transcript + meta strip + approvals + input. */}
+      <div className="flex flex-1 min-w-0 flex-col">
+        <ModeIdentityStrip
+          name={isInteractive ? 'Terminal' : 'Claude'}
+          transport={isInteractive ? 'interactive' : 'sdk'}
+          mode="flow"
+          running={running}
+        />
 
-        <div className="flex-1 overflow-hidden">
+        <div className="relative flex-1 overflow-hidden">
+          {/* Prompt-rail toggle — only meaningful for the structured transcript;
+              dropped in interactive mode (live terminal has no prompt history). */}
+          {!isInteractive && (
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed((v) => !v)}
+              title={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+              aria-label={sidebarCollapsed ? 'Show prompt history' : 'Hide prompt history'}
+              data-testid="run-chat-prompt-rail-toggle"
+              className="absolute right-2 top-2 z-10 rounded p-1 text-text-tertiary hover:bg-surface-secondary hover:text-text-secondary"
+            >
+              <History className="h-4 w-4" />
+            </button>
+          )}
+
           {isInteractive ? (
             /* Interactive substrate: the live PTY xterm IS the transcript
                surface. The structured ChatTranscript stays dormant (not
@@ -453,6 +466,13 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
             />
           )}
         </div>
+
+        <ChatMetaStrip
+          folderLabel={folderLabel}
+          folderTitle={worktreePath}
+          branchName={branchName}
+          contextUsage={null}
+        />
 
         <PendingApprovalsForRun runId={runId} />
 

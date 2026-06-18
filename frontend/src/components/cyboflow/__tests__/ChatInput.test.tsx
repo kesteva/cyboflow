@@ -213,23 +213,24 @@ describe('ChatInput — quick session mode', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('retry me');
   });
 
-  it('sends on Enter (without Shift)', async () => {
+  it('sends on ⌘↵ (Cmd+Enter)', async () => {
     render(<ChatInput runId={null} />);
 
     const textarea = screen.getByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'enter send' } });
-    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+    fireEvent.change(textarea, { target: { value: 'cmd enter send' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
 
     await waitFor(() => {
-      expect(mockSendInput).toHaveBeenCalledWith('qs-001', 'enter send');
+      expect(mockSendInput).toHaveBeenCalledWith('qs-001', 'cmd enter send');
     });
   });
 
-  it('does NOT send on Shift+Enter', async () => {
+  it('does NOT send on plain Enter (newline) or Shift+Enter', async () => {
     render(<ChatInput runId={null} />);
 
     const textarea = screen.getByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'shift enter' } });
+    fireEvent.change(textarea, { target: { value: 'no send' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
 
     // Give microtasks a tick — sendInput must NOT have been called
@@ -239,7 +240,7 @@ describe('ChatInput — quick session mode', () => {
 });
 
 describe('ChatInput — workflow run, no question', () => {
-  it('workflow run, no question, not awaiting_review: textarea disabled, tooltip rendered', () => {
+  it('workflow run, no question, not awaiting_review: textarea disabled, hint rendered', () => {
     // run-001 is NOT in activeRunsStore → activeRun is null → not nudgeable →
     // the idle input stays disabled (this is the non-awaiting_review idle case).
     render(<ChatInput runId="run-001" />);
@@ -248,13 +249,7 @@ describe('ChatInput — workflow run, no question', () => {
     expect(textarea).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
 
-    // Tooltip's `content` prop holds the exact literal string — trigger hover to
-    // make it visible in jsdom (the Tooltip component conditionally renders its
-    // content div on mouseEnter).
-    const tooltipWrapper = textarea.closest('.relative.inline-block');
-    expect(tooltipWrapper).not.toBeNull();
-    fireEvent.mouseEnter(tooltipWrapper!);
-
+    // The unified composer renders the disabled hint inline (no Tooltip wrapper).
     expect(
       screen.getByText('Input enabled when the agent asks a question or the run is awaiting your review'),
     ).toBeInTheDocument();
@@ -411,13 +406,18 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     };
   }
 
-  it('an interactive running run renders an ENABLED composer with the relay placeholder', () => {
+  it('an interactive running run reveals (⌃G) an ENABLED composer with the relay placeholder', () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun(RUN_ID);
       useActiveRunsStore.setState({ runsByProject: { 5: [makeInteractiveRow()] } });
     });
 
     render(<ChatInput runId={RUN_ID} />);
+
+    // PTY composer is hidden behind ⌃G by default (type into the terminal above);
+    // reveal it to reach the relay textarea.
+    expect(screen.queryByRole('textbox')).toBeNull();
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     expect(textarea).not.toBeDisabled();
@@ -432,6 +432,7 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
 
     render(<ChatInput runId={RUN_ID} />);
 
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
     const textarea = screen.getByRole('textbox');
     fireEvent.change(textarea, { target: { value: 'run the tests' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -488,6 +489,8 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     });
 
     render(<ChatInput runId={RUN_ID} />);
+    // Reveal the ⌃G-hidden composer; the revealed input is disabled (idle).
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
     expect(screen.getByRole('textbox')).toBeDisabled();
   });
 });
@@ -531,14 +534,11 @@ describe('ChatInput — workflow paused (Phase 4b)', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
-  it('shows a distinct paused tooltip (not the awaiting-review hint)', () => {
+  it('shows a distinct paused hint (not the awaiting-review hint)', () => {
     render(<ChatInput runId={RUN_ID} />);
 
-    const textarea = screen.getByRole('textbox');
-    const tooltipWrapper = textarea.closest('.relative.inline-block');
-    expect(tooltipWrapper).not.toBeNull();
-    fireEvent.mouseEnter(tooltipWrapper!);
-
+    // The paused run is SDK, so the composer is visible (disabled) with the
+    // paused hint rendered inline.
     expect(
       screen.getByText('Run paused — Resume to continue the conversation'),
     ).toBeInTheDocument();
@@ -562,59 +562,9 @@ describe('ChatInput — workflow paused (Phase 4b)', () => {
   });
 });
 
-describe('ChatInput — run status bar', () => {
-  function makeRunRow(overrides: Partial<ActiveRunRow>): ActiveRunRow {
-    return {
-      id: 'run-001',
-      workflow_id: 'wf-1',
-      project_id: 7,
-      status: 'running',
-      worktree_path: '/Users/me/worktrees/feature-x',
-      branch_name: 'feature/x',
-      created_at: '2026-01-01T00:00:00.000Z',
-      updated_at: '2026-01-01T00:00:00.000Z',
-      started_at: null,
-      ended_at: null,
-      stuck_reason: null,
-      workflowName: 'planner',
-      ...overrides,
-    };
-  }
-
-  it('renders folder basename + branch from the active run', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-001');
-      useActiveRunsStore.setState({ runsByProject: { 7: [makeRunRow({})] } });
-    });
-
-    render(<ChatInput runId="run-001" />);
-
-    const bar = screen.getByTestId('run-chat-status-bar');
-    expect(bar).toHaveTextContent('feature-x');
-    expect(bar).toHaveTextContent('feature/x');
-  });
-
-  it('hides the status bar when worktree and branch are null', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-001');
-      useActiveRunsStore.setState({
-        runsByProject: { 7: [makeRunRow({ worktree_path: null, branch_name: null })] },
-      });
-    });
-
-    render(<ChatInput runId="run-001" />);
-    expect(screen.queryByTestId('run-chat-status-bar')).toBeNull();
-  });
-
-  it('hides the status bar when the active run is not in the store', () => {
-    act(() => {
-      useCyboflowStore.getState().setActiveRun('run-missing');
-    });
-
-    render(<ChatInput runId="run-missing" />);
-    expect(screen.queryByTestId('run-chat-status-bar')).toBeNull();
-  });
-});
+// NOTE: the folder/branch status-bar moved out of ChatInput into the shared
+// <ChatMetaStrip> (rendered by RunChatView). Its chip rendering is covered by
+// ChatMetaStrip's own test; ChatInput no longer renders chips.
 
 describe('ChatInput — mode-gating re-renders', () => {
   it('switches from workflow-idle to workflow-question when a question is added', async () => {

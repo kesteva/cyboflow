@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { Paperclip, Square, Lock, X, FileText, CornerDownLeft } from 'lucide-react';
 import FilePathAutocomplete from '../../FilePathAutocomplete';
 import { cn } from '../../../utils/cn';
@@ -105,6 +105,16 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
   const [isDragging, setIsDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-grow the textarea with its content (up to its max-height). Works for
+  // both the plain textarea (PTY) and the FilePathAutocomplete textarea (SDK),
+  // since both share `textareaRef`.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [value, textareaRef]);
 
   const isSubmitting = busy || sending;
   const canSend = !disabled && !isSubmitting && (value.trim().length > 0 || hasAttachments(atts));
