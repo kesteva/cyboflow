@@ -63,6 +63,7 @@ interface ElectronAPI {
     gitCommit?: string;
     buildTimestamp?: number;
     worktreeName?: string;
+    variant?: 'stable' | 'beta';
   }>>;
 
   // In-app auto-updater (electron-updater → updates.cyboflow.com).

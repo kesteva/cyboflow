@@ -10,10 +10,11 @@ import { AppUpdater } from '../services/appUpdater';
 export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app, getMainWindow, logger } = services;
 
-  // The in-app auto-updater (electron-updater → updates.cyboflow.com). Constructed
-  // + wired once here; a no-op in dev (see AppUpdater.init). Lifecycle events reach
-  // the renderer over the 'updater:event' channel; check/download/install are
-  // user-triggered from the UI (About dialog).
+  // The in-app auto-updater (electron-updater). Constructed + wired once here; a
+  // no-op in dev (see AppUpdater.init). The update feed (stable vs beta) is fixed
+  // at build time per app variant — there is no in-app channel switch. Lifecycle
+  // events reach the renderer over the 'updater:event' channel; check/download/
+  // install are user-triggered from the UI (Settings → Updates, About dialog).
   const appUpdater = new AppUpdater(app, getMainWindow, logger);
   appUpdater.init();
 
@@ -49,7 +50,8 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
       let gitCommit: string | undefined;
       let buildTimestamp: number | undefined;
       let worktreeName: string | undefined;
-      
+      let variant: 'stable' | 'beta' | undefined;
+
       // Try to read build info if in packaged app
       if (app.isPackaged) {
         try {
@@ -59,6 +61,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
             buildDate = buildInfo.buildDate;
             gitCommit = buildInfo.gitCommit;
             buildTimestamp = buildInfo.buildTimestamp;
+            variant = buildInfo.variant === 'beta' ? 'beta' : 'stable';
           }
         } catch (err) {
           console.log('Could not read build info:', err);
@@ -111,6 +114,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         gitCommit?: string;
         buildTimestamp?: number;
         worktreeName?: string;
+        variant?: 'stable' | 'beta';
       } = {
         current: app.getVersion(),
         name: app.getName(),
@@ -118,7 +122,8 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         cyboflowDirectory: getCyboflowDirectory(),
         buildDate,
         gitCommit,
-        buildTimestamp
+        buildTimestamp,
+        variant
       };
 
       // Only include worktreeName in development builds and when defined

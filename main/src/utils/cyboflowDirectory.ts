@@ -13,6 +13,19 @@ export function setCyboflowDirectory(dir: string): void {
 }
 
 /**
+ * Base directory name for the running app variant. The beta variant ships as a
+ * separate app (appId com.cyboflow.app.beta) and MUST keep its own data dir so
+ * its forward-only DB migrations never advance the stable install's database.
+ * macOS sets __CFBundleIdentifier to the launched bundle's id, so it's a reliable
+ * runtime signal for both packaged and dev-inside-Cyboflow launches.
+ */
+function cyboflowDirName(): string {
+  return process.env.__CFBundleIdentifier === 'com.cyboflow.app.beta'
+    ? '.cyboflow-beta'
+    : '.cyboflow';
+}
+
+/**
  * Determines if Cyboflow is running from an installed application (DMG/Applications folder)
  * rather than a development build
  */
@@ -54,10 +67,12 @@ export function getCyboflowDirectory(): string {
     return envDir;
   }
 
-  // 3. If running as an installed app (from DMG, /Applications, etc), always use ~/.cyboflow
+  // 3. If running as an installed app (from DMG, /Applications, etc), use the
+  // variant data dir (~/.cyboflow, or ~/.cyboflow-beta for the beta app).
   if (isInstalledApp()) {
-    console.log('[Cyboflow] Running as installed app, using ~/.cyboflow');
-    return join(homedir(), '.cyboflow');
+    const dirName = cyboflowDirName();
+    console.log(`[Cyboflow] Running as installed app, using ~/${dirName}`);
+    return join(homedir(), dirName);
   }
 
   // 4. If running inside Cyboflow (detected by bundle identifier) in development, use development directory
@@ -67,8 +82,8 @@ export function getCyboflowDirectory(): string {
     return join(homedir(), '.cyboflow_dev');
   }
 
-  // 5. Default to ~/.cyboflow
-  return join(homedir(), '.cyboflow');
+  // 5. Default to the variant data dir (~/.cyboflow or ~/.cyboflow-beta)
+  return join(homedir(), cyboflowDirName());
 }
 
 /**

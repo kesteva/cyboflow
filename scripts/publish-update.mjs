@@ -11,16 +11,21 @@
  * the S3 SDK here and let the app fetch over HTTPS with no credentials. This keeps
  * the source repo private and ships NO token inside the app bundle.
  *
- * It mirrors the release artifacts in dist-electron to the bucket root:
- *   - latest-mac.yml      (the manifest the updater polls — must NOT be cached)
- *   - *.zip / *.zip.blockmap   (what the updater downloads + delta map)
- *   - *.dmg / *.dmg.blockmap   (first-install download for the website)
+ * It mirrors the release artifacts in dist-electron under a per-variant prefix
+ * (stable/ or beta/) so the two app variants have independent feeds in one bucket:
+ *   - <variant>/latest-mac.yml      (the manifest the updater polls — must NOT be cached)
+ *   - <variant>/*.zip / *.zip.blockmap   (what the updater downloads + delta map)
+ *   - <variant>/*.dmg / *.dmg.blockmap   (first-install download for the website)
+ *
+ * The prefix MUST match the build's --config.publish.url path (see package.json
+ * build:mac / build:mac:beta) or the updater won't resolve the artifacts.
  *
  * Required env (set these in your release shell / CI secrets — see docs/UPDATES.md):
  *   R2_ACCOUNT_ID          Cloudflare account id (subdomain of the S3 endpoint)
  *   R2_ACCESS_KEY_ID       R2 API token access key id
  *   R2_SECRET_ACCESS_KEY   R2 API token secret
  * Optional:
+ *   BUILD_VARIANT=beta     publish to the beta feed (default: stable)
  *   R2_BUCKET              bucket name (default: cyboflow-updates)
  *   R2_ENDPOINT            full S3 endpoint override (default derived from account id)
  *   UPDATE_DRY_RUN=true    list what would upload, but don't upload
@@ -34,7 +39,8 @@ import { Upload } from '@aws-sdk/lib-storage';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(__dirname, '..', 'dist-electron');
-const PUBLIC_BASE = 'https://updates.cyboflow.com';
+const VARIANT = process.env.BUILD_VARIANT === 'beta' ? 'beta' : 'stable';
+const PUBLIC_BASE = `https://updates.cyboflow.com/${VARIANT}`;
 
 // File extensions we publish, with their content type. The .yml manifest is the
 // only mutable file (it's overwritten each release), so it gets no-cache; the
@@ -87,7 +93,7 @@ if (artifacts.length === 0) {
   fail(`No publishable artifacts (.yml/.zip/.dmg/.blockmap) found in ${DIST_DIR}.`);
 }
 
-console.log(`\nPublishing ${artifacts.length} artifact(s) → r2://${bucket} (${PUBLIC_BASE})`);
+console.log(`\nPublishing ${artifacts.length} ${VARIANT} artifact(s) → r2://${bucket}/${VARIANT}/ (${PUBLIC_BASE})`);
 if (dryRun) console.log('(dry run — nothing will be uploaded)\n');
 
 const client =
@@ -117,7 +123,7 @@ for (const name of artifacts) {
     client,
     params: {
       Bucket: bucket,
-      Key: name,
+      Key: `${VARIANT}/${name}`,
       Body: createReadStream(join(DIST_DIR, name)),
       ContentType: contentType,
       CacheControl: cacheControl,

@@ -51,7 +51,10 @@ const buildInfo = {
   nodeVersion: process.version,
   platform: process.platform,
   arch: process.arch,
-  isCanary: isCanaryBuild
+  isCanary: isCanaryBuild,
+  // Which app variant this build is: 'stable' (default) or 'beta'. Surfaced in
+  // the About dialog and used to confirm the right artifact was built.
+  variant: process.env.BUILD_VARIANT === 'beta' ? 'beta' : 'stable'
 };
 
 // Write build info to a file in the main dist directory

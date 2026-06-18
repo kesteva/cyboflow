@@ -10,8 +10,10 @@ const INITIAL_CHECK_DELAY_MS = 8_000;
 
 /**
  * Wraps electron-updater for cyboflow. Reads the generic update feed baked into
- * the packaged app-update.yml (updates.cyboflow.com — see docs/UPDATES.md) and
- * relays the lifecycle to the renderer over the 'updater:event' IPC channel.
+ * the packaged app-update.yml — which feed (.../stable vs .../beta) is fixed at
+ * build time per app variant, so there is no in-app channel switch (see
+ * docs/UPDATES.md). Relays the lifecycle to the renderer over the
+ * 'updater:event' IPC channel.
  *
  * Design choices (deliberate):
  *  - No-op unless `app.isPackaged` — there is no feed in dev and electron-updater
