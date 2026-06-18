@@ -44,6 +44,10 @@ per-project; built-ins and global customs are `project_id NULL`.
   a txn, idempotent via `user_preferences` ledger, and honors `PRAGMA foreign_keys=OFF`.
   **Next free number on this branch is 029** (028 = `agent_overrides` here / `idea_attachments`
   on main). Table-rebuild precedent: migrations 010 and 020.
+  **⚠️ 029 cross-branch collision:** the `ridge-ravine` branch (tabbed center pane) also
+  plans `029_artifacts`, and `028` is already split (`agent_overrides` here vs
+  `idea_attachments` on main). `029` is fine on this branch in isolation but is a
+  merge-time renumber — resolve when these branches converge (mirror the 028 handling).
 
 ## Design
 
