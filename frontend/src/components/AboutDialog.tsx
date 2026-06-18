@@ -1,18 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, ExternalLink, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
-
-// Mirrors the lifecycle of the in-app auto-updater (see shared/types/updater).
-// 'unsupported' = dev / unpackaged build where the updater is a no-op.
-type UpdateUiState =
-  | { status: 'idle' }
-  | { status: 'checking' }
-  | { status: 'available'; version: string }
-  | { status: 'downloading'; percent: number }
-  | { status: 'downloaded'; version: string }
-  | { status: 'up-to-date' }
-  | { status: 'unsupported' }
-  | { status: 'error'; message: string };
+import { useUpdater } from '../hooks/useUpdater';
 
 interface VersionInfo {
   current: string;
@@ -22,6 +11,7 @@ interface VersionInfo {
   gitCommit?: string;
   buildTimestamp?: number;
   worktreeName?: string;
+  variant?: 'stable' | 'beta';
 }
 
 interface AboutDialogProps {
@@ -31,71 +21,18 @@ interface AboutDialogProps {
 
 export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
-  const [update, setUpdate] = useState<UpdateUiState>({ status: 'idle' });
+  const { state: update, check: checkForUpdates, download: downloadUpdate, install: installUpdate, reset } = useUpdater();
 
   useEffect(() => {
     if (isOpen) {
       // Get current version info immediately
       loadCurrentVersion();
     } else {
-      setUpdate({ status: 'idle' });
+      reset();
     }
+    // reset is stable across renders; intentionally keyed on open state only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
-
-  // Stream the async download lifecycle (progress/downloaded/error) while open.
-  // The discrete check verdict is settled by checkForUpdates() below.
-  useEffect(() => {
-    if (!isOpen) return;
-    return window.electronAPI.updater.onEvent((event) => {
-      switch (event.kind) {
-        case 'download-progress':
-          setUpdate({ status: 'downloading', percent: Math.round(event.percent) });
-          break;
-        case 'downloaded':
-          setUpdate({ status: 'downloaded', version: event.version });
-          break;
-        case 'error':
-          setUpdate({ status: 'error', message: event.message });
-          break;
-        case 'available':
-          setUpdate((prev) => (prev.status === 'idle' ? { status: 'available', version: event.version } : prev));
-          break;
-      }
-    });
-  }, [isOpen]);
-
-  const checkForUpdates = async () => {
-    setUpdate({ status: 'checking' });
-    try {
-      const result = await window.electronAPI.updater.check();
-      if (!result.success || !result.data) {
-        setUpdate({ status: 'error', message: result.error || 'Update check failed' });
-        return;
-      }
-      if (!result.data.supported) {
-        setUpdate({ status: 'unsupported' });
-      } else if (result.data.updateAvailable && result.data.latestVersion) {
-        setUpdate({ status: 'available', version: result.data.latestVersion });
-      } else {
-        setUpdate({ status: 'up-to-date' });
-      }
-    } catch (error) {
-      setUpdate({ status: 'error', message: error instanceof Error ? error.message : 'Update check failed' });
-    }
-  };
-
-  const downloadUpdate = async () => {
-    setUpdate({ status: 'downloading', percent: 0 });
-    const result = await window.electronAPI.updater.download();
-    if (!result.success) {
-      setUpdate({ status: 'error', message: result.error || 'Update download failed' });
-    }
-    // progress + 'downloaded' arrive via the event stream
-  };
-
-  const installUpdate = () => {
-    void window.electronAPI.updater.install();
-  };
 
   const loadCurrentVersion = async () => {
     try {
@@ -108,7 +45,8 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           buildDate: result.data.buildDate,
           gitCommit: result.data.gitCommit,
           buildTimestamp: result.data.buildTimestamp,
-          worktreeName: result.data.worktreeName
+          worktreeName: result.data.worktreeName,
+          variant: result.data.variant
         });
       }
     } catch (error) {
@@ -161,8 +99,13 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
         <div className="p-6 space-y-6">
           {/* App Info */}
           <div className="text-center space-y-2">
-            <h3 className="text-lg font-medium text-text-primary">
-              Cyboflow
+            <h3 className="text-lg font-medium text-text-primary flex items-center justify-center gap-2">
+              {versionInfo?.variant === 'beta' ? 'Cyboflow Beta' : 'Cyboflow'}
+              {versionInfo?.variant === 'beta' && (
+                <span className="rounded-[4px] border border-interactive px-1.5 py-px text-[10px] font-bold tracking-wide text-interactive">
+                  BETA
+                </span>
+              )}
             </h3>
             <p className="text-sm text-text-secondary">
               Multi-Session AI Code Assistant Manager
@@ -240,7 +183,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
 
           </div>
 
-          {/* Software Updates */}
+          {/* Software Updates (channel selection lives in Settings → Updates) */}
           <div className="pt-4 border-t border-border-primary space-y-3">
             <div className="flex items-center justify-between gap-3">
               <span className="text-sm font-medium text-text-secondary">Software Updates</span>

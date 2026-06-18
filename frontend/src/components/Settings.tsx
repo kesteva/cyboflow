@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NotificationSettings } from './NotificationSettings';
+import { UpdateSettings } from './UpdateSettings';
 import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import type { AppConfig } from '../types/config';
@@ -53,7 +54,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'notifications'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'updates'>('general');
   const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
@@ -184,6 +185,16 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             }`}
           >
             Notifications
+          </button>
+          <button
+            onClick={() => setActiveTab('updates')}
+            className={`px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'updates'
+                ? 'text-interactive border-b-2 border-interactive bg-interactive/5'
+                : 'text-text-tertiary hover:text-text-primary hover:bg-surface-hover'
+            }`}
+          >
+            Updates
           </button>
         </div>
 
@@ -467,6 +478,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
             }}
           />
         )}
+
+        {/* Updates apply immediately (channel persists on change; check/download/
+            install are imperative), so this tab has no Save footer. */}
+        {activeTab === 'updates' && <UpdateSettings />}
       </ModalBody>
 
       {/* Footer */}
