@@ -1279,7 +1279,8 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         id TEXT PRIMARY KEY,
         worktree_path TEXT,
         base_branch TEXT,
-        run_id TEXT
+        run_id TEXT,
+        substrate TEXT
       )
     `);
     return db;
@@ -1301,11 +1302,13 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
     interface IdRow { id: string }
     const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get(workflowName) as IdRow;
 
-    const createRunSpy = vi.fn((_id: string, _substrate?: CliSubstrate, sessionId?: string) => {
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
       db.prepare(
         "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
       ).run(cannedRunId, workflowId, 1, sessionId ?? null);
-      return { runId: cannedRunId, permissionMode: 'default' as const };
+      // Mirror the real registry: return the RESOLVED substrate (request → ladder
+      // → 'sdk' floor) so the launcher's sessions.substrate stamp keys off it.
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
     });
     const registry = {
       getById: (id: string) =>
@@ -1368,9 +1371,55 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       expect(row.session_id).toBe('sess-1');
       expect(row.status).toBe('starting');
 
-      // Legacy back-link dual-write: sessions.run_id now points at this run.
-      const sessRow = db.prepare("SELECT run_id FROM sessions WHERE id = 'sess-1'").get() as { run_id: string | null };
+      // Legacy back-link dual-write: sessions.run_id now points at this run, and
+      // the session's substrate is kept in lockstep with the run it hosts (the
+      // resolved 'sdk' floor here, since this launch passed no substrate).
+      const sessRow = db
+        .prepare("SELECT run_id, substrate FROM sessions WHERE id = 'sess-1'")
+        .get() as { run_id: string | null; substrate: string | null };
       expect(sessRow.run_id).toBe(cannedRunId);
+      expect(sessRow.substrate).toBe('sdk');
+    });
+  });
+
+  it('stamps sessions.substrate to the run substrate so the resting view stays PTY after cancel', async () => {
+    await withTempDir('runlauncher-session-sub-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const sessionWorktree = join(tmpDir, 'session-tree');
+      // Session was created on the SDK default (e.g. ensureSessionForLaunch),
+      // then hosts an INTERACTIVE run — the mismatch that made cancel fall back
+      // to the SDK resting view.
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id, substrate) VALUES ('sess-pty', ?, 'main', NULL, 'sdk')",
+      ).run(sessionWorktree);
+
+      const { registry, workflowId } = makeSessionRegistry(db, 'sprint', cannedRunId);
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue('feature/session-branch'),
+        getHeadCommit: vi.fn().mockResolvedValue('deadbeefcafef00d'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      // 3rd positional arg is the explicit per-run substrate.
+      await launcher.launch(workflowId, tmpDir, 'interactive', undefined, undefined, 'sess-pty');
+
+      const sessRow = db
+        .prepare("SELECT run_id, substrate FROM sessions WHERE id = 'sess-pty'")
+        .get() as { run_id: string | null; substrate: string | null };
+      expect(sessRow.run_id).toBe(cannedRunId);
+      // The session now reflects the interactive substrate the run actually used,
+      // so the post-cancel resting ClaudePanel renders the PTY surface (not SDK).
+      expect(sessRow.substrate).toBe('interactive');
     });
   });
 
