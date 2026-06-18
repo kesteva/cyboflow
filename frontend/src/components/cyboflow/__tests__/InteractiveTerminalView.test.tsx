@@ -20,7 +20,7 @@
  *   6. Unmount cleanup off()s the SAME channel + handler and disposes the term.
  */
 import '@testing-library/jest-dom';
-import { render, act, fireEvent, screen, within } from '@testing-library/react';
+import { render, act, fireEvent, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -424,11 +424,14 @@ describe('InteractiveTerminalView', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TASK-816 additive cases — warn guardrail, interactive chrome, reduced-motion.
+// TASK-816 additive cases — warn guardrail. The interactive chrome (INTERACTIVE
+// pill + LIVE PTY bar) was removed in the unified-chat consolidation: that
+// identity is now carried by the host's ModeIdentityStrip + ChatMetaStrip, so
+// the terminal view renders only the surface + the warn guardrail.
 // These do NOT touch TASK-815's xterm/subscribe assertions above.
 // ---------------------------------------------------------------------------
 
-describe('InteractiveTerminalView — TASK-816 warn guardrail + chrome', () => {
+describe('InteractiveTerminalView — TASK-816 warn guardrail', () => {
   it('opens the warn dialog on the FIRST terminal-surface mousedown only', () => {
     render(<InteractiveTerminalView runId="run-warn" />);
 
@@ -470,56 +473,14 @@ describe('InteractiveTerminalView — TASK-816 warn guardrail + chrome', () => {
     expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
   });
 
-  it('renders the INTERACTIVE pill and LIVE PTY bar (resume/pid/tty) when substrate is interactive', () => {
-    render(
-      <InteractiveTerminalView
-        runId="run-chrome"
-        substrate="interactive"
-        resumeId="abc123"
-        pid={4242}
-        tty="ttys004"
-      />,
-    );
+  it('no longer renders the INTERACTIVE pill or LIVE PTY bar (consolidated into the host strips)', () => {
+    render(<InteractiveTerminalView runId="run-no-chrome" />);
 
-    expect(screen.getByTestId('interactive-pill')).toHaveTextContent('INTERACTIVE');
-    const bar = screen.getByTestId('live-pty-bar');
-    expect(within(bar).getByTestId('live-pty-resume')).toHaveTextContent(
-      'claude --resume abc123',
-    );
-    expect(within(bar).getByTestId('live-pty-pid')).toHaveTextContent('pid 4242');
-    expect(within(bar).getByTestId('live-pty-tty')).toHaveTextContent('ttys004');
-    expect(within(bar).getByTestId('live-pty-elapsed')).toBeInTheDocument();
-    expect(within(bar).getByTestId('live-pty-tokens')).toBeInTheDocument();
-  });
-
-  it('omits the INTERACTIVE pill and LIVE PTY bar when substrate is sdk (Q3 preservation)', () => {
-    render(<InteractiveTerminalView runId="run-sdk" substrate="sdk" />);
-
+    // The terminal view is now chrome-free — only the surface + warn guardrail.
     expect(screen.queryByTestId('interactive-pill')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('interactive-pane-head')).not.toBeInTheDocument();
     expect(screen.queryByTestId('live-pty-bar')).not.toBeInTheDocument();
-  });
-
-  it('applies animate-pulse to the pill/PTY dots when reduced-motion does NOT match', () => {
-    stubMatchMedia(false);
-    render(<InteractiveTerminalView runId="run-motion-on" substrate="interactive" />);
-
-    expect(screen.getByTestId('interactive-pill-dot').className).toContain(
-      'animate-pulse',
-    );
-    expect(screen.getByTestId('live-pty-dot').className).toContain('animate-pulse');
-  });
-
-  it('drops animate-pulse/animate-spin/blink from the dots when reduced-motion matches', () => {
-    stubMatchMedia(true);
-    render(<InteractiveTerminalView runId="run-motion-off" substrate="interactive" />);
-
-    const pillDot = screen.getByTestId('interactive-pill-dot').className;
-    const ptyDot = screen.getByTestId('live-pty-dot').className;
-    for (const cls of [pillDot, ptyDot]) {
-      expect(cls).not.toContain('animate-pulse');
-      expect(cls).not.toContain('animate-spin');
-      expect(cls).not.toContain('blink');
-    }
+    expect(screen.getByTestId('interactive-terminal-surface')).toBeInTheDocument();
   });
 });
 
@@ -529,7 +490,7 @@ describe('InteractiveTerminalView — TASK-816 warn guardrail + chrome', () => {
 
 describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => {
   it('onData is INERT before "Interact anyway" — no relay on keystroke (the warn gate holds)', () => {
-    render(<InteractiveTerminalView runId="run-relay-off" substrate="interactive" />);
+    render(<InteractiveTerminalView runId="run-relay-off" />);
 
     expect(typeof onDataHandler).toBe('function');
     // Simulate a keystroke before the flag is flipped.
@@ -538,7 +499,7 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
   });
 
   it('relays raw keystrokes VERBATIM (no appended newline) ONLY after "Interact anyway" flips the flag', () => {
-    render(<InteractiveTerminalView runId="run-relay-on" substrate="interactive" />);
+    render(<InteractiveTerminalView runId="run-relay-on" />);
 
     // Guarded mount blocks xterm stdin (triggerDataEvent early-returns while
     // disableStdin is true — the REAL keystroke gate).
@@ -567,7 +528,7 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
   it('relays a geometry change to runs.relayResize with the new cols/rows', () => {
     vi.useFakeTimers();
     try {
-      render(<InteractiveTerminalView runId="run-resize" substrate="interactive" />);
+      render(<InteractiveTerminalView runId="run-resize" />);
       // First observer tick only flips renderable (ensureRenderable returns
       // without relaying); the tick AFTER the geometry change below is the relay.
       makeRenderable();
@@ -591,7 +552,7 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
   });
 
   it('keeps the onData binding alive across a switch (unmount), disposing it only on real end-of-life', () => {
-    const { unmount } = render(<InteractiveTerminalView runId="run-relay-dispose" substrate="interactive" />);
+    const { unmount } = render(<InteractiveTerminalView runId="run-relay-dispose" />);
     // A switch-away (unmount) must NOT dispose the relay — the PTY persists.
     unmount();
     expect(onDataDispose).not.toHaveBeenCalled();
@@ -612,7 +573,6 @@ describe('InteractiveTerminalView — guardFirstInteraction', () => {
     render(
       <InteractiveTerminalView
         runId="run-unguarded"
-        substrate="interactive"
         guardFirstInteraction={false}
       />,
     );
@@ -633,7 +593,7 @@ describe('InteractiveTerminalView — guardFirstInteraction', () => {
   });
 
   it('default (guarded): stdin blocked + relay inert, and the first mousedown still opens the dialog', () => {
-    render(<InteractiveTerminalView runId="run-guarded" substrate="interactive" />);
+    render(<InteractiveTerminalView runId="run-guarded" />);
 
     // Guarded mount constructs with stdin blocked (composer is the input path).
     expect(lastTerminalOptions?.disableStdin).toBe(true);

@@ -3,10 +3,11 @@
  * Claude Code session, used ONLY in demo mode to illustrate the interactive PTY
  * substrate without spawning a real `claude` REPL.
  *
- * It mirrors the visible chrome of {@link InteractiveTerminalView} (INTERACTIVE
- * pill + LIVE PTY bar) so a PTY-mode quick session in demo looks identical to a
- * live one, but everything is client-side: there is NO `cyboflow:pty:<runId>`
- * subscription, NO relay, and NO backend process. A scripted typewriter writes a
+ * It mirrors {@link InteractiveTerminalView}'s terminal surface so a PTY-mode
+ * quick session in demo looks identical to a live one (the shared mode-identity
+ * + meta strips are supplied by the host ClaudePanel), but everything is
+ * client-side: there is NO `cyboflow:pty:<runId>` subscription, NO relay, and NO
+ * backend process. A scripted typewriter writes a
  * believable Claude Code startup + short coding exchange into the terminal, then
  * rests at an idle prompt. With `showComposer`, a cosmetic composer echoes the
  * typed line and a canned acknowledgement back into the terminal (still entirely
@@ -23,7 +24,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Send } from 'lucide-react';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { Button } from '../ui/Button';
-import { cn } from '../../utils/cn';
 import '@xterm/xterm/css/xterm.css';
 
 /** Resolve the monospace font stack from `--font-family-mono`, falling back to
@@ -52,18 +52,6 @@ function usePrefersReducedMotion(): boolean {
     return () => mql.removeEventListener('change', onChange);
   }, []);
   return reduced;
-}
-
-/** Live elapsed counter for the LIVE PTY bar, formatted `Xm YYs`. */
-function useElapsed(): string {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
 // ANSI helpers — kept terse and inline so the script below reads close to what
@@ -170,7 +158,6 @@ export function DemoTerminalView({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const reducedMotion = usePrefersReducedMotion();
-  const elapsed = useElapsed();
 
   const [text, setText] = useState('');
 
@@ -302,51 +289,6 @@ export function DemoTerminalView({
 
   return (
     <div className="flex h-full w-full flex-col" data-testid="demo-terminal-view">
-      {/* INTERACTIVE pill — mirrors InteractiveTerminalView's pane-head chrome. */}
-      <div className="flex items-center px-3 py-1.5" data-testid="demo-terminal-pane-head">
-        <span
-          className="inline-flex items-center gap-1.5 rounded-full border border-interactive px-2 py-0.5 font-semibold uppercase text-interactive"
-          style={{ fontSize: '9px', letterSpacing: '0.16em' }}
-        >
-          <span
-            className={cn(
-              'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
-              !reducedMotion && 'animate-pulse',
-            )}
-            aria-hidden="true"
-          />
-          INTERACTIVE
-        </span>
-      </div>
-
-      {/* LIVE PTY session bar — presentational; values are illustrative. */}
-      <div
-        className="flex items-center gap-3 border-b border-dashed border-border-primary bg-bg-secondary px-3 py-1"
-        style={{ fontSize: '11px' }}
-        data-testid="demo-terminal-pty-bar"
-      >
-        <span
-          className="inline-flex items-center gap-1.5 font-bold uppercase text-interactive"
-          style={{ fontSize: '9px', letterSpacing: '0.16em' }}
-        >
-          <span
-            className={cn(
-              'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
-              !reducedMotion && 'animate-pulse',
-            )}
-            aria-hidden="true"
-          />
-          LIVE PTY
-        </span>
-        <span className="text-text-secondary">
-          <span className="font-semibold text-text-primary">claude --resume</span>
-        </span>
-        <span className="text-text-tertiary">pid 48213</span>
-        <span className="text-text-tertiary">ttys001</span>
-        <span className="ml-auto tabular-nums text-text-tertiary">{elapsed}</span>
-        <span className="tabular-nums text-text-tertiary">↑ 0k tok</span>
-      </div>
-
       {/* Terminal surface */}
       <div className="min-h-0 flex-1" data-testid="demo-terminal-surface">
         <div ref={containerRef} className="h-full w-full" />

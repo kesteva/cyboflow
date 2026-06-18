@@ -57,62 +57,9 @@ import { FitAddon } from '@xterm/addon-fit';
 import { getTerminalTheme } from '../../utils/terminalTheme';
 import { useTheme } from '../../contexts/ThemeContext';
 import { subscribeToPtyBytes } from '../../utils/cyboflowApi';
-import { cn } from '../../utils/cn';
 import { trpc } from '../../trpc/client';
 import { InteractiveWarnDialog } from './InteractiveWarnDialog';
 import '@xterm/xterm/css/xterm.css';
-
-/** Run substrate, surfaced to the renderer by TASK-813 (AppRouter-inferred on
- *  `ActiveRunRow.substrate`). The interactive chrome (INTERACTIVE pill + LIVE
- *  PTY bar) renders only for `'interactive'`; for `'sdk'` it is absent (Q3
- *  panel-preservation). Defaults to `'interactive'` because RunChatView only
- *  mounts this view when the run is interactive. */
-type RunSubstrate = 'sdk' | 'interactive';
-
-/**
- * Track `prefers-reduced-motion: reduce`. When it matches, the cosmetic motion
- * loops (pulsing pill/PTY dots, spinners, cursor blink) are dropped — the
- * accessibility contract from the IDEA-030 handoff. The elapsed counter keeps
- * ticking because it is information, not decorative motion.
- */
-function usePrefersReducedMotion(): boolean {
-  const [reduced, setReduced] = useState<boolean>(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
-      return false;
-    }
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  });
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
-      return;
-    }
-    const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onChange = (e: MediaQueryListEvent): void => setReduced(e.matches);
-    setReduced(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-
-  return reduced;
-}
-
-/**
- * Live elapsed counter for the LIVE PTY bar, formatted `Xm YYs`. Ticks every
- * 1000ms via a setInterval cleared on unmount. This is information (a numeric
- * value), so it keeps updating even under reduced-motion.
- */
-function useElapsed(active: boolean): string {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, [active]);
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}m ${String(s).padStart(2, '0')}s`;
-}
 
 /**
  * Resolve the monospace font stack from the `--font-family-mono` CSS variable,
@@ -229,14 +176,9 @@ export function __resetInteractiveTerminalCacheForTests(): void {
 
 export function InteractiveTerminalView({
   runId,
-  substrate = 'interactive',
   guardFirstInteraction = true,
-  resumeId,
-  pid,
-  tty,
 }: {
   runId: string;
-  substrate?: RunSubstrate;
   /** First-interaction guardrail toggle. Workflow runs keep the default `true`
    *  (byte-identical behavior): cyboflow orchestrates them, so direct typing can
    *  derail the orchestration loop — keystroke relay starts OFF and the first
@@ -244,16 +186,9 @@ export function InteractiveTerminalView({
    *  are user-driven, so direct typing IS the expected interaction — relay
    *  starts ON and the warn dialog is never mounted. */
   guardFirstInteraction?: boolean;
-  /** Session-identity fields for the LIVE PTY bar. Where a field is not yet
-   *  plumbed, a stable placeholder is rendered (real wiring is a follow-up). */
-  resumeId?: string;
-  pid?: number;
-  tty?: string;
 }): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const isInteractive = substrate === 'interactive';
-  const reducedMotion = usePrefersReducedMotion();
   // Active theme (paper | dark | light). The xterm palette is read from CSS vars
   // ONCE at construction, so a theme switch (Settings) — or a dev-time CSS token
   // edit — would otherwise leave the live terminal painting the stale palette
@@ -323,8 +258,6 @@ export function InteractiveTerminalView({
     });
     return () => cancelAnimationFrame(raf);
   }, [theme]);
-
-  const elapsed = useElapsed(isInteractive);
 
   const handleSurfaceMouseDown = useCallback((): void => {
     // FIRST mousedown only — the per-run has-warned flag suppresses every
@@ -595,77 +528,6 @@ export function InteractiveTerminalView({
       className="flex h-full w-full flex-col"
       data-testid="interactive-terminal-view"
     >
-      {isInteractive && (
-        <>
-          {/* INTERACTIVE pill — pane-head chrome, interactive-only. */}
-          <div
-            className="flex items-center px-3 py-1.5"
-            data-testid="interactive-pane-head"
-          >
-            <span
-              className="inline-flex items-center gap-1.5 rounded-full border border-interactive px-2 py-0.5 font-semibold uppercase text-interactive"
-              style={{ fontSize: '9px', letterSpacing: '0.16em' }}
-              data-testid="interactive-pill"
-            >
-              <span
-                className={cn(
-                  'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
-                  !reducedMotion && 'animate-pulse',
-                )}
-                data-testid="interactive-pill-dot"
-                aria-hidden="true"
-              />
-              INTERACTIVE
-            </span>
-          </div>
-
-          {/* LIVE PTY session bar — interactive-only presentational chrome. */}
-          <div
-            className="flex items-center gap-3 border-b border-dashed border-border-primary bg-bg-secondary px-3 py-1"
-            style={{ fontSize: '11px' }}
-            data-testid="live-pty-bar"
-          >
-            <span
-              className="inline-flex items-center gap-1.5 font-bold uppercase text-interactive"
-              style={{ fontSize: '9px', letterSpacing: '0.16em' }}
-            >
-              <span
-                className={cn(
-                  'inline-block h-1.5 w-1.5 rounded-full bg-interactive',
-                  !reducedMotion && 'animate-pulse',
-                )}
-                data-testid="live-pty-dot"
-                aria-hidden="true"
-              />
-              LIVE PTY
-            </span>
-            <span className="text-text-secondary" data-testid="live-pty-resume">
-              <span className="font-semibold text-text-primary">
-                claude --resume {resumeId ?? '—'}
-              </span>
-            </span>
-            <span className="text-text-tertiary" data-testid="live-pty-pid">
-              pid {pid ?? '—'}
-            </span>
-            <span className="text-text-tertiary" data-testid="live-pty-tty">
-              {tty ?? 'ttys000'}
-            </span>
-            <span
-              className="ml-auto tabular-nums text-text-tertiary"
-              data-testid="live-pty-elapsed"
-            >
-              {elapsed}
-            </span>
-            <span
-              className="tabular-nums text-text-tertiary"
-              data-testid="live-pty-tokens"
-            >
-              ↑ 0k tok
-            </span>
-          </div>
-        </>
-      )}
-
       {/* Terminal surface — first mousedown opens the warn guardrail (once);
           unguarded (quick-session) surfaces skip the dialog entirely. */}
       <div
