@@ -716,6 +716,10 @@ export class RunExecutor {
    *
    * Kept as a separate helper so Piece C can layer its pending-nudge branch
    * ahead of this one in getPrompt without re-deriving the seed-idea logic.
+   *
+   * The block leads with a dedup directive naming the existing idea (by ref +
+   * id) so the planner FOLDS the spec into it via cyboflow_update_task rather
+   * than creating a duplicate idea row.
    */
   private buildSeedIdeaBlock(runId: string): string | null {
     if (!this.ideaBodyReader) return null;
@@ -735,7 +739,13 @@ export class RunExecutor {
     const body = idea.body?.trim() ?? '';
     if (title === '' && summary === '' && body === '') return null;
 
+    const ref = idea.ref?.trim() ?? '';
+    const handle = ref !== '' ? `ref \`${ref}\`, id \`${seedIdeaId}\`` : `id \`${seedIdeaId}\``;
+
     const parts: string[] = [];
+    parts.push(
+      `> This idea already exists (${handle}). Fold the spec INTO this idea via cyboflow_update_task(task_id="${seedIdeaId}", …) — do NOT create a new idea row for it.`
+    );
     if (title !== '') parts.push(`## ${title}`);
     if (summary !== '') parts.push(summary);
     if (body !== '') parts.push(body);
