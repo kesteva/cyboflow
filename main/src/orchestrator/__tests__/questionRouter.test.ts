@@ -880,6 +880,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
     return db;
   }
 
