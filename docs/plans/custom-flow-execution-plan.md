@@ -56,8 +56,18 @@ flow.
      P1) runs right after, is **not** gated by `workflow_path`, and writes the full
      effective agent set (all builtins verbatim + overrides + customs). So every
      `cyboflow-<key>` a custom step names is present. ✔
-   - **Substrate resolves cleanly** (`substrateResolver.ts:66-84`, no name check) — see
-     decision D1 for the interactive caveat.
+   - **Both substrates work — the fix is substrate-agnostic** (verified by a follow-up
+     trace). `getPrompt` is the single prompt source: `execute()` computes it once
+     (`runExecutor.ts:382`) and `SubstrateDispatchFacade.spawnCliProcess` forwards the
+     same options unchanged to the SDK or interactive manager. `interactiveClaudeManager`
+     has no independent prompt source — it delivers the string verbatim as a positional
+     arg (`:808-811`). It also injects the cyboflow MCP server
+     (`writeInteractiveMcpConfig`, `:521-560`; `--mcp-config` at `:485-488`) so the
+     orchestrator can call `cyboflow_report_step` / `cyboflow_*`, and installs the same
+     `'*'` PreToolUse gate hook (`:734-751`) routing `AskUserQuestion` →
+     `QuestionRouter` → `awaiting_input`. Agents reach the PTY worktree via the same
+     `installAgentOverlay` (un-gated by path). No substrate special-casing needed (see
+     resolved D1).
    - **Seed-idea / sprint-batch / initial-step-id** all skip cleanly for custom flows
      (`runExecutor.ts:713,753,1001`; `stepTransitionBridge.ts:74-79` returns null →
      timeline advances on the first `report_step`).
@@ -132,14 +142,11 @@ row-typed `read` is cleaner and the test churn is small.)*
    and pass the row; branch the index.ts adapter (built-in path unchanged, custom path
    → `renderCustomFlowPrompt` + `buildStepReportingAppend`). Update affected mocks/tests
    (incl. the existing "throws on null path" assertions → new behavior).
-3. **(decision D1) substrate handling for custom flows** — pin custom flows to `'sdk'`
-   in v1 (recommended) *or* block-with-message when resolution yields `'interactive'`.
-   Commit: `feat: pin custom flows to the SDK substrate in v1` (or the guard variant).
-4. **`test: end-to-end custom-flow getPrompt + adapter coverage`** — adapter tests
+3. **`test: end-to-end custom-flow getPrompt + adapter coverage`** — adapter tests
    (null path + valid spec → harness+graph; null path + null/invalid spec → throws;
    non-null path → unchanged) and a `getPrompt` test proving no-throw + pass-through of
    the post-read branches.
-5. **Gate** — `pnpm rebuild better-sqlite3` → `pnpm typecheck` + `pnpm test:unit` +
+4. **Gate** — `pnpm rebuild better-sqlite3` → `pnpm typecheck` + `pnpm test:unit` +
    `pnpm lint` (0 errors). Then `pnpm dev` smoke (see Verification).
 
 ## Tests
@@ -157,18 +164,18 @@ row-typed `read` is cleaner and the test churn is small.)*
    `cyboflow-context`, hits the `approve-idea` gate (AskUserQuestion), and the progress
    timeline advances via `report_step`.
 2. New blank flow with one custom-agent step → that custom agent is delegated to.
-3. Confirm a custom flow under the global PTY lock behaves per D1 (runs on SDK, or is
-   blocked with a clear message — not a silent failure).
+3. Run a custom flow on the **interactive** substrate (e.g. under the PTY lock) → it
+   launches, delegates, gates, and advances its timeline the same as on SDK. Confirm
+   `installAgentOverlay` writes the agent set into the PTY worktree.
 
 ## Open decisions
 
-- **D1 — substrate.** Interactive substrate is stub-only for spec_json flows
-  (preflight). Under the global `interactivePtyOnly` lock (or demo mode), a custom flow
-  would otherwise be forced to `'interactive'` and break. **Recommend: pin custom flows
-  to `'sdk'` in v1** (narrow, labeled override mirroring demo mode's `'sdk'` pin;
-  reversible when interactive support lands). Trade-off: overrides the user's global PTY
-  lock *for custom flows only*. Alternative: block launch with a message. **Needs a
-  call before step 3.**
+- **D1 — substrate. RESOLVED: no special-casing.** A follow-up trace overturned the
+  preflight's "interactive is stub-only" claim. `getPrompt` is the single prompt source
+  for both substrates; the interactive manager injects the cyboflow MCP server and the
+  `'*'` PreToolUse gate hook (file:line in the verified-facts section). A custom flow
+  runs correctly on whichever substrate resolves — SDK or interactive — so the substrate
+  pin/guard is dropped.
 - **D2 — orchestrator commit behavior.** Should the harness instruct the agent to
   commit per step / at the end, or leave commits to the human-merged session (built-in
   default)? Recommend: leave commits to the session (match built-ins); revisit if a
@@ -183,9 +190,8 @@ row-typed `read` is cleaner and the test churn is small.)*
 - The harness is **not** user-editable in v1 (constant). Future B+ moves it to a
   file/DB and exposes a prose editor for power users — at which point `spec_json` could
   gain a `body` and `getPrompt`'s null branch reads it.
-- Interactive-substrate custom flows are out of scope (D1).
 - No drift risk: `spec_json` is the single source for both the timeline UI and the
-  injected prompt.
+  injected prompt. The fix is substrate-agnostic — works on SDK and interactive (D1).
 
 ## Risk / rollback
 
