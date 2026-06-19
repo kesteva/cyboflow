@@ -123,10 +123,28 @@ WHERE workflow_id IN (
     AND w.spec_json = '{}'
 );
 
-UPDATE workflow_revisions
+-- `workflow_revisions` carries a UNIQUE(workflow_id, spec_hash). When the SAME
+-- built-in is seeded across multiple projects (wf-1-planner, wf-2-planner, …)
+-- each per-project row's revision shares an identical spec_hash, so re-pointing
+-- them ALL onto one `wf-global-<name>` would collide. `UPDATE OR IGNORE`
+-- re-points the first (keeping the global row's history) and skips the
+-- duplicates — collapsing identical snapshots onto the global flow loses no
+-- information.
+UPDATE OR IGNORE workflow_revisions
 SET workflow_id = 'wf-global-' || (
   SELECT w.name FROM workflows w WHERE w.id = workflow_revisions.workflow_id
 )
+WHERE workflow_id IN (
+  SELECT w.id FROM workflows w
+  WHERE w.project_id IS NOT NULL
+    AND w.name IN ('planner', 'sprint', 'compound')
+    AND w.spec_json = '{}'
+);
+
+-- Any revision STILL pointing at an unedited per-project built-in was a skipped
+-- duplicate above. FKs are OFF for this migration, so step 4's DELETE will NOT
+-- cascade these away — drop them explicitly here to avoid orphaned revisions.
+DELETE FROM workflow_revisions
 WHERE workflow_id IN (
   SELECT w.id FROM workflows w
   WHERE w.project_id IS NOT NULL

@@ -282,6 +282,38 @@ describe('Migration 030: global built-in workflows + re-point run history', () =
     db.close();
   });
 
+  it('(b) collapses duplicate built-in revisions across projects without a UNIQUE violation', () => {
+    // Regression for the multi-project dev DB: the SAME built-in seeded in
+    // several projects (wf-1-planner, wf-2-planner) yields per-project revisions
+    // that share an identical spec_hash. Re-pointing them ALL onto
+    // wf-global-planner used to crash with UNIQUE(workflow_id, spec_hash).
+    const db = buildPre030Db();
+    // wf-1-planner already has hash-1-planner; give wf-2-planner the SAME hash.
+    db.prepare(
+      `INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)`,
+    ).run('wf-2-planner', 'hash-1-planner', '{"id":"planner","phases":[]}');
+
+    expect(() => applyMigration030(db)).not.toThrow();
+
+    // Exactly one revision survives for the shared hash, on the global row.
+    const rows = db
+      .prepare('SELECT workflow_id FROM workflow_revisions WHERE spec_hash = ?')
+      .all('hash-1-planner') as Array<{ workflow_id: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].workflow_id).toBe('wf-global-planner');
+
+    // The skipped duplicate is dropped, not orphaned onto a deleted built-in.
+    const orphans = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM workflow_revisions rev
+         WHERE NOT EXISTS (SELECT 1 FROM workflows w WHERE w.id = rev.workflow_id)`,
+      )
+      .get() as { n: number };
+    expect(orphans.n).toBe(0);
+
+    db.close();
+  });
+
   it('(c) deletes the unedited per-project built-in rows', () => {
     const db = buildPre030Db();
     applyMigration030(db);
