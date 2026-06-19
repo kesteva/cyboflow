@@ -367,56 +367,149 @@ describe('WorkflowRegistry', () => {
         expect(names).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
+
+    // ───── global + project union (migration 029) ─────
+
+    it('returns the GLOBAL built-ins UNIONed with the project-scoped rows', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // Global built-ins (project_id NULL) + one project-scoped custom flow.
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        const custom = registry.createCustom({
+          projectId: 3,
+          name: 'Project Three Flow',
+          specJson: JSON.stringify(makeDefinition('project-three-flow')),
+        });
+
+        const rows = registry.listByProject(3);
+        // The 3 global built-ins + the project's own custom.
+        expect(rows).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length + 1);
+        expect(rows.map((r) => r.id)).toContain(custom.id);
+        // The global built-ins surface (project_id NULL).
+        expect(rows.filter((r) => r.project_id === null).map((r) => r.name).sort()).toEqual(
+          BUILTIN_NAMES_SORTED,
+        );
+      });
+    });
+
+    it('does NOT return another project\'s scoped rows', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        const projTwoFlow = registry.createCustom({
+          projectId: 2,
+          name: 'Belongs To Two',
+          specJson: JSON.stringify(makeDefinition('belongs-to-two')),
+        });
+
+        // Project 5 sees the globals but NOT project 2's scoped custom flow.
+        const rows = registry.listByProject(5);
+        expect(rows.map((r) => r.id)).not.toContain(projTwoFlow.id);
+        expect(rows.map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
+      });
+    });
+
+    it('returns the GLOBAL built-ins even for a project with no scoped rows', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        const rows = registry.listByProject(999);
+        expect(rows.map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
+        expect(rows.every((r) => r.project_id === null)).toBe(true);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
-  // reconcileBuiltIns
+  // ensureGlobalBuiltIns (migration 029 — one global set, not per-project)
   // -------------------------------------------------------------------------
 
-  describe('reconcileBuiltIns', () => {
-    it('re-points an existing built-in row at the in-repo prompt (pre-refactor plugin path -> in-repo)', async () => {
+  describe('ensureGlobalBuiltIns', () => {
+    it('inserts exactly one global row per built-in (project_id NULL, id wf-global-<name>)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        // A pre-refactor row whose workflow_path points at the old plugin cache.
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        interface GlobalRow { id: string; name: string; project_id: number | null }
+        const rows = db
+          .prepare('SELECT id, name, project_id FROM workflows WHERE project_id IS NULL ORDER BY name')
+          .all() as GlobalRow[];
+
+        expect(rows).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
+        expect(rows.map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
+        for (const r of rows) {
+          expect(r.project_id).toBeNull();
+          expect(r.id).toBe(`wf-global-${r.name}`);
+        }
+      });
+    });
+
+    it('is idempotent — a second call does not duplicate the global rows', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const descriptors = buildDescriptors(tmpDir);
+        registry.ensureGlobalBuiltIns(descriptors);
+        registry.ensureGlobalBuiltIns(descriptors);
+
+        interface CountRow { count: number }
+        const { count } = db
+          .prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id IS NULL')
+          .get() as CountRow;
+        expect(count).toBe(CYBOFLOW_WORKFLOW_NAMES.length);
+      });
+    });
+
+    it('does NOT create any per-project rows (no wf-<projectId>-<name> seeding)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        interface CountRow { count: number }
+        const { count } = db
+          .prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id IS NOT NULL')
+          .get() as CountRow;
+        expect(count).toBe(0);
+      });
+    });
+
+    it('re-points an existing global row at the in-repo prompt (pre-refactor plugin path -> in-repo)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // A pre-refactor global row whose workflow_path points at the old plugin cache.
         db.prepare(
           `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
-           VALUES ('wf-1-planner', 1, 'planner', '/old/plugins/cache/soloflow/planner.md', 'default')`,
+           VALUES ('wf-global-planner', NULL, 'planner', '/old/plugins/cache/soloflow/planner.md', 'default')`,
         ).run();
 
         const descriptors = buildDescriptors(tmpDir); // real in-repo .md paths
         const plannerPath = descriptors.find((d) => d.name === 'planner')!.path;
-        registry.reconcileBuiltIns(1, descriptors);
+        registry.ensureGlobalBuiltIns(descriptors);
 
         const row = db
-          .prepare("SELECT workflow_path FROM workflows WHERE id = 'wf-1-planner'")
+          .prepare("SELECT workflow_path FROM workflows WHERE id = 'wf-global-planner'")
           .get() as { workflow_path: string };
         expect(row.workflow_path).toBe(plannerPath);
       });
     });
 
-    it('inserts the built-ins for a fresh project', async () => {
-      await withTempDir('workflow-registry-test-', async (tmpDir) => {
-        registry.reconcileBuiltIns(7, buildDescriptors(tmpDir));
-        const names = registry.listByProject(7).map((r) => r.name).sort();
-        expect(names).toEqual(BUILTIN_NAMES_SORTED);
-      });
-    });
-
-    it('preserves user spec_json edits while re-pointing the path', async () => {
+    it('preserves user spec_json edits on a global row while re-pointing the path', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         db.prepare(
           `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode, spec_json)
-           VALUES ('wf-1-sprint', 1, 'sprint', '/old/sprint.md', 'default', '{"phases":[]}')`,
+           VALUES ('wf-global-sprint', NULL, 'sprint', '/old/sprint.md', 'default', '{"phases":[]}')`,
         ).run();
 
         const descriptors = buildDescriptors(tmpDir);
         const sprintPath = descriptors.find((d) => d.name === 'sprint')!.path;
-        registry.reconcileBuiltIns(1, descriptors);
+        registry.ensureGlobalBuiltIns(descriptors);
 
         const row = db
-          .prepare("SELECT workflow_path, spec_json FROM workflows WHERE id = 'wf-1-sprint'")
+          .prepare("SELECT workflow_path, spec_json FROM workflows WHERE id = 'wf-global-sprint'")
           .get() as { workflow_path: string; spec_json: string };
         expect(row.workflow_path).toBe(sprintPath);
         expect(row.spec_json).toBe('{"phases":[]}');
+      });
+    });
+
+    it('global built-ins are visible to every project via listByProject', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        // No per-project seeding happened, yet each project sees the union.
+        expect(registry.listByProject(7).map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
+        expect(registry.listByProject(42).map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
   });
@@ -704,6 +797,71 @@ describe('WorkflowRegistry', () => {
         interface SessionRow { session_id: string | null }
         const row = db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get(runId) as SessionRow;
         expect(row.session_id).toBeNull();
+      });
+    });
+
+    // ───── explicit launch projectId stamping (migration 029) ─────
+
+    it('stamps the EXPLICIT launch projectId on a GLOBAL workflow (not the workflow\'s NULL project)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // Global built-in (project_id NULL) launched against project 5.
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db
+          .prepare("SELECT id FROM workflows WHERE name = 'planner' AND project_id IS NULL")
+          .get() as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, undefined, undefined, { projectId: 5 });
+
+        interface ProjectRow { project_id: number }
+        const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
+        expect(row.project_id).toBe(5);
+      });
+    });
+
+    it('the explicit launch projectId OVERRIDES a per-project workflow\'s own project_id', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // A per-project row (project 1), but launched explicitly against project 9.
+        const path = writeTempMd(tmpDir, 'override-project.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, undefined, undefined, { projectId: 9 });
+
+        interface ProjectRow { project_id: number }
+        const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
+        // The explicit launch project wins over the workflow row's own project.
+        expect(row.project_id).toBe(9);
+      });
+    });
+
+    it('falls back to the workflow\'s own project_id when no explicit projectId is supplied (per-project path)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'fallback-project.md', '---\n---\n');
+        registry.seed(4, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare("SELECT id FROM workflows WHERE project_id = 4").get() as IdRow;
+        const { runId } = registry.createRun(workflowId);
+
+        interface ProjectRow { project_id: number }
+        const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
+        expect(row.project_id).toBe(4);
+      });
+    });
+
+    it('throws when a GLOBAL workflow is launched WITHOUT an explicit projectId (no project to stamp)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db
+          .prepare("SELECT id FROM workflows WHERE name = 'planner' AND project_id IS NULL")
+          .get() as IdRow;
+        // No opts.projectId, and workflow.project_id is NULL → cannot stamp the
+        // NOT-NULL workflow_runs.project_id.
+        expect(() => registry.createRun(workflowId)).toThrow(/global.*projectId is required/i);
       });
     });
 
@@ -1220,11 +1378,16 @@ describe('WorkflowRegistry', () => {
   // -------------------------------------------------------------------------
 
   describe('createCustom', () => {
-    it('inserts a row with a generated id and returns it with spec_json + permission_mode', () => {
+    it('inserts a PROJECT-scoped row with a generated id and returns it with spec_json + permission_mode', () => {
       const definition = makeDefinition('my-flow');
-      const row = registry.createCustom(1, 'My Flow', definition, 'acceptEdits');
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'My Flow',
+        specJson: JSON.stringify(definition),
+        permissionMode: 'acceptEdits',
+      });
 
-      // Generated id: wf-<projectId>-custom-<8 lowercase hex chars>.
+      // Generated id for a project copy: wf-<projectId>-custom-<8 lowercase hex chars>.
       expect(row.id).toMatch(/^wf-1-custom-[0-9a-f]{8}$/);
       expect(row.project_id).toBe(1);
       expect(row.name).toBe('My Flow');
@@ -1239,36 +1402,81 @@ describe('WorkflowRegistry', () => {
       expect(JSON.parse(reread!.spec_json)).toEqual(definition);
     });
 
-    it('defaults persisted permission_mode to whatever the caller passes (default)', () => {
-      const row = registry.createCustom(7, 'Default Mode Flow', makeDefinition('default-mode-flow'), 'default');
-      expect(row.permission_mode).toBe('default');
+    // ───── global scope (migration 029 — the new default) ─────
+
+    it('inserts a GLOBAL row (project_id NULL, id wf-global-custom-<hex>) when projectId is null', () => {
+      const definition = makeDefinition('global-flow');
+      const row = registry.createCustom({
+        projectId: null,
+        name: 'Global Flow',
+        specJson: JSON.stringify(definition),
+        permissionMode: 'acceptEdits',
+      });
+
+      expect(row.id).toMatch(/^wf-global-custom-[0-9a-f]{8}$/);
+      expect(row.project_id).toBeNull();
+      expect(row.name).toBe('Global Flow');
+      expect(row.permission_mode).toBe('acceptEdits');
+      expect(JSON.parse(row.spec_json)).toEqual(definition);
     });
 
-    it('rejects a name that collides with a built-in workflow name', () => {
+    it('a GLOBAL custom flow surfaces in EVERY project via listByProject', () => {
+      const row = registry.createCustom({
+        projectId: null,
+        name: 'Everywhere Flow',
+        specJson: JSON.stringify(makeDefinition('everywhere-flow')),
+      });
+      expect(registry.listByProject(1).map((r) => r.id)).toContain(row.id);
+      expect(registry.listByProject(42).map((r) => r.id)).toContain(row.id);
+    });
+
+    it('defaults specJson to "{}" and permissionMode to "default" when omitted', () => {
+      const row = registry.createCustom({ projectId: 7, name: 'Default Mode Flow' });
+      expect(row.permission_mode).toBe('default');
+      expect(row.spec_json).toBe('{}');
+    });
+
+    it('rejects a name that collides with a built-in workflow name (any scope)', () => {
       for (const builtIn of ['planner', 'sprint']) {
         expect(
-          () => registry.createCustom(1, builtIn, makeDefinition(builtIn), 'default'),
+          () => registry.createCustom({ projectId: 1, name: builtIn }),
           `built-in name '${builtIn}' should be rejected`,
+        ).toThrow(/reserved/i);
+        expect(
+          () => registry.createCustom({ projectId: null, name: builtIn }),
+          `built-in name '${builtIn}' should be rejected globally`,
         ).toThrow(/reserved/i);
       }
     });
 
     it('rejects the __quick__ sentinel name', () => {
       expect(
-        () => registry.createCustom(1, QUICK_WORKFLOW_NAME, makeDefinition('quick'), 'default'),
+        () => registry.createCustom({ projectId: 1, name: QUICK_WORKFLOW_NAME }),
       ).toThrow(/reserved/i);
     });
 
-    it('rejects a name that collides with an existing row in the SAME project', () => {
-      registry.createCustom(1, 'Duplicate', makeDefinition('duplicate'), 'default');
+    it('rejects a name that collides with an existing GLOBAL flow (for any scope)', () => {
+      registry.createCustom({ projectId: null, name: 'Global Name' });
+      // A second GLOBAL flow with the same name is rejected.
       expect(
-        () => registry.createCustom(1, 'Duplicate', makeDefinition('duplicate'), 'default'),
-      ).toThrow(/already exists/i);
+        () => registry.createCustom({ projectId: null, name: 'Global Name' }),
+      ).toThrow(/global workflow named/i);
+      // A PROJECT copy that would shadow the global name is also rejected.
+      expect(
+        () => registry.createCustom({ projectId: 1, name: 'Global Name' }),
+      ).toThrow(/global workflow named/i);
     });
 
-    it('allows the same name in a DIFFERENT project (collision is per-project)', () => {
-      const rowA = registry.createCustom(1, 'Shared Name', makeDefinition('shared-name'), 'default');
-      const rowB = registry.createCustom(2, 'Shared Name', makeDefinition('shared-name'), 'default');
+    it('rejects a name that collides with an existing row in the SAME project', () => {
+      registry.createCustom({ projectId: 1, name: 'Duplicate' });
+      expect(
+        () => registry.createCustom({ projectId: 1, name: 'Duplicate' }),
+      ).toThrow(/already exists in this project/i);
+    });
+
+    it('allows the same name in a DIFFERENT project (project collision is per-project)', () => {
+      const rowA = registry.createCustom({ projectId: 1, name: 'Shared Name' });
+      const rowB = registry.createCustom({ projectId: 2, name: 'Shared Name' });
       expect(rowA.project_id).toBe(1);
       expect(rowB.project_id).toBe(2);
       expect(rowA.id).not.toBe(rowB.id);
@@ -1280,7 +1488,7 @@ describe('WorkflowRegistry', () => {
          VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
       ).run();
 
-      expect(() => registry.createCustom(1, 'planner', makeDefinition('planner'), 'default')).toThrow();
+      expect(() => registry.createCustom({ projectId: 1, name: 'planner' })).toThrow();
 
       interface CountRow { count: number }
       const { count } = db.prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id = 1').get() as CountRow;
@@ -1288,8 +1496,14 @@ describe('WorkflowRegistry', () => {
       expect(count).toBe(1);
     });
 
-    it('a created custom flow appears in listByProject', () => {
-      const row = registry.createCustom(3, 'Listed Flow', makeDefinition('listed-flow'), 'default');
+    it('a created project-scoped custom flow appears in listByProject', () => {
+      // Seed a resolvable spec (the UI always seeds a non-empty skeleton): a custom
+      // name with the default '{}' spec resolves to null and is filtered from the list.
+      const row = registry.createCustom({
+        projectId: 3,
+        name: 'Listed Flow',
+        specJson: JSON.stringify(WORKFLOW_DEFINITIONS.planner),
+      });
       const rows = registry.listByProject(3);
       expect(rows.map((r) => r.id)).toContain(row.id);
     });
@@ -1298,7 +1512,11 @@ describe('WorkflowRegistry', () => {
       // Custom flows are commonly created by cloning a built-in then renaming.
       // Confirm an arbitrary built-in definition survives the round-trip.
       const cloned = WORKFLOW_DEFINITIONS.planner;
-      const row = registry.createCustom(9, 'Cloned Planner', cloned, 'default');
+      const row = registry.createCustom({
+        projectId: 9,
+        name: 'Cloned Planner',
+        specJson: JSON.stringify(cloned),
+      });
       expect(JSON.parse(row.spec_json)).toEqual(cloned);
     });
   });

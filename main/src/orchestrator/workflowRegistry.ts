@@ -117,7 +117,7 @@ export class WorkflowRegistry {
    *
    * The `workflows.permission_mode` COLUMN stays non-null: seed/reconcile
    * coalesce this `null` to `'default'` when persisting (see seed /
-   * reconcileBuiltIns), and createRun treats a column value of `'default'` as
+   * ensureGlobalBuiltIns), and createRun treats a column value of `'default'` as
    * "fall through to the global default".
    */
   private extractPermissionMode(md: string): PermissionMode | null {
@@ -179,22 +179,32 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Reconcile the in-repo built-in workflows for a project.
+   * Reconcile the in-repo built-in workflows as ONE GLOBAL set (migration 029).
    *
-   * Unlike seed() (INSERT OR IGNORE — first-write-wins), this UPSERTs each
-   * built-in: a row from a PRIOR app version that still points at the old
+   * Replaces the old per-project `reconcileBuiltIns(projectId, …)`: instead of
+   * minting a `wf-<projectId>-<name>` row for every project, this UPSERTs a
+   * SINGLE `wf-global-<name>` row per built-in with `project_id = NULL` (GLOBAL
+   * scope). Every project sees these via the union in `listByProject`. There is
+   * no longer any per-project built-in seeding — the global rows are shared.
+   *
+   * Like the prior reconcile (and unlike `seed()`'s INSERT OR IGNORE), this
+   * UPSERTs: a row from a PRIOR app version that still points at the old
    * SoloFlow plugin-cache `workflow_path` is re-pointed at the current in-repo
-   * prompt, and its `permission_mode` is re-derived from that file. A fresh
-   * project gets the rows inserted. `spec_json` (user step edits) is preserved.
+   * prompt, and its `permission_mode` is re-derived from that file. A fresh DB
+   * gets the rows inserted. `spec_json` (user step edits) is PRESERVED — the
+   * ON CONFLICT clause touches only `workflow_path` + `permission_mode`.
+   *
+   * Idempotent: keyed on the deterministic `wf-global-<name>` primary key, so
+   * calling it on every `workflows.list` (project-independent) is safe.
    *
    * Dropped legacy built-ins (soloflow/prune) are intentionally NOT removed
    * here — listByProject() filters them from the picker instead (see
    * LEGACY_DROPPED_WORKFLOW_NAMES; deleting them would orphan historical runs).
    */
-  reconcileBuiltIns(projectId: number, workflowDescriptors: WorkflowDescriptor[]): void {
+  ensureGlobalBuiltIns(workflowDescriptors: WorkflowDescriptor[]): void {
     const upsert = this.db.prepare(`
       INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
-      VALUES (?, ?, ?, ?, ?)
+      VALUES (?, NULL, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         workflow_path = excluded.workflow_path,
         permission_mode = excluded.permission_mode
@@ -211,15 +221,15 @@ export class WorkflowRegistry {
           permissionMode = this.extractPermissionMode(md) ?? 'default';
         } catch (err) {
           this.logger.error(
-            `WorkflowRegistry.reconcileBuiltIns: could not read workflow file, defaulting permission_mode to 'default'`,
+            `WorkflowRegistry.ensureGlobalBuiltIns: could not read workflow file, defaulting permission_mode to 'default'`,
             {
               path: descriptor.path,
               error: err instanceof Error ? err.message : String(err),
             },
           );
         }
-        const deterministicId = `wf-${projectId}-${descriptor.name}`;
-        upsert.run(deterministicId, projectId, descriptor.name, descriptor.path, permissionMode);
+        const globalId = `wf-global-${descriptor.name}`;
+        upsert.run(globalId, descriptor.name, descriptor.path, permissionMode);
       }
     });
 
@@ -328,44 +338,76 @@ export class WorkflowRegistry {
 
   /**
    * Create a brand-new custom workflow row from an edited definition
-   * ("Save as new flow").
+   * ("Save as new flow" / "Create a project-specific copy").
    *
-   * The name must not collide with a built-in name, the `__quick__` sentinel,
-   * or any existing workflow name in the same project — collisions throw so the
-   * router can map to a CONFLICT.
+   * Scope (migration 029) is chosen by `params.projectId`:
+   *   - `null`    → GLOBAL custom flow (shown across every project). The row is
+   *                 inserted with `project_id NULL` and id
+   *                 `wf-global-custom-<8 lowercase hex chars>`.
+   *   - a number  → project-scoped custom flow (a "project copy"). The row is
+   *                 inserted with `project_id = <projectId>` and id
+   *                 `wf-<projectId>-custom-<8 lowercase hex chars>`.
    *
-   * The generated id mirrors the seed/sentinel convention but adds a random
-   * suffix so multiple custom flows can coexist:
-   *   `wf-<projectId>-custom-<8 lowercase hex chars>`.
+   * Name uniqueness (collisions throw so the router can map to a CONFLICT):
+   *   1. Reserved-name guard is GLOBAL: a built-in `CyboflowWorkflowName` or the
+   *      `__quick__` sentinel is rejected regardless of scope.
+   *   2. A name already used by a GLOBAL flow (`project_id IS NULL`) is rejected
+   *      for any scope — a project copy must not shadow a global flow's name.
+   *   3. When `projectId !== null`, a name already used WITHIN that project is
+   *      also rejected.
    *
-   * Caller must have validated the definition with `workflowDefinitionSchema`.
+   * `definition` defaults to the empty spec `'{}'` when `params.specJson` is
+   * omitted, and `permissionMode` defaults to `'default'`.
+   *
+   * Caller must have validated any supplied `specJson` with
+   * `workflowDefinitionSchema`. The registry does NOT re-validate, it only
+   * persists the string.
    *
    * @returns The freshly inserted `WorkflowRow`.
    */
-  createCustom(
-    projectId: number,
-    name: string,
-    definition: WorkflowDefinition,
-    permissionMode: PermissionMode,
-  ): WorkflowRow {
+  createCustom(params: {
+    projectId: number | null;
+    name: string;
+    specJson?: string;
+    permissionMode?: PermissionMode;
+  }): WorkflowRow {
+    const { projectId, name } = params;
+    const specJson = params.specJson ?? '{}';
+    const permissionMode: PermissionMode = params.permissionMode ?? 'default';
+
     if (isCyboflowWorkflowName(name) || name === QUICK_WORKFLOW_NAME) {
       throw new Error(
         `WorkflowRegistry.createCustom: name '${name}' is reserved`,
       );
     }
 
-    const collisionStmt = this.db.prepare(
-      'SELECT 1 FROM workflows WHERE project_id = ? AND name = ? LIMIT 1',
-    );
-    const existing = collisionStmt.get(projectId, name);
-    if (existing !== undefined) {
+    // (2) A GLOBAL flow's name is reserved across every scope.
+    const globalCollision = this.db
+      .prepare('SELECT 1 FROM workflows WHERE project_id IS NULL AND name = ? LIMIT 1')
+      .get(name);
+    if (globalCollision !== undefined) {
       throw new Error(
-        `WorkflowRegistry.createCustom: a workflow named '${name}' already exists in this project`,
+        `WorkflowRegistry.createCustom: a global workflow named '${name}' already exists`,
       );
     }
 
+    // (3) For a project copy, the name must also be free within that project.
+    if (projectId !== null) {
+      const projectCollision = this.db
+        .prepare('SELECT 1 FROM workflows WHERE project_id = ? AND name = ? LIMIT 1')
+        .get(projectId, name);
+      if (projectCollision !== undefined) {
+        throw new Error(
+          `WorkflowRegistry.createCustom: a workflow named '${name}' already exists in this project`,
+        );
+      }
+    }
+
     const suffix = randomUUID().replace(/-/g, '').slice(0, 8);
-    const newId = `wf-${projectId}-custom-${suffix}`;
+    const newId =
+      projectId === null
+        ? `wf-global-custom-${suffix}`
+        : `wf-${projectId}-custom-${suffix}`;
 
     const insert = this.db.prepare(`
       INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
@@ -373,7 +415,7 @@ export class WorkflowRegistry {
     `);
 
     const tx = this.db.transaction(() => {
-      insert.run(newId, projectId, name, JSON.stringify(definition), permissionMode);
+      insert.run(newId, projectId, name, specJson, permissionMode);
     });
     tx();
 
@@ -388,7 +430,10 @@ export class WorkflowRegistry {
   }
 
   /**
-   * List all workflows registered for a project.
+   * List the workflows visible to a project: the GLOBAL set
+   * (`project_id IS NULL` — built-ins + global customs, migration 029) UNIONed
+   * with that project's own scoped rows (`project_id = ?` — project-copy customs
+   * and any edited per-project built-in 029 preserved).
    * Used by the frontend workflow picker.
    *
    * Excludes the __quick__ sentinel row — that row is an internal implementation
@@ -396,10 +441,13 @@ export class WorkflowRegistry {
    * workflow pickers (TASK-787 / IDEA-027). Also hides any row that does not
    * resolve to a usable definition (empty/unknown spec) — e.g. foreign internal
    * flows leaked via the shared dev DB — so the picker never shows dead cards.
+   *
+   * Note: the global rows returned here repeat across every project's call, so
+   * the renderer (workflowsStore) dedupes the cross-project fan-out by `row.id`.
    */
   listByProject(projectId: number): WorkflowRow[] {
     // Exclude the __quick__ sentinel AND any dropped legacy built-ins
-    // (soloflow/prune) that linger in a pre-refactor project DB — they must
+    // (soloflow/prune) that linger in a pre-refactor DB — they must
     // never appear in the user-facing picker. Filtered, not deleted, to
     // preserve the workflow_runs FK for historical runs.
     const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
@@ -407,7 +455,7 @@ export class WorkflowRegistry {
     const stmt = this.db.prepare(
       `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
        FROM workflows
-       WHERE project_id = ? AND name NOT IN (${placeholders})
+       WHERE (project_id = ? OR project_id IS NULL) AND name NOT IN (${placeholders})
        ORDER BY name`,
     );
     const rows = stmt.all(projectId, ...excluded) as WorkflowRow[];
@@ -484,6 +532,15 @@ export class WorkflowRegistry {
    * session can own many runs over its lifetime. When omitted the column stays
    * NULL — the legacy parentless-run path, byte-identical to before.
    *
+   * `opts.projectId` (migration 029) is the EXPLICIT launch project stamped onto
+   * `workflow_runs.project_id` (a NOT-NULL column). It MUST be supplied for a
+   * GLOBAL workflow (`workflow.project_id IS NULL` — a built-in or a global
+   * custom flow) because the workflow row no longer carries a project. When
+   * omitted, it falls back to `workflow.project_id` (the per-project path: the
+   * quick sentinel or an edited per-project built-in preserved by 029). Throws
+   * if neither source yields a project (a global flow launched without an
+   * explicit projectId).
+   *
    * Returns the generated runId, the snapshotted permissionMode, and the
    * stamped substrate.
    * Throws if the workflow does not exist.
@@ -493,10 +550,23 @@ export class WorkflowRegistry {
     requestedSubstrate?: CliSubstrate,
     sessionId?: string,
     requestedPermissionMode?: PermissionMode,
+    opts?: { projectId?: number },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
+    }
+
+    // Stamp the EXPLICIT launch project (migration 029). For a GLOBAL workflow
+    // (built-in or global custom) workflow.project_id is NULL, so the launch
+    // project must be threaded by the caller (runs.start → runLauncher.launch).
+    // For a per-project row (quick sentinel / edited built-in) it falls back to
+    // the workflow's own project. workflow_runs.project_id is NOT NULL.
+    const runProjectId = opts?.projectId ?? workflow.project_id;
+    if (runProjectId === null || runProjectId === undefined) {
+      throw new Error(
+        `WorkflowRegistry.createRun: workflow ${workflowId} is global (project_id NULL); an explicit projectId is required`,
+      );
     }
 
     const runId = randomUUID().replace(/-/g, '');
@@ -558,7 +628,7 @@ export class WorkflowRegistry {
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, workflow.project_id, permissionMode, substrate, sessionId ?? null, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, sessionId ?? null, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
