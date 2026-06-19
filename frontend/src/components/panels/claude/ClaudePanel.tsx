@@ -87,6 +87,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     return () => window.removeEventListener('keydown', onKey, { capture: true });
   }, [interactiveRunId]);
 
+  // On ⌃G reveal, move focus into the composer so the user's next keystrokes
+  // land in the rich text box instead of the live PTY terminal (otherwise they
+  // have to click it). The rAF lets the textarea mount first — `inputVisible`
+  // flips to true on the same render that sets composerOpen.
+  useEffect(() => {
+    if (!composerOpen) return;
+    const id = requestAnimationFrame(() => hook.textareaRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [composerOpen, hook.textareaRef]);
+
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
   // SDK substrate emits a "54k/200k tokens (27%)" string; null for PTY/empty.
   const contextUsage = claudePanelState.contextUsage ?? null;
