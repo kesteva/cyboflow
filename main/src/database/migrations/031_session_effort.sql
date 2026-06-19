@@ -1,4 +1,4 @@
--- Migration 029: Add nullable effort to sessions for the read-only effort pill
+-- Migration 031: Add nullable effort to sessions for the read-only effort pill
 -- shown in the unified chat composer (session config, set at session start).
 --
 -- The only value today is 'ultracode' (the Session Start Wizard "Ultracode"
@@ -11,8 +11,12 @@
 -- and 027 (substrate).
 --
 -- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
--- this.transaction(...) call, so no explicit BEGIN/COMMIT here. 029 follows
--- 028_idea_attachments on this branch. schema.sql is intentionally NOT updated
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here. Renumbered
+-- 029 -> 031 when playa-cougar rebased onto main (main owns 029_agent_overrides
+-- + 030_global_workflows); the migration ledger is filename-keyed and tolerates
+-- the duplicate ALTER ("duplicate column name" is caught as idempotent-ok in
+-- runFileBasedMigrations), so dev DBs that already ran 029_session_effort
+-- re-mark cleanly. schema.sql is intentionally NOT updated
 -- (sessions is a legacy schema.sql table excluded from the parity diff — the
 -- migrations-only path cannot create it; same handling as substrate).
 
