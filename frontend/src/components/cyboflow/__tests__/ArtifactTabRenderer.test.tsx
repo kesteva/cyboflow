@@ -182,7 +182,7 @@ describe('ArtifactTabRenderer', () => {
 
   // --- ui-prototype / generic (live canvas) --------------------------------
 
-  it('renders the ui-prototype live-canvas placeholder with the rust eyebrow', () => {
+  it('embeds the ui-prototype live canvas (iframe) for a localhost url', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'http://localhost:8081' } } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
 
@@ -190,7 +190,9 @@ describe('ArtifactTabRenderer', () => {
     const eyebrow = screen.getByTestId('artifact-eyebrow');
     expect(eyebrow).toHaveTextContent('◳ Live canvas · ui prototype');
     expect(eyebrow).toHaveStyle({ color: '#c96442' });
-    expect(screen.getByTestId('artifact-canvas-placeholder')).toBeInTheDocument();
+    // A localhost url now renders the live iframe (not the placeholder).
+    expect(screen.queryByTestId('artifact-canvas-placeholder')).not.toBeInTheDocument();
+    expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'http://localhost:8081');
     expect(screen.getByTestId('artifact-canvas-open')).toHaveAttribute('href', 'http://localhost:8081');
   });
 

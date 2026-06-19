@@ -25,6 +25,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
+import { LiveCanvasEmbed } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { ARTIFACT_COLORS } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
@@ -365,27 +366,32 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
         meta={<span style={{ fontStyle: 'italic' }}>no template — embedded live</span>}
         actions={openInBrowser}
       />
-      {/* Hatched placeholder body — the live iframe/webview embed lands later. */}
-      <div
-        data-testid="artifact-canvas-placeholder"
-        style={{
-          flex: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 10,
-          padding: 32,
-          background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
-        }}
-      >
-        <span style={{ fontSize: '34px', color: accent }}>◳</span>
-        <span style={{ fontSize: '12px', fontWeight: 600, color: INK }}>Live canvas — embedded preview</span>
-        <span style={{ fontSize: '10.5px', color: MUTED, textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
-          This artifact has no template. In production its body is a live embed
-          {url ? ` of ${url}` : ' of the running preview'}; the iframe lands in a later milestone.
-        </span>
-      </div>
+      {/* Live embed when the agent has reported a localhost dev-server URL;
+          otherwise a hatched placeholder explaining there is no preview yet. */}
+      {url ? (
+        <LiveCanvasEmbed url={url} />
+      ) : (
+        <div
+          data-testid="artifact-canvas-placeholder"
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 10,
+            padding: 32,
+            background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
+          }}
+        >
+          <span style={{ fontSize: '34px', color: accent }}>◳</span>
+          <span style={{ fontSize: '12px', fontWeight: 600, color: INK }}>Live canvas — no preview yet</span>
+          <span style={{ fontSize: '10.5px', color: MUTED, textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
+            This artifact has no template. Its body embeds a live preview once the
+            agent reports a localhost dev-server URL (via cyboflow_report_artifact).
+          </span>
+        </div>
+      )}
     </Shell>
   );
 }
