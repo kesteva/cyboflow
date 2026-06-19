@@ -371,6 +371,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
+            outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
           },
           {
             id: 'research',
@@ -412,6 +413,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             desc: 'Capture each task via cyboflow_create_task with acceptance criteria.',
+            outputArtifact: { atype: 'decomposed-stories', label: 'Decomposed stories' },
           },
           {
             id: 'approve-plan',

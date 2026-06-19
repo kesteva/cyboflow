@@ -40,6 +40,7 @@
  * raw_events INSERT goes through the narrow DatabaseLike surface only.
  */
 import { stepTransitionEvents } from './trpc/routers/events';
+import { handleStepCompletion } from './autoMintArtifacts';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
@@ -228,6 +229,25 @@ export function buildStepTransitionEvent(
       `INSERT INTO raw_events (run_id, event_type, payload_json)
        VALUES (?, 'step_transition', ?)`,
     ).run(runId, payloadJson);
+
+    // Auto-mint artifacts on step COMPLETION (status='done') only. Mirrors the
+    // raw_events fail-soft posture: handleStepCompletion is itself fully
+    // try/caught + never throws/rejects, but we attach a defensive .catch so a
+    // surprise rejection can never become an unhandled-rejection and can never
+    // suppress the emit/return below. Fire-and-forget (this bridge is synchronous
+    // and its callers consume the return value) — artifact minting is an
+    // observational projection off the entity DB, not part of the authoritative
+    // transition. See main/src/orchestrator/autoMintArtifacts.ts.
+    if (status === 'done') {
+      void handleStepCompletion(db, runId, stepId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] auto-mint hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
   } catch (err) {
     const msg = `[stepTransitionBridge] raw_events INSERT threw for runId=${runId} (emit/return proceed): ${err}`;
     if (logger) {
