@@ -12,6 +12,14 @@
  *    whose sourceRef = the idea id.
  *  - a step with NO outputArtifact ('approve-idea') mints nothing.
  *  - an unknown run id is FAIL-SOFT (no throw, no mint).
+ *  - terminal-status gate (H-automint-1): a FAILED or CANCELED run does NOT mint
+ *    the templated artifact on the synthesized lifecycle 'done'; a 'completed'
+ *    run still mints.
+ *  - workflow-name gate (H-automint-2): a NON-planner workflow whose step
+ *    declares a templated atype ('idea-spec') does NOT mint.
+ *  - idempotency (H-automint-3): two 'context' completions yield ONE artifacts
+ *    row and exactly ONE 'created' entity_event (no second 'created', no-delta
+ *    re-derive appends no 'updated').
  *
  * DB: in-memory better-sqlite3 with migrations 006/011/014/015/016/017/024/028/029
  * applied (mirrors reviewItemRouter.test.ts buildDb + 017 seed-idea + 029
@@ -80,6 +88,76 @@ function seedPlannerRun(db: Database.Database, runId: string): void {
 /** Stamp seed_idea_id on an existing run (migration 017). */
 function setSeedIdea(db: Database.Database, runId: string, ideaId: string): void {
   db.prepare('UPDATE workflow_runs SET seed_idea_id = ? WHERE id = ?').run(ideaId, runId);
+}
+
+/** Stamp a lifecycle status on an existing run (mirrors transitionToFailed/Canceled). */
+function setRunStatus(db: Database.Database, runId: string, status: string): void {
+  db.prepare('UPDATE workflow_runs SET status = ? WHERE id = ?').run(status, runId);
+}
+
+/**
+ * Seed a NON-planner CUSTOM workflow run whose single step declares an
+ * outputArtifact of the (planner-only) `atype`. Used to assert the workflow-name
+ * guard: a non-planner step declaring a templated atype must NOT mint. The run
+ * row is seeded BEFORE entities so the entity_events.run_id FK holds.
+ */
+function seedCustomRunWithArtifactStep(
+  db: Database.Database,
+  runId: string,
+  atype: 'idea-spec' | 'decomposed-stories',
+): void {
+  const specJson = JSON.stringify({
+    id: 'my-custom-flow',
+    phases: [
+      {
+        id: 'phase-1',
+        label: 'Phase 1',
+        color: '#3b6dd6',
+        steps: [
+          {
+            id: 'context',
+            name: 'Get context',
+            agent: 'cyboflow-context',
+            outputArtifact: { atype, label: 'Idea spec' },
+          },
+        ],
+      },
+    ],
+  });
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-custom', 1, 'my-custom-flow', ?)`,
+  ).run(specJson);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+     VALUES (?, 'wf-custom', 1, 'running', 'default')`,
+  ).run(runId);
+}
+
+interface EntityEventRow {
+  kind: string;
+}
+
+/** All entity_events rows of entity_type='artifact' for a given artifact id, oldest-first. */
+function readArtifactEvents(db: Database.Database, artifactId: string): EntityEventRow[] {
+  return db
+    .prepare(
+      `SELECT kind FROM entity_events
+        WHERE entity_type = 'artifact' AND entity_id = ?
+        ORDER BY seq ASC`,
+    )
+    .all(artifactId) as EntityEventRow[];
+}
+
+interface ArtifactIdRow {
+  id: string;
+}
+
+/** Resolve the single artifact id for a (run, atype), or undefined. */
+function readArtifactId(db: Database.Database, runId: string, atype: string): string | undefined {
+  const row = db
+    .prepare('SELECT id FROM artifacts WHERE run_id = ? AND atype = ?')
+    .get(runId, atype) as ArtifactIdRow | undefined;
+  return row?.id;
 }
 
 interface ArtifactRow {
@@ -329,5 +407,137 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
 
     await expect(handleStepCompletion(adapter, 'no-such-run', 'context')).resolves.toBeUndefined();
     expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // terminal-status gate (finding H-automint-1) — failed/canceled run does NOT
+  // mint the templated artifact on the synthesized lifecycle 'done'.
+  // -------------------------------------------------------------------------
+
+  it("does NOT mint idea-spec when the run has already FAILED (synthesized 'context' done)", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-failed');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Realtime habit streaks',
+      runId: 'run-failed',
+    });
+    setSeedIdea(db, 'run-failed', ideaId);
+    // The failed lifecycle transition stamps status='failed' BEFORE the
+    // synthesized emitStep(runId,'done') fires — so it is terminal here.
+    setRunStatus(db, 'run-failed', 'failed');
+
+    await expect(handleStepCompletion(adapter, 'run-failed', 'context')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-failed')).toBe(0);
+  });
+
+  it("does NOT mint idea-spec when the run has already CANCELED (synthesized 'context' done)", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-canceled');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Realtime habit streaks',
+      runId: 'run-canceled',
+    });
+    setSeedIdea(db, 'run-canceled', ideaId);
+    setRunStatus(db, 'run-canceled', 'canceled');
+
+    await expect(handleStepCompletion(adapter, 'run-canceled', 'context')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-canceled')).toBe(0);
+  });
+
+  it("STILL mints idea-spec when the run is 'completed' (a completed run produced its artifact)", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-done');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Realtime habit streaks',
+      runId: 'run-done',
+    });
+    setSeedIdea(db, 'run-done', ideaId);
+    setRunStatus(db, 'run-done', 'completed');
+
+    await handleStepCompletion(adapter, 'run-done', 'context');
+
+    const art = readArtifact(db, 'run-done', 'idea-spec');
+    expect(art).toBeDefined();
+    expect(art!.source_ref).toBe(ideaId);
+  });
+
+  // -------------------------------------------------------------------------
+  // workflow-name gate (finding H-automint-2) — a NON-planner workflow whose
+  // step declares a templated atype must NOT mint against the run's owned ideas.
+  // -------------------------------------------------------------------------
+
+  it('does NOT mint idea-spec for a NON-planner workflow declaring atype idea-spec', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedCustomRunWithArtifactStep(db, 'run-custom', 'idea-spec');
+    // The custom run still OWNS an idea (so the only thing keeping it from
+    // minting is the workflow-name guard, not a missing idea).
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Idea owned by a custom run',
+      runId: 'run-custom',
+    });
+    setSeedIdea(db, 'run-custom', ideaId);
+
+    await expect(handleStepCompletion(adapter, 'run-custom', 'context')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-custom')).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // idempotency (finding H-automint-3) — a re-derive UPSERTs the SAME artifact
+  // row and logs NO second 'created' entity_event (no-delta on unchanged label).
+  // -------------------------------------------------------------------------
+
+  it("is idempotent: two 'context' completions yield ONE artifact row and exactly ONE 'created' event", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-idem');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Realtime habit streaks',
+      runId: 'run-idem',
+    });
+    setSeedIdea(db, 'run-idem', ideaId);
+
+    await handleStepCompletion(adapter, 'run-idem', 'context');
+    await handleStepCompletion(adapter, 'run-idem', 'context');
+
+    // Exactly one artifacts row for (run, atype).
+    expect(artifactCount(db, 'run-idem')).toBe(1);
+    const artifactId = readArtifactId(db, 'run-idem', 'idea-spec');
+    expect(artifactId).toBeDefined();
+
+    // The second re-derive is a no-delta UPSERT (label unchanged) → it appends NO
+    // new entity_event, so there is exactly ONE 'created' row and NO 'updated' row.
+    const events = readArtifactEvents(db, artifactId!);
+    expect(events.length).toBe(1);
+    expect(events[0].kind).toBe('created');
+    expect(events.filter((e) => e.kind === 'updated').length).toBe(0);
   });
 });

@@ -27,6 +27,38 @@ import { ArtifactRouter } from './artifactRouter';
 import { listRunOwnedIdeaIds } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
+import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
+
+// ---------------------------------------------------------------------------
+// Terminal-status gate (finding H-automint-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run statuses for which the synthesized lifecycle 'done' must NOT mint a
+ * templated artifact. The run-end lifecycle (runExecutor) fires a synthesized
+ * `stepTransitionEmitter.emit(runId, 'done')` for the INITIAL step id on EVERY
+ * terminal seam — clean drain AND failure AND cancel — and the failure/cancel
+ * lifecycle transition (transitionToFailed / transitionToCanceled) has ALREADY
+ * stamped workflow_runs.status terminal BEFORE that emit (runExecutor execute()
+ * catch arm: onLifecycleTransition('failed'|'canceled') is awaited, THEN
+ * emitStep(runId,'done')). Minting on a 'failed'/'canceled' run would stamp an
+ * idea-spec artifact as if the context step had succeeded. 'completed' is
+ * excluded from this skip set: a completed run legitimately produced its
+ * artifact. Note the explicit-agent path (cyboflow_report_step('context','done')
+ * via mcpQueryHandler) does NOT transition status, so a live run still mints.
+ */
+const TERMINAL_SKIP_STATUSES = new Set<string>(
+  TERMINAL_RUN_STATUSES.filter((s) => s === 'failed' || s === 'canceled'),
+);
+
+/**
+ * Workflow names whose steps are permitted to auto-mint the templated planner
+ * atypes ('idea-spec' / 'decomposed-stories'). A custom/edited NON-planner step
+ * that declares one of these atypes would otherwise mint against the run's owned
+ * ideas (finding H-automint-2). The atypes are planner-only by design, so a
+ * non-planner workflow declaring them is fail-soft skipped.
+ */
+const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
 
 // ---------------------------------------------------------------------------
 // Step-origin labels (human-readable provenance shown on the artifact tab)
@@ -79,6 +111,38 @@ function resolveStep(db: DatabaseLike, runId: string, stepId: string): WorkflowS
   if (def === null) return null;
 
   return def.phases.flatMap((p) => p.steps).find((s) => s.id === stepId) ?? null;
+}
+
+interface RunMetaRow {
+  workflowName: unknown;
+  status: unknown;
+}
+
+/**
+ * Resolve the run's workflow name (workflows.name) and current lifecycle status
+ * (workflow_runs.status). Used to (a) gate templated mints to the planner
+ * workflow and (b) skip the mint when the run has already failed/canceled — both
+ * read from the SAME row the synthesized lifecycle 'done' sees, since
+ * transitionToFailed / transitionToCanceled stamp status BEFORE emitStep fires.
+ * Returns null when the run row is missing.
+ */
+function resolveRunMeta(
+  db: DatabaseLike,
+  runId: string,
+): { workflowName: string | null; status: string | null } | null {
+  const row = db
+    .prepare(
+      `SELECT w.name AS workflowName, r.status AS status
+         FROM workflow_runs r
+         JOIN workflows w ON w.id = r.workflow_id
+        WHERE r.id = ?`,
+    )
+    .get(runId) as RunMetaRow | undefined;
+  if (!row) return null;
+  return {
+    workflowName: typeof row.workflowName === 'string' ? row.workflowName : null,
+    status: typeof row.status === 'string' ? row.status : null,
+  };
 }
 
 /** Resolve the run's owning project id (workflow_runs.project_id), or null. */
@@ -240,6 +304,20 @@ async function mintDecomposedStories(
  * chokepoint (templated types leave payloadJson null — content is re-derived on
  * read).
  *
+ * TERMINAL-STATUS GATE (finding H-automint-1): the run-end lifecycle fires a
+ * synthesized 'done' for the INITIAL step id (planner='context') on EVERY
+ * terminal seam — clean drain AND failure AND cancel. Because transitionToFailed
+ * / transitionToCanceled stamp workflow_runs.status terminal BEFORE that emit,
+ * we read the run's status here and SKIP the templated mint when it is
+ * 'failed'/'canceled' (so a never-completed context step does not produce an
+ * idea-spec stamped as if it succeeded). A 'completed'/'running'/gated run mints
+ * normally — the explicit-agent report_step path never sets status terminal.
+ *
+ * WORKFLOW GATE (finding H-automint-2): the templated atypes ('idea-spec' /
+ * 'decomposed-stories') are planner-only by design. A custom/edited non-planner
+ * step declaring one of them is fail-soft skipped (it would otherwise mint
+ * against the run's owned ideas).
+ *
  * FAIL-SOFT: the whole body is wrapped in try/catch — any failure logs via
  * `logger` and returns. NEVER throws (the caller is in the step-transition path).
  *
@@ -264,13 +342,40 @@ export async function handleStepCompletion(
       return;
     }
 
-    if (step.outputArtifact.atype === 'idea-spec') {
+    const atype = step.outputArtifact.atype;
+    // Only the templated planner atypes are auto-minted from a step completion in
+    // this milestone; other atypes (screenshots/ui-prototype/generic) are
+    // agent/user canvas writes and are not gated here.
+    if (atype === 'idea-spec' || atype === 'decomposed-stories') {
+      const meta = resolveRunMeta(db, runId);
+
+      // Finding H-automint-1: skip the templated mint when the run has already
+      // failed/canceled. The synthesized lifecycle 'done' fires AFTER the
+      // failed/canceled status stamp, so the step did not actually complete.
+      if (meta !== null && meta.status !== null && TERMINAL_SKIP_STATUSES.has(meta.status)) {
+        logger?.debug(
+          '[autoMintArtifacts] skipped — run is in a terminal failed/canceled state',
+          { runId, stepId, status: meta.status, atype },
+        );
+        return;
+      }
+
+      // Finding H-automint-2: the templated atypes are planner-only. A custom /
+      // edited non-planner step declaring them is fail-soft skipped.
+      if (meta !== null && (meta.workflowName === null || !TEMPLATED_ATYPE_WORKFLOWS.has(meta.workflowName))) {
+        logger?.debug(
+          '[autoMintArtifacts] skipped — templated atype declared by a non-planner workflow',
+          { runId, stepId, workflowName: meta.workflowName, atype },
+        );
+        return;
+      }
+    }
+
+    if (atype === 'idea-spec') {
       await mintIdeaSpec(db, runId, projectId, step, logger);
-    } else if (step.outputArtifact.atype === 'decomposed-stories') {
+    } else if (atype === 'decomposed-stories') {
       await mintDecomposedStories(db, runId, projectId, step, logger);
     }
-    // Other atypes (screenshots/ui-prototype/generic) are not auto-minted from a
-    // step completion in this milestone — they are agent/user canvas writes.
   } catch (err) {
     const msg = `[autoMintArtifacts] auto-mint failed for runId=${runId} stepId=${stepId} (fail-soft): ${
       err instanceof Error ? err.message : String(err)
