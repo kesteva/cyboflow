@@ -23,6 +23,7 @@ import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
+import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
 import { useArtifactsList } from '../../hooks/useArtifactsList';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
@@ -64,43 +65,77 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
   }, [ensureSession, sessionKey]);
 
   // ── Auto-open artifact tabs ────────────────────────────────────────────────
-  // Register a tab for every artifact, but only STEAL FOCUS for freshly-minted
-  // ones (`isNew === true` — produced mid-run). The pre-existing set surfaced on
-  // first load must NOT yank the user off the Flow tab.
+  // Register a tab for every artifact, but only STEAL FOCUS for ones genuinely
+  // minted AFTER this pane mounted for the current session. The pre-existing set
+  // surfaced on first load must NOT yank the user off the Flow tab.
+  //
+  // The DB `is_new` flag CANNOT be trusted for this: it is never written back to
+  // 0, so on app refresh / fresh run re-select `artifacts.list` re-seeds every
+  // prior artifact with isNew===true — which would steal focus on every reload
+  // (exactly what this effect forbids). Instead we treat "new" as purely a
+  // client-session notion: the FIRST sync for a session key marks every artifact
+  // already present as already-seen (so it is opened WITHOUT stealing focus), and
+  // only ids that appear in a LATER sync count as freshly minted and focus.
   //
   // centerPaneStore.openArtifactTab ALWAYS focuses the tab it opens/touches —
-  // there is no no-focus "register" action. To honour "don't steal focus on
-  // first load" without editing the store (not my file; flagged in the summary),
-  // we:
-  //   - track which artifact ids we've already registered (a ref Set), and
-  //   - on each sync, open ONLY artifacts that are both new-to-us AND isNew===true.
-  //     Pre-existing (isNew===false) artifacts are intentionally NOT auto-tabbed;
-  //     they are reopened on demand from the right-rail Artifacts panel or the
-  //     "creates ⟨artifact⟩" step chips. This is the documented v1 choice: it
-  //     avoids a focus-restore dance and a no-focus store action while still
-  //     auto-surfacing the artifacts a running flow mints in front of the user.
+  // there is no no-focus "register" action. To open the initial seed without
+  // stealing focus we capture the active tab id before the pass and restore it
+  // afterwards (the Flow tab carries no `isNew`, so focusTab restoring it is a
+  // no-op beyond setting activeTabId).
   const seenArtifactIds = useRef<Set<string>>(new Set());
   // Reset the seen-set when the pane switches to a different run/session so a
   // new run's freshly-minted artifacts focus correctly.
   const seenForKey = useRef<string | null>(null);
   useEffect(() => {
-    if (seenForKey.current !== sessionKey) {
+    const store = useCenterPaneStore.getState();
+    // The active tab the user is currently on — restored after the initial seed
+    // so pre-existing artifacts open silently (no focus steal).
+    const activeBeforeSeed = store.bySession[sessionKey]?.activeTabId ?? FLOW_TAB_ID;
+
+    const isInitialSeed = seenForKey.current !== sessionKey;
+    if (isInitialSeed) {
       seenArtifactIds.current = new Set();
       seenForKey.current = sessionKey;
     }
+
     for (const artifact of artifacts) {
       if (seenArtifactIds.current.has(artifact.id)) continue;
       seenArtifactIds.current.add(artifact.id);
-      // Only freshly-minted artifacts auto-open (and thereby focus). Pre-existing
-      // ones are left to the right-rail / step-chip reopen surfaces.
-      if (artifact.isNew) {
-        useCenterPaneStore.getState().openArtifactTab(sessionKey, {
-          atype: artifact.atype,
-          label: artifact.label,
-          artifactId: artifact.id,
-          committed: artifact.committed,
-          isNew: true,
-        });
+      // On the initial seed, every artifact is "pre-existing" — open it but do
+      // NOT treat it as new (focus is restored below). After the initial seed,
+      // an unseen artifact id is genuinely fresh this session and steals focus.
+      store.openArtifactTab(sessionKey, {
+        atype: artifact.atype,
+        label: artifact.label,
+        artifactId: artifact.id,
+        committed: artifact.committed,
+        isNew: !isInitialSeed,
+      });
+    }
+
+    // Restore focus after the initial seed so opening pre-existing artifacts
+    // never yanks the user off the Flow (or whichever) tab they were on.
+    if (isInitialSeed && artifacts.length > 0) {
+      useCenterPaneStore.getState().focusTab(sessionKey, activeBeforeSeed);
+    }
+  }, [artifacts, sessionKey]);
+
+  // ── Close tabs whose backing artifact row vanished ─────────────────────────
+  // A pruned / deleted artifact leaves its center-pane tab stranded on a
+  // perpetual "Loading…" state (renderActiveTab can't resolve the row). Close
+  // any artifact tab whose id AND atype no longer appear in the live list.
+  useEffect(() => {
+    const session = useCenterPaneStore.getState().bySession[sessionKey];
+    if (!session) return;
+    for (const tab of session.tabs) {
+      if (tab.kind !== 'artifact') continue;
+      const stillExists =
+        artifacts.some((a) => a.id === tab.artifactId) ||
+        artifacts.some((a) => a.atype === tab.atype);
+      if (!stillExists) {
+        // Drop our memory of the id too, so a re-mint re-opens (and focuses) it.
+        if (tab.artifactId) seenArtifactIds.current.delete(tab.artifactId);
+        useCenterPaneStore.getState().closeTab(sessionKey, tab.id);
       }
     }
   }, [artifacts, sessionKey]);
