@@ -59,8 +59,6 @@ export interface ChatVisibility {
   modelEffortDisabled: boolean;
   /** composer text input visible — SDK always; PTY only after ⌃G. */
   inputVisible: boolean;
-  /** inline thinking/tools segmented toggle lives in the PTY composer. */
-  showThinkingToolsInline: boolean;
   /** the same disp toggles live behind the ⚙ menu for SDK. */
   showSettingsToggles: boolean;
 }
@@ -82,7 +80,6 @@ export function resolveChatVisibility(input: ChatVisibilityInput): ChatVisibilit
     showModelEffort: isSDK,
     modelEffortDisabled: !isQuick && running,
     inputVisible: isSDK || input.ptyOpen,
-    showThinkingToolsInline: !isSDK,
     showSettingsToggles: isSDK,
   };
 }

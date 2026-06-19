@@ -31,7 +31,6 @@ describe('resolveChatVisibility', () => {
       showModelEffort: true,
       modelEffortDisabled: false,
       inputVisible: true,
-      showThinkingToolsInline: false,
       showSettingsToggles: true,
     });
   });
@@ -51,11 +50,10 @@ describe('resolveChatVisibility', () => {
     expect(v.showModelEffort).toBe(true); // disabled, not hidden
   });
 
-  it('PTY · quick — composer hidden until ⌃G; inline toggles, no rail/settings', () => {
+  it('PTY · quick — composer hidden until ⌃G; no rail/settings', () => {
     const closed = resolveChatVisibility(make({ transport: 'interactive', mode: 'quick', ptyOpen: false }));
     expect(closed.isSDK).toBe(false);
     expect(closed.inputVisible).toBe(false); // hidden until ⌃G
-    expect(closed.showThinkingToolsInline).toBe(true); // inline segmented in PTY composer
     expect(closed.showSettings).toBe(false);
     expect(closed.showSettingsToggles).toBe(false);
     expect(closed.showModelEffort).toBe(false);
@@ -72,7 +70,6 @@ describe('resolveChatVisibility', () => {
     expect(closed.showRail).toBe(false);
     expect(closed.showCheckpoint).toBe(false); // flow, not quick
     expect(closed.showSettings).toBe(false);
-    expect(closed.showThinkingToolsInline).toBe(true);
 
     const open = resolveChatVisibility(make({ transport: 'interactive', mode: 'flow', ptyOpen: true }));
     expect(open.inputVisible).toBe(true);
