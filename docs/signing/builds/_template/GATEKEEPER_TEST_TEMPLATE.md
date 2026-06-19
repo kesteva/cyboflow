@@ -210,4 +210,5 @@ After completing the test steps above:
 3. Update the **Anomalies** section.
 4. Change each `<TODO: PASS / FAIL / PENDING>` row in **Result** to `PASS` or `FAIL`.
 5. Commit: `git add docs/signing/builds/<TODO:VERSION>/GATEKEEPER_ACCEPTANCE_TEST.md && git commit -m "docs: record gatekeeper acceptance test results for <TODO:VERSION>"`
-6. Resolve the queued `manual_acceptance_test` action via `/soloflow:review-queue` (it will pull this completed doc into the testing bucket).
+
+The committed document is the proof-of-test artifact for this build — once the result row reads `PASS`, the signing acceptance gate for `<TODO:VERSION>` is closed.
