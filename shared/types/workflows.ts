@@ -43,7 +43,14 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 
 export interface WorkflowRow {
   id: string;
-  project_id: number;
+  /**
+   * Scope of the workflow (migration 029): NULL ⇒ GLOBAL (a `wf-global-<name>`
+   * built-in or a `wf-global-custom-<hex>` custom flow, shown across all
+   * projects); an integer ⇒ project-scoped (a `wf-<projectId>-custom-<hex>` flow,
+   * an edited per-project built-in preserved by 029, or the `wf-<projectId>-__quick__`
+   * sentinel). There is no separate scope column.
+   */
+  project_id: number | null;
   name: string;
   workflow_path: string | null;
   permission_mode: PermissionMode;

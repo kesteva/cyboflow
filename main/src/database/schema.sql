@@ -40,15 +40,19 @@ CREATE INDEX IF NOT EXISTS idx_session_outputs_timestamp ON session_outputs(time
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_id ON conversation_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_timestamp ON conversation_messages(timestamp);
 
--- Workflow registry: seeded with five SoloFlow workflow definitions
+-- Workflow registry: global built-ins (project_id NULL) + per-project customs.
+-- project_id is NULLABLE: NULL ⇒ global (shown across all projects), an integer
+-- ⇒ project-scoped (migration 029). FK to projects(id) ON DELETE CASCADE, with
+-- NULL allowed by the FK.
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,
-  project_id INTEGER NOT NULL,
+  project_id INTEGER,
   name TEXT NOT NULL,
   spec_json TEXT NOT NULL DEFAULT '{}',
   workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
 

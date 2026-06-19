@@ -9,6 +9,12 @@
  * Any column added to those tables at the canonical site MUST be
  * mirrored here too.
  *
+ * NOTE: workflows.project_id is NULLABLE (migration 029, NULL ⇒ global). The
+ * canonical schema.sql also carries a `FOREIGN KEY (project_id) REFERENCES
+ * projects(id) ON DELETE CASCADE`, but this hermetic fixture deliberately OMITS
+ * that FK so registry tests need not seed a `projects` table — these test DBs
+ * exercise the workflows/workflow_runs registry in isolation.
+ *
  * The fixture intentionally inlines the DDL (rather than reading the canonical
  * files at test runtime) so the test surface is hermetic — reading the source
  * files at runtime would couple tests to their exact byte layout, which is
@@ -21,7 +27,7 @@
 export const REGISTRY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,
-  project_id INTEGER NOT NULL,
+  project_id INTEGER,
   name TEXT NOT NULL,
   spec_json TEXT NOT NULL DEFAULT '{}',
   workflow_path TEXT,

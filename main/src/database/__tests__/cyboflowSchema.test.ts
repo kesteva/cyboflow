@@ -590,7 +590,7 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     // must succeed end-to-end — this was the failing path that motivated the fix.
     finalDb.exec(`
       INSERT INTO workflows (id, project_id, name, spec_json)
-        VALUES ('wf-reconcile', 1, 'test', '{}');
+        VALUES ('wf-reconcile', NULL, 'test', '{}');
       INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
         VALUES ('run-reconcile', 'wf-reconcile', 1, 'queued', 'acceptEdits');
     `);
@@ -640,7 +640,7 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
     // Seed a workflow + a workflow_runs row so we can verify data preservation.
     rawDb.exec(`
       INSERT INTO workflows (id, project_id, name, spec_json)
-        VALUES ('wf-preserve', 1, 'preserve test', '{}');
+        VALUES ('wf-preserve', NULL, 'preserve test', '{}');
       INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status)
         VALUES ('run-preserve', 'wf-preserve', 1, '/tmp/preserve-worktree', 'completed');
     `);
