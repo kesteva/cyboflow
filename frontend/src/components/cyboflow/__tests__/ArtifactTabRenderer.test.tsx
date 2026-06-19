@@ -180,6 +180,27 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByText('home.png')).toBeInTheDocument();
   });
 
+  it('falls back to the empty state (no throw) when fileNames is not an array', () => {
+    // Malformed payload — fileNames laundered through parsePayload as a non-array.
+    // The runtime narrowing must coerce to [] rather than letting .map() throw.
+    const malformed = { kind: 'screenshots', payload: { fileNames: 'shot.png' } } as unknown as ArtifactData['data'];
+    setHook({ loading: false, error: null, data: malformed });
+    expect(() =>
+      render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />),
+    ).not.toThrow();
+    expect(screen.getByTestId('artifact-shots-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-shots-grid')).not.toBeInTheDocument();
+  });
+
+  it('drops non-string entries from a mixed fileNames array', () => {
+    const mixed = { kind: 'screenshots', payload: { fileNames: ['home.png', 42, null, 'detail.png'] } } as unknown as ArtifactData['data'];
+    setHook({ loading: false, error: null, data: mixed });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+    expect(screen.getAllByTestId('artifact-shot-card')).toHaveLength(2);
+    expect(screen.getByText('home.png')).toBeInTheDocument();
+    expect(screen.getByText('detail.png')).toBeInTheDocument();
+  });
+
   // --- ui-prototype / generic (live canvas) --------------------------------
 
   it('embeds the ui-prototype live canvas (iframe) for a localhost url', () => {
@@ -200,6 +221,30 @@ describe('ArtifactTabRenderer', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'generic', mode: 'canvas' })} {...PROPS} />);
     expect(screen.getByTestId('artifact-eyebrow')).toHaveTextContent('◳ Live canvas · generic');
+    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+  });
+
+  it('refuses a javascript: canvas url — renders the disabled span, not a live anchor', () => {
+    // Build the scheme dynamically so the literal never appears as a script-url.
+    const jsUrl = `${'java'}${'script'}:alert(1)`;
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: jsUrl } } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    // No live <a href> for a non-localhost (here non-http) payload url.
+    expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
+    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+  });
+
+  it('refuses a file:// canvas url — renders the disabled span, not a live anchor', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'file:///etc/passwd' } } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
+    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+  });
+
+  it('refuses a remote http canvas url — renders the disabled span, not a live anchor', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'http://evil.example.com' } } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
     expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
   });
 

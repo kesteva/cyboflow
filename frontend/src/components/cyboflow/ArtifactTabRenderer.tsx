@@ -25,7 +25,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
-import { LiveCanvasEmbed } from './LiveCanvasEmbed';
+import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { ARTIFACT_COLORS } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
@@ -253,7 +253,14 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
 function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS.screenshots;
   const { loading, error, data } = useArtifactData(artifact);
-  const fileNames = data?.kind === 'screenshots' ? data.payload.fileNames ?? [] : [];
+  // `fileNames` is typed string[]|undefined but is laundered through parsePayload
+  // (Record<string, unknown>): a malformed payload like {"fileNames":"x.png"} or
+  // {"fileNames":{}} leaves it a non-array, so the ?? []-then-.map path would
+  // throw a TypeError → white screen (no error boundary). Narrow at runtime.
+  const fileNames =
+    data?.kind === 'screenshots' && Array.isArray(data.payload.fileNames)
+      ? data.payload.fileNames.filter((n): n is string => typeof n === 'string')
+      : [];
 
   return (
     <Shell testid="artifact-screenshots">
@@ -324,10 +331,15 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
 function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS[artifact.atype === 'generic' ? 'generic' : 'ui-prototype'];
   const { data } = useArtifactData(artifact);
-  const url = data?.kind === 'canvas' ? data.payload.url : undefined;
+  // `url` comes verbatim from agent-supplied payload_json (laundered through
+  // parsePayload as Record<string, unknown>), so narrow to a string at runtime.
+  const url = data?.kind === 'canvas' && typeof data.payload.url === 'string' ? data.payload.url : undefined;
   const label = artifact.atype === 'generic' ? 'generic' : 'ui prototype';
 
-  const openInBrowser: ReactNode = url ? (
+  // Only a localhost http(s) URL gets a LIVE anchor — a javascript:/file://
+  // /remote URL from the payload must NOT become a clickable link (same gate as
+  // the iframe in LiveCanvasEmbed); otherwise fall back to the disabled span.
+  const openInBrowser: ReactNode = url && isLocalhostUrl(url) ? (
     <a
       data-testid="artifact-canvas-open"
       href={url}
