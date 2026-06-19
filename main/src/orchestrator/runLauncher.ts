@@ -214,6 +214,15 @@ export class RunLauncher {
     // SprintLaneStore.createForRun and stamps `workflow_runs.batch_id`. ONLY
     // valid when the workflow's name === 'sprint' — any other workflow throws.
     seedTaskIds?: string[],
+    // The EXPLICIT launch project (migration 029 — global workflows). For a
+    // GLOBAL workflow (a built-in or global custom flow, `workflow.project_id
+    // IS NULL`) this is the ONLY source of the run's project: it is threaded into
+    // WorkflowRegistry.createRun (stamped onto the NOT-NULL workflow_runs.project_id)
+    // AND into SprintLaneStore.createForRun. OPTIONAL for backward-compat: when
+    // omitted (legacy call sites / a per-project sentinel or edited built-in row)
+    // createRun falls back to workflow.project_id. A global workflow launched
+    // WITHOUT this throws in createRun ("an explicit projectId is required").
+    projectId?: number,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -263,7 +272,19 @@ export class RunLauncher {
       }
     }
 
-    const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(workflowId, substrate, sessionId, requestedPermissionMode);
+    // Thread the EXPLICIT launch project (migration 029) so createRun stamps it
+    // onto workflow_runs.project_id. For a GLOBAL workflow (project_id NULL) this
+    // is required; for a per-project row (quick sentinel / edited built-in) it is
+    // omitted and createRun falls back to workflow.project_id. The `opts` object
+    // is only passed when projectId is defined so the legacy fallback path stays
+    // byte-identical for callers that never thread a project.
+    const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
+      workflowId,
+      substrate,
+      sessionId,
+      requestedPermissionMode,
+      projectId !== undefined ? { projectId } : undefined,
+    );
 
     try {
       const { worktreePath, branchName } = sessionId
@@ -338,8 +359,26 @@ export class RunLauncher {
       // write, NOT routed through the task chokepoint. Stamped at launch so the
       // link exists before the first cyboflow_update_sprint_task report.
       if (seedTaskIds && seedTaskIds.length > 0 && this.sprintLanes) {
+        // Seed the lanes with the run's project (migration 029). Prefer the
+        // EXPLICITLY-threaded launch `projectId` — the canonical source now that
+        // workflow.project_id is NULLABLE (NULL for the global built-ins). When a
+        // caller did not thread it, fall back to the RUN's stamped project
+        // (workflow_runs.project_id, a real NOT-NULL value createRun just wrote)
+        // rather than workflow.project_id, which may be NULL.
+        let laneProjectId: number;
+        if (projectId !== undefined) {
+          laneProjectId = projectId;
+        } else {
+          const runRow = this.db
+            .prepare('SELECT project_id FROM workflow_runs WHERE id = ?')
+            .get(runId) as { project_id: number } | undefined;
+          if (!runRow) {
+            throw new Error(`RunLauncher.launch: run ${runId} not found immediately after createRun`);
+          }
+          laneProjectId = runRow.project_id;
+        }
         const { batchId } = this.sprintLanes.createForRun(
-          workflow.project_id,
+          laneProjectId,
           resolvedSubstrate,
           seedTaskIds,
         );

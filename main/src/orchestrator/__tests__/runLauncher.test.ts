@@ -267,8 +267,9 @@ describe('RunLauncher.launch', () => {
       // The explicit per-run substrate choice must be forwarded to createRun as
       // its 2nd argument (the bug: it was previously dropped as `_substrate`).
       // The 3rd arg (sessionId) and 4th arg (requestedPermissionMode) are
-      // undefined on the legacy no-session, no-permission-override launch.
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined, undefined);
+      // undefined on the legacy no-session, no-permission-override launch; the 5th
+      // (the launch projectId opts) is undefined when no projectId is threaded.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined, undefined, undefined);
     });
   });
 
@@ -314,7 +315,7 @@ describe('RunLauncher.launch', () => {
 
       // The explicit per-run permission choice must be forwarded to createRun as
       // its 4th argument (the highest-precedence `requestedMode` rung).
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, undefined, 'auto');
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, undefined, 'auto', undefined);
     });
   });
 
@@ -1350,8 +1351,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       // createRun received the sessionId as its 3rd argument; the 4th
-      // (requestedPermissionMode) is undefined on this no-override launch.
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1', undefined);
+      // (requestedPermissionMode) and 5th (launch projectId opts) are undefined on
+      // this no-override, no-projectId launch.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1', undefined, undefined);
 
       // NO dedicated worktree was created — the run reuses the session tree.
       expect(createDeterministicWorktree).not.toHaveBeenCalled();

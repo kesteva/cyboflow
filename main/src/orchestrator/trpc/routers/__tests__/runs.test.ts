@@ -316,12 +316,12 @@ describe('cyboflow.runs.start', () => {
         branchName: 'cyboflow/my-workflow/abc12345',
       });
 
-      // With neither a substrate (IDEA-013) nor a native-task link (migration 014)
-      // supplied, start calls launch with the 2-arg SDK-default shape (workflowId +
-      // the project path resolved by the session manager) — no trailing undefineds,
-      // so the resolver's override ladder owns the substrate decision.
+      // The explicit launch projectId (migration 029 — global workflows) is now
+      // ALWAYS threaded: start calls the full-form launch with every optional arg
+      // undefined EXCEPT the trailing projectId (10th slot), so createRun can stamp
+      // workflow_runs.project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project');
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -353,10 +353,11 @@ describe('cyboflow.runs.start', () => {
       // With an ideaId present, start calls the full-form launch — substrate +
       // taskId undefined, ideaId in the 5th slot, sessionId (6th) +
       // requestedPermissionMode (7th) + baseBranch (8th) + seedTaskIds (9th)
-      // undefined — so the launcher writes workflow_runs.seed_idea_id directly
-      // (no stage derivation).
+      // undefined, and the explicit launch projectId (migration 029) in the 10th
+      // slot — so the launcher writes workflow_runs.seed_idea_id directly (no
+      // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -387,10 +388,11 @@ describe('cyboflow.runs.start', () => {
 
       // With a sessionId present, start calls the full-form launch — substrate +
       // taskId + ideaId undefined, sessionId in the 6th slot, requestedPermissionMode
-      // (7th) + baseBranch (8th) + seedTaskIds (9th) undefined — so the launcher
-      // hosts the run inside the session's existing worktree.
+      // (7th) + baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
+      // launch projectId (migration 029) in the 10th slot — so the launcher hosts
+      // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -419,12 +421,12 @@ describe('cyboflow.runs.start', () => {
       const caller = appRouter.createCaller(createContext());
       await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, permissionMode: 'auto' });
 
-      // With only permissionMode present, start leaves the legacy 2-arg shape (the
-      // all-undefined check now includes permissionMode) and calls the full-form
-      // launch — substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto'
-      // in the 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined.
+      // With permissionMode present, start calls the full-form launch —
+      // substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto' in the
+      // 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
+      // launch projectId (migration 029) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

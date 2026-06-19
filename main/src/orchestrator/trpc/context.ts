@@ -46,19 +46,27 @@ export interface WorkflowRegistryLike {
   listByProject(projectId: number): WorkflowRow[];
   getById(workflowId: string): WorkflowRow | null;
   seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
-  /** Upsert the in-repo built-ins, re-pointing pre-refactor rows at the in-repo prompts. */
-  reconcileBuiltIns(projectId: number, descriptors: WorkflowDescriptor[]): void;
+  /**
+   * Upsert the in-repo built-ins as ONE GLOBAL set (migration 029): a single
+   * `wf-global-<name>` row per built-in (`project_id NULL`), shared across every
+   * project. Re-points pre-refactor rows at the in-repo prompts; no projectId.
+   */
+  ensureGlobalBuiltIns(descriptors: WorkflowDescriptor[]): void;
   /** Persist an edited definition onto a workflow's `spec_json` (editor Save). */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void;
   /** Reset a built-in workflow's spec back to its static default. */
   resetSpec(workflowId: string): void;
-  /** Create a brand-new custom workflow row from an edited definition. */
-  createCustom(
-    projectId: number,
-    name: string,
-    definition: WorkflowDefinition,
-    permissionMode: PermissionMode,
-  ): WorkflowRow;
+  /**
+   * Create a brand-new custom workflow row (migration 029). `projectId === null`
+   * mints a GLOBAL custom flow; a number mints a project-scoped copy. `specJson`
+   * defaults to the empty spec and `permissionMode` to `'default'` when omitted.
+   */
+  createCustom(params: {
+    projectId: number | null;
+    name: string;
+    specJson?: string;
+    permissionMode?: PermissionMode;
+  }): WorkflowRow;
 }
 
 /**

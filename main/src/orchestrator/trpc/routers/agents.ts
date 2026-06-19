@@ -113,7 +113,11 @@ function rethrowAsTRPCError(err: unknown): never {
  * a broken/empty spec) are skipped.
  */
 function computeProjectUsage(ctx: AgentsCtx, projectId: number): Map<string, AgentUsage> {
-  ctx.workflowRegistry.reconcileBuiltIns(projectId, buildBuiltInWorkflows());
+  // Reconcile the in-repo built-ins as ONE GLOBAL set (migration 029) — a single
+  // `wf-global-<name>` row per built-in, shared across projects. Project-
+  // independent, so no projectId argument; the global rows surface in this
+  // project's list via the union in listByProject.
+  ctx.workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows());
   const rows = ctx.workflowRegistry.listByProject(projectId);
   const workflows: WorkflowForUsage[] = [];
   for (const row of rows) {

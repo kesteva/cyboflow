@@ -29,12 +29,15 @@ export const workflowsRouter = router({
           message: 'workflowRegistry not wired into tRPC context',
         });
       }
-      // Reconcile the in-repo built-ins on every list: a fresh project gets
-      // planner/sprint inserted, and a pre-refactor project whose rows still
-      // point at the old plugin-cache prompt is re-pointed at the in-repo prompt
-      // (preserving any user spec_json edits). Dropped legacy built-ins are
-      // filtered out by listByProject.
-      ctx.workflowRegistry.reconcileBuiltIns(input.projectId, buildBuiltInWorkflows());
+      // Reconcile the in-repo built-ins as ONE GLOBAL set on every list
+      // (migration 029): UPSERT a single `wf-global-<name>` row per built-in
+      // (project_id NULL), shared across every project — no per-project copies.
+      // A pre-refactor row still pointing at the old plugin-cache prompt is
+      // re-pointed at the in-repo prompt (preserving any user spec_json edits).
+      // Project-independent, so no projectId argument. Dropped legacy built-ins
+      // are filtered out by listByProject. The global rows surface in this
+      // project's list via the union in listByProject.
+      ctx.workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows());
       return ctx.workflowRegistry.listByProject(input.projectId);
     }),
 
@@ -146,13 +149,20 @@ export const workflowsRouter = router({
 
   /**
    * Create a brand-new custom workflow from an edited definition ("Save as new
-   * flow"). The `workflowDefinitionSchema` validates `definition` as `.input()`
-   * (BAD_REQUEST on failure); a name collision maps to CONFLICT.
+   * flow" / "Create a project-specific copy"). The `workflowDefinitionSchema`
+   * validates `definition` as `.input()` (BAD_REQUEST on failure); a name
+   * collision maps to CONFLICT.
+   *
+   * Scope (migration 029) is chosen by `projectId`: omitted or `null` mints a
+   * GLOBAL custom flow (the product default — one shared flow across projects);
+   * a positive integer mints a project-scoped copy. The registry derives the id
+   * (`wf-global-custom-<hex>` vs `wf-<projectId>-custom-<hex>`) and serialises
+   * the validated definition itself, so the router forwards it as a JSON string.
    */
   createCustom: protectedProcedure
     .input(
       z.object({
-        projectId: z.number().int().positive(),
+        projectId: z.number().int().positive().nullable().optional(),
         name: z.string().min(1),
         definition: workflowDefinitionSchema,
         permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
@@ -166,12 +176,12 @@ export const workflowsRouter = router({
         });
       }
       try {
-        return ctx.workflowRegistry.createCustom(
-          input.projectId,
-          input.name,
-          input.definition,
-          input.permissionMode ?? 'default',
-        );
+        return ctx.workflowRegistry.createCustom({
+          projectId: input.projectId ?? null,
+          name: input.name,
+          specJson: JSON.stringify(input.definition),
+          permissionMode: input.permissionMode ?? 'default',
+        });
       } catch (err) {
         throw new TRPCError({
           code: 'CONFLICT',

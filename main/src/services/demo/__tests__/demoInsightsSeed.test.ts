@@ -22,7 +22,7 @@ function createDb(): Database.Database {
   db.exec(`
     CREATE TABLE workflows (
       id TEXT PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      project_id INTEGER,
       name TEXT NOT NULL,
       description TEXT,
       workflow_path TEXT,
@@ -142,7 +142,7 @@ describe('seedDemoInsightsHistory', () => {
 
     expect(runs.length).toBeGreaterThan(8);
     for (const run of runs) {
-      expect(['wf-1-planner', 'wf-1-sprint']).toContain(run.workflowId);
+      expect(['wf-global-planner', 'wf-global-sprint']).toContain(run.workflowId);
       expect(['completed', 'canceled', 'failed']).toContain(run.status);
       expect(run.startedAt < run.endedAt).toBe(true);
     }

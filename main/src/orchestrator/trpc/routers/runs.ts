@@ -192,14 +192,18 @@ export interface RunLauncherLike {
    * `baseBranch` cuts the run's dedicated worktree branch off a non-default tip;
    * `seedTaskIds` (feat/parallel-sprint, single-run lane model) seeds the
    * per-task lanes of a session-hosted `sprint` run — only valid when the
-   * workflow's name === 'sprint'. All are OPTIONAL — when substrate is omitted
-   * the run falls through the resolver ladder to DEFAULT_SUBSTRATE ('sdk'); when
-   * taskId / ideaId are omitted no link is recorded; when sessionId is omitted
-   * the run creates its own dedicated worktree (legacy path); when
-   * requestedPermissionMode is omitted the permission ladder falls through to
-   * frontmatter → global default → 'default'.
+   * workflow's name === 'sprint'; `projectId` is the EXPLICIT launch project
+   * (migration 029 — global workflows) threaded into WorkflowRegistry.createRun
+   * (stamped onto workflow_runs.project_id) and SprintLaneStore.createForRun. All
+   * are OPTIONAL — when substrate is omitted the run falls through the resolver
+   * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no link
+   * is recorded; when sessionId is omitted the run creates its own dedicated
+   * worktree (legacy path); when requestedPermissionMode is omitted the
+   * permission ladder falls through to frontmatter → global default → 'default';
+   * when projectId is omitted createRun falls back to workflow.project_id (a
+   * GLOBAL workflow launched without it throws).
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[]): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -688,16 +692,27 @@ export const runsRouter = router({
       // Forward the per-run substrate choice (IDEA-013), native-task link
       // (migration 014), planner seed idea (migration 017), session host
       // (Phase 1 / migration 019), per-run agent permission override
-      // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint). When ALL
-      // are omitted, call the legacy 2-arg shape so the resolver ladder owns the
-      // substrate/permission decisions and the SDK-default call site stays
-      // byte-identical (zero-behavior-change floor); otherwise pass all (any may
-      // be undefined, which the launcher treats as "no link / no host / resolver
-      // default"). baseBranch is never sent over IPC — undefined placeholder.
-      const { runId, worktreePath, branchName } =
-        input.substrate === undefined && input.taskId === undefined && input.ideaId === undefined && input.sessionId === undefined && input.permissionMode === undefined && input.taskIds === undefined
-          ? await startRunDeps.runLauncher.launch(input.workflowId, project.path)
-          : await startRunDeps.runLauncher.launch(input.workflowId, project.path, input.substrate, input.taskId, input.ideaId, input.sessionId, input.permissionMode, undefined, input.taskIds);
+      // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint), PLUS the
+      // explicit launch projectId (migration 029 — global workflows). The
+      // projectId MUST always be threaded now: a GLOBAL built-in / custom flow
+      // carries workflow.project_id = NULL, so createRun has no fallback project
+      // and would throw without it. (The earlier "legacy 2-arg shape when all
+      // optionals are omitted" fast path is gone — it could not supply a project
+      // for a global flow.) Any optional arg may still be undefined, which the
+      // launcher treats as "no link / no host / resolver default". baseBranch is
+      // never sent over IPC — undefined placeholder.
+      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
+        input.workflowId,
+        project.path,
+        input.substrate,
+        input.taskId,
+        input.ideaId,
+        input.sessionId,
+        input.permissionMode,
+        undefined,
+        input.taskIds,
+        input.projectId,
+      );
       return { runId, worktreePath, branchName };
     }),
 

@@ -96,8 +96,10 @@ function createAgentsTestDb(): Database.Database {
 function makeWiredCaller(rawDb: Database.Database): ReturnType<typeof appRouter.createCaller> {
   const adapter = dbAdapter(rawDb);
   const registry = new WorkflowRegistry(adapter, silentLogger);
-  // Seed the built-in workflows for the project so usage resolves their step bindings.
-  registry.reconcileBuiltIns(PROJECT_ID, buildBuiltInWorkflows());
+  // Seed the built-in workflows as ONE GLOBAL set (migration 029) so usage
+  // resolves their step bindings — they surface for PROJECT_ID via the
+  // project_id-IS-NULL union in listByProject.
+  registry.ensureGlobalBuiltIns(buildBuiltInWorkflows());
   AgentOverrideRouter._resetForTesting();
   AgentOverrideRouter.initialize(adapter);
   return appRouter.createCaller(

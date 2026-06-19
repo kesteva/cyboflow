@@ -101,7 +101,8 @@ describe('cyboflow.workflows.list', () => {
     const adapter = dbAdapter(rawDb);
     const registry = new WorkflowRegistry(adapter, silentLogger);
 
-    // Seed two workflows directly.
+    // Seed two PROJECT-SCOPED workflows directly (an edited per-project built-in
+    // preserved by migration 029, disambiguated by the project chip in the UI).
     rawDb
       .prepare(
         `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
@@ -126,17 +127,30 @@ describe('cyboflow.workflows.list', () => {
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
 
-    // list() reconciles built-ins on every call, so the missing 'compound'
-    // built-in is auto-seeded alongside the 2 manually seeded rows.
-    expect(result).toHaveLength(3);
+    // list() reconciles the built-ins as ONE GLOBAL set on every call (migration
+    // 029): the 3 `wf-global-<name>` rows are UPSERTed and surface for project 1
+    // via the project_id-IS-NULL union, ALONGSIDE the 2 manually-seeded
+    // project-scoped rows (the preserved edited built-ins). The renderer dedupes
+    // global vs project rows by id; the router returns the raw union (5 rows).
+    // The foreign project's row (wf-2-sprint) is still excluded.
     const ids = result.map((r) => r.id);
     expect(ids).toContain('wf-1-sprint');
     expect(ids).toContain('wf-1-planner');
-    expect(ids).toContain('wf-1-compound');
+    expect(ids).toContain('wf-global-planner');
+    expect(ids).toContain('wf-global-sprint');
+    expect(ids).toContain('wf-global-compound');
     expect(ids).not.toContain('wf-2-sprint');
+    expect(result).toHaveLength(5);
 
-    // Every returned row now carries spec_json (defaults to '{}' for these).
+    // The global built-ins carry NULL project_id; the preserved per-project rows
+    // carry project 1.
     for (const r of result) {
+      if (r.id.startsWith('wf-global-')) {
+        expect(r.project_id).toBeNull();
+      } else {
+        expect(r.project_id).toBe(1);
+      }
+      // Every returned row carries spec_json (defaults to '{}' for these).
       expect(r.spec_json).toBe('{}');
     }
   });
@@ -144,7 +158,7 @@ describe('cyboflow.workflows.list', () => {
   // -------------------------------------------------------------------------
   // (b) list auto-seeds the in-repo built-ins when project has none
   // -------------------------------------------------------------------------
-  it('(b) auto-seeds the in-repo built-ins (planner+sprint+compound) and returns them when project has no workflows', async () => {
+  it('(b) auto-seeds the in-repo built-ins (planner+sprint+compound) as ONE GLOBAL set and returns them for a project with no workflows', async () => {
     const rawDb = createWorkflowTestDb();
     const adapter = dbAdapter(rawDb);
     const registry = new WorkflowRegistry(adapter, silentLogger);
@@ -155,18 +169,19 @@ describe('cyboflow.workflows.list', () => {
     // Every in-repo built-in must have been seeded (planner + sprint + compound).
     expect(result).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
 
-    // All belong to projectId=42.
+    // They are GLOBAL (migration 029): NULL project_id, shared across projects,
+    // surfaced for project 42 via the project_id-IS-NULL union in listByProject.
     for (const wf of result) {
-      expect(wf.project_id).toBe(42);
+      expect(wf.project_id).toBeNull();
     }
 
     // Verify the canonical cyboflow built-in names are present.
     const names = result.map((r) => r.name).sort();
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
 
-    // Deterministic id format: wf-<projectId>-<name>.
+    // Deterministic global id format: wf-global-<name>.
     for (const wf of result) {
-      expect(wf.id).toBe(`wf-42-${wf.name}`);
+      expect(wf.id).toBe(`wf-global-${wf.name}`);
     }
   });
 
@@ -526,5 +541,55 @@ describe('cyboflow.workflows.createCustom', () => {
         definition: makeDefinition('any'),
       }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+
+  it('defaults to GLOBAL scope (project_id NULL, wf-global-custom-<hex>) when projectId is omitted', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    const row = await caller.cyboflow.workflows.createCustom({
+      name: 'Global Flow',
+      definition: makeDefinition('global-flow'),
+    });
+
+    expect(row.id).toMatch(/^wf-global-custom-[0-9a-f]{8}$/);
+    expect(row.project_id).toBeNull();
+    expect(row.name).toBe('Global Flow');
+  });
+
+  it('mints a project-scoped copy (wf-<projectId>-custom-<hex>) when projectId is a number', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    const row = await caller.cyboflow.workflows.createCustom({
+      projectId: 7,
+      name: 'Project Copy',
+      definition: makeDefinition('project-copy'),
+    });
+
+    expect(row.id).toMatch(/^wf-7-custom-[0-9a-f]{8}$/);
+    expect(row.project_id).toBe(7);
+  });
+
+  it('rejects a project copy whose name collides with an existing GLOBAL flow (CONFLICT)', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    // Create a global custom flow, then a project copy under the SAME name must
+    // be rejected (a project copy may not shadow a global flow's name).
+    await caller.cyboflow.workflows.createCustom({
+      name: 'Shared Name',
+      definition: makeDefinition('shared-name'),
+    });
+    await expect(
+      caller.cyboflow.workflows.createCustom({
+        projectId: 3,
+        name: 'Shared Name',
+        definition: makeDefinition('shared-name'),
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
   });
 });
