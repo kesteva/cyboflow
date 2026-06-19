@@ -641,7 +641,11 @@ export function WorkflowEditorModal({
       <FlowNameDialog
         isOpen={nameDialogOpen}
         title="Name for the new workflow"
-        defaultValue={state.name ? `${state.name}-copy` : ''}
+        // Create mode: the flow doesn't exist yet, so the name the user already
+        // typed IS the name — no spurious `-copy`. Edit mode: "Save as new flow"
+        // FORKS the current flow, so `-copy` avoids colliding with the original.
+        // (A template-seeded create already carries its `-copy` from loadCreate.)
+        defaultValue={mode === 'create' ? state.name : state.name ? `${state.name}-copy` : ''}
         confirmLabel={pendingAction === 'run-with-modifications' ? 'Run' : 'Create'}
         onConfirm={(name) => void handleNameConfirm(name)}
         onClose={handleNameDialogClose}

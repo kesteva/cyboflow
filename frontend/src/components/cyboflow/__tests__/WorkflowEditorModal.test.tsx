@@ -328,6 +328,8 @@ describe('WorkflowEditorModal — edit mode', () => {
 
     // No window.prompt — an in-app dialog collects the name.
     const nameInput = await screen.findByTestId('flow-name-input');
+    // Edit-mode "Save as new flow" FORKS the current flow → defaults to <name>-copy.
+    expect((nameInput as HTMLInputElement).value).toBe('planner-copy');
     fireEvent.change(nameInput, { target: { value: 'my-flow' } });
     await act(async () => {
       fireEvent.click(screen.getByTestId('flow-name-confirm'));
@@ -536,5 +538,22 @@ describe('WorkflowEditorModal — create mode', () => {
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     expect(mockCreateCustom.mock.calls[0][0].name).toBe('new-flow');
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
+  });
+
+  it('the "Save as new flow" dialog defaults to the typed name WITHOUT a -copy suffix', async () => {
+    render(
+      <WorkflowEditorModal isOpen onClose={vi.fn()} workflowId="" projectId={1} mode="create" onSaved={vi.fn()} />,
+    );
+    await screen.findByTestId('workflow-editor-canvas');
+
+    // Name a brand-new flow in the editor header (create-mode input is editable).
+    fireEvent.change(screen.getByTestId('editor-name-input'), { target: { value: 'Codebase review' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+    const nameInput = (await screen.findByTestId('flow-name-input')) as HTMLInputElement;
+    // A new flow is not a copy of anything — no spurious "-copy".
+    expect(nameInput.value).toBe('Codebase review');
   });
 });
