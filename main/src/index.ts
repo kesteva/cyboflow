@@ -266,7 +266,10 @@ async function createWindow() {
   });
 
   // Log any console messages from the renderer
-  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+  // Electron >=35 passes a single ConsoleMessageEvent object (string `level`),
+  // not the legacy positional (event, level, message, line, sourceId) args.
+  mainWindow.webContents.on('console-message', (event) => {
+    const { message, level, lineNumber, sourceId } = event;
     // Skip messages that are already prefixed to avoid circular logging
     if (message.includes('[Main Process]') || message.includes('[Renderer]')) {
       return;
@@ -275,17 +278,14 @@ async function createWindow() {
     if (message.includes('Electron Security Warning') || sourceId.includes('electron/js2c')) {
       return;
     }
-    
+
     // In development, log ALL console messages to help with debugging
     if (isDevelopment) {
-      const levelNames = ['verbose', 'info', 'warning', 'error'];
-      const levelName = levelNames[level] || 'unknown';
-      const suffix = ` (${path.basename(sourceId)}:${line})`;
-      appendDevDebugLog('frontend', levelName as DevLogLevel, 'FRONTEND', `${message}${suffix}`, { error: originalError });
-    } else {
-      // In production, only log errors and warnings from renderer
-      if (level >= 2) { // 2 = warning, 3 = error
-      }
+      // Electron's level is one of 'info' | 'warning' | 'error' | 'debug';
+      // map 'warning' to the DevLogLevel 'warn', the rest pass through.
+      const levelName: DevLogLevel = level === 'warning' ? 'warn' : level;
+      const suffix = ` (${path.basename(sourceId)}:${lineNumber})`;
+      appendDevDebugLog('frontend', levelName, 'FRONTEND', `${message}${suffix}`);
     }
   });
 
