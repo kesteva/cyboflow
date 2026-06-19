@@ -270,13 +270,13 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
       {/* input box */}
       <div
         className={cn(
-          'flex items-start gap-2 border bg-surface-primary px-3 py-2 transition-colors',
+          'flex items-center gap-2 border bg-surface-primary px-3 py-2 transition-colors',
           'focus-within:border-border-hover',
           isDragging ? 'border-interactive' : 'border-border-primary',
           disabled && 'opacity-60',
         )}
       >
-        <span className="select-none pt-0.5 font-mono text-sm font-bold text-interactive">›</span>
+        <span className="select-none font-mono text-sm font-bold text-interactive">›</span>
         {visibility.isSDK ? (
           <FilePathAutocomplete
             value={value}
