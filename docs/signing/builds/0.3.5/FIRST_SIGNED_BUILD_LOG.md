@@ -50,11 +50,11 @@ node scripts/configure-build.test.js
 | 16:03 | codesign signing started — Developer ID Application: Raimundo Esteva (Y7B83UUSAC) |
 | 16:03 | `afterSign.js` hook ran: JAR cleanup completed |
 | 16:03:21 | codesign timestamp recorded |
-| 16:03:43 | `notarytool submit` submitted `Cyboflow.zip` to Apple (submission ID: `0c820130-8bfc-4d58-b825-76f8abf94e40`) |
+| 16:03:43 | `notarytool submit` submitted `Cyboflow.zip` to Apple (submission ID: `<SUBMISSION_ID>`) |
 | 16:03–17:01 | Background process killed by tool timeout (notarytool `--wait` still polling Apple) |
 | 17:01:14 | Separately confirmed: notarytool submit process finished |
 | 17:38:46 | notarytool history confirmed: app submission **Accepted** |
-| 17:42 | `notarytool submit` on DMG artifact: submission ID `c5950a84-b245-4322-a866-f332b6a4bef8` |
+| 17:42 | `notarytool submit` on DMG artifact: submission ID `<SUBMISSION_ID>` |
 | ~17:44 | DMG submission **Accepted** by Apple |
 | 17:44 | `xcrun stapler staple` on .app: **success** |
 | 17:44 | `xcrun stapler staple` on DMG: **success** |
@@ -86,7 +86,7 @@ Hardened Runtime: enabled
 
 ## Notarization — Submission 1: App Bundle (Cyboflow.zip)
 
-**Submission ID:** `0c820130-8bfc-4d58-b825-76f8abf94e40`  
+**Submission ID:** `<SUBMISSION_ID>`  
 **Submitted:** 2026-05-12T23:03:43.543Z (Apple upload time: 2026-05-12T23:05:22.840Z)  
 **Status:** Accepted  
 **statusSummary:** Ready for distribution  
@@ -96,7 +96,7 @@ Hardened Runtime: enabled
 **notarytool wall-clock time:** ~95 minutes (exceptionally slow first-submission delay on Apple servers)
 
 ```
-xcrun notarytool log 0c820130-8bfc-4d58-b825-76f8abf94e40 --apple-id <APPLE_ID> --team-id Y7B83UUSAC
+xcrun notarytool log <SUBMISSION_ID> --apple-id <APPLE_ID> --team-id Y7B83UUSAC
 # status: Accepted
 # statusSummary: Ready for distribution
 # statusCode: 0
@@ -110,7 +110,7 @@ No issues reported in the log (all files accepted, no warnings or errors).
 
 The DMG was created manually (`hdiutil create`) after electron-builder was killed during the packaging phase. The .app inside was already notarized and stapled; a second notarytool submission was made for the DMG file itself to obtain a staple ticket.
 
-**Submission ID:** `c5950a84-b245-4322-a866-f332b6a4bef8`  
+**Submission ID:** `<SUBMISSION_ID>`  
 **Submitted:** 2026-05-13T00:42:00.619Z  
 **Status:** Accepted  
 **statusSummary:** Ready for distribution  

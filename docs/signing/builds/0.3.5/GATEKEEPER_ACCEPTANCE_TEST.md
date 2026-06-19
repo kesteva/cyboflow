@@ -16,7 +16,7 @@ The test must be run on a clean macOS user account (one that has never run any u
 | App version | 0.3.5 |
 | AppID | com.cyboflow.app |
 | Signing identity | Developer ID Application: Raimundo Esteva (Y7B83UUSAC) |
-| Notarization status | Accepted (Apple submission ID: `c5950a84-b245-4322-a866-f332b6a4bef8`) |
+| Notarization status | Accepted (Apple submission ID: `<SUBMISSION_ID>`) |
 | DMG SHA256 | `6eda21e9dd98d4aa8d8fc2fbe636a22d6b6f1e2045ed68d7bb1d640a5490e494` |
 | Build log cross-reference | `./FIRST_SIGNED_BUILD_LOG.md` |
 

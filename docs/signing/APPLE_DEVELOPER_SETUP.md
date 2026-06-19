@@ -11,7 +11,7 @@ and onboarding a second signer take minutes, not hours.
 
 | Field                  | Value                                                       |
 | ---------------------- | ----------------------------------------------------------- |
-| Apple ID               | `<APPLE_ID>` (<APPLE_ID>)                           |
+| Apple ID               | `<APPLE_ID>`                                                |
 | Team ID                | `<TEAM_ID>` (Y7B83UUSAC)                                   |
 | Bundle ID              | `com.cyboflow.app` (see `package.json` → `build.appId`)     |
 | Signing identity (CN)  | `Developer ID Application: Raimundo Esteva (Y7B83UUSAC)`    |
