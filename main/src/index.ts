@@ -17,6 +17,7 @@ import { initTelemetry, trackUsage } from './services/telemetry';
 import { setTelemetrySink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
+import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -641,7 +642,7 @@ async function initializeServices() {
   // for `artifacts`; the cyboflow.artifacts tRPC router + the report/commit-artifact
   // MCP handlers reach it via getInstance(). Its artifactChangeEvents emitter is
   // consumed directly by cyboflow.artifacts.onArtifactChanged (no bridge needed).
-  ArtifactRouter.initialize(cyboflowDb);
+  ArtifactRouter.initialize(cyboflowDb, cyboflowLogger);
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via
@@ -1206,6 +1207,9 @@ async function initializeServices() {
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
+  // FU4 — screenshots artifact gallery: serve on-disk PNGs from the run's
+  // artifact image root (additive; mirrors the ideaAttachments handler).
+  registerArtifactImageHandlers(ipcMain, services);
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   

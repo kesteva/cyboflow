@@ -16,6 +16,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ArtifactTabRenderer } from '../ArtifactTabRenderer';
 import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactData';
+import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
 import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 
@@ -23,6 +24,15 @@ import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 
 vi.mock('../../../hooks/useArtifactData', () => ({ useArtifactData: vi.fn() }));
 const mockHook = vi.mocked(useArtifactData);
+
+// Screenshot bytes load through useArtifactImages (artifacts:load-images IPC).
+// Mock it so the renderer test never touches window.electronAPI; default to an
+// empty map and override per-test for the resolved-<img> cases.
+vi.mock('../../../hooks/useArtifactImages', () => ({ useArtifactImages: vi.fn() }));
+const mockImages = vi.mocked(useArtifactImages);
+function setImages(value: UseArtifactImages): void {
+  mockImages.mockReturnValue(value);
+}
 
 // Stub MarkdownPreview (avoids react-markdown ESM in jsdom); echo the content.
 vi.mock('../../MarkdownPreview', () => ({
@@ -99,6 +109,9 @@ const PROPS = { projectId: 1, runId: 'run-1' };
 describe('ArtifactTabRenderer', () => {
   beforeEach(() => {
     mockHook.mockReset();
+    mockImages.mockReset();
+    // Default: no resolved screenshot bytes (per-card fallback path).
+    setImages({ images: {}, loading: false, error: null });
     commitMutate.mockClear();
   });
 
@@ -178,6 +191,39 @@ describe('ArtifactTabRenderer', () => {
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
     expect(screen.getAllByTestId('artifact-shot-card')).toHaveLength(2);
     expect(screen.getByText('home.png')).toBeInTheDocument();
+  });
+
+  it('renders an <img> with the resolved data URL for each loaded screenshot', () => {
+    setHook({ loading: false, error: null, data: { kind: 'screenshots', payload: { fileNames: ['home.png', 'detail.png'] } } });
+    setImages({
+      images: {
+        'home.png': 'data:image/png;base64,AAA',
+        'detail.png': 'data:image/png;base64,BBB',
+      },
+      loading: false,
+      error: null,
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    const imgs = screen.getAllByTestId('artifact-shot-image');
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]).toHaveAttribute('src', 'data:image/png;base64,AAA');
+    expect(imgs[0]).toHaveAttribute('alt', 'home.png');
+    expect(imgs[1]).toHaveAttribute('src', 'data:image/png;base64,BBB');
+    expect(screen.queryByTestId('artifact-shot-missing')).not.toBeInTheDocument();
+  });
+
+  it('shows a per-card fallback for a fileName whose bytes did not resolve', () => {
+    setHook({ loading: false, error: null, data: { kind: 'screenshots', payload: { fileNames: ['home.png', 'gone.png'] } } });
+    // Only home.png resolved on disk; gone.png is missing / blocked by the guard.
+    setImages({ images: { 'home.png': 'data:image/png;base64,AAA' }, loading: false, error: null });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    expect(screen.getAllByTestId('artifact-shot-card')).toHaveLength(2);
+    expect(screen.getAllByTestId('artifact-shot-image')).toHaveLength(1);
+    const missing = screen.getByTestId('artifact-shot-missing');
+    expect(missing).toHaveTextContent('image unavailable');
+    expect(screen.getByText('gone.png')).toBeInTheDocument();
   });
 
   it('falls back to the empty state (no throw) when fileNames is not an array', () => {

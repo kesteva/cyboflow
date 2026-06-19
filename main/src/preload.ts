@@ -288,6 +288,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('ideas:load-attachments', paths),
   },
 
+  // Artifact images (FU4 screenshots gallery) — serves on-disk PNGs the
+  // visual-verifier producer wrote under CYBOFLOW_DIR/artifacts/runs/<runId>/.
+  // Returns the IPCResponse wrapper (unlike the raw ideas.* file IO above).
+  artifacts: {
+    loadImages: (
+      req: { runId: string; fileNames: string[] },
+    ): Promise<IPCResponse<{ images: Array<{ fileName: string; dataUrl: string }> }>> =>
+      ipcRenderer.invoke('artifacts:load-images', req),
+  },
+
   // Project management
   projects: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('projects:get-all'),

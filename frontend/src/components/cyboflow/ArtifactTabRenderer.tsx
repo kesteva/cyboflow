@@ -27,6 +27,7 @@ import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
+import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { ARTIFACT_COLORS } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
@@ -248,7 +249,14 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
 }
 
 // ---------------------------------------------------------------------------
-// screenshots — 2-col gallery; no disk image source yet → empty state.
+// screenshots — 2-col gallery rendering on-disk PNGs (FU4 display half).
+//
+// PRODUCER CONVENTION (capture half is environmental / out of scope): a
+// visual-verifier agent writes PNG bytes under CYBOFLOW_DIR/artifacts/runs/
+// <runId>/ and reports a 'screenshots' artifact via the cyboflow_report_artifact
+// MCP tool whose payload.fileNames are the BASENAMES. The bytes are served back
+// as data URLs by useArtifactImages → artifacts:load-images (path-validated,
+// fail-soft per file). The actual capture (Peekaboo TCC) is NOT built here.
 // ---------------------------------------------------------------------------
 function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS.screenshots;
@@ -261,6 +269,11 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
     data?.kind === 'screenshots' && Array.isArray(data.payload.fileNames)
       ? data.payload.fileNames.filter((n): n is string => typeof n === 'string')
       : [];
+
+  // Resolve the on-disk bytes (basename -> data URL) for the reported files.
+  // A file that fails the main-side containment guard / is missing simply has no
+  // entry, so the card below shows its per-card fallback instead of an <img>.
+  const { images } = useArtifactImages(artifact.runId, fileNames);
 
   return (
     <Shell testid="artifact-screenshots">
@@ -301,24 +314,51 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
           data-testid="artifact-shots-grid"
           style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: '16px 20px 28px' }}
         >
-          {fileNames.map((name) => (
-            <div key={name} data-testid="artifact-shot-card" style={{ border: `1px solid ${HAIRLINE}`, background: '#fff' }}>
-              {/* 16:10 placeholder image area (bytes load in a later milestone). */}
-              <div
-                style={{
-                  aspectRatio: '16 / 10',
-                  background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
-                  borderBottom: `1px solid ${HAIRLINE}`,
-                }}
-              />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px' }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: accent, flexShrink: 0 }} />
-                <span style={{ fontSize: '10.5px', color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {name}
-                </span>
+          {fileNames.map((name) => {
+            const dataUrl = images[name];
+            return (
+              <div key={name} data-testid="artifact-shot-card" style={{ border: `1px solid ${HAIRLINE}`, background: '#fff' }}>
+                {/* 16:10 image area — the resolved on-disk PNG, or a hatched
+                    fallback when the file did not resolve (missing / blocked). */}
+                {dataUrl ? (
+                  <img
+                    data-testid="artifact-shot-image"
+                    src={dataUrl}
+                    alt={name}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      aspectRatio: '16 / 10',
+                      objectFit: 'cover',
+                      borderBottom: `1px solid ${HAIRLINE}`,
+                    }}
+                  />
+                ) : (
+                  <div
+                    data-testid="artifact-shot-missing"
+                    style={{
+                      aspectRatio: '16 / 10',
+                      background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
+                      borderBottom: `1px solid ${HAIRLINE}`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '10px',
+                      color: FAINT,
+                    }}
+                  >
+                    image unavailable
+                  </div>
+                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 10px' }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: accent, flexShrink: 0 }} />
+                  <span style={{ fontSize: '10.5px', color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {name}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Shell>
