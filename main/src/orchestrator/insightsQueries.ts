@@ -158,6 +158,12 @@ interface WorkflowRunStatsRow {
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - When non-null, restricts to that project; null = all.
+ *
+ * Migration-029: this scopes on `r.project_id = ?` (the RUN's project), NOT the
+ * workflow's — so a GLOBAL built-in/custom flow (workflows.project_id NULL) is still
+ * attributed to the project its runs executed in. The per-project drill-down therefore
+ * surfaces global-flow stats correctly (grouped by workflow; the row's `projectId`
+ * field reflects the workflow's own scope, NULL for globals).
  */
 export function selectWorkflowRunStats(
   db: DatabaseLike,
@@ -191,7 +197,7 @@ export function selectWorkflowRunStats(
       MAX(r.created_at) AS lastRunAt
     FROM workflow_runs r
     JOIN workflows w ON w.id = r.workflow_id
-    ${projectId === null ? '' : 'WHERE w.project_id = ?'}
+    ${projectId === null ? '' : 'WHERE r.project_id = ?'}
     GROUP BY w.id, w.name, w.project_id
     ORDER BY w.name ASC
   `;
@@ -497,7 +503,12 @@ interface RunIdRow {
  * applied AFTER the OR, so the N-runs cap semantics are unchanged.
  *
  * @param db                   - Narrow DatabaseLike surface.
- * @param projectId            - When non-null, restricts to that project.
+ * @param projectId            - When non-null, restricts to that project. Same
+ *   migration-029 caveat as selectWorkflowRunStats: the per-project branch
+ *   filters on the WORKFLOW's `project_id = ?`, so a GLOBAL flow (project_id
+ *   NULL) is omitted from a per-project usage view (its runs still carry a real
+ *   workflow_runs.project_id). All-projects (null) sees every flow. Deliberately
+ *   unchanged scope for this pass.
  * @param limitRunsPerWorkflow - Recent-run window per workflow (default 200).
  */
 export function selectWorkflowUsageStats(
@@ -518,7 +529,7 @@ export function selectWorkflowUsageStats(
           .prepare(
             `SELECT id AS workflowId, name AS workflowName
              FROM workflows
-             WHERE project_id = ?
+             WHERE project_id = ? OR project_id IS NULL
              ORDER BY name ASC`,
           )
           .all(projectId)
@@ -527,10 +538,13 @@ export function selectWorkflowUsageStats(
   // Per workflow: last N run ids that carry usage — a materialized run_usage row
   // OR at least one raw_events row. The OR (not a switch) keeps historic runs
   // without a materialized row visible; the LIMIT after it preserves the N cap.
+  // Scope a (now possibly global) flow's runs to the queried project via the run's
+  // own project_id; `? IS NULL` disables the filter in the cross-project view.
   const recentRunsStmt = db.prepare(
     `SELECT r.id AS runId
      FROM workflow_runs r
      WHERE r.workflow_id = ?
+       AND (? IS NULL OR r.project_id = ?)
        AND (
          EXISTS (SELECT 1 FROM run_usage u WHERE u.run_id = r.id)
          OR EXISTS (SELECT 1 FROM raw_events e WHERE e.run_id = r.id)
@@ -543,6 +557,8 @@ export function selectWorkflowUsageStats(
   for (const wf of workflows) {
     const runIdRows = recentRunsStmt.all(
       wf.workflowId,
+      projectId,
+      projectId,
       limitRunsPerWorkflow,
     ) as RunIdRow[];
     const runIds = runIdRows.map((row) => row.runId);
@@ -1317,10 +1333,9 @@ export function selectDailyModelUsage(
       : `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
-         JOIN workflows w ON w.id = r.workflow_id
          WHERE e.event_type = 'assistant'
            AND e.created_at >= datetime('now', ?)
-           AND w.project_id = ?`;
+           AND r.project_id = ?`;
 
   const stmt = db.prepare(sql);
   const rows = (

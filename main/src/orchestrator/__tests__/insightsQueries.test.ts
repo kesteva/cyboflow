@@ -68,7 +68,7 @@ function createInsightsDb(): Database.Database {
   db.exec(`
     CREATE TABLE workflows (
       id TEXT PRIMARY KEY,
-      project_id INTEGER NOT NULL,
+      project_id INTEGER,
       name TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP

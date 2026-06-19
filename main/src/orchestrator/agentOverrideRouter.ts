@@ -433,6 +433,14 @@ export class AgentOverrideRouter {
   /**
    * Names of the project's workflows whose spec_json binds `agentKey` to any
    * step (step.agent === agentKey). Malformed spec_json is skipped.
+   *
+   * Migration-029 note: this checks only PROJECT-SCOPED workflows
+   * (`project_id = ?`); a GLOBAL custom flow (project_id NULL) binding `agentKey`
+   * is NOT caught by this per-project referential guard. Custom agents /
+   * agent_overrides remain per-project (out of scope for the global-workflow
+   * pass), so the common case — a per-project custom agent referenced by a
+   * per-project flow — is fully covered; the gap is only a global flow vs a
+   * per-project agent of the same key. Deliberately unchanged here.
    */
   private workflowsReferencing(projectId: number, agentKey: string): string[] {
     const rows = this.db
