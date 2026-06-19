@@ -13,7 +13,12 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { selectProjectBacklog, selectTaskById, boardsForProject } from '../taskListing';
+import {
+  selectProjectBacklog,
+  selectTaskById,
+  selectIdeaDecomposition,
+  boardsForProject,
+} from '../taskListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 function buildDb(): Database.Database {
@@ -212,6 +217,59 @@ describe('taskListing — 3-table UNION', () => {
     const child = epic.children![0];
     expect(child.stage_position).toBe(5);
     expect(child.archived_at).toBe(stamp);
+  });
+
+  it('selectIdeaDecomposition nests epics under the idea and tasks under each epic', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    // A SECOND epic from the same idea, with its own child task, to prove the
+    // tree nests per-epic (not all tasks flattened under the idea).
+    const epic2 = 'epc_2';
+    const task2 = 'tsk_2';
+    db.prepare(
+      `INSERT INTO epics (id, project_id, ref, title, body, board_id, stage_id, originating_idea_id, created_at)
+       VALUES (?, 1, 'EPIC-002', 'Second epic', 'epic2 body', 'board-1-default', ?, ?, '2026-01-01T00:00:03.000Z')`,
+    ).run(epic2, stageId(4), ideaId);
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+       VALUES (?, 1, 'TASK-002', 'Second task', 'task2 body', 'board-1-default', ?, ?, ?, '2026-01-01T00:00:04.000Z')`,
+    ).run(task2, stageId(5), epic2, ideaId);
+
+    const idea = selectIdeaDecomposition(dbAdapter(db), ideaId)!;
+    expect(idea.type).toBe('idea');
+    expect(idea.id).toBe(ideaId);
+
+    // Epics nest under the idea (ASC by created_at), each with childCount rollup.
+    const epics = idea.children ?? [];
+    expect(epics.map((e) => e.id)).toEqual([epicId, epic2]);
+    expect(idea.childCount).toBe(2);
+    expect(epics.every((e) => e.type === 'epic')).toBe(true);
+
+    // Each epic nests ONLY its own task (via parent_epic_id).
+    expect(epics[0].children?.map((t) => t.id)).toEqual([taskId]);
+    expect(epics[0].childCount).toBe(1);
+    expect(epics[1].children?.map((t) => t.id)).toEqual([task2]);
+    expect(epics[1].children?.[0].type).toBe('task');
+  });
+
+  it('selectIdeaDecomposition handles an idea with no epics and rejects non-idea ids', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    // An idea with no epics yet → empty children, not undefined.
+    const lonely = 'ide_lonely';
+    db.prepare(
+      `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES (?, 1, 'IDEA-009', 'Lonely idea', 'body', 'board-1-default', ?, '2026-01-01T00:00:05.000Z')`,
+    ).run(lonely, stageId(1));
+
+    const decomp = selectIdeaDecomposition(dbAdapter(db), lonely)!;
+    expect(decomp.children).toEqual([]);
+    expect(decomp.childCount).toBe(0);
+
+    // Passing an epic or task id (not an idea) returns null — root must be an idea.
+    expect(selectIdeaDecomposition(dbAdapter(db), epicId)).toBeNull();
+    expect(selectIdeaDecomposition(dbAdapter(db), taskId)).toBeNull();
+    expect(selectIdeaDecomposition(dbAdapter(db), 'missing')).toBeNull();
   });
 
   it('boardsForProject returns the 11-stage board (position 11 removed by migration 024)', () => {

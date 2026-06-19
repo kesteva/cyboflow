@@ -9,8 +9,14 @@
  *   - 'idea-spec'          -> the originating idea (its markdown `body`), fetched
  *                             via `trpc.cyboflow.tasks.get({ taskId: sourceRef })`.
  *   - 'decomposed-stories' -> the originating idea WITH its epic children and each
- *                             epic's task children (one `tasks.get` round-trip;
- *                             `selectTaskById` nests epics→tasks for an idea).
+ *                             epic's task children, fetched via the DEDICATED
+ *                             `trpc.cyboflow.tasks.ideaDecomposition({ ideaId })`
+ *                             read (`selectIdeaDecomposition` nests epics under the
+ *                             idea via originating_idea_id, then tasks under each
+ *                             epic via parent_epic_id). `tasks.get`/`selectTaskById`
+ *                             is NOT usable here — it only nests children for an
+ *                             EPIC, so an idea id yields children===undefined and
+ *                             the renderer would always show its empty state.
  *   - 'screenshots'        -> no entity source yet; the parsed `payload_json`
  *                             (`{ fileNames?: string[] }`) is surfaced as-is.
  *   - 'ui-prototype' / 'generic' (canvas) -> the parsed `payload_json`
@@ -102,7 +108,17 @@ export function useArtifactData(artifact: Artifact): ArtifactData {
     }
 
     setState({ loading: true, error: null, data: null });
-    trpc.cyboflow.tasks.get.query({ taskId: sourceRef }).then(
+
+    // idea-spec fetches the bare idea (markdown body). decomposed-stories uses
+    // the DEDICATED ideaDecomposition read so the idea arrives with its epic
+    // children + each epic's task children already nested (tasks.get would only
+    // nest children for an epic → an idea id there has children===undefined).
+    const fetched =
+      atype === 'decomposed-stories'
+        ? trpc.cyboflow.tasks.ideaDecomposition.query({ ideaId: sourceRef })
+        : trpc.cyboflow.tasks.get.query({ taskId: sourceRef });
+
+    fetched.then(
       (idea) => {
         if (cancelled) return;
         if (!idea) {
