@@ -58,11 +58,14 @@ function MiniButton({
   danger?: boolean;
   testId?: string;
 }): React.JSX.Element {
+  // shrink-0 keeps each button at its full label width so it wraps as a whole
+  // unit (with the parent's flex-wrap) instead of shrinking + clipping its text.
+  const base = 'shrink-0 border bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] transition-colors';
   const className = danger
-    ? 'border border-status-error bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-status-error transition-colors hover:bg-status-error hover:text-text-on-status-error'
+    ? `${base} border-status-error text-status-error hover:bg-status-error hover:text-text-on-status-error`
     : accent
-      ? 'border border-interactive bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive'
-      : 'border border-border-primary bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-text-primary transition-colors hover:border-text-primary';
+      ? `${base} border-interactive text-interactive hover:bg-interactive hover:text-text-on-interactive`
+      : `${base} border-border-primary text-text-primary hover:border-text-primary`;
   return (
     <button type="button" onClick={onClick} data-testid={testId} className={className}>
       {label}
@@ -140,34 +143,39 @@ export function WorkflowCard({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 border-t border-dashed border-border-primary bg-bg-secondary px-3 py-2">
-        <span className="flex-1 truncate text-[9.5px] uppercase tracking-[0.06em] text-text-tertiary">
+      <div className="flex flex-col gap-2 border-t border-dashed border-border-primary bg-bg-secondary px-3 py-2">
+        <span className="truncate text-[9.5px] uppercase tracking-[0.06em] text-text-tertiary">
           {used}
         </span>
-        <MiniButton
-          label="Edit"
-          testId={`workflow-card-edit-${row.id}`}
-          onClick={onEdit !== undefined ? () => onEdit(entry) : undefined}
-        />
-        <MiniButton
-          label="Duplicate"
-          testId={`workflow-card-duplicate-${row.id}`}
-          onClick={onDuplicate !== undefined ? () => onDuplicate(entry) : undefined}
-        />
-        {deletable && onDelete !== undefined && (
+        {/* Actions WRAP (and right-align) instead of overflowing the card edge on
+            narrow widths — compressed windows / multi-column grids make a card too
+            thin for all of Edit/Duplicate/Delete/Run on one row. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <MiniButton
-            label="Delete"
-            danger
-            testId={`workflow-card-delete-${row.id}`}
-            onClick={() => onDelete(entry)}
+            label="Edit"
+            testId={`workflow-card-edit-${row.id}`}
+            onClick={onEdit !== undefined ? () => onEdit(entry) : undefined}
           />
-        )}
-        <MiniButton
-          label="Run"
-          accent
-          testId={`workflow-card-run-${row.id}`}
-          onClick={onRun !== undefined ? () => onRun(entry) : undefined}
-        />
+          <MiniButton
+            label="Duplicate"
+            testId={`workflow-card-duplicate-${row.id}`}
+            onClick={onDuplicate !== undefined ? () => onDuplicate(entry) : undefined}
+          />
+          {deletable && onDelete !== undefined && (
+            <MiniButton
+              label="Delete"
+              danger
+              testId={`workflow-card-delete-${row.id}`}
+              onClick={() => onDelete(entry)}
+            />
+          )}
+          <MiniButton
+            label="Run"
+            accent
+            testId={`workflow-card-run-${row.id}`}
+            onClick={onRun !== undefined ? () => onRun(entry) : undefined}
+          />
+        </div>
       </div>
     </div>
   );
