@@ -27,6 +27,7 @@ import { isPermissionMode, type PermissionMode } from '../../../shared/types/wor
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
+import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 
@@ -669,6 +670,19 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         await cyboflow.cancelHostedRuns(sessionId);
       } catch (cancelError) {
         console.error(`[Main] Failed to cancel hosted runs for session ${sessionId}:`, cancelError);
+      }
+
+      // Drop this session's session-only (uncommitted) run artifacts — the tabbed
+      // center pane's "session-only artifacts clear on close unless committed"
+      // contract. Runs are canceled first (above); committed artifacts persist.
+      // Fail-soft: a prune failure must never block the dismiss.
+      try {
+        await pruneSessionOnlyArtifacts(makeDatabaseLike(databaseService), sessionId, {
+          warn: (m, meta) => console.warn(m, meta),
+          debug: (m) => console.log(m),
+        });
+      } catch (pruneError) {
+        console.error(`[Main] Failed to prune session-only artifacts for session ${sessionId}:`, pruneError);
       }
 
       // Add a message to session output about archiving
