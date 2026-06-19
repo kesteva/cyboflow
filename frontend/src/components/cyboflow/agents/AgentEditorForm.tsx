@@ -43,6 +43,12 @@ export function AgentEditorForm({
   // Name is editable ONLY for a brand-new custom (create mode). Built-ins and
   // existing customs render the name read-only.
   const nameEditable = mode === 'create' && isCustom;
+  // The READ-ONLY name field shows the BARE key — strip the load-bearing
+  // `cyboflow-` prefix the server persists on `name` — so it matches the
+  // de-prefixed modal title and gallery card. The EDITABLE create-mode input
+  // stays bound to the raw `draft.name` (the user's typed name feeds
+  // createCustom unchanged); create-mode drafts carry no prefix anyway.
+  const displayName = nameEditable ? draft.name : draft.name.replace(/^cyboflow-/, '');
   const enabled = useMemo(() => new Set(draft.enabledTools), [draft.enabledTools]);
   const promptTokens = estimateTokens(draft.systemPrompt);
 
@@ -57,7 +63,7 @@ export function AgentEditorForm({
           <div className="flex items-center gap-3">
             <input
               type="text"
-              value={draft.name}
+              value={displayName}
               readOnly={!nameEditable}
               onChange={(e) =>
                 nameEditable && dispatch({ type: 'SET_NAME', name: e.target.value })

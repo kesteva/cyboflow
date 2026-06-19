@@ -33,7 +33,9 @@ const BUILTIN_KEY = 'implement';
 /** A built-in agent bound to a step in one workflow AND dispatched by prose in another. */
 const BUILTIN_ENTRY: AgentEntry = {
   agentKey: BUILTIN_KEY,
-  name: 'implement',
+  // Production agents.* always return the prefixed name (`cyboflow-<key>`); the
+  // editor de-prefixes it for DISPLAY. Use the realistic shape here.
+  name: 'cyboflow-implement',
   role: 'sprint',
   description: 'Implements one task at a time.',
   systemPrompt: 'You are the implementer. Make the smallest diff that satisfies the criteria.',
@@ -67,7 +69,7 @@ const OVERRIDDEN_ENTRY: AgentEntry = {
 const PROSE_ENTRY: AgentEntry = {
   ...BUILTIN_ENTRY,
   agentKey: 'research',
-  name: 'research',
+  name: 'cyboflow-research',
   role: 'planner',
   usage: { workflowCount: 0, usedBy: [], dispatchedBy: ['planner'] },
 };
@@ -161,6 +163,15 @@ describe('AgentEditorModal — built-in edit', () => {
     const chip = screen.getByTestId('agent-role-chip');
     expect(chip.tagName).toBe('SPAN');
     expect(chip).toHaveTextContent('sprint');
+  });
+
+  it('shows the BARE key in the read-only name field, not the cyboflow- prefix', async () => {
+    // The server returns name = 'cyboflow-implement'; the read-only field strips
+    // the prefix so it matches the de-prefixed title + gallery card.
+    await renderModal();
+    const nameInput = screen.getByTestId('agent-name-input') as HTMLInputElement;
+    expect(nameInput.value).toBe('implement');
+    expect(nameInput.value).not.toContain('cyboflow-');
   });
 
   it('usage line shows bound + dispatched (never a bare 0 workflows)', async () => {
