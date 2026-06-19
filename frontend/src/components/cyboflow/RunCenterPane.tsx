@@ -19,6 +19,7 @@ import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane } from './RunBottomPane';
 import { CenterPaneTabStrip } from './CenterPaneTabStrip';
+import { FileTabRenderer } from './FileTabRenderer';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
@@ -88,7 +89,13 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
 
   const renderActiveTab = (): ReactElement => {
     if (!activeTab || activeTab.kind === 'flow') return renderFlow();
-    // file / artifact tab content arrives in later milestones.
+    if (activeTab.kind === 'file' && activeTab.filePath) {
+      // The diff source is the pane's session key (the run's parent session).
+      return (
+        <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />
+      );
+    }
+    // artifact tab content arrives in a later milestone.
     return (
       <div className="flex h-full items-center justify-center text-sm text-text-secondary">
         {activeTab.label}

@@ -6,14 +6,15 @@
  * fixtures directly — no tRPC mock needed.
  *
  * Behaviors verified:
- *   1. Renders three tabs (Workflow Progress / File Explorer / Diff);
- *      Workflow Progress is default selected; shows empty-state when activeRunId is null.
+ *   1. Renders two tabs (Workflow Progress / File Explorer) — the standalone Diff
+ *      tab was removed (per-file diffs open as center-pane tabs); Workflow Progress
+ *      is default selected; shows empty-state when activeRunId is null.
  *   2. Clicking File Explorer with no active quick session shows its empty state
  *      and hides the Workflow Progress panel.
  *   3. Clicking File Explorer WITH an active quick session mounts SessionFileExplorer
  *      keyed by that session id.
- *   4. Clicking Diff with no active quick session shows the neutral "select a session"
- *      message (the working <CombinedDiffView> mounts only when a sessionId is resolved).
+ *   4. During an active run, the File Explorer is the launcher: opening a file calls
+ *      centerPaneStore.openFileTab so a center-pane file tab appears.
  *   5. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
  *      (timeline renders phase sections from the phaseState prop).
  *   6. Shows empty state in workflow-progress tab when activeRunId is null.
@@ -36,16 +37,31 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 }));
 
 // Stub SessionFileExplorer so the File-Explorer-content test can assert the rail
-// mounts it (keyed by the selected session) WITHOUT firing real tRPC.
+// mounts it (keyed by the selected session) WITHOUT firing real tRPC. The stub
+// exposes the onOpenFile launcher (wired only during an active run) as a button.
 vi.mock('../SessionFileExplorer', () => ({
-  SessionFileExplorer: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="session-file-explorer-mock">{sessionId}</div>
+  SessionFileExplorer: ({
+    sessionId,
+    onOpenFile,
+  }: {
+    sessionId: string;
+    onOpenFile?: (filePath: string) => void;
+  }) => (
+    <div data-testid="session-file-explorer-mock">
+      {sessionId}
+      {onOpenFile && (
+        <button data-testid="mock-open-file" onClick={() => onOpenFile('src/x.ts')}>
+          open file
+        </button>
+      )}
+    </div>
   ),
 }));
 
 // Import after mocks
 import { RunRightRail } from '../RunRightRail';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { StreamEvent } from '../../../utils/cyboflowApi';
 
@@ -88,7 +104,9 @@ const LOADED_PHASE_STATE: UseWorkflowPhaseStateResult = {
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
+    useCyboflowStore.setState({ selectedSessionId: null });
   });
+  useCenterPaneStore.setState({ bySession: {} });
 });
 
 // ---------------------------------------------------------------------------
@@ -96,20 +114,19 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('RunRightRail', () => {
-  it('renders three tabs; Workflow Progress is selected by default and shows empty state when no activeRunId', () => {
+  it('renders two tabs (no Diff); Workflow Progress is selected by default and shows empty state when no activeRunId', () => {
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
 
     const wpTab = screen.getByRole('tab', { name: 'Workflow Progress' });
     const feTab = screen.getByRole('tab', { name: 'File Explorer' });
-    const diffTab = screen.getByRole('tab', { name: 'Diff' });
 
     expect(wpTab).toBeInTheDocument();
     expect(feTab).toBeInTheDocument();
-    expect(diffTab).toBeInTheDocument();
+    // The standalone Diff tab was removed in the tabbed-center-pane work.
+    expect(screen.queryByRole('tab', { name: 'Diff' })).not.toBeInTheDocument();
 
     expect(wpTab.getAttribute('aria-selected')).toBe('true');
     expect(feTab.getAttribute('aria-selected')).toBe('false');
-    expect(diffTab.getAttribute('aria-selected')).toBe('false');
 
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
@@ -160,22 +177,27 @@ describe('RunRightRail', () => {
     expect(screen.queryByTestId('run-right-rail-file-explorer-empty')).not.toBeInTheDocument();
   });
 
-  it('clicking Diff tab with no active session shows the neutral empty message and hides the other two', () => {
-    // No quick session is active in this test, so the working CombinedDiffView is not
-    // mounted; the DIFF tab renders the neutral "select a session" message instead.
+  it('during an active run, the File Explorer launches a center-pane file tab via openFileTab', async () => {
+    // setActiveRun(runId, parentSessionId) sets activeRunId + selectedSessionId so
+    // the explorer renders WITH the onOpenFile launcher (active-run context).
     act(() => {
-      useCyboflowStore.setState({ selectedSessionId: null });
+      useCyboflowStore.getState().setActiveRun('run-x', 'session-fe-001');
     });
 
     render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+    // Flush SprintLanesPanel's lane snapshot (global stub resolves []).
+    await act(async () => {
+      await Promise.resolve();
+    });
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    fireEvent.click(screen.getByTestId('mock-open-file'));
 
-    expect(screen.getByTestId('run-right-rail-diff-empty')).toBeInTheDocument();
-    expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('run-right-rail-file-explorer-empty')).not.toBeInTheDocument();
-
-    expect(screen.getByRole('tab', { name: 'Diff' }).getAttribute('aria-selected')).toBe('true');
+    const session = useCenterPaneStore.getState().bySession['session-fe-001'];
+    expect(session).toBeDefined();
+    const fileTab = session.tabs.find((t) => t.kind === 'file');
+    expect(fileTab).toMatchObject({ id: 'file:src/x.ts', label: 'x.ts', filePath: 'src/x.ts' });
+    expect(session.activeTabId).toBe('file:src/x.ts');
   });
 
   it('shows empty state in workflow-progress tab when activeRunId is null', () => {

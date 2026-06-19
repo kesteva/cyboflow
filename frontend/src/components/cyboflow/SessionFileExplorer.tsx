@@ -68,7 +68,18 @@ function formatBytes(bytes: number): string {
 // Component
 // ---------------------------------------------------------------------------
 
-export function SessionFileExplorer({ sessionId }: { sessionId: string }): React.JSX.Element {
+export function SessionFileExplorer({
+  sessionId,
+  onOpenFile,
+}: {
+  sessionId: string;
+  /**
+   * When provided (an active run with a tabbed center pane), clicking a file
+   * opens it as a CENTER file/diff tab via this callback instead of the in-rail
+   * takeover viewer. Omitted (resting/main-repo session) → the takeover viewer.
+   */
+  onOpenFile?: (filePath: string) => void;
+}): React.JSX.Element {
   // Tree state: directory contents keyed by relative dir path (ROOT === '').
   const [childrenByDir, setChildrenByDir] = useState<Record<string, RunFileEntry[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -329,7 +340,13 @@ export function SessionFileExplorer({ sessionId }: { sessionId: string }): React
           aria-level={depth + 1}
           aria-expanded={entry.isDirectory ? isOpen : undefined}
           data-testid={`session-file-explorer-node-${entry.path}`}
-          onClick={() => (entry.isDirectory ? toggleDir(entry.path) : void openFileAt(entry.path))}
+          onClick={() =>
+            entry.isDirectory
+              ? toggleDir(entry.path)
+              : onOpenFile
+                ? onOpenFile(entry.path)
+                : void openFileAt(entry.path)
+          }
           style={{ paddingLeft: indent }}
           className="w-full flex items-center gap-1 pr-2 py-1 text-left text-xs text-text-primary hover:bg-bg-hover transition-colors"
           title={entry.path}

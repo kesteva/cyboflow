@@ -66,8 +66,8 @@ describe('centerPaneStore', () => {
 
   it('opens a file tab and dedupes by path', () => {
     get().ensureSession(KEY);
-    get().openFileTab(KEY, { filePath: 'src/a.ts', worktreePath: '/wt', status: 'M' });
-    get().openFileTab(KEY, { filePath: 'src/a.ts', worktreePath: '/wt', status: 'M' });
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M' });
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M' });
     const s = get().bySession[KEY];
     expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
     expect(s.tabs.find((t) => t.kind === 'file')).toMatchObject({ label: 'a.ts', status: 'M' });
@@ -76,7 +76,7 @@ describe('centerPaneStore', () => {
 
   it('closing the active tab focuses the previous tab', () => {
     get().ensureSession(KEY);
-    get().openFileTab(KEY, { filePath: 'a.ts', worktreePath: '/wt' });
+    get().openFileTab(KEY, { filePath: 'a.ts' });
     get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'IDEA' });
     expect(get().bySession[KEY].activeTabId).toBe('art:idea-spec');
     get().closeTab(KEY, 'art:idea-spec');

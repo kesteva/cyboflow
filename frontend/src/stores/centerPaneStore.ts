@@ -53,7 +53,6 @@ export const FALLBACK_SESSION: CenterPaneSessionState = {
 /** Params to open (or focus) a file/diff tab. */
 export interface OpenFileTabArgs {
   filePath: string;
-  worktreePath: string;
   status?: FileTabStatus;
   /** Optional label override; defaults to the file's basename. */
   label?: string;
@@ -141,15 +140,11 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
         const id = fileTabId(args.filePath);
         const existing = cur.tabs.find((t) => t.id === id);
         if (existing) {
-          // Refresh worktree/status (the diff may have moved) and focus.
+          // Refresh the status letter (the file may have changed) and focus.
           return {
             ...cur,
             activeTabId: id,
-            tabs: cur.tabs.map((t) =>
-              t.id === id
-                ? { ...t, worktreePath: args.worktreePath, status: args.status }
-                : t,
-            ),
+            tabs: cur.tabs.map((t) => (t.id === id ? { ...t, status: args.status } : t)),
           };
         }
         const tab: TabItem = {
@@ -157,7 +152,6 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           kind: 'file',
           label: args.label ?? basename(args.filePath),
           filePath: args.filePath,
-          worktreePath: args.worktreePath,
           status: args.status,
         };
         return { ...cur, tabs: [...cur.tabs, tab], activeTabId: id };

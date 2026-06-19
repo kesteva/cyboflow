@@ -1,25 +1,27 @@
 /**
  * RunRightRail — fixed-width right rail in the CyboflowRoot two-column layout.
  *
- * Contains three tabs:
+ * Contains two tabs:
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline (plus the
  *     per-task SprintLanesPanel for sprint runs) when activeRunId is non-null; neutral
  *     empty state otherwise.
- *   - File Explorer — live SessionFileExplorer (selected session's worktree tree +
- *     read-only viewer) when selectedSessionId is non-null; neutral empty state
- *     otherwise.
- *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
- *     message when no session is active.
+ *   - File Explorer — live SessionFileExplorer (selected session's worktree tree).
+ *     During an active run it is the LAUNCHER for center-pane file/diff tabs (clicking
+ *     a file opens a center tab via centerPaneStore.openFileTab); otherwise it falls
+ *     back to its own read-only takeover viewer.
+ *
+ * The standalone Diff tab was removed: per-file diffs now open as center-pane file
+ * tabs (FileTabRenderer). The Artifacts tab + full 2-tab restructure land in M4.
  */
 import { useState } from 'react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
-import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
-type TabId = 'workflow-progress' | 'file-explorer' | 'diff';
+type TabId = 'workflow-progress' | 'file-explorer';
 
 interface Tab {
   id: TabId;
@@ -38,45 +40,13 @@ const TABS: Tab[] = [
     label: 'File Explorer',
     testid: 'run-right-rail-tab-file-explorer',
   },
-  {
-    id: 'diff',
-    label: 'Diff',
-    testid: 'run-right-rail-tab-diff',
-  },
 ];
-
-/**
- * RunRightRailDiff — compact wrapper around the working CombinedDiffView, mirroring the
- * minimal state DiffPanel owns (selectedExecutions defaulting to [] == all uncommitted
- * changes, isGitOperationRunning false). Rendered only when the DIFF tab is active and a
- * sessionId is resolved, so it remounts (and reloads git data) whenever the tab is
- * reopened. CombinedDiffView also exposes its own header refresh control.
- */
-function RunRightRailDiff({ sessionId, isActive }: { sessionId: string; isActive: boolean }) {
-  // [] == all uncommitted changes (same default DiffPanel uses).
-  const [selectedExecutions] = useState<number[]>([]);
-
-  return (
-    <div
-      data-testid="run-right-rail-diff"
-      className="h-full flex flex-col bg-surface-primary"
-    >
-      <div className="flex-1 overflow-hidden">
-        <CombinedDiffView
-          sessionId={sessionId}
-          selectedExecutions={selectedExecutions}
-          isGitOperationRunning={false}
-          isVisible={isActive}
-        />
-      </div>
-    </div>
-  );
-}
 
 export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
+  const openFileTab = useCenterPaneStore((s) => s.openFileTab);
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
@@ -132,26 +102,26 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               No active run
             </div>
           )
-        ) : currentTab.id === 'file-explorer' ? (
+        ) : (
           selectedSessionId ? (
-            <SessionFileExplorer sessionId={selectedSessionId} />
+            <SessionFileExplorer
+              sessionId={selectedSessionId}
+              // During an active run, clicking a file opens a center-pane file/diff
+              // tab (the centerPane key == selectedSessionId == the run's parent
+              // session). Without an active run there is no tabbed center pane, so
+              // the explorer uses its own takeover viewer.
+              onOpenFile={
+                activeRunId !== null
+                  ? (filePath) => openFileTab(selectedSessionId, { filePath })
+                  : undefined
+              }
+            />
           ) : (
             <div
               data-testid="run-right-rail-file-explorer-empty"
               className="p-4 text-sm text-text-secondary"
             >
               Select a session to view its files.
-            </div>
-          )
-        ) : (
-          selectedSessionId ? (
-            <RunRightRailDiff sessionId={selectedSessionId} isActive />
-          ) : (
-            <div
-              data-testid="run-right-rail-diff-empty"
-              className="p-4 text-sm text-text-secondary"
-            >
-              Select a session to view its diff.
             </div>
           )
         )}

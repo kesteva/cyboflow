@@ -44,10 +44,12 @@ export interface TabItem {
   pinned?: boolean;
 
   // --- file tabs ---
-  /** Path of the file relative to the worktree root (file tabs). */
+  /**
+   * Path of the file relative to the worktree root (file tabs). The diff itself
+   * is read from the pane's session (the centerPaneStore key), which is the run's
+   * parent session — so no per-tab worktree/session field is needed.
+   */
   filePath?: string;
-  /** The run worktree the diff is read from (file tabs key on this, not session). */
-  worktreePath?: string;
   /** Git status letter for the glyph (file tabs). */
   status?: FileTabStatus;
 
