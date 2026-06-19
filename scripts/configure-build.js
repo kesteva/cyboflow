@@ -1,29 +1,44 @@
 #!/usr/bin/env node
 
 /**
- * Configure build settings based on environment
- * This script modifies electron-builder configuration dynamically
- * to handle signing when certificates are available or skip it when they're not
+ * Configure build settings based on environment.
+ *
+ * Reads the canonical electron-builder config from package.json's `build` field
+ * (the committed source of truth — NEVER mutated) and writes an environment-adjusted
+ * copy to build/electron-builder.generated.json. The mac build scripts pass that file
+ * to electron-builder via `--config`, which uses it INSTEAD of package.json's `build`
+ * (electron-builder reads a `--config` file exclusively; it does not merge package.json
+ * `build` on top — see app-builder-lib getConfig). This keeps the tracked package.json
+ * clean across signed, unsigned, and beta builds.
+ *
+ * Adjustments:
+ *   - Signing/notarization posture is toggled based on the presence of Apple credentials.
+ *   - When BUILD_VARIANT=beta, the beta appId / productName / artifactName / publish URL
+ *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:beta).
  */
 
 const fs = require('fs');
 const path = require('path');
 
+const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
+const GENERATED_CONFIG_PATH = path.join(__dirname, '..', 'build', 'electron-builder.generated.json');
+
 function configureBuild() {
   console.log('Configuring build for current environment...');
-  
+
   // Check if signing is explicitly disabled
   const signingDisabled = process.env.CSC_DISABLE === 'true';
-  
+
   // Check if we have Apple signing credentials
   const hasAppleCertificate = !!(process.env.CSC_LINK || process.env.APPLE_CERTIFICATE);
-  const hasAppleId = !!(process.env.APPLE_ID);
-  const hasTeamId = !!(process.env.APPLE_TEAM_ID);
+  const hasAppleId = !!process.env.APPLE_ID;
+  const hasTeamId = !!process.env.APPLE_TEAM_ID;
   const hasAppPassword = !!(process.env.APPLE_APP_SPECIFIC_PASSWORD || process.env.APPLE_APP_PASSWORD);
-  
+
   const canSign = !signingDisabled && hasAppleCertificate;
   const canNotarize = canSign && hasAppleId && hasTeamId && hasAppPassword;
-  
+  const isBeta = process.env.BUILD_VARIANT === 'beta';
+
   console.log('Environment check:');
   console.log(`  - Signing Disabled: ${signingDisabled ? '✓' : '✗'}`);
   console.log(`  - Apple Certificate: ${hasAppleCertificate ? '✓' : '✗'}`);
@@ -32,48 +47,61 @@ function configureBuild() {
   console.log(`  - App Password: ${hasAppPassword ? '✓' : '✗'}`);
   console.log(`  - Can Sign: ${canSign ? '✓' : '✗'}`);
   console.log(`  - Can Notarize: ${canNotarize ? '✓' : '✗'}`);
-  
-  // Read the package.json file
-  const packageJsonPath = path.join(__dirname, '..', 'package.json');
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-  
-  // Configure macOS build settings
+  console.log(`  - Build Variant: ${isBeta ? 'beta' : 'stable'}`);
+
+  // Read the canonical config from package.json (source of truth — not mutated)
+  const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
+
   if (!packageJson.build || !packageJson.build.mac) {
     console.error('Error: No macOS build configuration found in package.json');
     process.exit(1);
   }
-  
-  // Update configuration based on capabilities
-  packageJson.build.mac.notarize = canNotarize;
-  
+
+  // Deep-clone so the source package.json is never touched
+  const config = JSON.parse(JSON.stringify(packageJson.build));
+
+  // Configure macOS signing posture based on capabilities
+  config.mac.notarize = canNotarize;
+
   if (!canSign) {
-    // When we can't sign, we need to disable certain features
     console.log('Configuring for unsigned build...');
-    packageJson.build.mac.hardenedRuntime = false;
-    // Keep gatekeeperAssess as false - this allows unsigned apps to run
-    packageJson.build.mac.gatekeeperAssess = false;
-    // Remove signing-related entitlements when not signing
-    delete packageJson.build.mac.entitlements;
-    delete packageJson.build.mac.entitlementsInherit;
+    config.mac.hardenedRuntime = false;
+    // Keep gatekeeperAssess false so unsigned apps can run locally
+    config.mac.gatekeeperAssess = false;
+    delete config.mac.entitlements;
+    delete config.mac.entitlementsInherit;
   } else {
-    // When we can sign, enable the proper settings
     console.log('Configuring for signed build...');
-    packageJson.build.mac.hardenedRuntime = true;
-    packageJson.build.mac.gatekeeperAssess = false;
-    packageJson.build.mac.entitlements = 'build/entitlements.mac.plist';
-    packageJson.build.mac.entitlementsInherit = 'build/entitlements.mac.plist';
+    config.mac.hardenedRuntime = true;
+    config.mac.gatekeeperAssess = false;
+    config.mac.entitlements = 'build/entitlements.mac.plist';
+    config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
   }
-  
-  // Write the updated package.json back
-  fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n');
-  
-  console.log('Build configuration updated successfully!');
-  console.log(`Notarization: ${packageJson.build.mac.notarize ? 'enabled' : 'disabled'}`);
-  console.log(`Hardened Runtime: ${packageJson.build.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+
+  // Beta-variant overrides (previously inline --config.* flags on build:mac:beta).
+  // Template tokens like ${version} are electron-builder placeholders and must stay literal.
+  if (isBeta) {
+    console.log('Applying beta-variant overrides...');
+    config.appId = 'com.cyboflow.app.beta';
+    config.productName = 'Cyboflow Beta';
+    config.mac.artifactName = 'Cyboflow-Beta-${version}-macOS-${arch}.${ext}';
+    config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/beta' };
+  }
+
+  // Write the environment-adjusted config; package.json stays pristine
+  fs.mkdirSync(path.dirname(GENERATED_CONFIG_PATH), { recursive: true });
+  fs.writeFileSync(GENERATED_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+
+  const relPath = path.relative(path.join(__dirname, '..'), GENERATED_CONFIG_PATH);
+  console.log(`Build configuration written to ${relPath}`);
+  console.log(`Notarization: ${config.mac.notarize ? 'enabled' : 'disabled'}`);
+  console.log(`Hardened Runtime: ${config.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+
+  return config;
 }
 
 if (require.main === module) {
   configureBuild();
 }
 
-module.exports = { configureBuild };
+module.exports = { configureBuild, GENERATED_CONFIG_PATH };

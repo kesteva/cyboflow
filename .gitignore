@@ -71,6 +71,7 @@ sessions/
 *.pacman
 electron-builder.yml
 electron-builder.json5
+build/electron-builder.generated.json
 
 # Electron Builder directories
 packaged/
