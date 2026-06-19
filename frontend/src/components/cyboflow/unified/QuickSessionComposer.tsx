@@ -3,6 +3,7 @@ import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
+import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
 import type { AttachedImage, AttachedText, ComposerAttachments } from './attachments';
@@ -73,6 +74,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
 
   const transport = interactive ? 'interactive' : 'sdk';
   const running = activeSession.status === 'running';
+  const updateSession = useSessionStore((s) => s.updateSession);
 
   // Read-only model display (set at session start; mid-session change deferred).
   // The model lives on the panel settings, not the Session row, so we fetch it.
@@ -149,6 +151,16 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       autoCommit={activeSession.autoCommit}
       projectId={activeSession.projectId}
       isAutoCommitEnabled={isAutoCommitEnabled}
+      // The pill persists the change itself (commit-mode:update-session-settings);
+      // mirror it into the session store so the pill label reflects it immediately
+      // instead of staying stale until the session is re-fetched.
+      onModeChange={(mode, settings) =>
+        updateSession({
+          ...activeSession,
+          commitMode: mode,
+          commitModeSettings: JSON.stringify(settings),
+        })
+      }
     />
   ) : undefined;
 
