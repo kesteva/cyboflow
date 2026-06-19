@@ -98,7 +98,6 @@ export interface CreateSessionRequest {
   folderId?: string;
   baseBranch?: string;
   autoCommit?: boolean;
-  model?: string;
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings

@@ -160,7 +160,6 @@ export interface CreateSessionRequest {
   effort?: 'ultracode';
   projectId?: number;
   folderId?: string;
-  isMainRepo?: boolean;
   baseBranch?: string;
   autoCommit?: boolean;
   toolType?: 'claude' | 'none';
