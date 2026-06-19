@@ -123,12 +123,68 @@ describe('parseFileHunks', () => {
   });
 
   it('findFileDiff locates a file by new path and by old path (rename/delete)', () => {
-    const combined = [MODIFY, RENAME, DELETE].join('\n');
+    // Combined exactly as production does: combineDiffs joins file blocks with '\n\n'.
+    const combined = [MODIFY, RENAME, DELETE].join('\n\n');
     expect(findFileDiff(combined, 'src/a.ts')?.type).toBe('modified');
     expect(findFileDiff(combined, 'new/name.ts')?.type).toBe('renamed');
     expect(findFileDiff(combined, 'old/name.ts')?.type).toBe('renamed'); // old path
     expect(findFileDiff(combined, 'src/gone.ts')?.type).toBe('deleted');
     expect(findFileDiff(combined, 'does/not/exist.ts')).toBeNull();
+
+    // The '\n\n' block separator must NOT bleed phantom blank-context rows onto
+    // the last hunk of a non-final file. The first file's last hunk holds only
+    // its real lines — no trailing { kind: 'context', text: '' } past EOF.
+    const first = findFileDiff(combined, 'src/a.ts');
+    expect(first?.hunks).toHaveLength(1);
+    expect(first?.hunks[0].lines).toEqual([
+      { oldNo: 1, newNo: 1, kind: 'context', text: 'line1' },
+      { oldNo: 2, newNo: null, kind: 'del', text: 'old line' },
+      { oldNo: null, newNo: 2, kind: 'add', text: 'new line' },
+      { oldNo: 3, newNo: 3, kind: 'context', text: 'line3' },
+    ]);
+  });
+
+  it('does not emit phantom blank-context rows from the \\n\\n block separator', () => {
+    // Two MODIFIED file blocks joined by the production '\n\n' separator.
+    const combined = [MODIFY, MODIFY.replace(/a\.ts/g, 'b.ts')].join('\n\n');
+    const files = parseFileDiffs(combined);
+    expect(files).toHaveLength(2);
+
+    for (const f of files) {
+      expect(f.hunks).toHaveLength(1);
+      const lines = f.hunks[0].lines;
+      // No phantom empty-context rows anywhere.
+      expect(lines.some((l) => l.kind === 'context' && l.text === '')).toBe(false);
+      // The last row of the first file's last hunk is its real ' line3' context
+      // row at newNo 3 — not a blank row at newNo 4 past EOF.
+      expect(lines[lines.length - 1]).toEqual({ oldNo: 3, newNo: 3, kind: 'context', text: 'line3' });
+    }
+  });
+
+  it('handles a tracked block followed by an untracked block across a trailing-newline boundary', () => {
+    // Production appends untracked diffs with an extra trailing '\n', so the
+    // boundary between a tracked block and the untracked one carries multiple
+    // empty lines. None of them may become phantom context rows.
+    const combined = MODIFY + '\n\n' + ADD + '\n';
+    const files = parseFileDiffs(combined);
+    expect(files.map((f) => f.path)).toEqual(['src/a.ts', 'src/new.ts']);
+
+    const tracked = files[0];
+    expect(tracked.hunks).toHaveLength(1);
+    expect(tracked.hunks[0].lines).toEqual([
+      { oldNo: 1, newNo: 1, kind: 'context', text: 'line1' },
+      { oldNo: 2, newNo: null, kind: 'del', text: 'old line' },
+      { oldNo: null, newNo: 2, kind: 'add', text: 'new line' },
+      { oldNo: 3, newNo: 3, kind: 'context', text: 'line3' },
+    ]);
+
+    // The trailing-newline boundary after the final untracked block must not
+    // append a phantom blank row either.
+    const untracked = files[1];
+    expect(untracked.hunks[0].lines).toEqual([
+      { oldNo: null, newNo: 1, kind: 'add', text: 'first' },
+      { oldNo: null, newNo: 2, kind: 'add', text: 'second' },
+    ]);
   });
 
   it('returns [] for an empty diff', () => {

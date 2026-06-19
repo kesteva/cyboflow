@@ -108,13 +108,13 @@ function parseBlock(block: string): ParsedFileDiff | null {
       oldNo += 1;
       newNo += 1;
     }
-    // A blank line inside a hunk is an empty context line (' ' was stripped by
-    // the split); represent it as context so spacing is preserved.
-    else if (line === '') {
-      current.lines.push({ oldNo, newNo, kind: 'context', text: '' });
-      oldNo += 1;
-      newNo += 1;
-    }
+    // Any other line (including a wholly-empty '') is a no-op: git unified diffs
+    // prefix every context line with a single space, so a truly-empty line is
+    // never a content row — it is only the blank-line separator that
+    // `combineDiffs` inserts between file blocks (`join('\n\n')`) or the trailing
+    // newline appended after an untracked diff. Treating '' as context here
+    // produced phantom blank rows with line numbers past EOF on the last hunk of
+    // every non-final file. Fall through and ignore it.
   }
 
   return { path, oldPath: paths.oldPath, type, isBinary: false, additions, deletions, hunks };
