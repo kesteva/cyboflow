@@ -20,11 +20,11 @@ Cyboflow is MIT-licensed, inheriting Crystal's pre-Nimbalyst MIT posture. See [/
 
 ## Do not merge from Nimbalyst
 
-Crystal was deprecated in early 2026 and replaced by a new product called Nimbalyst (https://github.com/Nimbalyst/nimbalyst). Nimbalyst is a separate product on a separate license footing; merging changes from Nimbalyst into Cyboflow risks license contamination (AGPL or other non-MIT constraints).
+Crystal was deprecated in early 2026 and replaced by a new product called Nimbalyst (https://github.com/Nimbalyst/nimbalyst). Nimbalyst is also MIT-licensed, so this is **not** a license-contamination concern — but it is a separate product on its own scope and direction, and Cyboflow has diverged substantially from the `0.3.5` fork point.
 
 **The rule is absolute:** do not cherry-pick, rebase, or apply patches from https://github.com/Nimbalyst/nimbalyst into this repository. If a fix is needed that Nimbalyst happens to have implemented, reproduce the fix from first principles on the Cyboflow side.
 
-**Rationale:** The Crystal-to-Nimbalyst rename coincided with a scope and license shift. Even if individual commits in Nimbalyst appear benign, the act of importing them establishes a merge lineage from a non-MIT codebase. The risk is not theoretical — AGPL contamination would propagate to every downstream user of Cyboflow and require relicensing. The only safe posture is a hard no-merge boundary at the fork point.
+**Rationale:** The goal is a clean, auditable provenance and a single coherent product direction. Cyboflow forked Crystal `0.3.5` deliberately and has narrowed and rebuilt large parts of it; importing commits from a now-divergent codebase would muddy that lineage and re-introduce decisions Cyboflow has intentionally moved away from. The safe posture is a hard no-merge boundary at the fork point — independent of license, which is MIT on both sides.
 
 ## What Cyboflow inherits from Crystal
 
@@ -40,7 +40,7 @@ Crystal `0.3.5` provides six of Cyboflow's eight required primitives in producti
 Cyboflow adds:
 
 7. **Cross-workflow review queue** — aggregates approval requests from all concurrent runs into one keyboard-driven UI
-8. **CyboflowMcpServer outbound bridge** — typed stream parser and MCP server for SoloFlow workflow integration
+8. **CyboflowMcpServer outbound bridge** — typed stream parser and MCP server exposing the `cyboflow_*` tools the built-in flows use to write the backlog
 
 ## Author
 
