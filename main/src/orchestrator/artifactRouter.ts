@@ -246,9 +246,16 @@ export class ArtifactRouter {
 
     const txn = this.db.transaction(() => {
       if (existing) {
-        // Idempotent re-derive: keep the row id, refresh the mutable fields.
+        // Idempotent re-derive: keep the row id, refresh the mutable fields. The
+        // audit row records ONLY fields that actually changed (matching the
+        // op='update' no-op semantics) — a re-derive with an unchanged label must
+        // not spam the entity_events log with a no-op delta.
         artifactId = existing.id;
         action = 'updated';
+        const nextStepOrigin = change.stepOrigin ?? existing.step_origin;
+        const nextPayload = change.payloadJson ?? existing.payload_json;
+        const nextSourceRef = change.sourceRef ?? existing.source_ref;
+        const nextIsNew = change.isNew === false ? 0 : 1;
         this.db
           .prepare(
             `UPDATE artifacts
@@ -256,21 +263,27 @@ export class ArtifactRouter {
                     session_id = COALESCE(?, session_id), is_new = ?
               WHERE id = ?`,
           )
-          .run(
-            change.label,
-            change.stepOrigin ?? existing.step_origin,
-            mode,
-            change.payloadJson ?? existing.payload_json,
-            change.sourceRef ?? existing.source_ref,
-            change.sessionId ?? null,
-            change.isNew === false ? 0 : 1,
-            existing.id,
-          );
-        const ev = this.insertEvent(existing.id, 'updated', change.actor, change.runId, [
-          { field: 'label', from: existing.label, to: change.label },
-        ], now);
-        eventId = ev.id;
-        eventSeq = ev.seq;
+          .run(change.label, nextStepOrigin, mode, nextPayload, nextSourceRef, change.sessionId ?? null, nextIsNew, existing.id);
+
+        const deltas: FieldDelta[] = [];
+        if (change.label !== existing.label) deltas.push({ field: 'label', from: existing.label, to: change.label });
+        if (mode !== existing.mode) deltas.push({ field: 'mode', from: existing.mode, to: mode });
+        if (nextIsNew !== existing.is_new) deltas.push({ field: 'is_new', from: existing.is_new === 1, to: nextIsNew === 1 });
+        if (nextPayload !== existing.payload_json) deltas.push({ field: 'payload_json', from: null, to: 'updated' });
+
+        if (deltas.length === 0) {
+          const last = this.db
+            .prepare(
+              'SELECT id, seq FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
+            )
+            .get(ENTITY_EVENT_TYPE, existing.id) as { id: number; seq: number } | undefined;
+          eventId = last?.id ?? 0;
+          eventSeq = last?.seq ?? 0;
+        } else {
+          const ev = this.insertEvent(existing.id, 'updated', change.actor, change.runId, deltas, now);
+          eventId = ev.id;
+          eventSeq = ev.seq;
+        }
         return;
       }
 

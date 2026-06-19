@@ -127,6 +127,14 @@ describe('ArtifactRouter', () => {
     const rows = db.prepare("SELECT * FROM artifacts WHERE run_id = 'run-1' AND atype = 'decomposed-stories'").all();
     expect(rows).toHaveLength(1);
     expect((rows[0] as { label: string }).label).toBe('3 epics · re-derived');
+
+    // The label change logged a delta (created + updated = 2). A re-derive with an
+    // UNCHANGED label must NOT spam a no-op event (stays at 2).
+    expect(countEvents(db, first.artifactId)).toBe(2);
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'decomposed-stories', label: '3 epics · re-derived', actor: 'orchestrator',
+    });
+    expect(countEvents(db, first.artifactId)).toBe(2);
   });
 
   it('update enriches an existing artifact', async () => {
