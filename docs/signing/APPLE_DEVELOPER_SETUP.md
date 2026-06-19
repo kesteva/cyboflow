@@ -279,10 +279,17 @@ Verify:
 
 ## Build-Time Environment Variables
 
-`scripts/configure-build.js` reads these environment variables to decide
-whether to enable the signed + notarized build posture. All five must be set
-in the shell that invokes `pnpm run build:mac:universal` (or `release:mac`);
-if any are missing, the script silently downgrades to an unsigned build.
+`scripts/configure-build.js` reads these environment variables to decide the
+build's signing posture. There are **three** postures, selected purely by which
+vars are present in the shell that invokes a `pnpm run build:mac:*` script:
+
+| Posture | Vars present | Result |
+| ------- | ------------ | ------ |
+| **Unsigned** | none | No signing, notarization, or hardened runtime. Runs locally via right-click → Open. |
+| **Signed, not notarized** | `CSC_LINK` + `CSC_KEY_PASSWORD` only | Developer-ID-signed with hardened runtime; notarization skipped. Runs on the build machine; other Macs need right-click → Open (Gatekeeper blocks unnotarized downloads). |
+| **Signed + notarized** | all five | Full release posture — signed, hardened, notarized, staple-ready. |
+
+The five variables are:
 
 > These five live alongside the three R2 publish vars in the single gitignored
 > file **`~/Developer/cyboflow/.envrc.local`**, sourced manually before a release
@@ -330,22 +337,52 @@ export CSC_KEY_PASSWORD="<passphrase>"
 pnpm run build:mac:universal
 ```
 
+### Signed but not notarized
+
+For a quick local or **beta** build that skips the (slow) notarization
+round-trip but still signs with your Developer ID, provide only the two `CSC_*`
+cert vars and withhold the notarization trio. The cleanest way is to source the
+full `.envrc.local` and unset the three notarization vars:
+
+```bash
+source ./.envrc.local
+unset APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_APP_PASSWORD
+
+pnpm run build:mac:arm64     # or build:mac:universal
+pnpm run build:mac:beta      # beta variant (universal) → "Cyboflow-Beta-<version>-macOS-universal.dmg"
+```
+
+`configure-build.js` then reports `Can Sign: ✓ / Can Notarize: ✗` and writes a
+generated config with `notarize: false` and `hardenedRuntime: true`. Verify:
+
+```bash
+codesign --verify --deep --strict --verbose=2 dist-electron/mac-*/Cyboflow*.app
+spctl --assess --type execute --verbose dist-electron/mac-*/Cyboflow*.app
+#   → "rejected — source=Unnotarized Developer ID"   (expected: signed, not notarized)
+```
+
+> electron-builder discovers a Developer ID identity from your keychain by
+> default. For a *truly unsigned* build while your cert is in the keychain, also
+> set `CSC_IDENTITY_AUTO_DISCOVERY=false` and unset `CSC_LINK`.
+
 ### configure-build.js contract
 
-`scripts/configure-build.js` rewrites `package.json` **in place** before invoking
-`electron-builder`, and is run automatically by every `pnpm run build:mac:*` script.
-The fields it rewrites on every invocation:
+`scripts/configure-build.js` reads the canonical `build` block from
+`package.json` (**never mutating it**) and writes an environment-adjusted copy to
+**`build/electron-builder.generated.json`** (git-ignored), which the `build:mac:*`
+scripts pass to electron-builder via `--config`. It runs automatically in every
+`build:mac:*` script. The fields it sets per posture:
 
-| Field                           | Signed (all 5 env vars set) | Unsigned        |
-| ------------------------------- | --------------------------- | --------------- |
-| `build.mac.notarize`            | `true`                      | `false`         |
-| `build.mac.hardenedRuntime`     | `true`                      | `false`         |
-| `build.mac.entitlements`        | `build/entitlements.mac.plist` | deleted       |
-| `build.mac.entitlementsInherit` | `build/entitlements.mac.plist` | deleted       |
+| Field                       | Signed + notarized | Signed, not notarized | Unsigned |
+| --------------------------- | ------------------ | --------------------- | -------- |
+| `mac.notarize`              | `true`             | `false`               | `false`  |
+| `mac.hardenedRuntime`       | `true`             | `true`                | `false`  |
+| `mac.entitlements`          | set                | set                   | deleted  |
+| `mac.entitlementsInherit`   | set                | set                   | deleted  |
 
-The committed values in `package.json` (e.g. `"notarize": true` after a signed
-run) are post-run artifacts, not defaults — the script overwrites them every
-build based on the env vars present at that moment.
+The posture is chosen entirely by the env vars present at build time (see the
+table under "Build-Time Environment Variables"); `package.json` is the pristine
+source and is never rewritten.
 
 **Never invoke `electron-builder` directly.** Always use `pnpm run build:mac:universal`
 (or another `build:mac:*` / `release:mac` script). Skipping the npm script skips
