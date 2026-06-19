@@ -1,4 +1,4 @@
--- Migration 028: agent_overrides — per-project builtin shadows + custom agents.
+-- Migration 029: agent_overrides — per-project builtin shadows + custom agents.
 --
 -- Stores user edits to the 13 builtin cyboflow agents AND fully-custom agents,
 -- scoped per project. One row per (project_id, agent_key).

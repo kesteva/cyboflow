@@ -368,7 +368,7 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    // ───── global + project union (migration 029) ─────
+    // ───── global + project union (migration 030) ─────
 
     it('returns the GLOBAL built-ins UNIONed with the project-scoped rows', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
@@ -418,7 +418,7 @@ describe('WorkflowRegistry', () => {
   });
 
   // -------------------------------------------------------------------------
-  // ensureGlobalBuiltIns (migration 029 — one global set, not per-project)
+  // ensureGlobalBuiltIns (migration 030 — one global set, not per-project)
   // -------------------------------------------------------------------------
 
   describe('ensureGlobalBuiltIns', () => {
@@ -800,7 +800,7 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    // ───── explicit launch projectId stamping (migration 029) ─────
+    // ───── explicit launch projectId stamping (migration 030) ─────
 
     it('stamps the EXPLICIT launch projectId on a GLOBAL workflow (not the workflow\'s NULL project)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
@@ -1402,7 +1402,7 @@ describe('WorkflowRegistry', () => {
       expect(JSON.parse(reread!.spec_json)).toEqual(definition);
     });
 
-    // ───── global scope (migration 029 — the new default) ─────
+    // ───── global scope (migration 030 — the new default) ─────
 
     it('inserts a GLOBAL row (project_id NULL, id wf-global-custom-<hex>) when projectId is null', () => {
       const definition = makeDefinition('global-flow');

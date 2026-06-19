@@ -11,7 +11,7 @@
  *   Cancel              — close without saving.
  *   Reset to default    — built-in flows only; `resetSpec` then close + onSaved.
  *   Save                — edit mode: opens the {@link SaveScopeDialog} (migration
- *                         029) — "Save globally" (`updateSpec` on the shared row,
+ *                         030) — "Save globally" (`updateSpec` on the shared row,
  *                         the default) vs "Create a project-specific copy"
  *                         (`createCustom` with a chosen project, forking the
  *                         global flow). Disabled when not dirty.
@@ -45,7 +45,7 @@ export interface WorkflowEditorModalProps {
   workflowId: string;
   /**
    * The project the run launches into ("Run with modifications") and the
-   * fallback target for a project-scoped save. With globals (migration 029) this
+   * fallback target for a project-scoped save. With globals (migration 030) this
    * is no longer the saved row's scope — a global flow's row carries
    * `project_id === null`; the Save-scope dialog (edit mode) decides where an
    * edit lands. Always non-null (the caller resolves a launch project).
@@ -61,7 +61,7 @@ export interface WorkflowEditorModalProps {
   /**
    * Projects available as a fork target for "Create a project-specific copy"
    * (Save-scope dialog). Optional; defaults to the single `projectId` so the
-   * project-copy path always has at least one target. Migration 029.
+   * project-copy path always has at least one target. Migration 030.
    */
   projects?: SaveScopeProject[];
   mode?: 'edit' | 'create';
@@ -78,7 +78,7 @@ export interface WorkflowEditorModalProps {
   /** Optional name seed for create mode; suffixed with '-copy' when present. */
   initialName?: string;
   /**
-   * Scope for a brand-new flow (create mode, migration 029): `null` ⇒ GLOBAL
+   * Scope for a brand-new flow (create mode, migration 030): `null` ⇒ GLOBAL
    * (`wf-global-custom-*`, the product default), an integer ⇒ a project-scoped
    * custom flow. Chosen in GalleryNew and threaded here. Defaults to `null`
    * (global) so a new flow is global unless the user scopes it; ignored in edit
@@ -138,7 +138,7 @@ export function WorkflowEditorModal({
    */
   const [sourcePermissionMode, setSourcePermissionMode] = useState<PermissionMode>('default');
   /**
-   * Scope of the SOURCE row (migration 029): null ⇒ a GLOBAL flow, an integer ⇒
+   * Scope of the SOURCE row (migration 030): null ⇒ a GLOBAL flow, an integer ⇒
    * project-scoped. Captured on seed (edit mode). Surfaced in the header so the
    * user knows whether a "Save globally" edit fans out to all projects, and used
    * to label the dialog. Defaults to null (no source row in create mode).
@@ -241,7 +241,7 @@ export function WorkflowEditorModal({
   // is no row yet. Saving a brand-new flow always goes through "Save as new".
   const canSave = mode === 'edit' && isDirty && !isBusy && !isLoading;
 
-  // Target scope for the name-dialog create paths (migration 029). Create mode
+  // Target scope for the name-dialog create paths (migration 030). Create mode
   // honors the GalleryNew scope (`createScopeProjectId`; null ⇒ global); edit
   // mode's "Save as new flow" keeps forking into the launch `projectId` (the
   // edit-mode global/project choice lives in the SaveScopeDialog instead).
@@ -261,7 +261,7 @@ export function WorkflowEditorModal({
 
   /**
    * Create a brand-new custom flow from the working definition. `targetProjectId`
-   * picks the scope (migration 029): `null` ⇒ a GLOBAL custom flow
+   * picks the scope (migration 030): `null` ⇒ a GLOBAL custom flow
    * (`wf-global-custom-*`), an integer ⇒ a project-scoped copy
    * (`wf-<projectId>-custom-*`). Defaults to the `projectId` prop (the
    * "Save as new flow" / create-mode path keeps the launch project's scope).
@@ -281,7 +281,7 @@ export function WorkflowEditorModal({
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
-  // Save presents the scope choice (migration 029): "Save globally" updates the
+  // Save presents the scope choice (migration 030): "Save globally" updates the
   // (global) row; "Create a project-specific copy" forks via createCustom. The
   // dialog opening is non-mutating, so it does NOT take the in-flight latch — the
   // latch is acquired only on the dialog's confirm (handleSaveScopeConfirm).
@@ -454,7 +454,7 @@ export function WorkflowEditorModal({
     return `Edit workflow · ${state.name || workflowId}`;
   }, [mode, state.name, workflowId]);
 
-  // ── Save-scope dialog inputs (migration 029) ─────────────────────────────────
+  // ── Save-scope dialog inputs (migration 030) ─────────────────────────────────
   // Projects the project-copy path can target. Falls back to the single launch
   // `projectId` when no explicit list is supplied so the copy path always has a
   // target (non-gallery callers like the wizard pass no list).
@@ -501,7 +501,7 @@ export function WorkflowEditorModal({
             data-testid="editor-name-input"
           />
 
-          {/* Scope chip (edit mode, migration 029): a GLOBAL flow's edit fans out
+          {/* Scope chip (edit mode, migration 030): a GLOBAL flow's edit fans out
               to every project, so flag it so "Save globally" is unsurprising. */}
           {mode === 'edit' && sourceProjectId === null && (
             <span
@@ -613,7 +613,7 @@ export function WorkflowEditorModal({
         onClose={handleNameDialogClose}
       />
 
-      {/* Save-scope choice (edit mode, migration 029): Save globally vs project copy. */}
+      {/* Save-scope choice (edit mode, migration 030): Save globally vs project copy. */}
       <SaveScopeDialog
         isOpen={saveScopeOpen}
         projects={saveScopeProjects}

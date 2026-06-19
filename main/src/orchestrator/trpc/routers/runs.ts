@@ -193,7 +193,7 @@ export interface RunLauncherLike {
    * `seedTaskIds` (feat/parallel-sprint, single-run lane model) seeds the
    * per-task lanes of a session-hosted `sprint` run — only valid when the
    * workflow's name === 'sprint'; `projectId` is the EXPLICIT launch project
-   * (migration 029 — global workflows) threaded into WorkflowRegistry.createRun
+   * (migration 030 — global workflows) threaded into WorkflowRegistry.createRun
    * (stamped onto workflow_runs.project_id) and SprintLaneStore.createForRun. All
    * are OPTIONAL — when substrate is omitted the run falls through the resolver
    * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no link
@@ -693,7 +693,7 @@ export const runsRouter = router({
       // (migration 014), planner seed idea (migration 017), session host
       // (Phase 1 / migration 019), per-run agent permission override
       // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint), PLUS the
-      // explicit launch projectId (migration 029 — global workflows). The
+      // explicit launch projectId (migration 030 — global workflows). The
       // projectId MUST always be threaded now: a GLOBAL built-in / custom flow
       // carries workflow.project_id = NULL, so createRun has no fallback project
       // and would throw without it. (The earlier "legacy 2-arg shape when all

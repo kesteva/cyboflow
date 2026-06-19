@@ -47,7 +47,7 @@ export interface WorkflowRegistryLike {
   getById(workflowId: string): WorkflowRow | null;
   seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
   /**
-   * Upsert the in-repo built-ins as ONE GLOBAL set (migration 029): a single
+   * Upsert the in-repo built-ins as ONE GLOBAL set (migration 030): a single
    * `wf-global-<name>` row per built-in (`project_id NULL`), shared across every
    * project. Re-points pre-refactor rows at the in-repo prompts; no projectId.
    */
@@ -57,7 +57,7 @@ export interface WorkflowRegistryLike {
   /** Reset a built-in workflow's spec back to its static default. */
   resetSpec(workflowId: string): void;
   /**
-   * Create a brand-new custom workflow row (migration 029). `projectId === null`
+   * Create a brand-new custom workflow row (migration 030). `projectId === null`
    * mints a GLOBAL custom flow; a number mints a project-scoped copy. `specJson`
    * defaults to the empty spec and `permissionMode` to `'default'` when omitted.
    */
@@ -115,7 +115,7 @@ export interface ContextDeps {
 
   /**
    * Live AgentOverrideRouter instance — the single write chokepoint for
-   * `agent_overrides` (migration 028).
+   * `agent_overrides` (migration 029).
    *
    * Injected from `main/src/index.ts` via `AgentOverrideRouter.getInstance()`.
    * Using the narrow `AgentOverrideRouterLike` interface (rather than importing

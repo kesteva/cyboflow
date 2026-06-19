@@ -144,7 +144,7 @@ export async function seedDemoInsightsHistory(args: DemoInsightsSeedArgs): Promi
 
   // The built-in workflows are normally reconciled lazily by the renderer's
   // workflows.list — force them now so the history runs have parents. As of
-  // migration 029 the built-ins are ONE GLOBAL set (`wf-global-<name>`,
+  // migration 030 the built-ins are ONE GLOBAL set (`wf-global-<name>`,
   // project_id NULL), shared across projects — so this is project-independent.
   workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows());
 
@@ -177,7 +177,7 @@ export async function seedDemoInsightsHistory(args: DemoInsightsSeedArgs): Promi
       for (let i = 0; i < runsToday; i++) {
         runSeq += 1;
         const flow: 'planner' | 'sprint' = rng() < 0.4 ? 'planner' : 'sprint';
-        // Built-ins are now ONE GLOBAL set (migration 029): the parent workflow
+        // Built-ins are now ONE GLOBAL set (migration 030): the parent workflow
         // row is `wf-global-<name>` (project_id NULL), not the old per-project
         // `wf-<projectId>-<name>`. The history run still records its own real
         // project via workflow_runs.project_id (passed to insertRun below).

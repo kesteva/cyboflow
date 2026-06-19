@@ -212,7 +212,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     const saveBtn = screen.getByTestId('editor-save-button');
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
 
-    // Save now opens the scope dialog (migration 029); "Save globally" is the
+    // Save now opens the scope dialog (migration 030); "Save globally" is the
     // default and updates the existing row in place.
     await act(async () => {
       fireEvent.click(saveBtn);

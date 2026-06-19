@@ -177,7 +177,7 @@ Build order: **P0 → P1 → (P2 ∥ P3) → P4.** P0 must land strictly before 
 ### Files created
 
 **Persistence**
-- `main/src/database/migrations/028_agent_overrides.sql` — DDL per C3 (no `enabled`, includes `description`). Header documents: canonical-basename identity, model-agnostic (no model column), `human` never a key, validation in code not CHECK, transaction-wrapped by `runFileBasedMigrations` (no BEGIN/COMMIT), `IF NOT EXISTS`.
+- `main/src/database/migrations/029_agent_overrides.sql` — DDL per C3 (no `enabled`, includes `description`). Header documents: canonical-basename identity, model-agnostic (no model column), `human` never a key, validation in code not CHECK, transaction-wrapped by `runFileBasedMigrations` (no BEGIN/COMMIT), `IF NOT EXISTS`.
 - `main/src/database/models.ts` (modified) — add `AgentOverrideRow` with the exact C3 columns (`base_agent_key: string|null`, `description: string`, `is_custom: number /*0|1*/`, `tools_json: string`; no `enabled`).
 
 **Catalogue + merge (shared by router and overlay — C6/C9)**

@@ -95,7 +95,7 @@ export function WorkflowCard({
           </span>
           {/* Project chip — shown only in the cross-project view AND only for a
               project-scoped flow (row.project_id !== null). A GLOBAL flow
-              (project_id null, migration 029) carries no owning project, so it
+              (project_id null, migration 030) carries no owning project, so it
               shows NO chip at all. */}
           {showProjectChip && row.project_id !== null && projectName !== '' && (
             <span

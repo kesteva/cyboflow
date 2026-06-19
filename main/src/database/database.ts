@@ -1475,7 +1475,7 @@ export class DatabaseService {
         BEGIN;
         CREATE TABLE workflows_reconcile_new (
           id TEXT PRIMARY KEY,
-          -- project_id is NULLABLE (NULL ⇒ global) per migration 029; this safety-net
+          -- project_id is NULLABLE (NULL ⇒ global) per migration 030; this safety-net
           -- reconciler must not regress globals back to NOT NULL if it ever re-fires.
           project_id INTEGER,
           name TEXT NOT NULL,

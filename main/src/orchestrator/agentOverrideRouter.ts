@@ -1,6 +1,6 @@
 /**
  * AgentOverrideRouter — the SINGLE write chokepoint for `agent_overrides`
- * (migration 028).
+ * (migration 029).
  *
  * INVARIANT: every agent_overrides write (builtin override upsert, builtin
  * reset, custom-agent create, custom-agent delete) routes through applyChange.
@@ -434,7 +434,7 @@ export class AgentOverrideRouter {
    * Names of the project's workflows whose spec_json binds `agentKey` to any
    * step (step.agent === agentKey). Malformed spec_json is skipped.
    *
-   * Migration-029 note: this checks only PROJECT-SCOPED workflows
+   * Migration-030 note: this checks only PROJECT-SCOPED workflows
    * (`project_id = ?`); a GLOBAL custom flow (project_id NULL) binding `agentKey`
    * is NOT caught by this per-project referential guard. Custom agents /
    * agent_overrides remain per-project (out of scope for the global-workflow

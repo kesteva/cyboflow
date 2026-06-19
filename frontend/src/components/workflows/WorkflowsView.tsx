@@ -117,7 +117,7 @@ export function WorkflowsView(): React.JSX.Element {
   // One-shot project probe for the no-projects empty-state + the Save-scope /
   // new-flow-scope pickers' project options. `hasProjects` is null while
   // unknown so we never flash the CTA before the probe resolves; `projectList`
-  // (id + name) feeds the scope pickers (migration 029).
+  // (id + name) feeds the scope pickers (migration 030).
   const [hasProjects, setHasProjects] = useState<boolean | null>(null);
   const [projectList, setProjectList] = useState<{ id: number; name: string }[]>([]);
   useEffect(() => {
@@ -162,7 +162,7 @@ export function WorkflowsView(): React.JSX.Element {
     initialPermissionMode?: PermissionMode;
     initialName?: string;
     /**
-     * Create mode: the chosen scope for the new flow (migration 029) — null ⇒
+     * Create mode: the chosen scope for the new flow (migration 030) — null ⇒
      * GLOBAL (the default), an integer ⇒ project-scoped. Ignored in edit mode.
      */
     createScopeProjectId?: number | null;
@@ -191,7 +191,7 @@ export function WorkflowsView(): React.JSX.Element {
    * the active `projectFilter` when set, else the first enumerated project.
    * Returns null when there are no projects (the New cards become no-ops).
    *
-   * Migration 029: a workflow row's `project_id` is now NULL for global flows
+   * Migration 030: a workflow row's `project_id` is now NULL for global flows
    * (and globals sort to the top of the deduped list), so we can no longer read
    * the target off `workflows[0]`. Use the probed `projectList` instead, falling
    * back to a project-scoped workflow row only if the probe has not yet resolved.
@@ -219,7 +219,7 @@ export function WorkflowsView(): React.JSX.Element {
   const onRunWorkflow = (entry: WorkflowGalleryEntry): void => {
     // Land the start-session wizard locked to this workflow's project with the
     // flow preselected BY ROW ID. goToWizard's nav mutual-exclusion closes the
-    // Workflows pane. A GLOBAL flow (project_id NULL, migration 029) carries no
+    // Workflows pane. A GLOBAL flow (project_id NULL, migration 030) carries no
     // project of its own, so the wizard collects one (lockProjectId left
     // undefined — the launch phase refines this preselect path).
     useNavigationStore.getState().goToWizard({
@@ -231,7 +231,7 @@ export function WorkflowsView(): React.JSX.Element {
   const onEditWorkflow = (entry: WorkflowGalleryEntry): void => {
     // The editor's projectId is the launch / fallback project for "Run with
     // modifications" and the project-copy save target. For a GLOBAL flow
-    // (project_id NULL, migration 029) it falls back to the resolved target
+    // (project_id NULL, migration 030) it falls back to the resolved target
     // project; the actual scope decision is the editor's Save-scope dialog (Save
     // globally vs a project copy). With no project resolvable the editor cannot
     // open, so no-op (mirrors the New cards' no-project no-op).
@@ -246,7 +246,7 @@ export function WorkflowsView(): React.JSX.Element {
 
   const onDuplicateWorkflow = (entry: WorkflowGalleryEntry): void => {
     if (duplicateInFlightRef.current) return;
-    // Duplicate PRESERVES the source flow's scope (migration 029): a GLOBAL flow
+    // Duplicate PRESERVES the source flow's scope (migration 030): a GLOBAL flow
     // (project_id NULL) forks to another global copy; a project-scoped flow forks
     // within the same project. createCustom accepts a null projectId for the
     // global case, so no project resolution is needed.
@@ -385,7 +385,7 @@ export function WorkflowsView(): React.JSX.Element {
           templates={newWorkflowTemplates}
           projects={projectList}
           // A new flow defaults to GLOBAL (null) unless a gallery project filter
-          // is active, in which case that project is preselected (migration 029).
+          // is active, in which case that project is preselected (migration 030).
           defaultScopeProjectId={projectFilter}
           onClose={() => setNewWorkflowProjectId(null)}
           onSelect={(def, pm, name, scopeProjectId) => {
@@ -413,7 +413,7 @@ export function WorkflowsView(): React.JSX.Element {
           mode={wfEditor.mode}
           workflowId={wfEditor.workflowId}
           projectId={wfEditor.projectId}
-          // Save-scope dialog inputs (migration 029): the gallery's active filter
+          // Save-scope dialog inputs (migration 030): the gallery's active filter
           // defaults the project-copy target; the project list feeds its picker.
           activeProjectFilter={projectFilter}
           projects={projectList}

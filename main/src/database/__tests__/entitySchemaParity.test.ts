@@ -55,7 +55,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '028_agent_overrides.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '029_agent_overrides.sql'), 'utf-8'));
   return db;
 }
 

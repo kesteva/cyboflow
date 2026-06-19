@@ -441,7 +441,7 @@ export interface WorkflowRevisionRow {
 }
 
 /**
- * `agent_overrides` row (migration 028) — a per-project override of a built-in
+ * `agent_overrides` row (migration 029) — a per-project override of a built-in
  * agent (`base_agent_key === agent_key`, `is_custom 0`) OR a brand-new custom
  * agent (`base_agent_key NULL`, `is_custom 1`). One row per (project_id,
  * agent_key). `name` is always the frontmatter name `cyboflow-<agent_key>` and is

@@ -48,10 +48,14 @@ per-project; built-ins and global customs are `project_id NULL`.
   plans `029_artifacts`, and `028` is already split (`agent_overrides` here vs
   `idea_attachments` on main). `029` is fine on this branch in isolation but is a
   merge-time renumber — resolve when these branches converge (mirror the 028 handling).
+  **✅ Resolved 2026-06-19 on rebase onto main:** main owns `028_idea_attachments`, so this
+  branch renumbered `028_agent_overrides → 029_agent_overrides` and
+  `029_global_workflows → 030_global_workflows` (and `migration029.test.ts → migration030.test.ts`).
+  ridge-ravine's `029_artifacts` collision is still open until that branch merges.
 
 ## Design
 
-### 1. Schema — migration `029_global_workflows.sql`
+### 1. Schema — migration `030_global_workflows.sql`
 
 Single transaction, `PRAGMA foreign_keys=OFF` (runner-managed):
 
@@ -113,8 +117,8 @@ tolerate null (see §3).
 
 ## Implementation steps (atomic commits)
 
-1. `feat: migration 029 — global built-in workflows + re-point run history` (the SQL +
-   `migration029.test.ts`).
+1. `feat: migration 030 — global built-in workflows + re-point run history` (the SQL +
+   `migration030.test.ts`).
 2. `refactor: WorkflowRow.project_id nullable + tolerate global scope` (type + consumer
    audit; `runLauncher`/`createRun`/`sprintLanes`/insights/agentOverride reads).
 3. `feat: seed built-ins once as global; listByProject unions global + project` (registry
@@ -127,7 +131,7 @@ tolerate null (see §3).
 
 ## Tests
 
-- **migration029.test.ts:** per-project built-ins collapse to `wf-global-*`; runs +
+- **migration030.test.ts:** per-project built-ins collapse to `wf-global-*`; runs +
   revisions re-pointed (no orphaned history); edited per-project rows preserved; unedited
   ones gone; `project_id` nullable; projects FK present.
 - **registry:** `ensureGlobalBuiltIns` idempotent; `listByProject` returns global +

@@ -11,7 +11,7 @@
  *      `onSelect(undefined, undefined, undefined, scopeProjectId)` so the caller
  *      seeds a brand-new custom skeleton.
  *
- * SCOPE (migration 029): a new flow defaults to GLOBAL (scopeProjectId null,
+ * SCOPE (migration 030): a new flow defaults to GLOBAL (scopeProjectId null,
  * shown across all projects). A scope control offers either Global or a specific
  * project; the chosen scope is threaded as the 4th `onSelect` argument. The
  * project options come from `projects`; if none are supplied only Global is
@@ -55,7 +55,7 @@ export interface GalleryNewProps {
    */
   templates: GalleryNewTemplate[];
   /**
-   * Projects the new flow can be scoped to (migration 029). Empty ⇒ only the
+   * Projects the new flow can be scoped to (migration 030). Empty ⇒ only the
    * Global scope is offered.
    */
   projects?: GalleryNewProject[];
@@ -126,7 +126,7 @@ export function GalleryNew({
     <Modal isOpen={isOpen} onClose={onClose} size="lg">
       <ModalHeader title="New workflow" onClose={onClose} />
       <ModalBody className="flex flex-col gap-6">
-        {/* Scope (migration 029) — GLOBAL default, or scope to one project. */}
+        {/* Scope (migration 030) — GLOBAL default, or scope to one project. */}
         <section className="flex flex-col gap-2">
           <h3 className="eyebrow text-[10px] uppercase tracking-[0.1em] text-text-tertiary">
             Scope

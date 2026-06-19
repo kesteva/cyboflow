@@ -71,7 +71,7 @@ describe('GalleryNew', () => {
       <GalleryNew isOpen onClose={() => {}} templates={TEMPLATES} projects={PROJECTS} onSelect={onSelect} />,
     );
     fireEvent.click(screen.getByTestId('gallery-new-template-a'));
-    // 4th arg = scope; default is GLOBAL (null) for a new flow (migration 029).
+    // 4th arg = scope; default is GLOBAL (null) for a new flow (migration 030).
     expect(onSelect).toHaveBeenCalledWith(def('planner'), 'acceptEdits', 'Planner', null);
   });
 

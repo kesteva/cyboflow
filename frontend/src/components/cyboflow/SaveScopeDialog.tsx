@@ -1,5 +1,5 @@
 /**
- * SaveScopeDialog — the editor's two-way Save-scope choice (migration 029).
+ * SaveScopeDialog — the editor's two-way Save-scope choice (migration 030).
  *
  * When the user saves an EDITED flow, they decide whether the edit applies
  * globally (to the shared `wf-global-*` row, visible across all projects) or

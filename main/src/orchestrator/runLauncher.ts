@@ -214,7 +214,7 @@ export class RunLauncher {
     // SprintLaneStore.createForRun and stamps `workflow_runs.batch_id`. ONLY
     // valid when the workflow's name === 'sprint' — any other workflow throws.
     seedTaskIds?: string[],
-    // The EXPLICIT launch project (migration 029 — global workflows). For a
+    // The EXPLICIT launch project (migration 030 — global workflows). For a
     // GLOBAL workflow (a built-in or global custom flow, `workflow.project_id
     // IS NULL`) this is the ONLY source of the run's project: it is threaded into
     // WorkflowRegistry.createRun (stamped onto the NOT-NULL workflow_runs.project_id)
@@ -272,7 +272,7 @@ export class RunLauncher {
       }
     }
 
-    // Thread the EXPLICIT launch project (migration 029) so createRun stamps it
+    // Thread the EXPLICIT launch project (migration 030) so createRun stamps it
     // onto workflow_runs.project_id. For a GLOBAL workflow (project_id NULL) this
     // is required; for a per-project row (quick sentinel / edited built-in) it is
     // omitted and createRun falls back to workflow.project_id. The `opts` object
@@ -359,7 +359,7 @@ export class RunLauncher {
       // write, NOT routed through the task chokepoint. Stamped at launch so the
       // link exists before the first cyboflow_update_sprint_task report.
       if (seedTaskIds && seedTaskIds.length > 0 && this.sprintLanes) {
-        // Seed the lanes with the run's project (migration 029). Prefer the
+        // Seed the lanes with the run's project (migration 030). Prefer the
         // EXPLICITLY-threaded launch `projectId` — the canonical source now that
         // workflow.project_id is NULLABLE (NULL for the global built-ins). When a
         // caller did not thread it, fall back to the RUN's stamped project

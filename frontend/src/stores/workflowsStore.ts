@@ -17,7 +17,7 @@
  * `runs.list` per workflow. When filtered we fan out over the single project.
  *
  * Workflows are then DEDUPED BY `row.id` (mirroring the agent dedup): a GLOBAL
- * flow (`project_id` null, migration 029) is returned by every project's
+ * flow (`project_id` null, migration 030) is returned by every project's
  * `workflows.list`, so it would otherwise repeat once per enumerated project.
  * Its `lastUsedAt` is folded to the NEWEST run timestamp across the fan-out,
  * since a global flow's runs are scattered across the projects it ran in.
@@ -283,7 +283,7 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
     // A newer fetch superseded us — drop everything we computed.
     if (generation !== fetchGeneration) return;
 
-    // Dedupe workflows by row.id (migration 029): a GLOBAL flow (project_id null)
+    // Dedupe workflows by row.id (migration 030): a GLOBAL flow (project_id null)
     // is returned by EVERY project's workflows.list, so the cross-project fan-out
     // yields the same row once per enumerated project. We keep ONE entry per id
     // (mirrors the agentsByKey dedup below) and fold the per-project run history

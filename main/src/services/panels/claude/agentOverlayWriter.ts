@@ -2,7 +2,7 @@
  * agentOverlayWriter — the substrate-shared seam that materializes a project's
  * EFFECTIVE agent set (built-in catalogue + `agent_overrides`) into a run's
  * worktree `.claude/agents/` directory, so BOTH CLI substrates auto-discover the
- * project's customized agents at spawn (migration 028 / agent gallery feature).
+ * project's customized agents at spawn (migration 029 / agent gallery feature).
  *
  * This is layered ON TOP of `WorkflowBundleWriter`: that writer places a flow's
  * sibling-bundle agents verbatim; this overlay then writes the FULL effective set
@@ -64,7 +64,7 @@ function getRunProjectId(db: Database.Database, runId: string, logger?: LoggerLi
 
 /**
  * Read the project's `agent_overrides` rows. Wrapped in try/catch → `[]` when the
- * table is absent (a DB predating migration 028) or on any read error — the overlay
+ * table is absent (a DB predating migration 029) or on any read error — the overlay
  * then writes the pure built-in set.
  */
 function readOverrides(db: Database.Database, projectId: number, logger?: LoggerLike): AgentOverrideRow[] {

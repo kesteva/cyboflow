@@ -594,7 +594,7 @@ async function initializeServices() {
   // it opens a blocking decision review_item (pausing the run) and applies
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
   ReviewItemRouter.initialize(cyboflowDb);
-  // Single write chokepoint for `agent_overrides` (migration 028) — the
+  // Single write chokepoint for `agent_overrides` (migration 029) — the
   // cyboflow.agents tRPC router reaches it via getInstance(). Serializes
   // per-project; emits AgentChangedEvent post-commit on the per-project channel.
   AgentOverrideRouter.initialize(cyboflowDb);

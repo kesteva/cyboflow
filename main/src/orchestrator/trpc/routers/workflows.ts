@@ -30,7 +30,7 @@ export const workflowsRouter = router({
         });
       }
       // Reconcile the in-repo built-ins as ONE GLOBAL set on every list
-      // (migration 029): UPSERT a single `wf-global-<name>` row per built-in
+      // (migration 030): UPSERT a single `wf-global-<name>` row per built-in
       // (project_id NULL), shared across every project — no per-project copies.
       // A pre-refactor row still pointing at the old plugin-cache prompt is
       // re-pointed at the in-repo prompt (preserving any user spec_json edits).
@@ -153,7 +153,7 @@ export const workflowsRouter = router({
    * validates `definition` as `.input()` (BAD_REQUEST on failure); a name
    * collision maps to CONFLICT.
    *
-   * Scope (migration 029) is chosen by `projectId`: omitted or `null` mints a
+   * Scope (migration 030) is chosen by `projectId`: omitted or `null` mints a
    * GLOBAL custom flow (the product default — one shared flow across projects);
    * a positive integer mints a project-scoped copy. The registry derives the id
    * (`wf-global-custom-<hex>` vs `wf-<projectId>-custom-<hex>`) and serialises

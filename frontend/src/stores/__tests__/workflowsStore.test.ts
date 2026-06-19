@@ -1,6 +1,6 @@
 /**
  * Unit tests for workflowsStore — focused on the cross-project fan-out dedup
- * introduced for global workflows (migration 029).
+ * introduced for global workflows (migration 030).
  *
  * A GLOBAL flow (`project_id` null) is returned by EVERY project's
  * `workflows.list`, so the fan-out yields the same row once per enumerated
@@ -148,7 +148,7 @@ describe('deriveLastUsedByWorkflow', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cross-project dedup of global workflows (migration 029)
+// Cross-project dedup of global workflows (migration 030)
 // ---------------------------------------------------------------------------
 
 describe('workflowsStore — global-workflow dedup', () => {

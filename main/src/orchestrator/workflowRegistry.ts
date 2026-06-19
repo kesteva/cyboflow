@@ -179,7 +179,7 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Reconcile the in-repo built-in workflows as ONE GLOBAL set (migration 029).
+   * Reconcile the in-repo built-in workflows as ONE GLOBAL set (migration 030).
    *
    * Replaces the old per-project `reconcileBuiltIns(projectId, …)`: instead of
    * minting a `wf-<projectId>-<name>` row for every project, this UPSERTs a
@@ -340,7 +340,7 @@ export class WorkflowRegistry {
    * Create a brand-new custom workflow row from an edited definition
    * ("Save as new flow" / "Create a project-specific copy").
    *
-   * Scope (migration 029) is chosen by `params.projectId`:
+   * Scope (migration 030) is chosen by `params.projectId`:
    *   - `null`    → GLOBAL custom flow (shown across every project). The row is
    *                 inserted with `project_id NULL` and id
    *                 `wf-global-custom-<8 lowercase hex chars>`.
@@ -431,9 +431,9 @@ export class WorkflowRegistry {
 
   /**
    * List the workflows visible to a project: the GLOBAL set
-   * (`project_id IS NULL` — built-ins + global customs, migration 029) UNIONed
+   * (`project_id IS NULL` — built-ins + global customs, migration 030) UNIONed
    * with that project's own scoped rows (`project_id = ?` — project-copy customs
-   * and any edited per-project built-in 029 preserved).
+   * and any edited per-project built-in 030 preserved).
    * Used by the frontend workflow picker.
    *
    * Excludes the __quick__ sentinel row — that row is an internal implementation
@@ -532,12 +532,12 @@ export class WorkflowRegistry {
    * session can own many runs over its lifetime. When omitted the column stays
    * NULL — the legacy parentless-run path, byte-identical to before.
    *
-   * `opts.projectId` (migration 029) is the EXPLICIT launch project stamped onto
+   * `opts.projectId` (migration 030) is the EXPLICIT launch project stamped onto
    * `workflow_runs.project_id` (a NOT-NULL column). It MUST be supplied for a
    * GLOBAL workflow (`workflow.project_id IS NULL` — a built-in or a global
    * custom flow) because the workflow row no longer carries a project. When
    * omitted, it falls back to `workflow.project_id` (the per-project path: the
-   * quick sentinel or an edited per-project built-in preserved by 029). Throws
+   * quick sentinel or an edited per-project built-in preserved by 030). Throws
    * if neither source yields a project (a global flow launched without an
    * explicit projectId).
    *
@@ -557,7 +557,7 @@ export class WorkflowRegistry {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
     }
 
-    // Stamp the EXPLICIT launch project (migration 029). For a GLOBAL workflow
+    // Stamp the EXPLICIT launch project (migration 030). For a GLOBAL workflow
     // (built-in or global custom) workflow.project_id is NULL, so the launch
     // project must be threaded by the caller (runs.start → runLauncher.launch).
     // For a per-project row (quick sentinel / edited built-in) it falls back to

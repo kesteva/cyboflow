@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_messages_timestamp ON conversation_m
 
 -- Workflow registry: global built-ins (project_id NULL) + per-project customs.
 -- project_id is NULLABLE: NULL ⇒ global (shown across all projects), an integer
--- ⇒ project-scoped (migration 029). FK to projects(id) ON DELETE CASCADE, with
+-- ⇒ project-scoped (migration 030). FK to projects(id) ON DELETE CASCADE, with
 -- NULL allowed by the FK.
 CREATE TABLE IF NOT EXISTS workflows (
   id TEXT PRIMARY KEY,

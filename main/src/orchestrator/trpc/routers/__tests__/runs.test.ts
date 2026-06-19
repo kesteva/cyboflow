@@ -316,7 +316,7 @@ describe('cyboflow.runs.start', () => {
         branchName: 'cyboflow/my-workflow/abc12345',
       });
 
-      // The explicit launch projectId (migration 029 — global workflows) is now
+      // The explicit launch projectId (migration 030 — global workflows) is now
       // ALWAYS threaded: start calls the full-form launch with every optional arg
       // undefined EXCEPT the trailing projectId (10th slot), so createRun can stamp
       // workflow_runs.project_id even for a GLOBAL flow (workflow.project_id NULL).
@@ -353,7 +353,7 @@ describe('cyboflow.runs.start', () => {
       // With an ideaId present, start calls the full-form launch — substrate +
       // taskId undefined, ideaId in the 5th slot, sessionId (6th) +
       // requestedPermissionMode (7th) + baseBranch (8th) + seedTaskIds (9th)
-      // undefined, and the explicit launch projectId (migration 029) in the 10th
+      // undefined, and the explicit launch projectId (migration 030) in the 10th
       // slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
@@ -389,7 +389,7 @@ describe('cyboflow.runs.start', () => {
       // With a sessionId present, start calls the full-form launch — substrate +
       // taskId + ideaId undefined, sessionId in the 6th slot, requestedPermissionMode
       // (7th) + baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
-      // launch projectId (migration 029) in the 10th slot — so the launcher hosts
+      // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1);
@@ -424,7 +424,7 @@ describe('cyboflow.runs.start', () => {
       // With permissionMode present, start calls the full-form launch —
       // substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto' in the
       // 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
-      // launch projectId (migration 029) in the 10th slot.
+      // launch projectId (migration 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1);
     } finally {

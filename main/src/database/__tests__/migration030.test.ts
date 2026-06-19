@@ -1,7 +1,7 @@
 /**
- * Integration tests for migration 029_global_workflows.sql.
+ * Integration tests for migration 030_global_workflows.sql.
  *
- * Migration 029 makes the standard flows (planner/sprint/compound) GLOBAL —
+ * Migration 030 makes the standard flows (planner/sprint/compound) GLOBAL —
  * collapsing the old per-project `wf-<projectId>-<name>` rows to a single
  * `wf-global-<name>` row each (project_id NULL) — while re-pointing all run +
  * revision history to the global ids BEFORE deleting the redundant per-project
@@ -9,11 +9,11 @@
  * spec_json) are preserved as project-scoped flows. The `workflows.project_id`
  * column becomes NULLABLE with a projects FK ON DELETE CASCADE.
  *
- * We build the pre-029 shape from the real .sql files: a minimal `projects`
+ * We build the pre-030 shape from the real .sql files: a minimal `projects`
  * table, then 006 (workflows + workflow_runs), then the workflow_revisions DDL
  * from 026 applied inline (mirrors migration020.test.ts inlining only the columns
  * it needs — the rest of 026 / run_usage is irrelevant here). We then read +
- * apply the real 029 SQL via the production path so this proves the file itself
+ * apply the real 030 SQL via the production path so this proves the file itself
  * is correct (not a hand-copied inline string).
  *
  * Targets:
@@ -77,7 +77,7 @@ interface FkRow {
 }
 
 /**
- * Build the pre-029 DB: projects + the 006 workflows/workflow_runs tables + the
+ * Build the pre-030 DB: projects + the 006 workflows/workflow_runs tables + the
  * 026 workflow_revisions table, then seed per-project built-ins, runs, and
  * revisions pointing at them.
  *
@@ -89,7 +89,7 @@ interface FkRow {
  *   - wf-1-__quick__ (sentinel — untouched)
  * plus workflow_runs + workflow_revisions pointing at several of these.
  */
-function buildPre029Db(): Database.Database {
+function buildPre030Db(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
 
@@ -109,7 +109,7 @@ function buildPre029Db(): Database.Database {
   db.exec(readMigration('006_cyboflow_schema.sql'));
 
   // 026's workflow_revisions DDL, applied inline (the run_usage / spec_hash /
-  // index parts of 026 are irrelevant to 029's re-point).
+  // index parts of 026 are irrelevant to 030's re-point).
   db.exec(`
     CREATE TABLE IF NOT EXISTS workflow_revisions (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +133,7 @@ function buildPre029Db(): Database.Database {
   insWf.run('wf-2-planner', 2, 'planner', '{}', '/wf/planner.md', 'default');
   // EDITED per-project built-in — non-empty spec_json, must survive.
   insWf.run('wf-2-sprint', 2, 'sprint', '{"id":"sprint","phases":[]}', '/wf/sprint.md', 'dontAsk');
-  // A project custom + the quick sentinel — both untouched by 029.
+  // A project custom + the quick sentinel — both untouched by 030.
   insWf.run('wf-1-custom-aaaa', 1, 'My Custom', '{"id":"x","phases":[]}', null, 'default');
   insWf.run('wf-1-__quick__', 1, '__quick__', '{}', null, 'default');
 
@@ -160,14 +160,14 @@ function buildPre029Db(): Database.Database {
   return db;
 }
 
-function applyMigration029(db: Database.Database): void {
-  runMigrationViaProductionPath(db, readMigration('029_global_workflows.sql'));
+function applyMigration030(db: Database.Database): void {
+  runMigrationViaProductionPath(db, readMigration('030_global_workflows.sql'));
 }
 
-describe('Migration 029: global built-in workflows + re-point run history', () => {
+describe('Migration 030: global built-in workflows + re-point run history', () => {
   it('(a) creates exactly one wf-global-<name> row per built-in with project_id NULL', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     for (const name of ['planner', 'sprint', 'compound']) {
       const rows = db
@@ -181,8 +181,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(a) sources workflow_path / permission_mode from the per-project rows', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const sprint = db
       .prepare('SELECT workflow_path, permission_mode, spec_json FROM workflows WHERE id = ?')
@@ -200,10 +200,10 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(b) re-points workflow_runs to the global ids without losing any history', () => {
-    const db = buildPre029Db();
+    const db = buildPre030Db();
     const before = (db.prepare('SELECT COUNT(*) AS n FROM workflow_runs').get() as { n: number }).n;
 
-    applyMigration029(db);
+    applyMigration030(db);
 
     // No run lost.
     const after = (db.prepare('SELECT COUNT(*) AS n FROM workflow_runs').get() as { n: number }).n;
@@ -246,12 +246,12 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(b) re-points workflow_revisions to the global ids without losing history', () => {
-    const db = buildPre029Db();
+    const db = buildPre030Db();
     const before = (
       db.prepare('SELECT COUNT(*) AS n FROM workflow_revisions').get() as { n: number }
     ).n;
 
-    applyMigration029(db);
+    applyMigration030(db);
 
     const after = (
       db.prepare('SELECT COUNT(*) AS n FROM workflow_revisions').get() as { n: number }
@@ -283,8 +283,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(c) deletes the unedited per-project built-in rows', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     for (const id of ['wf-1-planner', 'wf-1-sprint', 'wf-1-compound', 'wf-2-planner']) {
       const row = db.prepare('SELECT id FROM workflows WHERE id = ?').get(id);
@@ -295,8 +295,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(d) preserves an edited per-project built-in as a project-scoped flow', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const edited = db
       .prepare('SELECT id, project_id, name, spec_json FROM workflows WHERE id = ?')
@@ -312,8 +312,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(e) makes workflows.project_id nullable', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const cols = db.prepare('PRAGMA table_info(workflows)').all() as TableInfoRow[];
     const projectId = cols.find((c) => c.name === 'project_id');
@@ -335,8 +335,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(f) adds the projects FK on workflows (ON DELETE CASCADE)', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const fks = db.prepare('PRAGMA foreign_key_list(workflows)').all() as FkRow[];
     const projectsFk = fks.find((fk) => fk.table === 'projects');
@@ -349,8 +349,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(f) the projects FK cascades: deleting a project drops its project-scoped flows but not globals', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
     db.pragma('foreign_keys = ON');
 
     // Delete project 2 → its preserved edited sprint flow cascades away.
@@ -366,8 +366,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('(g) leaves the __quick__ sentinel and project customs untouched', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const quick = db
       .prepare('SELECT id, project_id, name FROM workflows WHERE id = ?')
@@ -392,8 +392,8 @@ describe('Migration 029: global built-in workflows + re-point run history', () =
   });
 
   it('preserves the idx_workflows_project_id index across the rebuild', () => {
-    const db = buildPre029Db();
-    applyMigration029(db);
+    const db = buildPre030Db();
+    applyMigration030(db);
 
     const idx = db
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='workflows'")

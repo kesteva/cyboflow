@@ -9,7 +9,7 @@
  * Any column added to those tables at the canonical site MUST be
  * mirrored here too.
  *
- * NOTE: workflows.project_id is NULLABLE (migration 029, NULL ⇒ global). The
+ * NOTE: workflows.project_id is NULLABLE (migration 030, NULL ⇒ global). The
  * canonical schema.sql also carries a `FOREIGN KEY (project_id) REFERENCES
  * projects(id) ON DELETE CASCADE`, but this hermetic fixture deliberately OMITS
  * that FK so registry tests need not seed a `projects` table — these test DBs

@@ -102,7 +102,7 @@ describe('cyboflow.workflows.list', () => {
     const registry = new WorkflowRegistry(adapter, silentLogger);
 
     // Seed two PROJECT-SCOPED workflows directly (an edited per-project built-in
-    // preserved by migration 029, disambiguated by the project chip in the UI).
+    // preserved by migration 030, disambiguated by the project chip in the UI).
     rawDb
       .prepare(
         `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
@@ -128,7 +128,7 @@ describe('cyboflow.workflows.list', () => {
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
 
     // list() reconciles the built-ins as ONE GLOBAL set on every call (migration
-    // 029): the 3 `wf-global-<name>` rows are UPSERTed and surface for project 1
+    // 030): the 3 `wf-global-<name>` rows are UPSERTed and surface for project 1
     // via the project_id-IS-NULL union, ALONGSIDE the 2 manually-seeded
     // project-scoped rows (the preserved edited built-ins). The renderer dedupes
     // global vs project rows by id; the router returns the raw union (5 rows).
@@ -169,7 +169,7 @@ describe('cyboflow.workflows.list', () => {
     // Every in-repo built-in must have been seeded (planner + sprint + compound).
     expect(result).toHaveLength(CYBOFLOW_WORKFLOW_NAMES.length);
 
-    // They are GLOBAL (migration 029): NULL project_id, shared across projects,
+    // They are GLOBAL (migration 030): NULL project_id, shared across projects,
     // surfaced for project 42 via the project_id-IS-NULL union in listByProject.
     for (const wf of result) {
       expect(wf.project_id).toBeNull();
