@@ -364,6 +364,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['review_item_id', 'resolution_kind'],
         },
       },
+      {
+        name: 'cyboflow_report_artifact',
+        description:
+          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). Templated atypes (idea-spec, decomposed-stories, screenshots) are normally auto-created by the orchestrator on step completion — use this primarily for ui-prototype / generic live canvases, or to enrich an existing artifact. Returns { artifactId }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            atype: {
+              type: 'string',
+              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'],
+              description: 'Artifact type (required). ui-prototype / generic render as an embedded live canvas; the others are templated.',
+            },
+            label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
+            payload_json: {
+              type: 'string',
+              description: 'Optional JSON payload, e.g. {"url":"http://localhost:8081"} for a ui-prototype or {"fileNames":["a.png"]} for screenshots',
+            },
+          },
+          required: ['atype', 'label'],
+        },
+      },
+      {
+        name: 'cyboflow_commit_artifact',
+        description:
+          'Persist a run artifact into the repo so it survives session close (session-only artifacts are otherwise dropped when the run closes). The run is derived from CYBOFLOW_RUN_ID. Pass the artifact_id returned by cyboflow_report_artifact. Returns { artifactId }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            artifact_id: { type: 'string', description: 'The artifact id to commit (from cyboflow_report_artifact)' },
+            payload_json: { type: 'string', description: 'Optional final payload JSON to store alongside the commit' },
+          },
+          required: ['artifact_id'],
+        },
+      },
     ],
   };
 });
@@ -1017,6 +1051,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (note !== undefined) queryParams['note'] = note;
       if (task_id !== undefined) queryParams['taskId'] = task_id;
       return executeMcpQuery('mcp-resolve-finding', queryParams);
+    }
+
+    case 'cyboflow_report_artifact': {
+      const args = (request.params.arguments ?? {}) as {
+        atype?: unknown;
+        label?: unknown;
+        payload_json?: unknown;
+      };
+      const { atype, label, payload_json } = args;
+      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'];
+      if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: `atype: ${validAtypes.join(' | ')}` }) },
+          ],
+        };
+      }
+      if (typeof label !== 'string' || label.length === 0) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'label: string' }) }],
+        };
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'payload_json: string (optional)' }) },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { atype, label };
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-report-artifact', queryParams);
+    }
+
+    case 'cyboflow_commit_artifact': {
+      const args = (request.params.arguments ?? {}) as { artifact_id?: unknown; payload_json?: unknown };
+      const { artifact_id, payload_json } = args;
+      if (typeof artifact_id !== 'string' || artifact_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'artifact_id: string' }) },
+          ],
+        };
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'payload_json: string (optional)' }) },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { artifactId: artifact_id };
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-commit-artifact', queryParams);
     }
 
     default:

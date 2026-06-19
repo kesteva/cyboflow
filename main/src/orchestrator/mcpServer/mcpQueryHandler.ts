@@ -58,6 +58,9 @@ import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRou
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
+import { ArtifactRouter, ArtifactError } from '../artifactRouter';
+import type { ArtifactActor } from '../artifactRouter';
+import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
@@ -207,6 +210,24 @@ export type McpQueryMessage =
       note?: string;
       /** Optional minted task id; recorded when resolutionKind='promoted'. */
       taskId?: string;
+    }
+  | {
+      /** Create (or idempotently re-derive) a run artifact via the ArtifactRouter
+       *  chokepoint. UPSERTS by (run, atype); replies with the artifact id. */
+      type: 'mcp-report-artifact';
+      requestId: string;
+      runId: string;
+      atype: ArtifactType;
+      label: string;
+      payloadJson?: string;
+    }
+  | {
+      /** Commit a run artifact (flip committed). Replies with the artifact id. */
+      type: 'mcp-commit-artifact';
+      requestId: string;
+      runId: string;
+      artifactId: string;
+      payloadJson?: string;
     }
   | {
       type: 'shell-approval-request';
@@ -426,6 +447,12 @@ export class McpQueryHandler {
           // AWAITED (unlike fire-and-forget report-finding) so a failed resolve
           // surfaces to the agent rather than silently leaving the finding pending.
           await this.handleResolveFinding(msg, client);
+          break;
+        case 'mcp-report-artifact':
+          await this.handleReportArtifact(msg, client);
+          break;
+        case 'mcp-commit-artifact':
+          await this.handleCommitArtifact(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -1717,6 +1744,82 @@ export class McpQueryHandler {
     } catch (err) {
       this.writeReviewItemError(client, msg.requestId, err);
     }
+  }
+
+  /**
+   * Create (or idempotently re-derive) a run artifact via the ArtifactRouter
+   * chokepoint. Unlike report-finding this AWAITS the write so it can reply with
+   * the artifact id (the agent needs it to enrich/commit later). The project +
+   * actor are resolved from the run; the artifact is minted isNew so its tab
+   * pulses until focused.
+   */
+  private async handleReportArtifact(
+    msg: Extract<McpQueryMessage, { type: 'mcp-report-artifact' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    try {
+      const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
+        op: 'create',
+        runId: msg.runId,
+        atype: msg.atype,
+        label: msg.label,
+        payloadJson: msg.payloadJson ?? null,
+        isNew: true,
+        actor,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { artifactId, atype: msg.atype },
+      });
+    } catch (err) {
+      this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Commit a run artifact (flip committed) via the ArtifactRouter chokepoint.
+   */
+  private async handleCommitArtifact(
+    msg: Extract<McpQueryMessage, { type: 'mcp-commit-artifact' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    try {
+      const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
+        op: 'commit',
+        artifactId: msg.artifactId,
+        actor,
+        ...(msg.payloadJson !== undefined ? { payloadJson: msg.payloadJson } : {}),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { artifactId, committed: true },
+      });
+    } catch (err) {
+      this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  /** Surface an ArtifactError code (or a generic message) as an ok:false reply. */
+  private writeArtifactError(client: net.Socket, requestId: string, err: unknown): void {
+    const error =
+      err instanceof ArtifactError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : String(err);
+    this.writeResponse(client, { type: 'mcp-query-response', requestId, ok: false, error });
   }
 
   /**

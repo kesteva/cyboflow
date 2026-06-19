@@ -9,6 +9,7 @@
 import type { CliSubstrate } from './substrate';
 import type { ExecutionModel } from './executionModel';
 import type { WorkflowRunStatus } from './cyboflow';
+import type { ArtifactType } from './artifacts';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -272,6 +273,16 @@ export interface WorkflowStep {
    * per-item lane. Additive — absent ⇒ a normal step (today's behavior).
    */
   fanOut?: FanOutSpec;
+  /**
+   * When set, this step produces a run artifact on completion. The orchestrator
+   * auto-mints an artifact of `atype` (re-derived from the entity DB for
+   * templated types) when the step finishes, and the Flow/Workflow-steps views
+   * render a "creates ⟨artifact⟩" footer chip. See shared/types/artifacts.ts.
+   */
+  outputArtifact?: {
+    atype: ArtifactType;
+    label: string;
+  };
 }
 
 /**
