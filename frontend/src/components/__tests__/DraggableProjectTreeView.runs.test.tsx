@@ -547,3 +547,90 @@ describe('DraggableProjectTreeView — runs nest under their session', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Empty saved expansion must not lock projects collapsed (collapse regression)
+// ---------------------------------------------------------------------------
+
+/**
+ * getExpanded resolves success:true with EMPTY arrays — the exact persisted
+ * state (`treeView.expandedProjects = []`) that locked every project collapsed.
+ * Note this is distinct from `makeElectronAPI([])`, which resolves success:false
+ * ("never saved"); the original guard treated the two the same only by accident,
+ * and the empty-but-present case is what shipped the bug.
+ */
+function makeElectronAPISavedEmpty() {
+  return {
+    ...makeElectronAPI([]),
+    uiState: {
+      getExpanded: vi.fn().mockResolvedValue({
+        success: true,
+        data: { expandedProjects: [], expandedFolders: [] },
+      }),
+      saveExpanded: vi.fn().mockResolvedValue({ success: true }),
+    },
+  };
+}
+
+describe('DraggableProjectTreeView — empty saved expansion', () => {
+  it('auto-expands a project with sessions even when the saved expansion exists but is empty', async () => {
+    Object.defineProperty(window, 'electronAPI', {
+      writable: true,
+      value: makeElectronAPISavedEmpty(),
+    });
+    mockSessions = [makeSession({ name: 'visible-on-boot', projectId: 1 })];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+    // Empty arrays are truthy: the old guard restored the empty set, collapsing
+    // every project and hiding this row. The fixed guard falls through to
+    // auto-expand, so the session renders.
+    await waitFor(() => expect(screen.getByText('visible-on-boot')).toBeInTheDocument());
+  });
+
+  it('auto-expands once the session store hydrates after the initial load (race fix)', async () => {
+    Object.defineProperty(window, 'electronAPI', {
+      writable: true,
+      value: makeElectronAPISavedEmpty(),
+    });
+    // No sessions at first load → the load-time auto-expand opens nothing.
+    mockSessions = [];
+
+    let utils: ReturnType<typeof render>;
+    await act(async () => {
+      utils = render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+    expect(screen.queryByText('late-session')).toBeNull();
+
+    // Sessions hydrate after the initial load; the reactive effect must expand
+    // the project so the late-arriving session becomes visible without a reload.
+    mockSessions = [makeSession({ name: 'late-session', projectId: 1 })];
+    await act(async () => {
+      utils!.rerender(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('late-session')).toBeInTheDocument());
+  });
+
+  it('respects a non-empty saved layout and does not force-expand a project the user left collapsed', async () => {
+    // Saved layout is non-empty but does NOT include project 1. Even though
+    // project 1 has a session, the reactive auto-expand must stay out of the way
+    // (the user's explicit layout is authoritative), so the row stays hidden.
+    Object.defineProperty(window, 'electronAPI', {
+      writable: true,
+      value: makeElectronAPI([999]),
+    });
+    mockSessions = [makeSession({ name: 'collapsed-session', projectId: 1 })];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+    // restoredSavedExpansionRef is true → reactive auto-expand is skipped →
+    // project 1 (absent from the saved set) stays collapsed → its session is not
+    // rendered.
+    expect(screen.queryByText('collapsed-session')).toBeNull();
+  });
+});

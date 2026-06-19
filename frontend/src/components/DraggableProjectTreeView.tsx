@@ -73,6 +73,25 @@ function statusDotClass(status: string): string {
   return STATUS_DOT_CLASS[status] ?? 'bg-text-tertiary';
 }
 
+/**
+ * Projects that have at least one session the rail will actually render — i.e.
+ * non-main-repo, non-archived. Mirrors the per-project `projectSessions` filter
+ * in the render path so auto-expand never opens a project that would show no
+ * rows (or skips one that would).
+ */
+function projectsWithVisibleSessions(
+  projects: ProjectWithRuns[],
+  sessions: Session[],
+): Set<number> {
+  const out = new Set<number>();
+  for (const p of projects) {
+    if (sessions.some((s) => s.projectId === p.id && !s.isMainRepo && !s.archived)) {
+      out.add(p.id);
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -107,6 +126,14 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     overFolderId: null,
   });
   const dragCounter = useRef(0);
+
+  // Auto-expand bookkeeping. `restoredSavedExpansion` is true once load restores
+  // a meaningful (non-empty) saved layout — when it is, the user's expand/collapse
+  // choices are authoritative and the reactive auto-expand stays out of the way.
+  // `didReactiveAutoExpand` makes that reactive pass one-shot so it never re-opens
+  // a project the user later collapsed.
+  const restoredSavedExpansionRef = useRef(false);
+  const didReactiveAutoExpandRef = useRef(false);
 
   const { showError } = useErrorStore();
   const activeProjectId = useNavigationStore((state) => state.activeProjectId);
@@ -203,19 +230,30 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         console.error('[DraggableProjectTreeView] Failed to load saved UI state:', _e);
       }
 
-      if (savedState?.expandedProjects && savedState?.expandedFolders) {
-        setExpandedProjects(new Set(savedState.expandedProjects));
-        setExpandedFolders(new Set(savedState.expandedFolders));
+      // An EMPTY saved expansion (`{ expandedProjects: [], expandedFolders: [] }`)
+      // is not a meaningful layout — it is what a prior boot persists when it
+      // auto-expanded before the session store had hydrated (found no sessions →
+      // saved []). Empty arrays are truthy, so the old guard
+      // (`savedState?.expandedProjects && savedState?.expandedFolders`) restored
+      // that empty set and collapsed every project on every subsequent boot,
+      // hiding all sessions. Treat empty-or-absent as "unset" and fall through to
+      // auto-expand instead.
+      const hasSavedExpansion =
+        (savedState?.expandedProjects?.length ?? 0) > 0 ||
+        (savedState?.expandedFolders?.length ?? 0) > 0;
+      if (hasSavedExpansion) {
+        restoredSavedExpansionRef.current = true;
+        setExpandedProjects(new Set(savedState?.expandedProjects ?? []));
+        setExpandedFolders(new Set(savedState?.expandedFolders ?? []));
       } else {
-        // Auto-expand projects that currently have active sessions
-        const sessionsSnapshot = useSessionStore.getState().sessions;
-        const projectsToExpand = new Set<number>();
-        projectsWithRunsData.forEach(p => {
-          if (sessionsSnapshot.some(s => s.projectId === p.id && !s.isMainRepo)) {
-            projectsToExpand.add(p.id);
-          }
-        });
-        setExpandedProjects(projectsToExpand);
+        // No meaningful saved layout — auto-expand projects that have visible
+        // sessions. The session store may not be hydrated yet at this first pass,
+        // so it can legitimately come up empty; the reactive effect below re-runs
+        // it once sessions arrive, closing that race.
+        restoredSavedExpansionRef.current = false;
+        setExpandedProjects(
+          projectsWithVisibleSessions(projectsWithRunsData, useSessionStore.getState().sessions),
+        );
         setExpandedFolders(new Set());
       }
 
@@ -251,6 +289,31 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       console.error('[DraggableProjectTreeView] Failed to load folders:', error);
     }
   };
+
+  // Race fix: the session store can finish hydrating AFTER the initial project
+  // load, so the load-time auto-expand may have found no sessions and opened
+  // nothing. Re-run it once here when sessions are present — but never when the
+  // user has a meaningful saved layout (restoredSavedExpansionRef), and only once
+  // (didReactiveAutoExpandRef) so it can't fight a manual collapse afterward.
+  useEffect(() => {
+    if (restoredSavedExpansionRef.current) return;
+    if (didReactiveAutoExpandRef.current) return;
+    if (allSessions.length === 0 || projectsWithRuns.length === 0) return;
+    const toExpand = projectsWithVisibleSessions(projectsWithRuns, allSessions);
+    if (toExpand.size === 0) return;
+    didReactiveAutoExpandRef.current = true;
+    setExpandedProjects((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      toExpand.forEach((id) => {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [allSessions, projectsWithRuns]);
 
   useEffect(() => {
     // Initial data load
