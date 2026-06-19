@@ -53,7 +53,6 @@ coverage/
 # Git worktrees (except the main directory)
 /worktree-*/
 /worktrees/
-.soloflow/worktrees/
 
 # Claude Code session data
 sessions/
