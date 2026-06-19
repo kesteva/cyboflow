@@ -13,6 +13,13 @@
  *  - pruneSessionOnly drops uncommitted artifacts for the given runs, keeps
  *    committed ones, and emits a 'deleted' event per drop.
  *  - invalid atype / unknown run are rejected; FK cascade removes a run's rows.
+ *  - a commit/update scheduled on the WRONG project (artifact owned by another
+ *    project's run) is rejected with 'wrong_project'; a commit routed via the
+ *    artifact's TRUE project emits on that project's channel.
+ *  - a true no-op (re-derive / update with no changed field) writes NO audit row
+ *    AND emits NOTHING.
+ *  - the payload_json delta reflects the real before/after (null/present/cleared),
+ *    not a constant sentinel.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -44,6 +51,7 @@ function buildDb(): Database.Database {
     );
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+  db.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj2', '/tmp/p2');
 
   const migDir = join(__dirname, '..', '..', 'database', 'migrations');
   for (const f of [
@@ -67,6 +75,18 @@ function seedRun(db: Database.Database, runId: string): void {
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
      VALUES (?, 'wf-1', 1, 'running', 'default')`,
   ).run(runId);
+}
+
+/** Seed a workflow + run under an arbitrary project (for cross-project tests). */
+function seedRunInProject(db: Database.Database, runId: string, projectId: number): void {
+  const wfId = `wf-p${projectId}`;
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'planner', '{}')`,
+  ).run(wfId, projectId);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+     VALUES (?, ?, ?, 'running', 'default')`,
+  ).run(runId, wfId, projectId);
 }
 
 function countEvents(db: Database.Database, artifactId: string): number {
@@ -216,5 +236,100 @@ describe('ArtifactRouter', () => {
 
     db.prepare('DELETE FROM workflow_runs WHERE id = ?').run('run-1');
     expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get()).toMatchObject({ n: 0 });
+  });
+
+  it('rejects a commit scheduled on the WRONG project (artifact owned by another project)', async () => {
+    const db = buildDb();
+    // run-2 lives in project 2; mint an artifact for it via project 2's queue.
+    seedRunInProject(db, 'run-2', 2);
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(2, {
+      op: 'create', runId: 'run-2', atype: 'idea-spec', label: 'foreign', actor: 'orchestrator',
+    });
+
+    // An agent in project 1 tries to commit project 2's artifact by id.
+    const p1Events: ArtifactChangedEvent[] = [];
+    const p2Events: ArtifactChangedEvent[] = [];
+    artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => p1Events.push(e));
+    artifactChangeEvents.on(artifactProjectChannel(2), (e: ArtifactChangedEvent) => p2Events.push(e));
+
+    await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).rejects.toMatchObject({
+      code: 'wrong_project',
+    });
+    // No write, no emit on either channel; the row stays uncommitted.
+    expect(p1Events).toHaveLength(0);
+    expect(p2Events).toHaveLength(0);
+    const row = db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number };
+    expect(row.committed).toBe(0);
+
+    // The same update routed via the TRUE project (2) succeeds and emits on channel 2.
+    await router.apply(2, { op: 'update', artifactId, label: 'renamed', actor: 'user' });
+    expect(p1Events).toHaveLength(0);
+    expect(p2Events.some((e) => e.action === 'updated' && e.artifactId === artifactId)).toBe(true);
+  });
+
+  it('a true no-op update writes NO audit row and emits NOTHING', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'generic', label: 'g', actor: 'user',
+    });
+    expect(countEvents(db, artifactId)).toBe(1); // created
+
+    const events: ArtifactChangedEvent[] = [];
+    artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => events.push(e));
+
+    // No-op: same label, is_new unchanged, no payload key supplied.
+    await router.apply(1, { op: 'update', artifactId, label: 'g', actor: 'user' });
+    expect(countEvents(db, artifactId)).toBe(1); // still just 'created'
+    expect(events).toHaveLength(0); // no emit on a true no-op
+  });
+
+  it('a true no-op re-derive (create with unchanged fields) writes NO audit row and emits NOTHING', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'decomposed-stories', label: 'same', actor: 'orchestrator',
+    });
+    expect(countEvents(db, artifactId)).toBe(1); // created
+
+    const events: ArtifactChangedEvent[] = [];
+    artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => events.push(e));
+
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'decomposed-stories', label: 'same', actor: 'orchestrator',
+    });
+    expect(countEvents(db, artifactId)).toBe(1); // no no-op audit row
+    expect(events).toHaveLength(0); // no no-op emit
+  });
+
+  it('the payload_json delta reflects the real before/after (null -> present -> cleared)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'ui-prototype', label: 'proto', actor: 'agent:executor',
+    });
+
+    const lastDelta = (field: string): { from: unknown; to: unknown } | undefined => {
+      const row = db
+        .prepare(
+          "SELECT changes_json FROM entity_events WHERE entity_type = 'artifact' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(artifactId) as { changes_json: string } | undefined;
+      if (!row) return undefined;
+      const deltas = JSON.parse(row.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+      return deltas.find((d) => d.field === field);
+    };
+
+    // null -> present
+    await router.apply(1, { op: 'update', artifactId, payloadJson: '{"url":"http://x"}', actor: 'agent:executor' });
+    expect(lastDelta('payload_json')).toMatchObject({ from: null, to: 'present' });
+
+    // present -> cleared
+    await router.apply(1, { op: 'update', artifactId, payloadJson: null, actor: 'agent:executor' });
+    expect(lastDelta('payload_json')).toMatchObject({ from: 'present', to: 'cleared' });
   });
 });

@@ -48,7 +48,12 @@ const ENTITY_EVENT_TYPE = 'artifact';
 // Errors
 // ---------------------------------------------------------------------------
 
-export type ArtifactErrorCode = 'not_found' | 'invalid_atype' | 'already_committed' | 'run_not_found';
+export type ArtifactErrorCode =
+  | 'not_found'
+  | 'invalid_atype'
+  | 'already_committed'
+  | 'run_not_found'
+  | 'wrong_project';
 
 export class ArtifactError extends Error {
   constructor(
@@ -243,6 +248,7 @@ export class ArtifactRouter {
     let action: ArtifactChangeAction;
     let eventId = 0;
     let eventSeq = 0;
+    let wrote = false;
 
     const txn = this.db.transaction(() => {
       if (existing) {
@@ -269,7 +275,13 @@ export class ArtifactRouter {
         if (change.label !== existing.label) deltas.push({ field: 'label', from: existing.label, to: change.label });
         if (mode !== existing.mode) deltas.push({ field: 'mode', from: existing.mode, to: mode });
         if (nextIsNew !== existing.is_new) deltas.push({ field: 'is_new', from: existing.is_new === 1, to: nextIsNew === 1 });
-        if (nextPayload !== existing.payload_json) deltas.push({ field: 'payload_json', from: null, to: 'updated' });
+        if (nextPayload !== existing.payload_json) {
+          deltas.push({
+            field: 'payload_json',
+            from: existing.payload_json == null ? null : 'present',
+            to: nextPayload == null ? 'cleared' : 'present',
+          });
+        }
 
         if (deltas.length === 0) {
           const last = this.db
@@ -283,6 +295,7 @@ export class ArtifactRouter {
           const ev = this.insertEvent(existing.id, 'updated', change.actor, change.runId, deltas, now);
           eventId = ev.id;
           eventSeq = ev.seq;
+          wrote = true;
         }
         return;
       }
@@ -321,10 +334,15 @@ export class ArtifactRouter {
       ], now);
       eventId = ev.id;
       eventSeq = ev.seq;
+      wrote = true;
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, change.runId, artifactId!, change.atype, action!, this.readById(artifactId!));
+    // An idempotent re-derive with NO changed fields wrote no audit row — skip the
+    // emit too, so a true no-op neither writes audit nor emits.
+    if (wrote) {
+      this.emitChange(projectId, change.runId, artifactId!, change.atype, action!, this.readById(artifactId!));
+    }
     return { artifactId: artifactId!, event: { id: eventId, seq: eventSeq } };
   }
 
@@ -337,12 +355,15 @@ export class ArtifactRouter {
     let eventSeq = 0;
     let runId = '';
     let atype: ArtifactType = 'generic';
+    let trueProject = projectId;
+    let wrote = false;
 
     const txn = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(change.artifactId) as
         | ArtifactDbRow
         | undefined;
       if (!row) throw new ArtifactError('not_found', `artifact ${change.artifactId} not found`);
+      trueProject = this.assertArtifactProject(projectId, row);
       runId = row.run_id;
       atype = row.atype;
 
@@ -357,7 +378,11 @@ export class ArtifactRouter {
       if (change.payloadJson !== undefined) {
         sets.push('payload_json = ?');
         params.push(change.payloadJson);
-        deltas.push({ field: 'payload_json', from: null, to: 'updated' });
+        deltas.push({
+          field: 'payload_json',
+          from: row.payload_json == null ? null : 'present',
+          to: change.payloadJson == null ? 'cleared' : 'present',
+        });
       }
       if (change.isNew !== undefined) {
         const next = change.isNew ? 1 : 0;
@@ -382,10 +407,14 @@ export class ArtifactRouter {
       const ev = this.insertEvent(change.artifactId, 'updated', change.actor, runId, deltas, now);
       eventId = ev.id;
       eventSeq = ev.seq;
+      wrote = true;
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, runId, change.artifactId, atype, 'updated', this.readById(change.artifactId));
+    // A true no-op (nothing changed) wrote no audit row — so emit nothing either.
+    if (wrote) {
+      this.emitChange(trueProject, runId, change.artifactId, atype, 'updated', this.readById(change.artifactId));
+    }
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
 
@@ -398,12 +427,14 @@ export class ArtifactRouter {
     let eventSeq = 0;
     let runId = '';
     let atype: ArtifactType = 'generic';
+    let trueProject = projectId;
 
     const txn = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(change.artifactId) as
         | ArtifactDbRow
         | undefined;
       if (!row) throw new ArtifactError('not_found', `artifact ${change.artifactId} not found`);
+      trueProject = this.assertArtifactProject(projectId, row);
       if (row.committed === 1) {
         throw new ArtifactError('already_committed', `artifact ${change.artifactId} is already committed`);
       }
@@ -431,7 +462,7 @@ export class ArtifactRouter {
     });
     (txn as () => void)();
 
-    this.emitChange(projectId, runId, change.artifactId, atype, 'committed', this.readById(change.artifactId));
+    this.emitChange(trueProject, runId, change.artifactId, atype, 'committed', this.readById(change.artifactId));
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
 
@@ -475,6 +506,29 @@ export class ArtifactRouter {
       | { ok: number }
       | undefined;
     if (!run) throw new ArtifactError('run_not_found', `run ${runId} not found`);
+  }
+
+  /**
+   * Resolve the artifact's TRUE project via its owning run, and reject when it
+   * differs from the queue/project the change was scheduled on. Without this an
+   * agent in project P_A could mutate an artifact id owned by run B (project
+   * P_B): the write would serialize on P_A's queue (not P_B's — defeating
+   * per-project concurrency-1 for that row) and emit on the P_A channel that the
+   * real subscriber (P_B) never listens to. Returns the true project for the
+   * emit channel.
+   */
+  private assertArtifactProject(projectId: number, row: ArtifactDbRow): number {
+    const run = this.db
+      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+      .get(row.run_id) as { projectId: number } | undefined;
+    if (!run) throw new ArtifactError('run_not_found', `run ${row.run_id} not found`);
+    if (run.projectId !== projectId) {
+      throw new ArtifactError(
+        'wrong_project',
+        `artifact ${row.id} belongs to project ${run.projectId}, not ${projectId}`,
+      );
+    }
+    return run.projectId;
   }
 
   private insertEvent(
