@@ -7,11 +7,14 @@
  * does NOT orchestrate the server). A non-local URL is refused with a notice.
  *
  * The iframe uses `sandbox="allow-scripts allow-same-origin"`: a live prototype is
- * a real app and needs its own scripts. This is safe here because the dev server
+ * a real app and needs its own scripts. This is safe ONLY because the dev server
  * (e.g. localhost:8081) is a DIFFERENT ORIGIN from the cyboflow shell (different
  * port in dev, file:// in prod), so the frame is cross-origin and cannot reach
  * `window.parent` or rewrite its own sandbox; top-navigation/popups are NOT
- * granted. The frame is isolated to its own origin.
+ * granted. To keep that guarantee true even for an attacker-supplied URL,
+ * `isLocalhostUrl` explicitly REJECTS the shell's own origin (host + port) — see
+ * its doc — so a payload of e.g. `http://localhost:4521` (the dev shell origin)
+ * can never render same-origin.
  *
  * Cross-origin load failures (server down) cannot be detected reliably from the
  * parent, so we surface a manual Reload + "Open in browser" + a hint rather than
@@ -27,14 +30,33 @@ const MUTED = '#6a5e44';
 const FAINT = '#9c8e6c';
 const RUST = '#c96442';
 
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
+// Embeddable local hosts. `0.0.0.0` and the unspecified-address `::`/`[::]`
+// are deliberately EXCLUDED: they are bind-all sentinels, not real loopback
+// hosts, and a frame served from them is not reliably cross-origin from the
+// shell, so they must not be treated as embeddable.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
-/** True for an http(s) URL pointing at a local host (the only embeddable kind). */
+/**
+ * True for an http(s) URL pointing at a local host (the only embeddable kind).
+ *
+ * The iframe is rendered `sandbox="allow-scripts allow-same-origin …"`, whose
+ * sole isolation guarantee is that the embedded dev server is a DIFFERENT ORIGIN
+ * (host + port) than the cyboflow shell. We therefore reject any URL whose origin
+ * equals the shell's own origin — in dev the shell runs at e.g.
+ * `http://localhost:4521`, so a payload of `http://localhost:4521` would render
+ * same-origin and could reach `window.parent` / preload IPC. Comparing the full
+ * origin (incl. port) against `window.location.origin` closes that escape.
+ */
 export function isLocalhostUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    return LOCAL_HOSTS.has(u.hostname);
+    if (!LOCAL_HOSTS.has(u.hostname)) return false;
+    // Refuse the shell's own origin: a same-origin frame escapes the sandbox.
+    if (typeof window !== 'undefined' && u.origin === window.location?.origin) {
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }

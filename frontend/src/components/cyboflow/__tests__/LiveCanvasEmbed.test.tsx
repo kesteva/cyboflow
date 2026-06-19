@@ -10,17 +10,33 @@ import { describe, it, expect } from 'vitest';
 import { LiveCanvasEmbed, isLocalhostUrl } from '../LiveCanvasEmbed';
 
 describe('isLocalhostUrl', () => {
-  it('accepts http(s) localhost hosts', () => {
+  it('accepts http(s) localhost hosts on a non-shell port', () => {
     expect(isLocalhostUrl('http://localhost:8081')).toBe(true);
-    expect(isLocalhostUrl('http://127.0.0.1:3000/path')).toBe(true);
+    expect(isLocalhostUrl('http://127.0.0.1:3001/path')).toBe(true);
     expect(isLocalhostUrl('https://localhost:5173')).toBe(true);
+    expect(isLocalhostUrl('http://[::1]:8080')).toBe(true);
   });
   it('rejects remote hosts, non-http protocols, and garbage', () => {
     expect(isLocalhostUrl('https://example.com')).toBe(false);
     expect(isLocalhostUrl('http://10.0.0.5:8081')).toBe(false);
     expect(isLocalhostUrl('file:///etc/passwd')).toBe(false);
+    expect(isLocalhostUrl('file://remote/share')).toBe(false);
     expect(isLocalhostUrl('javascript:alert(1)')).toBe(false);
     expect(isLocalhostUrl('not a url')).toBe(false);
+  });
+  it('rejects bind-all sentinel hosts (0.0.0.0 and ::) — not real loopback', () => {
+    expect(isLocalhostUrl('http://0.0.0.0:8081')).toBe(false);
+    expect(isLocalhostUrl('http://[::]:8081')).toBe(false);
+  });
+  it('rejects the shell origin to prevent a same-origin sandbox escape', () => {
+    // The test env (jsdom) origin IS the shell origin here; any localhost URL
+    // matching it (host + port) must be refused even though the host is local.
+    const shell = new URL(window.location.origin);
+    expect(isLocalhostUrl(window.location.origin)).toBe(false);
+    expect(isLocalhostUrl(`${window.location.origin}/some/path`)).toBe(false);
+    // A different port on the same local host is still embeddable (not shell origin).
+    const otherPort = shell.port === '8082' ? '8083' : '8082';
+    expect(isLocalhostUrl(`${shell.protocol}//${shell.hostname}:${otherPort}`)).toBe(true);
   });
 });
 
