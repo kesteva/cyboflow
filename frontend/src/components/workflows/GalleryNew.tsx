@@ -124,7 +124,10 @@ export function GalleryNew({
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="lg">
-      <ModalHeader title="New workflow" onClose={onClose} />
+      {/* No onClose here — the Modal renders its own close X; passing onClose to
+          ModalHeader too would stack a second X on top of it (matches the
+          SaveScopeDialog pattern). */}
+      <ModalHeader title="New workflow" />
       <ModalBody className="flex flex-col gap-6">
         {/* Scope (migration 030) — GLOBAL default, or scope to one project. */}
         <section className="flex flex-col gap-2">
