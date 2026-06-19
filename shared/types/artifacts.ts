@@ -71,3 +71,66 @@ export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
 export function isCanvasArtifact(atype: ArtifactType): boolean {
   return ARTIFACT_RENDER_MODE[atype] === 'canvas';
 }
+
+// ===========================================================================
+// Data model — the run-scoped artifacts subsystem (migration 029).
+//
+// `Artifact` is the camelCase API shape returned to the renderer (the DB row
+// shape lives next to the chokepoint in main/src/orchestrator/artifactRouter.ts,
+// mirroring ReviewItemDbRow). All writes funnel through ArtifactRouter.
+// ===========================================================================
+
+/** API shape of one run artifact (camelCase; numeric flags shaped to booleans). */
+export interface Artifact {
+  id: string;
+  runId: string;
+  sessionId: string | null;
+  atype: ArtifactType;
+  label: string;
+  /** Phase·step origin label (e.g. "Plan · get context"), or null. */
+  stepOrigin: string | null;
+  mode: ArtifactRenderMode;
+  /** Persisted into the repo (git) — false = session-only/ephemeral. */
+  committed: boolean;
+  /** Dropped on session close unless committed. */
+  sessionOnly: boolean;
+  /** Freshly minted; drives the tab's pulsing "new" dot until focused. */
+  isNew: boolean;
+  /** Per-atype payload JSON (screenshot fileNames, ui-prototype url, cached render). */
+  payloadJson: string | null;
+  /** Soft link to the derived-from entity (ideaId/epicId/taskId), or null. */
+  sourceRef: string | null;
+  createdAt: string;
+  committedAt: string | null;
+}
+
+export type ArtifactChangeAction = 'created' | 'updated' | 'committed' | 'deleted';
+
+/** Emitted on the per-project channel after an artifact write commits. */
+export interface ArtifactChangedEvent {
+  projectId: number;
+  runId: string;
+  artifactId: string;
+  atype: ArtifactType;
+  action: ArtifactChangeAction;
+  /** The shaped artifact, or null when the action is 'deleted'. */
+  artifact: Artifact | null;
+}
+
+// ---- tRPC / IPC request shapes ----
+
+export interface ListArtifactsInput {
+  runId: string;
+  /** When set, filter to committed (true) or session-only (false) artifacts. */
+  committed?: boolean;
+}
+
+export interface GetArtifactInput {
+  artifactId: string;
+}
+
+export interface CommitArtifactInput {
+  artifactId: string;
+  /** Optional payload to persist alongside the commit (e.g. final ui-prototype url). */
+  payloadJson?: string;
+}

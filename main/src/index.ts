@@ -32,6 +32,7 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
+import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
@@ -635,6 +636,12 @@ async function initializeServices() {
   // Per-step result store (Stage 3, migration 033): the programmatic step recorder
   // + crash-safe resume + the monitor.stepResults tRPC query reach it here.
   StepResultStore.initialize(cyboflowDb);
+
+  // Run-artifact write chokepoint (migration 029). The single serialized writer
+  // for `artifacts`; the cyboflow.artifacts tRPC router + the report/commit-artifact
+  // MCP handlers reach it via getInstance(). Its artifactChangeEvents emitter is
+  // consumed directly by cyboflow.artifacts.onArtifactChanged (no bridge needed).
+  ArtifactRouter.initialize(cyboflowDb);
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via
