@@ -70,6 +70,18 @@ export function AgentEditorModal({
   // ── Seed on open ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isOpen) return;
+
+    // CREATE = a brand-new custom agent. There is nothing to fetch and the
+    // create-mode agentKey is empty, so calling agents.get would fail the
+    // agentKey regex and wedge the modal on "Loading agent…". The reducer's
+    // initial state is already a blank draft, so just clear the gate.
+    if (mode === 'create') {
+      setEntry(null);
+      setError(null);
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
     setIsLoading(true);
     setError(null);
@@ -91,10 +103,12 @@ export function AgentEditorModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, projectId, agentKey, dispatch]);
+  }, [isOpen, mode, projectId, agentKey, dispatch]);
 
   // ── Derived flags ───────────────────────────────────────────────────────────
-  const isCustom = entry?.isCustom ?? false;
+  // A brand-new agent (create mode) IS a custom — even before it has an entry —
+  // so the name field unlocks and the case note reads correctly.
+  const isCustom = mode === 'create' ? true : (entry?.isCustom ?? false);
   const isOverridden = entry?.isOverridden ?? false;
   // "Reset to default" applies ONLY to an overridden BUILT-IN (a custom has no
   // default to revert to — it would use deleteCustom instead).
@@ -108,10 +122,28 @@ export function AgentEditorModal({
     return null;
   }, [state.draft.description]);
 
+  // Create mode mints a NEW custom: the server derives the agentKey from a
+  // non-empty name and requires ≥1 tool (toolsSchema.min(1)). Gate Save on both
+  // so the create call can't fail the input contract.
+  const nameError = useMemo<string | null>(
+    () => (mode === 'create' && state.draft.name.trim().length === 0 ? 'A name is required.' : null),
+    [mode, state.draft.name],
+  );
+  const toolsError = useMemo<string | null>(
+    () => (mode === 'create' && state.draft.enabledTools.length === 0 ? 'Enable at least one tool.' : null),
+    [mode, state.draft.enabledTools.length],
+  );
+
   const liveTokens = estimateTokens(state.draft.systemPrompt);
   const liveToolsEnabled = state.draft.enabledTools.length;
 
-  const canSave = dirty && descriptionError === null && !isBusy && !isLoading;
+  const canSave =
+    dirty &&
+    descriptionError === null &&
+    nameError === null &&
+    toolsError === null &&
+    !isBusy &&
+    !isLoading;
 
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
@@ -120,6 +152,21 @@ export function AgentEditorModal({
     setError(null);
     setIsBusy(true);
     try {
+      if (mode === 'create') {
+        // Mint a NEW custom agent — createCustom derives the kebab agentKey from
+        // the name (no agentKey input). Then close, like the duplicate path.
+        const created = await trpc.cyboflow.agents.createCustom.mutate({
+          projectId,
+          name: state.draft.name,
+          description: state.draft.description,
+          systemPrompt: state.draft.systemPrompt,
+          tools: state.draft.enabledTools,
+          role: state.draft.role,
+        });
+        onSaved(created.agentKey);
+        onClose();
+        return;
+      }
       const saved = await trpc.cyboflow.agents.upsertOverride.mutate({
         projectId,
         agentKey,
@@ -138,7 +185,7 @@ export function AgentEditorModal({
       setIsBusy(false);
       actionInFlightRef.current = false;
     }
-  }, [canSave, projectId, agentKey, state.draft, dispatch, onSaved]);
+  }, [canSave, mode, projectId, agentKey, state.draft, dispatch, onSaved, onClose]);
 
   const handleReset = useCallback(async () => {
     if (!showReset || actionInFlightRef.current) return;
@@ -224,15 +271,19 @@ export function AgentEditorModal({
 
           <div className="flex-1" />
 
-          <button
-            type="button"
-            onClick={handleDuplicate}
-            disabled={isBusy || isLoading}
-            className="rounded-button border border-border-subtle bg-surface-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-secondary disabled:cursor-not-allowed disabled:opacity-50"
-            data-testid="agent-editor-duplicate-button"
-          >
-            Duplicate
-          </button>
+          {/* Duplicate needs a saved source agent — meaningless for a brand-new
+              one, so it is hidden in create mode. */}
+          {mode === 'edit' && (
+            <button
+              type="button"
+              onClick={handleDuplicate}
+              disabled={isBusy || isLoading}
+              className="rounded-button border border-border-subtle bg-surface-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-secondary disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="agent-editor-duplicate-button"
+            >
+              Duplicate
+            </button>
+          )}
 
           {showReset && (
             <button
@@ -281,8 +332,12 @@ export function AgentEditorModal({
         )}
 
         {/* ── Body — form + inspector ───────────────────────────────────── */}
+        {/* CREATE has no entry to fetch, so it renders the blank form straight
+            away; only EDIT shows the "Loading agent…" gate while agents.get is
+            in flight. The usage inspector needs a real entry (usage/stats), so
+            it is shown only once one exists. */}
         <div className="flex flex-row flex-1 overflow-hidden">
-          {isLoading || entry === null ? (
+          {isLoading || (mode === 'edit' && entry === null) ? (
             <div className="flex flex-1 items-center justify-center">
               <p className="text-xs text-text-secondary">Loading agent…</p>
             </div>
@@ -295,11 +350,13 @@ export function AgentEditorModal({
                 isCustom={isCustom}
                 descriptionError={descriptionError}
               />
-              <AgentUsageInspector
-                entry={entry}
-                liveTokens={liveTokens}
-                liveToolsEnabled={liveToolsEnabled}
-              />
+              {entry !== null && (
+                <AgentUsageInspector
+                  entry={entry}
+                  liveTokens={liveTokens}
+                  liveToolsEnabled={liveToolsEnabled}
+                />
+              )}
             </>
           )}
         </div>

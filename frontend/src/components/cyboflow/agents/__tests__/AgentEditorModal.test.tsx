@@ -84,6 +84,7 @@ vi.mock('../../../../trpc/client', () => ({
         upsertOverride: { mutate: vi.fn() },
         resetOverride: { mutate: vi.fn() },
         duplicate: { mutate: vi.fn() },
+        createCustom: { mutate: vi.fn() },
       },
     },
   },
@@ -97,6 +98,7 @@ const mockGet = vi.mocked(trpc.cyboflow.agents.get.query);
 const mockUpsert = vi.mocked(trpc.cyboflow.agents.upsertOverride.mutate);
 const mockReset = vi.mocked(trpc.cyboflow.agents.resetOverride.mutate);
 const mockDuplicate = vi.mocked(trpc.cyboflow.agents.duplicate.mutate);
+const mockCreate = vi.mocked(trpc.cyboflow.agents.createCustom.mutate);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -104,6 +106,7 @@ beforeEach(() => {
   mockUpsert.mockResolvedValue(structuredClone(BUILTIN_ENTRY));
   mockReset.mockResolvedValue(structuredClone(BUILTIN_ENTRY));
   mockDuplicate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'implement-copy', name: 'implement-copy', isCustom: true });
+  mockCreate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'my-helper', name: 'My Helper', isCustom: true });
 });
 
 afterEach(() => {
@@ -339,5 +342,51 @@ describe('AgentEditorModal — duplicate', () => {
       newName: 'implement-copy',
     });
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('implement-copy'));
+  });
+});
+
+describe('AgentEditorModal — create (new custom agent)', () => {
+  it('opens a blank form without calling agents.get and without wedging on Loading', async () => {
+    // Regression: "New agent" opens with an empty agentKey. Calling agents.get
+    // with it failed the agentKey regex and stuck the modal on "Loading agent…".
+    await renderModal({ mode: 'create', agentKey: '' });
+
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(screen.queryByText('Loading agent…')).not.toBeInTheDocument();
+    // Name is editable for a brand-new custom; Duplicate + usage are hidden.
+    expect(screen.getByTestId('agent-name-input')).not.toHaveAttribute('readonly');
+    expect(screen.queryByTestId('agent-editor-duplicate-button')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-usage-inspector')).not.toBeInTheDocument();
+  });
+
+  it('Save mints a custom via createCustom (not upsertOverride) once name + description + a tool are set', async () => {
+    const { onSaved, onClose } = await renderModal({ mode: 'create', agentKey: '' });
+    const saveBtn = screen.getByTestId('agent-editor-save-button');
+    expect(saveBtn).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('agent-name-input'), { target: { value: 'My Helper' } });
+    fireEvent.change(screen.getByTestId('agent-description-input'), {
+      target: { value: 'Helps with things.' },
+    });
+    // Still disabled until ≥1 tool is enabled (server toolsSchema.min(1)).
+    expect(saveBtn).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`agent-tool-switch-${CLI_TOOLS[0]}`));
+    });
+
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const arg = mockCreate.mock.calls[0][0];
+    expect(arg.projectId).toBe(PROJECT_ID);
+    expect(arg.name).toBe('My Helper');
+    expect(arg.description).toBe('Helps with things.');
+    expect(arg.tools).toEqual([CLI_TOOLS[0]]);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('my-helper'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 });
