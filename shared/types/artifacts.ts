@@ -117,20 +117,8 @@ export interface ArtifactChangedEvent {
   artifact: Artifact | null;
 }
 
-// ---- tRPC / IPC request shapes ----
-
-export interface ListArtifactsInput {
-  runId: string;
-  /** When set, filter to committed (true) or session-only (false) artifacts. */
-  committed?: boolean;
-}
-
-export interface GetArtifactInput {
-  artifactId: string;
-}
-
-export interface CommitArtifactInput {
-  artifactId: string;
-  /** Optional payload to persist alongside the commit (e.g. final ui-prototype url). */
-  payloadJson?: string;
-}
+// Note: the artifacts tRPC request shapes are NOT modeled here — the live
+// single source of truth is the inline zod `.input(...)` on each procedure in
+// main/src/orchestrator/trpc/routers/artifacts.ts (list / get / commit). Hand-
+// mirrored request interfaces were removed after they silently diverged from
+// the zod contract (the commit input omitted the required projectId).
