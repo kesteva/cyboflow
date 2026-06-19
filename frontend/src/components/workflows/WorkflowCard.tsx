@@ -20,6 +20,7 @@
 import { PhaseRibbon } from './PhaseRibbon';
 import type { WorkflowGalleryEntry } from '../../stores/workflowsStore';
 import { formatDistanceToNow } from '../../utils/timestampUtils';
+import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 
 export interface WorkflowCardProps {
   /** The workflow gallery row (row + resolved definition + derived meta). */
@@ -35,6 +36,12 @@ export interface WorkflowCardProps {
   onEdit?: (entry: WorkflowGalleryEntry) => void;
   /** Duplicate this workflow into a new editable draft. Wired in P4. */
   onDuplicate?: (entry: WorkflowGalleryEntry) => void;
+  /**
+   * Delete this workflow. Only invoked for a DELETABLE card (see `deletable`
+   * below) — a global built-in and the __quick__ sentinel never offer Delete,
+   * mirroring the registry's `deleteWorkflow` guard. Omitting it hides the button.
+   */
+  onDelete?: (entry: WorkflowGalleryEntry) => void;
 }
 
 /** Small uppercase footer button — the design's `.GB-mini`. */
@@ -42,24 +49,22 @@ function MiniButton({
   label,
   onClick,
   accent = false,
+  danger = false,
   testId,
 }: {
   label: string;
   onClick?: () => void;
   accent?: boolean;
+  danger?: boolean;
   testId?: string;
 }): React.JSX.Element {
+  const className = danger
+    ? 'border border-status-error bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-status-error transition-colors hover:bg-status-error hover:text-text-on-status-error'
+    : accent
+      ? 'border border-interactive bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive'
+      : 'border border-border-primary bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-text-primary transition-colors hover:border-text-primary';
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      data-testid={testId}
-      className={
-        accent
-          ? 'border border-interactive bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive'
-          : 'border border-border-primary bg-surface-primary px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-text-primary transition-colors hover:border-text-primary'
-      }
-    >
+    <button type="button" onClick={onClick} data-testid={testId} className={className}>
       {label}
     </button>
   );
@@ -72,10 +77,17 @@ export function WorkflowCard({
   onRun,
   onEdit,
   onDuplicate,
+  onDelete,
 }: WorkflowCardProps): React.JSX.Element {
   const { row, definition, meta, lastUsedAt, projectName } = entry;
   const used =
     lastUsedAt !== null ? `used ${formatDistanceToNow(lastUsedAt)}` : 'never run';
+
+  // Delete is offered for everything EXCEPT a GLOBAL built-in (project_id null AND
+  // a cyboflow built-in name) and the __quick__ sentinel — both re-seed, so the
+  // server refuses to delete them. Mirrors the registry's deleteWorkflow guard.
+  const deletable =
+    !(row.project_id === null && isCyboflowWorkflowName(row.name)) && row.name !== '__quick__';
 
   return (
     <div
@@ -142,6 +154,14 @@ export function WorkflowCard({
           testId={`workflow-card-duplicate-${row.id}`}
           onClick={onDuplicate !== undefined ? () => onDuplicate(entry) : undefined}
         />
+        {deletable && onDelete !== undefined && (
+          <MiniButton
+            label="Delete"
+            danger
+            testId={`workflow-card-delete-${row.id}`}
+            onClick={() => onDelete(entry)}
+          />
+        )}
         <MiniButton
           label="Run"
           accent

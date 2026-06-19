@@ -67,6 +67,12 @@ export interface WorkflowRegistryLike {
     specJson?: string;
     permissionMode?: PermissionMode;
   }): WorkflowRow;
+  /**
+   * Delete a workflow row (gallery "Delete"). Throws a distinguishable Error for
+   * a missing row ('not found'), a reserved global built-in / __quick__ sentinel
+   * ('reserved'), or a flow with run history ('run history').
+   */
+  deleteWorkflow(workflowId: string): void;
 }
 
 /**

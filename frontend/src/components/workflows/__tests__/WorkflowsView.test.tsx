@@ -99,8 +99,16 @@ vi.mock('../../../stores/navigationStore', () => ({
 }));
 
 const mockCreateCustom = vi.fn(async (_args: unknown) => ({ id: 'wf-copy' }));
+const mockDelete = vi.fn(async (_args: unknown) => ({ ok: true as const }));
 vi.mock('../../../trpc/client', () => ({
-  trpc: { cyboflow: { workflows: { createCustom: { mutate: (args: unknown) => mockCreateCustom(args) } } } },
+  trpc: {
+    cyboflow: {
+      workflows: {
+        createCustom: { mutate: (args: unknown) => mockCreateCustom(args) },
+        delete: { mutate: (args: unknown) => mockDelete(args) },
+      },
+    },
+  },
 }));
 
 // Inert modals — only render markers when open; never touch tRPC at mount.
@@ -334,5 +342,51 @@ describe('WorkflowsView card-action wiring (P4)', () => {
     fireEvent.click(btn);
     fireEvent.click(btn);
     await waitFor(() => expect(mockCreateCustom).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('WorkflowsView delete-workflow wiring', () => {
+  it('Delete opens a confirm dialog; confirming calls workflows.delete then refreshes and closes', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    // The default fixture card ('Planner', non-built-in name) offers Delete.
+    fireEvent.click(screen.getByTestId('workflow-card-delete-wf-planner'));
+    expect(screen.getByTestId('workflow-delete-dialog')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('workflow-delete-confirm'));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledWith({ workflowId: 'wf-planner' }));
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
+    // The dialog closes on success.
+    await waitFor(() =>
+      expect(screen.queryByTestId('workflow-delete-dialog')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('surfaces a delete failure inline and keeps the dialog open (no refresh)', async () => {
+    mockDelete.mockRejectedValueOnce(
+      new Error('workflow wf-planner has run history (2 run(s)); refusing to delete'),
+    );
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-delete-wf-planner'));
+    fireEvent.click(screen.getByTestId('workflow-delete-confirm'));
+
+    const err = await screen.findByTestId('workflow-delete-error');
+    expect(err).toHaveTextContent('run history');
+    // Dialog stays open and the store is NOT refreshed on failure.
+    expect(screen.getByTestId('workflow-delete-dialog')).toBeInTheDocument();
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
+  it('Cancel closes the dialog without calling delete', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-delete-wf-planner'));
+    fireEvent.click(screen.getByTestId('workflow-delete-cancel'));
+    expect(screen.queryByTestId('workflow-delete-dialog')).not.toBeInTheDocument();
+    expect(mockDelete).not.toHaveBeenCalled();
   });
 });

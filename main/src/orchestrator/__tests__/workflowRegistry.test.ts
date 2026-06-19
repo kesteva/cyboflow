@@ -512,6 +512,69 @@ describe('WorkflowRegistry', () => {
         expect(registry.listByProject(42).map((r) => r.name).sort()).toEqual(BUILTIN_NAMES_SORTED);
       });
     });
+
+    // ───── phantom per-project built-in prune (shared-DB hardening) ─────
+
+    it('prunes a re-seeded phantom per-project built-in (spec "{}", no runs) while PRESERVING an edited project copy', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // Phantom per-project built-ins a stale build re-seeded (empty spec).
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode) VALUES
+             ('wf-1-planner', 1, 'planner', '{}', 'default'),
+             ('wf-2-sprint', 2, 'sprint', '{}', 'default')`,
+        ).run();
+        // An EDITED per-project built-in (project copy) — non-empty spec, KEPT.
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+           VALUES ('wf-3-planner', 3, 'planner', ?, 'default')`,
+        ).run(JSON.stringify(makeDefinition('planner')));
+
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        // Phantoms pruned.
+        expect(registry.getById('wf-1-planner')).toBeNull();
+        expect(registry.getById('wf-2-sprint')).toBeNull();
+        // Edited project copy preserved.
+        expect(registry.getById('wf-3-planner')).not.toBeNull();
+        // The single global set is intact (one row per built-in, project_id NULL).
+        interface CountRow { count: number }
+        const { count } = db
+          .prepare('SELECT COUNT(*) AS count FROM workflows WHERE project_id IS NULL')
+          .get() as CountRow;
+        expect(count).toBe(CYBOFLOW_WORKFLOW_NAMES.length);
+      });
+    });
+
+    it('does NOT prune a phantom per-project built-in that carries run history (would cascade-delete runs)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+           VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
+        ).run();
+        // A run pinned to that phantom row — pruning it would cascade the run away.
+        registry.createRun('wf-1-planner');
+
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        // The phantom survives BECAUSE it has run history (safety guard).
+        expect(registry.getById('wf-1-planner')).not.toBeNull();
+      });
+    });
+
+    it('does NOT touch custom flows (non-built-in names) during the phantom prune', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        // A project-scoped custom flow with an EMPTY spec must NOT be pruned —
+        // the prune is scoped to built-in names only.
+        db.prepare(
+          `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+           VALUES ('wf-1-custom-keepme01', 1, 'Keep Me', '{}', 'default')`,
+        ).run();
+
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+
+        expect(registry.getById('wf-1-custom-keepme01')).not.toBeNull();
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1518,6 +1581,74 @@ describe('WorkflowRegistry', () => {
         specJson: JSON.stringify(cloned),
       });
       expect(JSON.parse(row.spec_json)).toEqual(cloned);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // deleteWorkflow (gallery "Delete")
+  // -------------------------------------------------------------------------
+
+  describe('deleteWorkflow', () => {
+    it('deletes a project-scoped custom flow with no runs', () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Disposable Flow',
+        specJson: JSON.stringify(makeDefinition('disposable-flow')),
+      });
+      registry.deleteWorkflow(row.id);
+      expect(registry.getById(row.id)).toBeNull();
+    });
+
+    it('deletes a GLOBAL custom flow with no runs', () => {
+      const row = registry.createCustom({
+        projectId: null,
+        name: 'Global Disposable',
+        specJson: JSON.stringify(makeDefinition('global-disposable')),
+      });
+      registry.deleteWorkflow(row.id);
+      expect(registry.getById(row.id)).toBeNull();
+    });
+
+    it("throws 'not found' for an unknown id", () => {
+      expect(() => registry.deleteWorkflow('nope')).toThrow(/not found/i);
+    });
+
+    it("refuses ('reserved') to delete a GLOBAL built-in, leaving the row intact", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        expect(() => registry.deleteWorkflow('wf-global-planner')).toThrow(/reserved/i);
+        expect(registry.getById('wf-global-planner')).not.toBeNull();
+      });
+    });
+
+    it("refuses ('reserved') to delete the __quick__ sentinel", () => {
+      const quickId = registry.ensureQuickWorkflow(1);
+      expect(() => registry.deleteWorkflow(quickId)).toThrow(/reserved/i);
+      expect(registry.getById(quickId)).not.toBeNull();
+    });
+
+    it("refuses ('run history') to delete a flow that has runs, preserving the row", () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Has Runs',
+        specJson: JSON.stringify(makeDefinition('has-runs')),
+      });
+      registry.createRun(row.id);
+      expect(() => registry.deleteWorkflow(row.id)).toThrow(/run history/i);
+      // The flow is preserved so its run history is never orphaned/destroyed.
+      expect(registry.getById(row.id)).not.toBeNull();
+    });
+
+    it('allows deleting an EDITED per-project built-in (project copy) with no runs', () => {
+      // A per-project built-in row preserved by migration 030: the NAME is a
+      // built-in but project_id is set → NOT a global built-in, so it is
+      // deletable (the global built-in row is a separate wf-global-<name> row).
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, permission_mode)
+         VALUES ('wf-1-planner', 1, 'planner', ?, 'default')`,
+      ).run(JSON.stringify(makeDefinition('planner')));
+      registry.deleteWorkflow('wf-1-planner');
+      expect(registry.getById('wf-1-planner')).toBeNull();
     });
   });
 });

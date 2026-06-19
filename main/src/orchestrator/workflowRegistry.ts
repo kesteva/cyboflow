@@ -210,6 +210,32 @@ export class WorkflowRegistry {
         permission_mode = excluded.permission_mode
     `);
 
+    // Defensive prune (shared-DB hardening): a STALE older build that still seeds
+    // per-project built-ins (`wf-<projectId>-<name>`) can re-mint the phantom rows
+    // migration 030 already collapsed into the global set, because the dev
+    // sessions.db is shared across worktrees. On every reconcile, drop any
+    // UNEDITED per-project built-in so the gallery never re-grows duplicate
+    // built-in cards. Guards keep it safe + narrow:
+    //   - name is a built-in (the descriptor set) — custom flows are never touched;
+    //   - project_id IS NOT NULL — the canonical rows are the global ones;
+    //   - spec_json '{}' — an EDITED project copy (non-empty spec) is PRESERVED;
+    //   - no run history — a row with runs would cascade-delete them (FK ON DELETE
+    //     CASCADE), so we leave it intact (mirrors deleteWorkflow's invariant;
+    //     migration 030 re-pointed history before its own delete — this is the only
+    //     at-rest guard we add here). An empty descriptor set skips the prune (an
+    //     `IN ()` is invalid SQL).
+    const builtInNames = workflowDescriptors.map((d) => d.name);
+    const prunePhantoms =
+      builtInNames.length > 0
+        ? this.db.prepare(
+            `DELETE FROM workflows
+              WHERE name IN (${builtInNames.map(() => '?').join(', ')})
+                AND project_id IS NOT NULL
+                AND spec_json = '{}'
+                AND id NOT IN (SELECT DISTINCT workflow_id FROM workflow_runs)`,
+          )
+        : null;
+
     const reconcileTx = this.db.transaction(() => {
       for (const descriptor of workflowDescriptors) {
         // Seed the non-null COLUMN with 'default' when frontmatter has no
@@ -231,6 +257,9 @@ export class WorkflowRegistry {
         const globalId = `wf-global-${descriptor.name}`;
         upsert.run(globalId, descriptor.name, descriptor.path, permissionMode);
       }
+      // After the global rows are in place, drop any re-seeded phantom
+      // per-project built-ins (see the comment on prunePhantoms above).
+      prunePhantoms?.run(...builtInNames);
     });
 
     reconcileTx();
@@ -427,6 +456,51 @@ export class WorkflowRegistry {
       );
     }
     return row;
+  }
+
+  /**
+   * Delete a workflow row ("Delete" on a gallery card).
+   *
+   * Guards (each throws a distinguishable Error the router maps to a TRPCError):
+   *   - Missing row → message contains 'not found' (→ NOT_FOUND).
+   *   - A GLOBAL built-in (`project_id IS NULL` AND a `CyboflowWorkflowName`) or the
+   *     `__quick__` sentinel → message contains 'reserved' (→ BAD_REQUEST): both
+   *     re-seed on the next reconcile / quick session, so deleting them is futile.
+   *   - A workflow with ANY run history → message contains 'run history'
+   *     (→ CONFLICT). `workflow_runs.workflow_id` AND `workflow_revisions.workflow_id`
+   *     both reference `workflows(id) ON DELETE CASCADE` (schema.sql / migration
+   *     030), so deleting a flow-with-runs would silently destroy its run +
+   *     Insights history. We refuse instead (safe v1).
+   *
+   * With the zero-run guarantee the only cascade is the flow's OWN
+   * `workflow_revisions` (editor save snapshots) — acceptable, since they describe
+   * a flow that no longer exists. Runs inside a transaction.
+   */
+  deleteWorkflow(workflowId: string): void {
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.deleteWorkflow: workflow ${workflowId} not found`);
+    }
+    if (
+      (row.project_id === null && isCyboflowWorkflowName(row.name)) ||
+      row.name === QUICK_WORKFLOW_NAME
+    ) {
+      throw new Error(
+        `WorkflowRegistry.deleteWorkflow: '${row.name}' is a reserved built-in and cannot be deleted`,
+      );
+    }
+    const { count } = this.db
+      .prepare('SELECT COUNT(*) AS count FROM workflow_runs WHERE workflow_id = ?')
+      .get(workflowId) as { count: number };
+    if (count > 0) {
+      throw new Error(
+        `WorkflowRegistry.deleteWorkflow: workflow ${workflowId} has run history (${count} run(s)); refusing to delete`,
+      );
+    }
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM workflows WHERE id = ?').run(workflowId);
+    });
+    tx();
   }
 
   /**

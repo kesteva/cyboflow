@@ -101,28 +101,35 @@ describe('cyboflow.workflows.list', () => {
     const adapter = dbAdapter(rawDb);
     const registry = new WorkflowRegistry(adapter, silentLogger);
 
-    // Seed two PROJECT-SCOPED workflows directly (an edited per-project built-in
+    // Seed two PROJECT-SCOPED workflows directly (an EDITED per-project built-in
     // preserved by migration 030, disambiguated by the project chip in the UI).
+    // They MUST carry a non-empty spec_json: an unedited ('{}') per-project
+    // built-in is the phantom case migration 030 deletes — and which
+    // ensureGlobalBuiltIns (called by list) now prunes on every reconcile — so a
+    // genuine project copy is defined by having been edited.
+    const editedSprint = JSON.stringify(makeDefinition('sprint'));
+    const editedPlanner = JSON.stringify(makeDefinition('planner'));
     rawDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run('wf-1-sprint', 1, 'sprint', '/some/path.md', 'default');
+      .run('wf-1-sprint', 1, 'sprint', editedSprint, '/some/path.md', 'default');
     rawDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run('wf-1-planner', 1, 'planner', '/other/path.md', 'acceptEdits');
+      .run('wf-1-planner', 1, 'planner', editedPlanner, '/other/path.md', 'acceptEdits');
 
-    // Seed a workflow for a different project — must NOT appear.
+    // Seed an EDITED workflow for a different project — must NOT appear (excluded
+    // by the project filter, not pruned — it is a genuine edited copy).
     rawDb
       .prepare(
-        `INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run('wf-2-sprint', 2, 'sprint', '/proj2/path.md', 'default');
+      .run('wf-2-sprint', 2, 'sprint', editedSprint, '/proj2/path.md', 'default');
 
     const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
@@ -147,11 +154,14 @@ describe('cyboflow.workflows.list', () => {
     for (const r of result) {
       if (r.id.startsWith('wf-global-')) {
         expect(r.project_id).toBeNull();
+        // The global built-ins are seeded with the default empty spec.
+        expect(r.spec_json).toBe('{}');
       } else {
         expect(r.project_id).toBe(1);
+        // The project-scoped rows are EDITED copies (non-empty spec) — that is
+        // precisely why they survive the phantom prune in ensureGlobalBuiltIns.
+        expect(r.spec_json).not.toBe('{}');
       }
-      // Every returned row carries spec_json (defaults to '{}' for these).
-      expect(r.spec_json).toBe('{}');
     }
   });
 
@@ -591,5 +601,81 @@ describe('cyboflow.workflows.createCustom', () => {
         definition: makeDefinition('shared-name'),
       }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+  });
+});
+
+describe('cyboflow.workflows.delete', () => {
+  it('deletes a custom workflow and returns { ok: true }', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-custom-del01', 1, 'Disposable', JSON.stringify(makeDefinition('disposable')));
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.delete({ workflowId: 'wf-1-custom-del01' });
+    expect(result).toEqual({ ok: true });
+
+    interface CountRow { count: number }
+    const { count } = rawDb
+      .prepare('SELECT COUNT(*) AS count FROM workflows WHERE id = ?')
+      .get('wf-1-custom-del01') as CountRow;
+    expect(count).toBe(0);
+  });
+
+  it('maps a missing workflow id to NOT_FOUND', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    await expect(
+      caller.cyboflow.workflows.delete({ workflowId: 'nope' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('maps a reserved GLOBAL built-in to BAD_REQUEST', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    // A global built-in row (project_id NULL, built-in name) re-seeds on reconcile.
+    rawDb
+      .prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES ('wf-global-planner', NULL, 'planner', '{}', NULL, 'default')`,
+      )
+      .run();
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.delete({ workflowId: 'wf-global-planner' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('maps a flow with run history to CONFLICT', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-custom-runs01', 1, 'Has Runs', JSON.stringify(makeDefinition('has-runs')));
+    // Insert a run row directly (REGISTRY_SCHEMA workflow_runs has no substrate/
+    // session_id columns, so createRun cannot be used here) — only the FK +
+    // NOT-NULL columns are needed to register run history against the flow.
+    rawDb
+      .prepare('INSERT INTO workflow_runs (id, workflow_id, project_id) VALUES (?, ?, ?)')
+      .run('run-existing-01', 'wf-1-custom-runs01', 1);
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.delete({ workflowId: 'wf-1-custom-runs01' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+
+    // The flow row survives the refused delete.
+    interface CountRow { count: number }
+    const { count } = rawDb
+      .prepare('SELECT COUNT(*) AS count FROM workflows WHERE id = ?')
+      .get('wf-1-custom-runs01') as CountRow;
+    expect(count).toBe(1);
+  });
+
+  it('throws PRECONDITION_FAILED when workflowRegistry is not wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.workflows.delete({ workflowId: 'any' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
   });
 });

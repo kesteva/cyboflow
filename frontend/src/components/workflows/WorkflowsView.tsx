@@ -30,6 +30,7 @@ import { trpc } from '../../trpc/client';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { CreateProjectDialog } from '../CreateProjectDialog';
+import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { GalleryStacked } from './GalleryStacked';
 import { GalleryNew, type GalleryNewTemplate } from './GalleryNew';
 import { WorkflowsProjectFilter } from './WorkflowsProjectFilter';
@@ -186,6 +187,15 @@ export function WorkflowsView(): React.JSX.Element {
   // second invocation before it can issue a duplicate create.
   const duplicateInFlightRef = useRef(false);
 
+  // ── Delete-workflow confirm state ───────────────────────────────────────────
+  // The card pending deletion (null = no dialog), plus busy/error for the
+  // in-dialog mutation. A synchronous latch rejects a double-confirm before the
+  // disabled button re-renders (same pattern as duplicate).
+  const [deleteTarget, setDeleteTarget] = useState<WorkflowGalleryEntry | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteInFlightRef = useRef(false);
+
   /**
    * Resolve the project the New / cross-project actions target (v1):
    * the active `projectFilter` when set, else the first enumerated project.
@@ -282,6 +292,37 @@ export function WorkflowsView(): React.JSX.Element {
     })();
   };
 
+  // Open the delete confirm for a card. The card only offers Delete for a
+  // deletable flow (WorkflowCard.deletable), so we never receive a global
+  // built-in / __quick__ here; the server enforces the same guard regardless.
+  const onDeleteWorkflow = (entry: WorkflowGalleryEntry): void => {
+    setDeleteError(null);
+    setDeleteTarget(entry);
+  };
+
+  // Confirm the delete: mutate then refresh the store. A "has run history"
+  // CONFLICT (or any failure) surfaces inline in the dialog rather than closing
+  // it, so the user understands why the flow could not be removed.
+  const confirmDeleteWorkflow = (): void => {
+    if (deleteTarget === null || deleteInFlightRef.current) return;
+    const entry = deleteTarget;
+    deleteInFlightRef.current = true;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    void (async () => {
+      try {
+        await trpc.cyboflow.workflows.delete.mutate({ workflowId: entry.row.id });
+        await useWorkflowsStore.getState().refresh();
+        setDeleteTarget(null);
+      } catch (err: unknown) {
+        setDeleteError(err instanceof Error ? err.message : 'Could not delete the workflow');
+      } finally {
+        setDeleteBusy(false);
+        deleteInFlightRef.current = false;
+      }
+    })();
+  };
+
   const onNewWorkflow = (): void => {
     const targetProjectId = resolveTargetProjectId();
     if (targetProjectId === null) return; // No projects — no-op.
@@ -367,6 +408,7 @@ export function WorkflowsView(): React.JSX.Element {
             onRunWorkflow={onRunWorkflow}
             onEditWorkflow={onEditWorkflow}
             onDuplicateWorkflow={onDuplicateWorkflow}
+            onDeleteWorkflow={onDeleteWorkflow}
             onNewWorkflow={onNewWorkflow}
             onEditAgent={onEditAgent}
             onNewAgent={onNewAgent}
@@ -427,6 +469,59 @@ export function WorkflowsView(): React.JSX.Element {
             void useWorkflowsStore.getState().refresh();
           }}
         />
+      )}
+
+      {/* Delete-workflow confirm. A small danger dialog built from the shared
+          Modal primitives; the actual guard (reserved built-ins, run history)
+          lives server-side and surfaces here on failure. */}
+      {deleteTarget !== null && (
+        <Modal
+          isOpen
+          onClose={() => {
+            if (!deleteBusy) setDeleteTarget(null);
+          }}
+          size="sm"
+          showCloseButton={false}
+        >
+          <div data-testid="workflow-delete-dialog">
+            <ModalHeader title="Delete workflow" />
+            <ModalBody>
+              <p className="text-sm leading-relaxed text-text-secondary">
+                Delete <b className="text-text-primary">{deleteTarget.row.name}</b>? This
+                can&rsquo;t be undone. A workflow with run history can&rsquo;t be deleted.
+              </p>
+              {deleteError !== null && (
+                <p
+                  role="alert"
+                  data-testid="workflow-delete-error"
+                  className="mt-3 text-xs text-status-error"
+                >
+                  {deleteError}
+                </p>
+              )}
+            </ModalBody>
+            <ModalFooter>
+              <button
+                type="button"
+                data-testid="workflow-delete-cancel"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleteBusy}
+                className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="workflow-delete-confirm"
+                onClick={confirmDeleteWorkflow}
+                disabled={deleteBusy}
+                className="rounded-button bg-status-error px-3 py-1.5 text-xs font-medium text-text-on-status-error hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Delete
+              </button>
+            </ModalFooter>
+          </div>
+        </Modal>
       )}
 
       {/* Agent editor (edit or create). */}
