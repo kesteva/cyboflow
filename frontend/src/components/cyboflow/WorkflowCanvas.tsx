@@ -16,11 +16,13 @@
  */
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import { PauseCircle } from 'lucide-react';
-import type { WorkflowDefinition } from '../../../../shared/types/workflows';
+import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
 import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
 import { useWorkflowTokenAnimation } from '../../hooks/useWorkflowTokenAnimation';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +56,89 @@ export interface WorkflowCanvasProps {
    * paused (those pills take precedence).
    */
   status?: string;
+  /**
+   * Center-pane session key (run's parent session_id ?? runId) for the
+   * "creates ⟨artifact⟩" footer chip on step cards. Threaded down by
+   * RunCenterPane (which owns the key). When omitted the chip is non-interactive
+   * (still renders, but clicking is a no-op) — keeps the canvas usable in
+   * contexts without a center-pane session (tests / previews).
+   */
+  sessionKey?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// "creates ⟨artifact⟩" footer chip — rendered under a step card whose
+// definition declares an `outputArtifact`. Dashed top rule, glyph from
+// ARTIFACT_GLYPHS (solid/dashed border per ARTIFACT_RENDER_MODE), color =
+// ARTIFACT_COLORS[atype]. Click opens/focuses that artifact's tab.
+//
+// Inline design hexes (warm-paper; M7 tokenizes): hover bg #faf7ef, 8.5px text.
+// ---------------------------------------------------------------------------
+
+function StepArtifactChip({
+  outputArtifact,
+  sessionKey,
+}: {
+  outputArtifact: NonNullable<WorkflowStep['outputArtifact']>;
+  sessionKey: string | null | undefined;
+}) {
+  const { atype, label } = outputArtifact;
+  const color = ARTIFACT_COLORS[atype];
+  const glyph = ARTIFACT_GLYPHS[atype];
+  const dashed = ARTIFACT_RENDER_MODE[atype] === 'canvas';
+
+  const handleClick = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (sessionKey == null) return;
+    useCenterPaneStore.getState().openArtifactTab(sessionKey, { atype, label });
+  };
+
+  return (
+    <button
+      type="button"
+      data-testid={`canvas-step-artifact-chip-${atype}`}
+      onClick={handleClick}
+      disabled={sessionKey == null}
+      title={`creates ${label}`}
+      style={{
+        marginTop: 3,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        maxWidth: '100%',
+        padding: '2px 4px',
+        fontSize: 8.5,
+        lineHeight: 1.2,
+        letterSpacing: '0.04em',
+        textTransform: 'uppercase',
+        color,
+        background: 'transparent',
+        border: 'none',
+        borderTop: `1px ${dashed ? 'dashed' : 'solid'} ${color}`,
+        cursor: sessionKey == null ? 'default' : 'pointer',
+        textAlign: 'left',
+      }}
+      onMouseEnter={(e) => {
+        if (sessionKey != null) e.currentTarget.style.background = '#faf7ef';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+      }}
+    >
+      <span aria-hidden style={{ fontSize: 10, lineHeight: 1 }}>
+        {glyph}
+      </span>
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        creates {label}
+      </span>
+    </button>
+  );
 }
 
 /**
@@ -89,6 +174,7 @@ export function WorkflowCanvas({
   isRunning = false,
   paused = false,
   status,
+  sessionKey,
 }: WorkflowCanvasProps) {
   // A paused run is, by definition, not actively running — suppress the running
   // pill and the token animation regardless of the isRunning prop so the canvas
@@ -418,6 +504,24 @@ export function WorkflowCanvas({
                       stepIndex={globalStepIndex}
                       status={derivedStatus}
                     />
+                    {/* "creates ⟨artifact⟩" footer chip — absolutely positioned
+                        below the card so it never alters the measured card rect
+                        (edge-overlay anchoring) or the column grid. */}
+                    {step.outputArtifact && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: ROW_H - 16,
+                          left: 0,
+                          right: 0,
+                        }}
+                      >
+                        <StepArtifactChip
+                          outputArtifact={step.outputArtifact}
+                          sessionKey={sessionKey}
+                        />
+                      </div>
+                    )}
                   </div>
                 );
               })}

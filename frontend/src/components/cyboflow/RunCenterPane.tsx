@@ -14,14 +14,16 @@
  * terminal dock collapses via display:none and NEVER unmounts RunBottomPane, so
  * the live interactive xterm survives a collapse (see TerminalDock).
  */
-import { useEffect, type ReactElement } from 'react';
+import { useEffect, useRef, type ReactElement } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane } from './RunBottomPane';
 import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
+import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
+import { useArtifactsList } from '../../hooks/useArtifactsList';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
@@ -43,15 +45,65 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
   // (legacy parentless runs still get isolated, stable tab state).
   const sessionKey = activeRun?.session_id ?? activeRunId;
 
+  // The run's project — needed for the artifacts list query + change subscription
+  // and threaded into ArtifactTabRenderer. ActiveRunRow extends WorkflowRunListRow
+  // (project_id: number); null until the run row resolves in activeRunsStore.
+  const projectId = activeRun?.project_id ?? null;
+
   const ensureSession = useCenterPaneStore((s) => s.ensureSession);
   const focusTab = useCenterPaneStore((s) => s.focusTab);
   const closeTab = useCenterPaneStore((s) => s.closeTab);
   const toggleTerminal = useCenterPaneStore((s) => s.toggleTerminal);
   const session = useCenterPaneSession(sessionKey);
 
+  // Live artifacts for this run (initial list + ArtifactChanged subscription).
+  const { artifacts } = useArtifactsList(activeRunId, projectId);
+
   useEffect(() => {
     ensureSession(sessionKey);
   }, [ensureSession, sessionKey]);
+
+  // ── Auto-open artifact tabs ────────────────────────────────────────────────
+  // Register a tab for every artifact, but only STEAL FOCUS for freshly-minted
+  // ones (`isNew === true` — produced mid-run). The pre-existing set surfaced on
+  // first load must NOT yank the user off the Flow tab.
+  //
+  // centerPaneStore.openArtifactTab ALWAYS focuses the tab it opens/touches —
+  // there is no no-focus "register" action. To honour "don't steal focus on
+  // first load" without editing the store (not my file; flagged in the summary),
+  // we:
+  //   - track which artifact ids we've already registered (a ref Set), and
+  //   - on each sync, open ONLY artifacts that are both new-to-us AND isNew===true.
+  //     Pre-existing (isNew===false) artifacts are intentionally NOT auto-tabbed;
+  //     they are reopened on demand from the right-rail Artifacts panel or the
+  //     "creates ⟨artifact⟩" step chips. This is the documented v1 choice: it
+  //     avoids a focus-restore dance and a no-focus store action while still
+  //     auto-surfacing the artifacts a running flow mints in front of the user.
+  const seenArtifactIds = useRef<Set<string>>(new Set());
+  // Reset the seen-set when the pane switches to a different run/session so a
+  // new run's freshly-minted artifacts focus correctly.
+  const seenForKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (seenForKey.current !== sessionKey) {
+      seenArtifactIds.current = new Set();
+      seenForKey.current = sessionKey;
+    }
+    for (const artifact of artifacts) {
+      if (seenArtifactIds.current.has(artifact.id)) continue;
+      seenArtifactIds.current.add(artifact.id);
+      // Only freshly-minted artifacts auto-open (and thereby focus). Pre-existing
+      // ones are left to the right-rail / step-chip reopen surfaces.
+      if (artifact.isNew) {
+        useCenterPaneStore.getState().openArtifactTab(sessionKey, {
+          atype: artifact.atype,
+          label: artifact.label,
+          artifactId: artifact.id,
+          committed: artifact.committed,
+          isNew: true,
+        });
+      }
+    }
+  }, [artifacts, sessionKey]);
 
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
@@ -83,6 +135,7 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
         isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
         paused={activeRun?.status === 'paused'}
         status={activeRun?.status}
+        sessionKey={sessionKey}
       />
     );
   };
@@ -95,7 +148,28 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
         <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />
       );
     }
-    // artifact tab content arrives in a later milestone.
+    if (activeTab.kind === 'artifact') {
+      // Resolve the backing artifact row from the live list. Prefer the tab's
+      // stored artifactId (set when auto-opened); fall back to atype (chip-opened
+      // tabs carry only atype until the row arrives). The artifacts table is one
+      // row per (run, atype) so atype is a stable secondary key.
+      const artifact =
+        artifacts.find((a) => a.id === activeTab.artifactId) ??
+        artifacts.find((a) => a.atype === activeTab.atype);
+      if (artifact && projectId !== null) {
+        return (
+          <ArtifactTabRenderer artifact={artifact} projectId={projectId} runId={activeRunId} />
+        );
+      }
+      // Row not loaded yet (chip-opened tab before the list resolves, or the
+      // artifact hasn't been minted) — small loading state.
+      return (
+        <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+          Loading {activeTab.label}…
+        </div>
+      );
+    }
+    // Unknown tab kind — render the label as a minimal fallback.
     return (
       <div className="flex h-full items-center justify-center text-sm text-text-secondary">
         {activeTab.label}

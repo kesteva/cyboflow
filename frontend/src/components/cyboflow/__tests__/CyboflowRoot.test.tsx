@@ -27,6 +27,17 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// RunCenterPane (mounted in the active-run branch) now drives the artifacts list
+// via the tRPC artifacts client. This suite exercises CyboflowRoot's layout +
+// lifecycle, not artifacts — stub the list hook + the renderer so it doesn't
+// reach the (unmocked) artifacts client.
+vi.mock('../../../hooks/useArtifactsList', () => ({
+  useArtifactsList: () => ({ artifacts: [] }),
+}));
+vi.mock('../ArtifactTabRenderer', () => ({
+  ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,
+}));
+
 // ---------------------------------------------------------------------------
 // tRPC mock — override the global setup.ts stub to add runs.start.mutate and
 // health.mcpServer.query so WorkflowPicker and mcpHealthStore work.

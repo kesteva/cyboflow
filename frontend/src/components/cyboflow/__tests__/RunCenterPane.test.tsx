@@ -29,6 +29,15 @@ vi.mock('../SprintSwimlaneCanvas', () => ({
 vi.mock('../RunBottomPane', () => ({
   RunBottomPane: () => <div data-testid="mock-run-bottom-pane" />,
 }));
+// The artifacts list + ArtifactTabRenderer are exercised by their own suites and
+// by the orchestrator integration tests; stub them here so the tab/dock shell
+// tests don't drag in the tRPC artifacts client.
+vi.mock('../../../hooks/useArtifactsList', () => ({
+  useArtifactsList: () => ({ artifacts: [] }),
+}));
+vi.mock('../ArtifactTabRenderer', () => ({
+  ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,
+}));
 
 const DEFINITION: WorkflowDefinition = { id: 'planner', phases: [] };
 

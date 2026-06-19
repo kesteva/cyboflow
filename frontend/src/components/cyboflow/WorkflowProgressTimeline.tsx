@@ -18,10 +18,13 @@
  */
 import { useEffect, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
-import type { WorkflowStepState } from '../../../../shared/types/workflows';
+import type { WorkflowStepState, WorkflowStep } from '../../../../shared/types/workflows';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type { StreamEvent } from '../../utils/cyboflowApi';
+import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
 
 // ---------------------------------------------------------------------------
 // LogLine — projected from streamEvents
@@ -167,6 +170,62 @@ function ensurePulseStyle(): void {
 }
 
 // ---------------------------------------------------------------------------
+// "creates ⟨artifact⟩" footer chip
+//
+// Rendered under any step whose definition declares an `outputArtifact`. Dashed
+// top border, glyph from ARTIFACT_GLYPHS (solid/dashed border per
+// ARTIFACT_RENDER_MODE), color = ARTIFACT_COLORS[atype]. Clicking opens (or
+// focuses) that artifact's tab in the center pane.
+//
+// Inline design hexes (warm-paper palette; M7 tokenizes):
+//   chip hover bg #faf7ef · dashed-rule border var taken from artifact color.
+// ---------------------------------------------------------------------------
+
+function StepArtifactChip({
+  outputArtifact,
+  sessionKey,
+}: {
+  outputArtifact: NonNullable<WorkflowStep['outputArtifact']>;
+  sessionKey: string | null;
+}): ReactElement {
+  const { atype, label } = outputArtifact;
+  const color = ARTIFACT_COLORS[atype];
+  const glyph = ARTIFACT_GLYPHS[atype];
+  // Live canvases get a dashed border; templated artifacts a solid one.
+  const dashed = ARTIFACT_RENDER_MODE[atype] === 'canvas';
+
+  const handleClick = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (sessionKey === null) return;
+    useCenterPaneStore.getState().openArtifactTab(sessionKey, { atype, label });
+  };
+
+  return (
+    <button
+      type="button"
+      data-testid={`step-artifact-chip-${atype}`}
+      onClick={handleClick}
+      disabled={sessionKey === null}
+      className="mt-1 ml-4 flex items-center gap-1.5 self-start rounded-sm bg-transparent px-1.5 py-1 text-left transition-colors hover:bg-[#faf7ef] disabled:cursor-default disabled:opacity-60"
+      style={{
+        fontSize: '8.5px',
+        color,
+        borderTop: `1px ${dashed ? 'dashed' : 'solid'} ${color}`,
+      }}
+      title={`creates ${label}`}
+    >
+      <span aria-hidden style={{ fontSize: '10px', lineHeight: 1 }}>
+        {glyph}
+      </span>
+      <span className="uppercase tracking-wide">creates {label}</span>
+      <span aria-hidden style={{ opacity: 0.7 }}>
+        open →
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // WorkflowProgressTimeline
 // ---------------------------------------------------------------------------
 
@@ -182,6 +241,19 @@ export function WorkflowProgressTimeline({
 
   // Stream events for log-line projection
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
+
+  // ── Center-pane session key for the "creates ⟨artifact⟩" chip ──────────────
+  // The chip opens an artifact tab keyed by the run's parent session (the same
+  // key RunCenterPane uses: session_id ?? runId). Resolve the run from
+  // activeRunsStore to read its session_id; fall back to the runId for legacy
+  // parentless runs. Selecting the whole map keeps this reactive to refresh().
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  const sessionKey: string | null =
+    runId === null
+      ? null
+      : (Object.values(runsByProject)
+          .flat()
+          .find((r) => r.id === runId)?.session_id ?? runId);
 
   // ── Pulse style injection (once) ───────────────────────────────────────────
   useEffect(() => {
@@ -287,7 +359,7 @@ export function WorkflowProgressTimeline({
                   <div
                     key={step.id}
                     data-testid={`step-item-${step.id}`}
-                    className={`border-l-2 pl-3 py-1 ${borderClass}`}
+                    className={`flex flex-col border-l-2 pl-3 py-1 ${borderClass}`}
                   >
                     {/* Step header row */}
                     <div className="flex items-center gap-2">
@@ -349,6 +421,14 @@ export function WorkflowProgressTimeline({
                           </div>
                         ))}
                       </div>
+                    )}
+
+                    {/* "creates ⟨artifact⟩" footer chip — steps that produce an artifact */}
+                    {step.outputArtifact && (
+                      <StepArtifactChip
+                        outputArtifact={step.outputArtifact}
+                        sessionKey={sessionKey}
+                      />
                     )}
                   </div>
                 );
