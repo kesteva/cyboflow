@@ -19,7 +19,8 @@
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import PQueue from 'p-queue';
-import type { DatabaseLike } from './types';
+import type { DatabaseLike, LoggerLike } from './types';
+import { snapshotCommittedArtifact } from './artifactSnapshot';
 import {
   ARTIFACT_RENDER_MODE,
   type Artifact,
@@ -100,7 +101,8 @@ export interface ArtifactUpdate {
   actor: ArtifactActor;
 }
 
-/** Persist the artifact into the repo (flips committed; M5 adds the disk snapshot). */
+/** Persist the artifact (flips committed; runCommit also writes a fail-soft
+ *  on-disk durability snapshot under the run worktree — see artifactSnapshot.ts). */
 export interface ArtifactCommit {
   op: 'commit';
   artifactId: string;
@@ -152,10 +154,13 @@ export class ArtifactRouter {
   /** Per-project serialization queues (artifacts are project-scoped). */
   private projectQueues = new Map<number, PQueue>();
 
-  constructor(private readonly db: DatabaseLike) {}
+  constructor(
+    private readonly db: DatabaseLike,
+    private readonly logger?: LoggerLike,
+  ) {}
 
-  static initialize(db: DatabaseLike): ArtifactRouter {
-    ArtifactRouter.instance = new ArtifactRouter(db);
+  static initialize(db: DatabaseLike, logger?: LoggerLike): ArtifactRouter {
+    ArtifactRouter.instance = new ArtifactRouter(db, logger);
     return ArtifactRouter.instance;
   }
 
@@ -418,10 +423,10 @@ export class ArtifactRouter {
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
 
-  private runCommit(
+  private async runCommit(
     projectId: number,
     change: ArtifactCommit,
-  ): { artifactId: string; event: { id: number; seq: number } } {
+  ): Promise<{ artifactId: string; event: { id: number; seq: number } }> {
     const now = new Date().toISOString();
     let eventId = 0;
     let eventSeq = 0;
@@ -463,7 +468,34 @@ export class ArtifactRouter {
     (txn as () => void)();
 
     this.emitChange(trueProject, runId, change.artifactId, atype, 'committed', this.readById(change.artifactId));
+
+    // Durability snapshot (FEATURE #3): now that committed=1 is persisted, mirror
+    // the committed row to disk under the run's worktree so the deliverable
+    // survives a later DELETE of the originating entity. Strictly OUTSIDE the txn
+    // and FAIL-SOFT — a disk error must never undo or block the commit.
+    await this.maybeSnapshot(change.artifactId);
+
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  /**
+   * Best-effort on-disk snapshot of a just-committed artifact. Re-reads the full
+   * committed row, resolves the owning run's worktree_path, and writes the
+   * manifest via the (fail-soft, never-throwing) artifactSnapshot module. A run
+   * with no worktree_path (NULL) is skipped silently. Errors are swallowed inside
+   * snapshotCommittedArtifact, so this never throws.
+   */
+  private async maybeSnapshot(artifactId: string): Promise<void> {
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
+      | ArtifactDbRow
+      | undefined;
+    if (!row) return;
+    const runRow = this.db
+      .prepare('SELECT worktree_path AS worktreePath FROM workflow_runs WHERE id = ?')
+      .get(row.run_id) as { worktreePath: string | null } | undefined;
+    const worktreePath = runRow?.worktreePath;
+    if (!worktreePath) return;
+    await snapshotCommittedArtifact(worktreePath, row, this.logger);
   }
 
   // ------------------------------------------------------------------------
