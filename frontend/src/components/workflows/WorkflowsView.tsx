@@ -114,9 +114,12 @@ export function WorkflowsView(): React.JSX.Element {
     void useWorkflowsStore.getState().init();
   }, []);
 
-  // One-shot project-count probe for the no-projects empty-state. `null` while
-  // unknown so we never flash the CTA before the count resolves.
+  // One-shot project probe for the no-projects empty-state + the Save-scope /
+  // new-flow-scope pickers' project options. `hasProjects` is null while
+  // unknown so we never flash the CTA before the probe resolves; `projectList`
+  // (id + name) feeds the scope pickers (migration 029).
   const [hasProjects, setHasProjects] = useState<boolean | null>(null);
+  const [projectList, setProjectList] = useState<{ id: number; name: string }[]>([]);
   useEffect(() => {
     let active = true;
     void API.projects
@@ -124,7 +127,9 @@ export function WorkflowsView(): React.JSX.Element {
       .then((res) => {
         if (!active) return;
         if (res.success && Array.isArray(res.data)) {
-          setHasProjects(res.data.length > 0);
+          const list = res.data as Project[];
+          setHasProjects(list.length > 0);
+          setProjectList(list.map((p) => ({ id: p.id, name: p.name })));
         } else {
           // A list error should not strand the user on the CTA — assume projects
           // exist and let the gallery's own error banner surface the failure.
@@ -149,12 +154,18 @@ export function WorkflowsView(): React.JSX.Element {
   /** Workflow blueprint editor — `mode` + seeds drive edit vs create. */
   interface WfEditorState {
     mode: 'edit' | 'create';
+    /** The launch project + fallback save target (always a concrete project). */
     projectId: number;
     /** Edit mode: the row to edit. Create mode: '' (ignored). */
     workflowId: string;
     initialDefinition?: WorkflowDefinition;
     initialPermissionMode?: PermissionMode;
     initialName?: string;
+    /**
+     * Create mode: the chosen scope for the new flow (migration 029) — null ⇒
+     * GLOBAL (the default), an integer ⇒ project-scoped. Ignored in edit mode.
+     */
+    createScopeProjectId?: number | null;
   }
   const [wfEditor, setWfEditor] = useState<WfEditorState | null>(null);
 
@@ -177,17 +188,20 @@ export function WorkflowsView(): React.JSX.Element {
 
   /**
    * Resolve the project the New / cross-project actions target (v1):
-   * the active `projectFilter` when set, else the single/first enumerated
-   * project. Returns null when there are no projects (the New cards become
-   * no-ops). Derived from the store's already-fetched slices — no extra fetch.
+   * the active `projectFilter` when set, else the first enumerated project.
+   * Returns null when there are no projects (the New cards become no-ops).
+   *
+   * Migration 029: a workflow row's `project_id` is now NULL for global flows
+   * (and globals sort to the top of the deduped list), so we can no longer read
+   * the target off `workflows[0]`. Use the probed `projectList` instead, falling
+   * back to a project-scoped workflow row only if the probe has not yet resolved.
    */
   const resolveTargetProjectId = (): number | null => {
     if (projectFilter !== null) return projectFilter;
-    // The gallery slices carry the owning project id per workflow row; use the
-    // first one as the lone/first enumerated project. (Agents alone don't carry
-    // a project id, so workflows are the source of truth here.)
-    const first = workflows[0]?.row.project_id;
-    return first ?? null;
+    if (projectList.length > 0) return projectList[0].id;
+    // Probe not yet resolved — fall back to any project-scoped workflow row.
+    const scoped = workflows.find((w) => w.row.project_id !== null);
+    return scoped?.row.project_id ?? null;
   };
 
   /**
@@ -205,23 +219,38 @@ export function WorkflowsView(): React.JSX.Element {
   const onRunWorkflow = (entry: WorkflowGalleryEntry): void => {
     // Land the start-session wizard locked to this workflow's project with the
     // flow preselected BY ROW ID. goToWizard's nav mutual-exclusion closes the
-    // Workflows pane.
+    // Workflows pane. A GLOBAL flow (project_id NULL, migration 029) carries no
+    // project of its own, so the wizard collects one (lockProjectId left
+    // undefined — the launch phase refines this preselect path).
     useNavigationStore.getState().goToWizard({
-      lockProjectId: entry.row.project_id,
+      lockProjectId: entry.row.project_id ?? undefined,
       preselectWorkflowId: entry.row.id,
     });
   };
 
   const onEditWorkflow = (entry: WorkflowGalleryEntry): void => {
+    // The editor's projectId is the launch / fallback project for "Run with
+    // modifications" and the project-copy save target. For a GLOBAL flow
+    // (project_id NULL, migration 029) it falls back to the resolved target
+    // project; the actual scope decision is the editor's Save-scope dialog (Save
+    // globally vs a project copy). With no project resolvable the editor cannot
+    // open, so no-op (mirrors the New cards' no-project no-op).
+    const editorProjectId = entry.row.project_id ?? resolveTargetProjectId();
+    if (editorProjectId === null) return;
     setWfEditor({
       mode: 'edit',
-      projectId: entry.row.project_id,
+      projectId: editorProjectId,
       workflowId: entry.row.id,
     });
   };
 
   const onDuplicateWorkflow = (entry: WorkflowGalleryEntry): void => {
     if (duplicateInFlightRef.current) return;
+    // Duplicate PRESERVES the source flow's scope (migration 029): a GLOBAL flow
+    // (project_id NULL) forks to another global copy; a project-scoped flow forks
+    // within the same project. createCustom accepts a null projectId for the
+    // global case, so no project resolution is needed.
+    const duplicateProjectId = entry.row.project_id;
     duplicateInFlightRef.current = true;
     void (async () => {
       const isConflict = (err: unknown): boolean =>
@@ -229,7 +258,7 @@ export function WorkflowsView(): React.JSX.Element {
       try {
         try {
           await trpc.cyboflow.workflows.createCustom.mutate({
-            projectId: entry.row.project_id,
+            projectId: duplicateProjectId,
             name: entry.row.name + '-copy',
             definition: entry.definition,
             permissionMode: entry.row.permission_mode,
@@ -238,7 +267,7 @@ export function WorkflowsView(): React.JSX.Element {
           // Retry ONCE with a distinct name on a name-collision conflict.
           if (!isConflict(err)) throw err;
           await trpc.cyboflow.workflows.createCustom.mutate({
-            projectId: entry.row.project_id,
+            projectId: duplicateProjectId,
             name: entry.row.name + '-copy-2',
             definition: entry.definition,
             permissionMode: entry.row.permission_mode,
@@ -354,17 +383,24 @@ export function WorkflowsView(): React.JSX.Element {
         <GalleryNew
           isOpen
           templates={newWorkflowTemplates}
+          projects={projectList}
+          // A new flow defaults to GLOBAL (null) unless a gallery project filter
+          // is active, in which case that project is preselected (migration 029).
+          defaultScopeProjectId={projectFilter}
           onClose={() => setNewWorkflowProjectId(null)}
-          onSelect={(def, pm, name) => {
+          onSelect={(def, pm, name, scopeProjectId) => {
             const projectId = newWorkflowProjectId;
             setNewWorkflowProjectId(null);
             setWfEditor({
               mode: 'create',
+              // The editor still launches / falls back to a concrete project; the
+              // chosen scope (null = global) is threaded separately.
               projectId,
               workflowId: '',
               initialDefinition: def,
               initialPermissionMode: pm,
               initialName: name,
+              createScopeProjectId: scopeProjectId ?? null,
             });
           }}
         />
@@ -377,9 +413,14 @@ export function WorkflowsView(): React.JSX.Element {
           mode={wfEditor.mode}
           workflowId={wfEditor.workflowId}
           projectId={wfEditor.projectId}
+          // Save-scope dialog inputs (migration 029): the gallery's active filter
+          // defaults the project-copy target; the project list feeds its picker.
+          activeProjectFilter={projectFilter}
+          projects={projectList}
           initialDefinition={wfEditor.initialDefinition}
           initialPermissionMode={wfEditor.initialPermissionMode}
           initialName={wfEditor.initialName}
+          createScopeProjectId={wfEditor.createScopeProjectId}
           onClose={() => setWfEditor(null)}
           onSaved={() => {
             setWfEditor(null);

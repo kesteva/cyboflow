@@ -2,7 +2,9 @@
  * WorkflowCard — one workflow tile in the stacked gallery's Workflows section.
  *
  * Renders a {@link WorkflowGalleryEntry}: the flow name, an optional project
- * chip (shown only in the cross-project "All projects" view), a presentational
+ * chip (shown only in the cross-project "All projects" view AND only for a
+ * project-scoped flow — a GLOBAL flow with `row.project_id === null` shows no
+ * chip), a presentational
  * {@link PhaseRibbon} preview (NO subscription — see PhaseRibbon's header), the
  * {@link WfMeta} headline counts (steps / phases / human gates / loops), the
  * relative "used" timestamp, and a Run / Edit / Duplicate action footer.
@@ -91,7 +93,11 @@ export function WorkflowCard({
           <span className="min-w-0 flex-1 truncate text-[15px] font-bold tracking-[-0.01em] text-text-primary">
             {row.name}
           </span>
-          {showProjectChip && projectName !== '' && (
+          {/* Project chip — shown only in the cross-project view AND only for a
+              project-scoped flow (row.project_id !== null). A GLOBAL flow
+              (project_id null, migration 029) carries no owning project, so it
+              shows NO chip at all. */}
+          {showProjectChip && row.project_id !== null && projectName !== '' && (
             <span
               data-testid="workflow-card-project-chip"
               className="shrink-0 truncate rounded-badge border border-border-primary bg-bg-secondary px-1.5 py-px text-[9px] font-semibold text-text-tertiary"

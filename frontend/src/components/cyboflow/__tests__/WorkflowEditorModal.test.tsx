@@ -203,8 +203,39 @@ describe('WorkflowEditorModal — edit mode', () => {
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
   });
 
-  it('Save calls workflows.updateSpec.mutate with the edited definition', async () => {
+  it('Save → "Save globally" calls workflows.updateSpec.mutate with the edited definition', async () => {
     const { onSaved } = await renderEditMode();
+
+    const nameInput = screen.getByTestId('inspector-name-input');
+    fireEvent.change(nameInput, { target: { value: 'Context (edited)' } });
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+
+    // Save now opens the scope dialog (migration 029); "Save globally" is the
+    // default and updates the existing row in place.
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    const confirm = await screen.findByTestId('save-scope-confirm');
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+
+    expect(mockUpdateSpec).toHaveBeenCalledOnce();
+    const arg = mockUpdateSpec.mock.calls[0][0];
+    expect(arg.workflowId).toBe(EDIT_WORKFLOW_ID);
+    // The edited field is present in the persisted definition.
+    const editedStep = arg.definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(editedStep?.name).toBe('Context (edited)');
+
+    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+    // Save globally must NOT fork a copy.
+    expect(mockCreateCustom).not.toHaveBeenCalled();
+  });
+
+  it('Save → "Create a project-specific copy" calls createCustom with the chosen project', async () => {
+    const { onSaved, onClose } = await renderEditMode();
 
     const nameInput = screen.getByTestId('inspector-name-input');
     fireEvent.change(nameInput, { target: { value: 'Context (edited)' } });
@@ -216,14 +247,28 @@ describe('WorkflowEditorModal — edit mode', () => {
       fireEvent.click(saveBtn);
     });
 
-    expect(mockUpdateSpec).toHaveBeenCalledOnce();
-    const arg = mockUpdateSpec.mock.calls[0][0];
-    expect(arg.workflowId).toBe(EDIT_WORKFLOW_ID);
-    // The edited field is present in the persisted definition.
-    const editedStep = arg.definition.phases[0].steps.find((s) => s.id === 'context');
-    expect(editedStep?.name).toBe('Context (edited)');
+    // Switch to the project-copy radio. The lone `projectId={1}` fallback project
+    // is preselected (single-project default), so the copy can confirm directly.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-project-radio'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-confirm'));
+    });
 
-    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+    // The fork goes through createCustom with the chosen project, NOT updateSpec.
+    expect(mockUpdateSpec).not.toHaveBeenCalled();
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    const arg = mockCreateCustom.mock.calls[0][0];
+    expect(arg.projectId).toBe(1);
+    // The fork de-reserves the built-in name with a `-copy` suffix (a bare 'planner'
+    // would hit the reserved-name / global-collision guards in createCustom).
+    expect(arg.name).toBe('planner-copy');
+    const forkedStep = arg.definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(forkedStep?.name).toBe('Context (edited)');
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
+    expect(onClose).toHaveBeenCalled();
   });
 
   it('"Save as new flow" opens the name dialog and calls createCustom', async () => {
@@ -379,7 +424,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(mockRunStart).toHaveBeenCalledTimes(1);
   });
 
-  it('surfaces a server validation error inline when Save fails', async () => {
+  it('surfaces a server validation error inline when Save (global) fails', async () => {
     mockUpdateSpec.mockRejectedValue(new Error('phase ids must be unique'));
     await renderEditMode();
 
@@ -389,11 +434,15 @@ describe('WorkflowEditorModal — edit mode', () => {
     const saveBtn = screen.getByTestId('editor-save-button');
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
 
+    // Save → scope dialog → "Save globally" → updateSpec rejects → inline alert.
     await act(async () => {
       fireEvent.click(saveBtn);
     });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
 
-    const alert = await screen.findByRole('alert');
+    const alert = await screen.findByTestId('editor-error');
     expect(alert).toHaveTextContent('phase ids must be unique');
   });
 });

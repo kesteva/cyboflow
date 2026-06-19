@@ -16,6 +16,12 @@
  * `runs.list` result by `workflow_id` (newest `created_at` wins) — we never call
  * `runs.list` per workflow. When filtered we fan out over the single project.
  *
+ * Workflows are then DEDUPED BY `row.id` (mirroring the agent dedup): a GLOBAL
+ * flow (`project_id` null, migration 029) is returned by every project's
+ * `workflows.list`, so it would otherwise repeat once per enumerated project.
+ * Its `lastUsedAt` is folded to the NEWEST run timestamp across the fan-out,
+ * since a global flow's runs are scattered across the projects it ran in.
+ *
  * Each workflow row's effective definition is resolved via
  * {@link resolveWorkflowDefinition}; rows whose definition cannot resolve (a
  * stale custom flow with broken spec, or a hidden scheduler-internal row) are
@@ -277,7 +283,13 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
     // A newer fetch superseded us — drop everything we computed.
     if (generation !== fetchGeneration) return;
 
-    const workflows: WorkflowGalleryEntry[] = [];
+    // Dedupe workflows by row.id (migration 029): a GLOBAL flow (project_id null)
+    // is returned by EVERY project's workflows.list, so the cross-project fan-out
+    // yields the same row once per enumerated project. We keep ONE entry per id
+    // (mirrors the agentsByKey dedup below) and fold the per-project run history
+    // into it — a global flow's runs are scattered across projects, so lastUsedAt
+    // must be the NEWEST created_at across the whole fan-out, not the first seen.
+    const workflowsById = new Map<string, WorkflowGalleryEntry>();
     const agentsByKey = new Map<string, AgentGalleryEntry>();
 
     for (const { projectId, rows, agentEntries, runs } of perProject) {
@@ -288,12 +300,28 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
         // Drop rows whose definition cannot resolve (broken spec / hidden
         // scheduler-internal row) so the gallery never renders a ribbon-less card.
         if (definition === null) continue;
-        workflows.push({
+        const lastUsedAt = lastUsed[row.id] ?? null;
+        const existing = workflowsById.get(row.id);
+        if (existing !== undefined) {
+          // Same global row seen under another project — keep the newest run
+          // timestamp across the fan-out (ISO strings are lexically comparable).
+          if (
+            lastUsedAt !== null &&
+            (existing.lastUsedAt === null || existing.lastUsedAt < lastUsedAt)
+          ) {
+            existing.lastUsedAt = lastUsedAt;
+          }
+          continue;
+        }
+        workflowsById.set(row.id, {
           row,
           definition,
           meta: wfMeta(definition),
-          lastUsedAt: lastUsed[row.id] ?? null,
-          projectName,
+          lastUsedAt,
+          // A global row carries no owning project; the chip is hidden for it
+          // (project_id null), so projectName is unused there. A project-scoped
+          // row gets the project it was fetched under.
+          projectName: row.project_id === null ? '' : projectName,
         });
       }
       for (const entry of agentEntries ?? []) {
@@ -303,6 +331,8 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
         }
       }
     }
+
+    const workflows = Array.from(workflowsById.values());
 
     // Commit only when at least one project's queries yielded data; an
     // all-failed fan-out keeps the prior slices (stale-not-cleared).
