@@ -85,6 +85,11 @@ export interface Session {
    * Written by sessions:create-quick (migration 027); NULL → sdk (legacy).
    */
   substrate?: CliSubstrate;
+  /**
+   * Agent effort the session was launched with ('ultracode' | undefined).
+   * Written by sessions:create-quick (migration 029); NULL → no effort.
+   */
+  effort?: 'ultracode';
 }
 
 export interface SessionOutput {

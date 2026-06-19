@@ -148,6 +148,21 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
     expect(legacySession.substrate).toBeUndefined();
   });
+
+  it("copies effort='ultracode' to effort; a row without it maps to undefined (migration 029)", () => {
+    // Without this mapping the persisted effort is dropped on read and the
+    // read-only effort pill never renders (silent-drop / projection-omission).
+    const stamped = makeDbSession({ effort: 'ultracode' });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(stamped);
+    expect(session.effort).toBe('ultracode');
+
+    const legacy = makeDbSession();
+    const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
+    expect(legacySession.effort).toBeUndefined();
+  });
 });
 
 // ------------------------------------------------------------------
