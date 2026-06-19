@@ -35,6 +35,7 @@ import { ChatInput } from './ChatInput';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { ModeIdentityStrip } from './unified/ModeIdentityStrip';
 import { ChatMetaStrip } from './unified/ChatMetaStrip';
+import { deriveRunContextUsage } from './unified/runContextUsage';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -94,6 +95,16 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const worktreePath = run?.worktree_path ?? null;
   const branchName = run?.branch_name ?? null;
   const folderLabel = worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
+
+  // Live context-% for the meta strip. Flow runs have no server-side
+  // contextUsage (the backend extractor skips cyboflow run ids), so we derive it
+  // on the renderer from the run's structured stream — reactive as events
+  // append. Interactive runs put NO events on the structured stream (Q3 store
+  // isolation: raw PTY bytes go straight to xterm), so they stay "--%".
+  const contextUsage = useMemo(
+    () => (isInteractive ? null : deriveRunContextUsage(streamEvents)),
+    [isInteractive, streamEvents],
+  );
 
   // -------------------------------------------------------------------------
   // Messages + load state
@@ -471,7 +482,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
           folderLabel={folderLabel}
           folderTitle={worktreePath}
           branchName={branchName}
-          contextUsage={null}
+          contextUsage={contextUsage}
         />
 
         <PendingApprovalsForRun runId={runId} />
