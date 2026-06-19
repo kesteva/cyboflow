@@ -52,13 +52,15 @@ export type {
 /**
  * Discriminated union over all IPC envelope `type` values the renderer can receive.
  *
- * Derived from the shared `StreamEnvelope` discriminant in
- * shared/types/claudeStream.ts by intersecting with the renderer-only `runId`
- * field. Discriminate on `event.type`. Never re-declare the
- * `StreamEnvelopePayload` arms here — a parallel union silently routes new
+ * Alias of the shared `StreamEnvelope` discriminant in
+ * shared/types/claudeStream.ts. Discriminate on `event.type`. Never re-declare
+ * the `StreamEnvelopePayload` arms here — a parallel union silently routes new
  * SDK variants to `UnknownEventRow` if any arm is forgotten (FIND-SPRINT-031-4).
+ *
+ * The run is already discriminated by the `cyboflow:stream:<runId>` channel, so
+ * the envelope carries no top-level `runId` (FIND-SPRINT-016-3).
  */
-export type StreamEvent = StreamEnvelope & { runId: string };
+export type StreamEvent = StreamEnvelope;
 
 // ---------------------------------------------------------------------------
 // Guard: ensure window.electron is present before every IPC call

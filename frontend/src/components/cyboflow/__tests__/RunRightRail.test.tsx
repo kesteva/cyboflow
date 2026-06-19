@@ -222,7 +222,6 @@ const RUN_ID = 'run-parity-rail-001';
  */
 function makeAssistantEnvelope(): StreamEvent {
   return {
-    runId: RUN_ID,
     type: 'assistant',
     payload: {
       type: 'assistant',

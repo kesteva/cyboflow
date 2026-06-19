@@ -90,14 +90,12 @@ function getStepTimeWindow(
  */
 function projectLogLines(
   events: StreamEvent[],
-  runId: string,
   window: TimeWindow | null,
 ): LogLine[] {
   if (window === null) return [];
 
   return events
     .filter((e) => {
-      if (e.runId !== runId) return false;
       const ts = new Date(e.timestamp).getTime();
       if (ts < window.start) return false;
       if (window.end !== null && ts > window.end) return false;
@@ -278,7 +276,7 @@ export function WorkflowProgressTimeline({
                 const window = getStepTimeWindow(step.id, stepStates, streamEvents);
                 const logLines = isPending
                   ? []
-                  : projectLogLines(streamEvents, runId, window);
+                  : projectLogLines(streamEvents, window);
 
                 // Start timestamp for elapsed time calculation
                 // unreachable in v1 — kept for TASK-765 (window is always null until step timestamps land)

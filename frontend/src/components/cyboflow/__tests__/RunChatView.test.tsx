@@ -279,7 +279,6 @@ describe('RunChatView — data flow', () => {
 
     act(() => {
       useCyboflowStore.getState().appendStreamEvent({
-        runId: 'run-1',
         type: 'assistant',
         payload: {
           type: 'assistant',

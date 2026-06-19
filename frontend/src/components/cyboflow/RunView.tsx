@@ -315,11 +315,11 @@ export function RunView() {
   const [isLoading, setIsLoading] = useState(false);
 
   // Re-query the durable raw_events log. Result type is INFERRED from AppRouter
-  // (StreamEnvelope[]); we attach runId to match the renderer's StreamEvent.
+  // (StreamEnvelope[]), which is exactly the renderer's StreamEvent.
   const loadEvents = useCallback(async (runId: string): Promise<void> => {
     try {
       const result = await trpc.cyboflow.runs.listRawEvents.query({ runId });
-      setEvents(result.map((envelope) => ({ ...envelope, runId })));
+      setEvents(result);
     } finally {
       setIsLoading(false);
     }
@@ -339,7 +339,7 @@ export function RunView() {
       try {
         const result = await trpc.cyboflow.runs.listRawEvents.query({ runId: activeRunId });
         if (aborted) return;
-        setEvents(result.map((envelope) => ({ ...envelope, runId: activeRunId })));
+        setEvents(result);
       } finally {
         if (!aborted) setIsLoading(false);
       }

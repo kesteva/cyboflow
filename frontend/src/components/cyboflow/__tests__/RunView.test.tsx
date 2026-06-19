@@ -124,7 +124,6 @@ describe('RunView', () => {
 
   it('routes a system/init event to the typed system branch', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -147,7 +146,6 @@ describe('RunView', () => {
 
   it('routes an assistant event to the typed assistant branch', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'assistant',
       payload: {
         type: 'assistant',
@@ -167,7 +165,6 @@ describe('RunView', () => {
 
   it('routes a user event to the typed user branch and shows tool_result content', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'user',
       payload: {
         type: 'user',
@@ -188,7 +185,6 @@ describe('RunView', () => {
 
   it('routes a result event to the typed result branch and shows subtype and num_turns', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'result',
       payload: {
         type: 'result',
@@ -208,7 +204,6 @@ describe('RunView', () => {
 
   it('routes a stream_event to the typed stream_event branch as a compact one-line summary', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'stream_event',
       payload: {
         type: 'stream_event',
@@ -223,7 +218,6 @@ describe('RunView', () => {
 
   it('routes an unrecognized event type to the unknown branch with a visible warning', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'unknown',
       payload: { raw: { some_field: 'some_value' } },
       timestamp: '2026-05-20T00:00:05Z',
@@ -241,7 +235,6 @@ describe('RunView', () => {
 
   it('routes a retired api_retry payload to UnknownEventRow — Unrecognized event', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'unknown',
       payload: { type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 5, retry_delay_ms: 1000 },
       timestamp: '2026-05-20T00:00:10Z',
@@ -253,7 +246,6 @@ describe('RunView', () => {
 
   it('routes a retired compact payload to UnknownEventRow — Unrecognized event', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'unknown',
       payload: { type: 'system', subtype: 'compact', summary: 'Context compacted after 50k tokens.' },
       timestamp: '2026-05-20T00:00:11Z',
@@ -265,7 +257,6 @@ describe('RunView', () => {
 
   it('routes a system/compact_boundary event to the typed system branch (non-init subtype)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -282,7 +273,6 @@ describe('RunView', () => {
 
   it('renders assistant event with multiple mixed content blocks (text + tool_use + thinking)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'assistant',
       payload: {
         type: 'assistant',
@@ -308,7 +298,6 @@ describe('RunView', () => {
 
   it('renders result event without total_cost_usd as "n/a"', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'result',
       payload: {
         type: 'result',
@@ -327,7 +316,6 @@ describe('RunView', () => {
 
   it('renders stream_event content_block_delta text inline in the compact summary', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'stream_event',
       payload: {
         type: 'stream_event',
@@ -347,7 +335,6 @@ describe('RunView', () => {
 
   it('routes a session_info event to the typed SessionInfoEventRow', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'session_info',
       payload: {
         type: 'session_info',
@@ -369,7 +356,6 @@ describe('RunView', () => {
 
   it('routes a rate_limit_event to the typed RateLimitEventRow (shows status text)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'rate_limit_event',
       payload: {
         type: 'rate_limit_event',
@@ -386,7 +372,6 @@ describe('RunView', () => {
 
   it('routes a system/hook_started event to the typed SystemEventRow (shows hook_name)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -407,7 +392,6 @@ describe('RunView', () => {
 
   it('routes a system/hook_response event to the typed SystemEventRow (shows outcome)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -433,7 +417,6 @@ describe('RunView', () => {
 
   it('routes a system/status event to the typed SystemEventRow (shows status value)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -452,7 +435,6 @@ describe('RunView', () => {
 
   it('renders system/status with status=null as the literal "null" string (null-coalesce branch)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -470,7 +452,6 @@ describe('RunView', () => {
 
   it('renders system/hook_response with outcome=error (error color branch, not UnknownEventRow)', async () => {
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'system',
       payload: {
         type: 'system',
@@ -499,7 +480,6 @@ describe('RunView', () => {
   it('truncates session_info initial_prompt longer than 120 chars with an ellipsis', async () => {
     const longPrompt = 'A'.repeat(130);
     const event: StreamEvent = {
-      runId: 'run-1',
       type: 'session_info',
       payload: {
         type: 'session_info',
@@ -524,7 +504,6 @@ describe('RunView', () => {
 
   it('routes a run_started event to RunStartedEventRow (shows "Starting" placeholder)', async () => {
     const event: StreamEvent = {
-      runId: 'run-started-test',
       type: 'run_started',
       payload: {
         type: 'run_started',
@@ -543,7 +522,6 @@ describe('RunView', () => {
   it('RunStartedEventRow truncates runId to 8 chars followed by an ellipsis', async () => {
     const longRunId = 'abcdef1234567890'; // 16 chars; first 8 = 'abcdef12'
     const event: StreamEvent = {
-      runId: longRunId,
       type: 'run_started',
       payload: {
         type: 'run_started',
@@ -566,13 +544,11 @@ describe('RunView', () => {
 
   it('re-queries listRawEvents when the active run changes (backfill survives a switch)', async () => {
     const eventA: StreamEvent = {
-      runId: 'run-A',
       type: 'assistant',
       payload: { type: 'assistant', message: { id: 'm-a', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'History for run A' }] } },
       timestamp: '2026-05-22T00:00:00Z',
     };
     const eventB: StreamEvent = {
-      runId: 'run-B',
       type: 'assistant',
       payload: { type: 'assistant', message: { id: 'm-b', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'History for run B' }] } },
       timestamp: '2026-05-22T00:00:01Z',
