@@ -17,22 +17,17 @@ browser.
    registration to launch with `--cdp-endpoint http://localhost:9223`. The MCP
    server's `browser_navigate` / `browser_snapshot` etc. then drive the real
    renderer instead of a standalone Chromium.
-3. SoloFlow's `shadow-verifier` honors `verification.visual_web=true` (in
-   `.soloflow/config.json`) and routes Electron flows through
-   `mcp__playwright__*` automatically.
 
 **Required precondition:** `pnpm dev` must be running before any
 `mcp__playwright__*` call. If port 9223 isn't listening, the MCP server
-fails the `connectOverCDP` and returns navigation errors. The verifier
-classifies this as `skipped_unable` — not a code regression; just start the
-dev server.
+fails the `connectOverCDP` and returns navigation errors — not a code
+regression; just start the dev server.
 
 ## Peekaboo (visual_macos) — fallback path
 
 When `pnpm dev` isn't running, or when capturing system UI outside the
 Electron window, `visual_macos` via Peekaboo MCP captures the Cyboflow
-window directly. `verification.visual_macos=true` is set in
-`.soloflow/config.json`, so this path is also active.
+window directly.
 
 ### macOS Permissions Required for Peekaboo
 

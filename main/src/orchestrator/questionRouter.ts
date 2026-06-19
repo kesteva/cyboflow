@@ -31,10 +31,9 @@
  *
  * 5. The user's answer flows back to the SDK through the PreToolUse hook's
  *    `updatedInput: { questions, answers }` payload (NOT through an injected
- *    tool_result). See .soloflow/archive/ideas/IDEA-025-research.md "Answered
- *    Questions" for the SDK contract details: the SDK synthesizes the
- *    tool_result from updatedInput.answers; injecting our own tool_result would
- *    either duplicate or conflict with the SDK's own emission.
+ *    tool_result). The SDK synthesizes the tool_result from updatedInput.answers;
+ *    injecting our own tool_result would either duplicate or conflict with the
+ *    SDK's own emission.
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*.

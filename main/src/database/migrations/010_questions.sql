@@ -5,8 +5,8 @@
 --   (2) workflow_runs CHECK-constraint update — adds a 9th status value via the
 --       SQLite table-recreation recipe (no ALTER TABLE for CHECK constraints).
 --
--- Risk 2 in .soloflow/active/research/IDEA-025-research.md documents the
--- table-recreation recipe; this migration is its concrete application.
+-- This migration applies the SQLite table-recreation recipe for evolving a
+-- CHECK constraint (SQLite has no ALTER TABLE for CHECK constraints).
 --
 -- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
 -- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.

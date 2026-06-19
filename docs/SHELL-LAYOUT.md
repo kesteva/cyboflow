@@ -36,7 +36,6 @@ macOS dock badge stay live even when the pane is unmounted.
 
 - Product framing: `docs/cyboflow_system_design.md` §5.7.
 - Current mount site: `frontend/src/App.tsx` lines 317-375.
-- Epic: `.soloflow/active/plans/cyboflow-shell-architecture/EPIC-cyboflow-shell-architecture.md`.
 
 ## Navigation store contract
 

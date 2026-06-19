@@ -6,7 +6,6 @@
  *
  * Sources:
  *   - CLAUDE_AGENT_SDK_SPEC.md gist (SamSaffron): https://gist.github.com/SamSaffron/603648958a8c18ceae34939a8951d417
- *   - Architecture research §1: .soloflow/active/research/ROADMAP-001-research-architecture.md
  *   - @anthropic-ai/claude-agent-sdk@0.2.x sdk.d.ts (authoritative source for SDK wire format)
  */
 
