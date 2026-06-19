@@ -88,6 +88,34 @@ function configureBuild() {
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/beta' };
   }
 
+  // Lean per-arch packaging. The claude-agent-sdk ships its (~200 MB) native
+  // `claude` CLI as a per-arch package (`…-darwin-arm64` / `…-darwin-x64`). A
+  // cross-arch dev box can have BOTH installed, and electron-builder bundles
+  // node_modules wholesale — so a single-arch build would otherwise also ship
+  // the OTHER arch's (dead-weight, wrong-arch) binary. When BUILD_ARCH names a
+  // single arch, exclude the other arch's package and fail fast if the target
+  // arch's binary is absent (which would silently break the SDK substrate at
+  // runtime). BUILD_ARCH unset / 'universal' leaves files untouched.
+  const targetArch = process.env.BUILD_ARCH;
+  if (targetArch === 'arm64' || targetArch === 'x64') {
+    const otherArch = targetArch === 'arm64' ? 'x64' : 'arm64';
+    const sdkBase = '@anthropic-ai/claude-agent-sdk';
+    const targetBinary = path.join(
+      __dirname, '..', 'node_modules', `${sdkBase}-darwin-${targetArch}`, 'claude'
+    );
+    if (!fs.existsSync(targetBinary)) {
+      console.error(
+        `Error: the ${targetArch} Claude Code binary is missing ` +
+          `(${sdkBase}-darwin-${targetArch}/claude). A ${targetArch} build would ship ` +
+          `without it and break the SDK substrate at runtime. ` +
+          `Run "pnpm run install:darwin-cross" before a cross-arch build.`
+      );
+      process.exit(1);
+    }
+    config.files = [...(config.files || []), `!node_modules/${sdkBase}-darwin-${otherArch}/**`];
+    console.log(`Lean packaging: excluding ${sdkBase}-darwin-${otherArch} (target arch ${targetArch}).`);
+  }
+
   // Write the environment-adjusted config; package.json stays pristine
   fs.mkdirSync(path.dirname(GENERATED_CONFIG_PATH), { recursive: true });
   fs.writeFileSync(GENERATED_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');

@@ -48,6 +48,7 @@ function runCase(label, envOverrides, assertFn) {
     'APPLE_APP_SPECIFIC_PASSWORD',
     'APPLE_APP_PASSWORD',
     'BUILD_VARIANT',
+    'BUILD_ARCH',
   ];
 
   for (const key of managedKeys) {
@@ -158,6 +159,40 @@ try {
   );
 } catch (err) {
   console.error('FAIL: Case C — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case D: BUILD_ARCH=<arch> → lean per-arch packaging excludes the OTHER arch's
+  // claude-agent-sdk binary. The preflight requires the TARGET arch's binary on
+  // disk (else it process.exit(1)s), and CI does not install the darwin binaries,
+  // so only run this case when the host arch's binary is actually present.
+  const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
+  const otherArch = hostArch === 'x64' ? 'arm64' : 'x64';
+  const hostBinary = path.join(
+    __dirname, '..', 'node_modules', '@anthropic-ai', `claude-agent-sdk-darwin-${hostArch}`, 'claude'
+  );
+  if (process.platform === 'darwin' && fs.existsSync(hostBinary)) {
+    runCase(
+      `Case D: BUILD_ARCH=${hostArch} (lean per-arch exclusion)`,
+      { BUILD_ARCH: hostArch, CSC_DISABLE: 'true' },
+      function (config) {
+        const exclusion = `!node_modules/@anthropic-ai/claude-agent-sdk-darwin-${otherArch}/**`;
+        assert(
+          Array.isArray(config.files) && config.files.includes(exclusion),
+          `files should exclude the non-target arch (${exclusion})`
+        );
+        assert(
+          !config.files.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-darwin-${hostArch}/**`),
+          'files must NOT exclude the target arch'
+        );
+      }
+    );
+  } else {
+    console.log('\n--- Case D: skipped (no darwin claude-agent-sdk binary on this host) ---');
+  }
+} catch (err) {
+  console.error('FAIL: Case D — ' + err.message);
   failed = true;
 }
 
