@@ -1,8 +1,6 @@
 # cyboflow
 
-cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships three built-in flows — **Planner**, **Sprint**, and **Compound** — whose prompt bodies live in app source (`main/src/orchestrator/workflows/planner.md` + `sprint.md` + `compound.md`); there is NO runtime dependency on the SoloFlow plugin cache. It is a fork of [Crystal](https://github.com/stravu/crystal) (`stravu/crystal@0.3.5`) currently being narrowed and rebuilt — see `docs/cyboflow_system_design.md` for the target scope and `docs/ARCHITECTURE.md` for the current component layout.
-
-> The `.soloflow/` directory, `.claude/agents/`, and `.claude/settings.json` are the SoloFlow DEV PLUGIN that tracks cyboflow's OWN development — they are NOT part of the shipped app and have no runtime relationship to it. Do not confuse them with the app's built-in flows.
+cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships three built-in flows — **Planner**, **Sprint**, and **Compound** — whose prompt bodies live in app source (`main/src/orchestrator/workflows/planner.md` + `sprint.md` + `compound.md`). It is a fork of [Crystal](https://github.com/stravu/crystal) (`stravu/crystal@0.3.5`) currently being narrowed and rebuilt — see `docs/cyboflow_system_design.md` for the target scope and `docs/ARCHITECTURE.md` for the current component layout.
 
 ## Entity model + review queue
 
