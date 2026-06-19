@@ -281,9 +281,14 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
+    // Clear the composer the moment we dispatch (before the send round-trip) so
+    // the UI reflects the send immediately, instead of holding the typed text
+    // until the response returns; restore the draft if the dispatch fails.
+    const draft = input;
+    setInput('');
     const response = await API.panels.sendInput(panelId, `${finalInput}\n`);
-    if (response.success) {
-      setInput('');
+    if (!response.success) {
+      setInput(draft);
     }
   };
 
@@ -355,11 +360,16 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
+    // Clear the composer the moment we dispatch (before the send round-trip) so
+    // the UI reflects the send immediately, instead of holding the typed text
+    // until the response returns; restore the draft if the dispatch fails.
+    const draft = input;
+    setInput('');
     const response = await API.panels.continue(panelId, finalInput, modelOverride);
-    if (response.success) {
-      setInput('');
-      // Output will be loaded automatically when session status changes
+    if (!response.success) {
+      setInput(draft);
     }
+    // Output will be loaded automatically when session status changes
   };
 
   const handleTerminalCommand = async () => {
