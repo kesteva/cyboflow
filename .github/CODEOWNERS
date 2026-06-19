@@ -1,1 +1,3 @@
-* @jordan-BAIC @ghinkle @SaucyWrong
+# Global code owner. Every change to main requires review from @kesteva.
+# Enforced via branch protection (require_code_owner_reviews).
+* @kesteva
