@@ -25,17 +25,20 @@ import {
   type Artifact,
 } from '../../../../shared/types/artifacts';
 
-// --- design hexes (warm-paper chrome; M7 tokenizes) ---
-const INK = '#1a1815';
-const MUTED = '#6a5e44';
-const FAINT = '#9c8e6c';
-const HAIRLINE_SOFT = '#e6dec7';
-const BORDER_HAIRLINE = '#d8cfb8';
-const CARD_BG = '#ffffff';
+// --- design hexes (warm-paper chrome; tokenized to theme-aware var()s) ---
+const INK = 'var(--color-text-primary)';
+const MUTED = 'var(--color-text-secondary)';
+const FAINT = 'var(--color-text-tertiary)';
+const HAIRLINE_SOFT = 'var(--color-border-tertiary)';
+const BORDER_HAIRLINE = 'var(--color-border-primary)';
+const CARD_BG = 'var(--color-surface-primary)';
+// rgba of the human-checkpoint amber (#a86b1d); no *-rgb channel token exists,
+// so this stays a literal rgba (see report).
 const SESSION_BG = 'rgba(168,107,29,.05)';
+// #e6c9a8 has no exact token in colors.css — left as a literal (see report).
 const SESSION_BORDER = '#e6c9a8';
-const GREEN = '#2d8a5b';
-const AMBER = '#a86b1d';
+const GREEN = 'var(--color-status-success)';
+const AMBER = 'var(--human-border)';
 const LIVE_GLYPH = '◳';
 
 interface ArtifactsPanelProps {
@@ -72,7 +75,7 @@ export function ArtifactsPanel({ runId, projectId, sessionKey }: ArtifactsPanelP
     <div
       data-testid="artifacts-panel"
       className="h-full overflow-y-auto"
-      style={{ padding: '12px 12px 16px', background: '#ebe4d2' }}
+      style={{ padding: '12px 12px 16px', background: 'var(--color-bg-secondary)' }}
     >
       {/* Eyebrow + helper line */}
       <div

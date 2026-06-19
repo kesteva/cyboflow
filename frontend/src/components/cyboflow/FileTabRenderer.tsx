@@ -14,14 +14,18 @@ import { useFileDiffData } from '../../hooks/useFileDiffData';
 import type { DiffHunk, HunkLine } from '../../utils/parseFileHunks';
 import type { FileTabStatus } from '../../../../shared/types/centerPane';
 
-const RAIL = '#ebe4d2';
-const HAIRLINE = '#d8cfb8';
-const SOFT = '#e6dec7';
-const FAINT = '#9c8e6c';
-const MUTED = '#6a5e44';
-const GREEN = '#2d8a5b';
-const RUST = '#c96442';
-const INK = '#1a1815';
+const RAIL = 'var(--color-bg-secondary)';
+const HAIRLINE = 'var(--color-border-primary)';
+const SOFT = 'var(--color-border-tertiary)';
+const FAINT = 'var(--color-text-tertiary)';
+const MUTED = 'var(--color-text-secondary)';
+const GREEN = 'var(--color-status-success)';
+const RUST = 'var(--color-interactive-primary)';
+const INK = 'var(--color-text-primary)';
+// Diff add/del row washes are kept as theme-stable literals (no --*-rgb channel
+// triple exists for green/terracotta): additions read green, deletions rust in
+// every theme, preserving the pairing. Do NOT map DEL_BG to --color-interactive-
+// surface — it remaps to blue in dark mode and breaks the add/del contrast.
 const ADD_BG = 'rgba(45,138,91,.12)';
 const DEL_BG = 'rgba(201,100,66,.12)';
 
@@ -93,7 +97,7 @@ export function FileTabRenderer({ sessionId, filePath, status }: FileTabRenderer
   const { loading, error, fileDiff } = useFileDiffData(sessionId, filePath);
 
   return (
-    <div data-testid="file-tab-renderer" className="cf-scroll" style={{ height: '100%', overflow: 'auto', background: '#f5f1e8' }}>
+    <div data-testid="file-tab-renderer" className="cf-scroll" style={{ height: '100%', overflow: 'auto', background: 'var(--color-bg-primary)' }}>
       {/* Header */}
       <div
         style={{

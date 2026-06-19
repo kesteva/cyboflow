@@ -20,13 +20,13 @@ import { trpc } from '../../trpc/client';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import { isCanvasArtifact } from '../../../../shared/types/artifacts';
 
-const RAIL = '#ebe4d2';
-const HAIRLINE = '#d8cfb8';
-const FAINT = '#9c8e6c';
-const INK = '#1a1815';
-const PAGE = '#f5f1e8';
-const GREEN = '#2d8a5b';
-const AMBER = '#a86b1d';
+const RAIL = 'var(--color-bg-secondary)';
+const HAIRLINE = 'var(--color-border-primary)';
+const FAINT = 'var(--color-text-tertiary)';
+const INK = 'var(--color-text-primary)';
+const PAGE = 'var(--color-bg-primary)';
+const GREEN = 'var(--color-status-success)';
+const AMBER = 'var(--human-border)';
 
 interface ArtifactHeaderProps {
   artifact: Artifact;
@@ -155,7 +155,7 @@ export function ArtifactHeader({
       <span style={{ flex: 1 }} />
 
       {commitError && (
-        <span data-testid="artifact-commit-error" style={{ fontSize: '10px', color: '#c96442', fontWeight: 600 }}>
+        <span data-testid="artifact-commit-error" style={{ fontSize: '10px', color: 'var(--color-interactive-primary)', fontWeight: 600 }}>
           {commitError}
         </span>
       )}

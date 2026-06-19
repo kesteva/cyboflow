@@ -20,19 +20,19 @@ import {
   isCanvasArtifact,
 } from '../../../../shared/types/artifacts';
 
-// Warm-paper palette (design handoff).
-const INK = '#1a1815';
-const HAIRLINE = '#d8cfb8';
-const PAGE = '#f5f1e8';
-const RAIL = '#ebe4d2';
-const FAINT = '#9c8e6c';
-const DISABLED = '#b3a685';
-const CHIP_IDLE = '#cabfa3';
-const FILE_EDGE = '#6a5e44';
-const RUST = '#c96442';
-const AMBER = '#a86b1d';
-const STATUS_M = '#d4a72c';
-const STATUS_A = '#2d8a5b';
+// Warm-paper palette (design handoff) — theme-remapped semantic tokens.
+const INK = 'var(--color-text-primary)';
+const HAIRLINE = 'var(--color-border-primary)';
+const PAGE = 'var(--color-bg-primary)';
+const RAIL = 'var(--color-bg-secondary)';
+const FAINT = 'var(--color-text-tertiary)';
+const DISABLED = 'var(--color-text-disabled)';
+const CHIP_IDLE = '#cabfa3'; // no exact token match in colors.css — left as literal
+const FILE_EDGE = 'var(--color-text-secondary)';
+const RUST = 'var(--color-interactive-primary)';
+const AMBER = 'var(--human-border)';
+const STATUS_M = 'var(--color-status-warning)';
+const STATUS_A = 'var(--color-status-success)';
 
 interface CenterPaneTabStripProps {
   tabs: TabItem[];

@@ -32,15 +32,15 @@ import { ARTIFACT_COLORS } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
-const PAGE = '#f5f1e8';
-const HAIRLINE = '#d8cfb8';
-const SOFT = '#e6dec7';
-const FAINT = '#9c8e6c';
-const MUTED = '#6a5e44';
-const INK = '#1a1815';
-const RUST = '#c96442';
+const PAGE = 'var(--color-bg-primary)';
+const HAIRLINE = 'var(--color-border-primary)';
+const SOFT = 'var(--color-border-tertiary)';
+const FAINT = 'var(--color-text-tertiary)';
+const MUTED = 'var(--color-text-secondary)';
+const INK = 'var(--color-text-primary)';
+const RUST = 'var(--color-interactive-primary)';
 const HOVER_WASH = '#faf7ef';
-const STORIES = '#5a4ad6';
+const STORIES = 'var(--color-phase-refine)';
 
 interface ArtifactTabRendererProps {
   artifact: Artifact;
@@ -99,7 +99,7 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
             style={{
               maxWidth: 680,
               margin: '0 auto',
-              background: '#fff',
+              background: 'var(--color-surface-primary)',
               border: `1px solid ${HAIRLINE}`,
               padding: '34px 40px 56px',
               marginTop: 18,
@@ -144,7 +144,7 @@ function taskChildren(epic: BacklogTaskItem): BacklogTaskItem[] {
 function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
   const tasks = taskChildren(epic);
   return (
-    <div data-testid="artifact-epic-card" style={{ border: `1px solid ${HAIRLINE}`, background: '#fff', marginBottom: 14 }}>
+    <div data-testid="artifact-epic-card" style={{ border: `1px solid ${HAIRLINE}`, background: 'var(--color-surface-primary)', marginBottom: 14 }}>
       {/* Epic header */}
       <div
         style={{
@@ -177,7 +177,7 @@ function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
           }}
         >
           {tasks.map((task) => (
-            <div key={task.id} data-testid="artifact-task-cell" style={{ background: '#fff', padding: '9px 11px' }}>
+            <div key={task.id} data-testid="artifact-task-cell" style={{ background: 'var(--color-surface-primary)', padding: '9px 11px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
                 <span style={{ fontSize: '9px', fontWeight: 700, color: STORIES, letterSpacing: '.03em' }}>{task.ref}</span>
                 {task.priority && (
@@ -317,7 +317,7 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
           {fileNames.map((name) => {
             const dataUrl = images[name];
             return (
-              <div key={name} data-testid="artifact-shot-card" style={{ border: `1px solid ${HAIRLINE}`, background: '#fff' }}>
+              <div key={name} data-testid="artifact-shot-card" style={{ border: `1px solid ${HAIRLINE}`, background: 'var(--color-surface-primary)' }}>
                 {/* 16:10 image area — the resolved on-disk PNG, or a hatched
                     fallback when the file did not resolve (missing / blocked). */}
                 {dataUrl ? (
@@ -338,7 +338,7 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
                     data-testid="artifact-shot-missing"
                     style={{
                       aspectRatio: '16 / 10',
-                      background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
+                      background: 'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
                       borderBottom: `1px solid ${HAIRLINE}`,
                       display: 'flex',
                       alignItems: 'center',
@@ -433,7 +433,7 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
             justifyContent: 'center',
             gap: 10,
             padding: 32,
-            background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
+            background: 'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
           }}
         >
           <span style={{ fontSize: '34px', color: accent }}>◳</span>

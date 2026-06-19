@@ -22,13 +22,13 @@
  */
 import { useState, type ReactElement } from 'react';
 
-const HAIRLINE = '#d8cfb8';
-const RAIL = '#ebe4d2';
-const PAGE = '#f5f1e8';
-const INK = '#1a1815';
-const MUTED = '#6a5e44';
-const FAINT = '#9c8e6c';
-const RUST = '#c96442';
+const HAIRLINE = 'var(--color-border-primary)';
+const RAIL = 'var(--color-bg-secondary)';
+const PAGE = 'var(--color-bg-primary)';
+const INK = 'var(--color-text-primary)';
+const MUTED = 'var(--color-text-secondary)';
+const FAINT = 'var(--color-text-tertiary)';
+const RUST = 'var(--color-interactive-primary)';
 
 // Embeddable local hosts. `0.0.0.0` and the unspecified-address `::`/`[::]`
 // are deliberately EXCLUDED: they are bind-all sentinels, not real loopback
@@ -78,7 +78,8 @@ export function LiveCanvasEmbed({ url }: { url: string }): ReactElement {
           gap: 8,
           padding: 32,
           textAlign: 'center',
-          background: 'repeating-linear-gradient(135deg,#efeadc 0 10px,#f5f1e8 10px 20px)',
+          background:
+            'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
         }}
       >
         <span style={{ fontSize: '28px', color: RUST }}>◳</span>
@@ -152,7 +153,7 @@ export function LiveCanvasEmbed({ url }: { url: string }): ReactElement {
         src={url}
         title="UI prototype live preview"
         sandbox="allow-scripts allow-same-origin allow-forms"
-        style={{ flex: 1, width: '100%', border: 'none', background: '#fff', minHeight: 0 }}
+        style={{ flex: 1, width: '100%', border: 'none', background: 'var(--color-surface-primary)', minHeight: 0 }}
       />
       <div
         style={{

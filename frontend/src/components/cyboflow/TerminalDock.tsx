@@ -33,11 +33,11 @@ const DOCK_MAX_ABS_HEIGHT = 560;
 /** localStorage key for the persisted open height. Brand-new key — no migration. */
 const DOCK_HEIGHT_KEY = 'cyboflow.terminalDock.height';
 
-const INK = '#1a1815';
-const HAIRLINE = '#d8cfb8';
-const RAIL = '#ebe4d2';
-const FAINT = '#9c8e6c';
-const PAGE = '#f5f1e8';
+const INK = 'var(--color-text-primary)';
+const HAIRLINE = 'var(--color-border-primary)';
+const RAIL = 'var(--color-bg-secondary)';
+const FAINT = 'var(--color-text-tertiary)';
+const PAGE = 'var(--color-bg-primary)';
 
 /** Upper resize bound: absolute cap, but never more than ~70% of the viewport. */
 function maxDockHeight(): number {
@@ -182,7 +182,7 @@ export function TerminalDock({
         >
           {open ? 'click to collapse' : 'click to expand'}
         </span>
-        <span style={{ fontSize: '12px', color: '#6a5e44' }}>{open ? '▾' : '▸'}</span>
+        <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>{open ? '▾' : '▸'}</span>
       </button>
 
       {/* Drag-to-resize handle (open only). Dragging UP grows the dock. Mounting
@@ -212,7 +212,7 @@ export function TerminalDock({
               width: 28,
               height: 2,
               borderRadius: 1,
-              background: isResizing ? '#6a5e44' : FAINT,
+              background: isResizing ? 'var(--color-text-secondary)' : FAINT,
             }}
           />
         </div>
