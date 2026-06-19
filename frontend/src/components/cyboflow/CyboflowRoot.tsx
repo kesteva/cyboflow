@@ -6,7 +6,7 @@
  *                    action bars (the workflow / quick-session / edit-flow
  *                    launchers were removed; those actions live on other surfaces)
  *   main content   — three-branch left column:
- *                    1. activeRunId set   → WorkflowCanvas (when phaseState has definition) + RunBottomPane
+ *                    1. activeRunId set   → WorkflowSummaryPanel card (run ended) or RunCenterPane (tabbed Flow + dock)
  *                    2. mainRepoSession   → PanelTabBar + PanelContainer (session panels fill the area)
  *                    3. neither          → empty-state CTA
  *   right rail     — RunRightRail (always rendered, 296 px fixed)
@@ -20,12 +20,11 @@
  */
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
-import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
-import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
+import { GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
 import { WorkflowSummaryPanel } from './WorkflowSummaryPanel';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
-import { RunBottomPane } from './RunBottomPane';
+import { RunCenterPane } from './RunCenterPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -296,46 +295,17 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                   />
                 </div>
               ) : (
-                phaseState.definition !== null && (
-                  <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
-                    {activeRun?.batch_id != null ? (
-                      // Parallel sprint run (workflow_runs.batch_id stamped at
-                      // launch) — the center pane shows the per-task swim lanes
-                      // instead of the generic phase canvas. The right rail's
-                      // SprintLanesPanel stays as-is.
-                      <SprintSwimlaneCanvas
-                        runId={activeRunId}
-                        phaseState={phaseState}
-                        sprintStatus={activeRun?.status}
-                      />
-                    ) : (
-                      <WorkflowCanvas
-                        definition={phaseState.definition}
-                        currentStepId={phaseState.currentStepId}
-                        runLabel={activeRunId}
-                        folderPath={activeRun?.worktree_path}
-                        branchName={activeRun?.branch_name}
-                        // Reflect the run's ACTUAL lifecycle status, not phaseState
-                        // load state (which is always "loaded, no error" once ready
-                        // and so pinned the badge to RUNNING even after the run
-                        // rested in awaiting_review). activeRun.status now stays
-                        // fresh via activeRunsStore's onRunStatusChanged subscription.
-                        // A paused run is at rest: isRunning is already false for it,
-                        // and the `paused` prop swaps the running pill for the amber
-                        // PauseCircle badge (Phase 4b).
-                        isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
-                        paused={activeRun?.status === 'paused'}
-                        // Surfaces a static completed/failed outcome pill once the
-                        // run self-terminates, while the operator decides to End it.
-                        status={activeRun?.status}
-                      />
-                    )}
-                  </div>
-                )
+                // Active run — tabbed center surface (pinned Flow tab hosting the
+                // WorkflowCanvas, or SprintSwimlaneCanvas for sprint runs) over a
+                // collapsible terminal dock, plus file/diff + artifact tabs.
+                // RunCenterPane owns the per-session tab state and the
+                // xterm-keep-alive dock collapse.
+                <RunCenterPane
+                  activeRunId={activeRunId}
+                  phaseState={phaseState}
+                  activeRun={activeRun}
+                />
               )}
-              <div className="flex-1 overflow-hidden">
-                <RunBottomPane />
-              </div>
             </>
           ) : effectiveSession ? (
             <SessionProvider session={effectiveSession} projectName={projectName}>
