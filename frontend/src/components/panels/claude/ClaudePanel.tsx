@@ -148,9 +148,21 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }
 
   // Unified-chat chrome derivations for this quick session.
+  //
+  // Use the PANE's own session — substrateSession (the SessionProvider's
+  // freshly-fetched session, else the store copy keyed by panel.sessionId),
+  // falling back to the global activeSession only when neither is present. The
+  // global store `activeSession` is keyed by the GLOBAL activeSessionId, which
+  // can point at a different / lagging session than the one THIS panel renders
+  // (same "prefer context over the laggy store copy" reasoning already applied
+  // to approvalRunId + the substrate swap above). Feeding the composer the wrong
+  // session read the wrong effort (read-only pill blank), folder/branch, running
+  // state, AND send target. In normal single-session use paneSession ===
+  // activeSession, so this is behavior-neutral there.
+  const paneSession = substrateSession ?? activeSession;
   const isInteractive = interactiveRunId !== null;
-  const sessionRunning = activeSession.status === 'running';
-  const worktreePath = activeSession.worktreePath ?? null;
+  const sessionRunning = paneSession.status === 'running';
+  const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
     worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
   const branchName = hook.gitCommands?.currentBranch ?? null;
@@ -298,12 +310,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           live PTY) and is hidden behind ⌃G; the SDK variant uses the
           panel-scoped handlers. The substrate-specific send is owned by
           QuickSessionComposer, never the panel. */}
-      {!activeSession.archived && (
+      {!paneSession.archived && (
         // Demo interactive sessions render the cosmetic composer INSIDE
         // DemoTerminalView (showComposer), so suppress the relay composer here.
         showDemoTerminal ? null : (
           <QuickSessionComposer
-            activeSession={activeSession}
+            activeSession={paneSession}
             input={hook.input}
             setInput={hook.setInput}
             textareaRef={hook.textareaRef}
@@ -322,7 +334,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
       )}
 
       {/* Show archived message if session is archived */}
-      {activeSession.archived && (
+      {paneSession.archived && (
         <div className="bg-surface-secondary border-t border-border-primary px-4 py-3 text-center text-text-muted text-sm">
           This session is archived. Unarchive it to continue the conversation.
         </div>

@@ -108,11 +108,21 @@ vi.mock('../SessionStats', () => ({
 // in QuickSessionComposer.test / UnifiedComposer.test. Here we only assert the
 // substrate-swap branch logic mounts it with the right `interactive`/`ptyOpen`.
 vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
-  QuickSessionComposer: ({ interactive, ptyOpen }: { interactive: boolean; ptyOpen?: boolean }) => (
+  QuickSessionComposer: ({
+    interactive,
+    ptyOpen,
+    activeSession,
+  }: {
+    interactive: boolean;
+    ptyOpen?: boolean;
+    activeSession?: { id?: string; effort?: string };
+  }) => (
     <div
       data-testid="quick-session-composer"
       data-interactive={String(interactive)}
       data-pty-open={String(ptyOpen)}
+      data-session-id={activeSession?.id ?? ''}
+      data-effort={activeSession?.effort ?? ''}
     >
       QuickSessionComposer
     </div>
@@ -254,5 +264,29 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       'InteractiveTerminalView:run-q2',
     );
     expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
+  });
+
+  it('feeds the composer the PANE session, not a diverging global activeSession (live-smoke regression)', () => {
+    // The global store activeSession points at a STALE, different session (no
+    // effort); the SessionProvider holds the pane's real session (panel.sessionId
+    // 's1', ultracode). ClaudePanel must bind the composer to the pane session so
+    // the read-only effort pill + the interactive send target are correct — the
+    // exact divergence caught in the dev smoke (composer was reading bab62c6f
+    // while the pane rendered the ultracode session 24e899ab).
+    const pane = makeSession({ id: 's1', substrate: 'interactive', runId: 'run-q1', effort: 'ultracode' });
+    const staleGlobal = makeSession({ id: 'stale-global' });
+    mocks.holder.activeSession = staleGlobal;
+    useSessionStore.setState({ sessions: [pane], activeSessionId: 'stale-global', activeMainRepoSession: null });
+
+    render(
+      <SessionProvider session={pane} projectName="tester-mctest">
+        <ClaudePanel panel={PANEL} isActive />
+      </SessionProvider>,
+    );
+
+    const composer = screen.getByTestId('quick-session-composer');
+    expect(composer).toHaveAttribute('data-session-id', 's1');
+    expect(composer).toHaveAttribute('data-effort', 'ultracode');
+    expect(composer).toHaveAttribute('data-interactive', 'true');
   });
 });
