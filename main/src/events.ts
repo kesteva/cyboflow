@@ -965,6 +965,27 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
               skipSessionSummary = true;
               await finalizeAutoContextRun(panelId);
             } else if (exitCode === 0) {
+              // Refresh the context-% meter on every successful turn. Otherwise
+              // the extractor only runs inside finalizeAutoContextRun (the
+              // auto-compaction path above), which a normal quick session may
+              // never enter — leaving ClaudePanelState.contextUsage null and the
+              // ChatMetaStrip stuck at "--%". getPanelOutputs is oldest→newest, so
+              // reverse to let the NEWEST result's modelUsage win.
+              try {
+                const recentOutputs =
+                  typeof sessionManager.getPanelOutputs === 'function'
+                    ? [...sessionManager.getPanelOutputs(panelId, 200)].reverse()
+                    : [];
+                const turnContextUsage = extractContextUsageFromOutputs(recentOutputs);
+                if (turnContextUsage) {
+                  await updateClaudePanelCustomState(panelId, (state) => ({
+                    ...state,
+                    contextUsage: turnContextUsage,
+                  }));
+                }
+              } catch (ctxErr) {
+                console.warn('[auto-context] per-turn context-% refresh failed:', ctxErr);
+              }
               console.log(`[auto-context-debug] Starting auto context run for panel ${panelId}`);
               await startAutoContextRun(panelId, sessionId);
             } else {
