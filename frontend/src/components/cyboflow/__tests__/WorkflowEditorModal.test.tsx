@@ -18,6 +18,7 @@ import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { WorkflowDefinition, WorkflowRow } from '../../../../../shared/types/workflows';
+import type { AgentEntry } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Fixtures shared by the mock + assertions
@@ -60,6 +61,28 @@ const NEW_CUSTOM_ROW: WorkflowRow = {
   created_at: '',
 };
 
+/** A project custom agent — must surface in the step inspector's agent picker. */
+const CUSTOM_AGENT: AgentEntry = {
+  agentKey: 'my-helper',
+  name: 'cyboflow-my-helper',
+  role: '',
+  description: 'A custom helper agent',
+  systemPrompt: '',
+  tools: [],
+  source: 'custom',
+  isCustom: true,
+  isOverridden: false,
+  usage: { workflowCount: 0, usedBy: [], dispatchedBy: [] },
+  stats: {
+    model: 'inherits run model',
+    estPromptTokens: 0,
+    costUsd: null,
+    lastEditedAt: null,
+    toolsEnabled: 0,
+    toolsTotal: 0,
+  },
+};
+
 // ---------------------------------------------------------------------------
 // tRPC mock — override the global setup.ts stub.
 // ---------------------------------------------------------------------------
@@ -74,6 +97,9 @@ vi.mock('../../../trpc/client', () => ({
         updateSpec: { mutate: vi.fn() },
         resetSpec: { mutate: vi.fn() },
         createCustom: { mutate: vi.fn() },
+      },
+      agents: {
+        list: { query: vi.fn() },
       },
       runs: {
         start: { mutate: vi.fn() },
@@ -122,6 +148,7 @@ const mockList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockUpdateSpec = vi.mocked(trpc.cyboflow.workflows.updateSpec.mutate);
 const mockResetSpec = vi.mocked(trpc.cyboflow.workflows.resetSpec.mutate);
 const mockCreateCustom = vi.mocked(trpc.cyboflow.workflows.createCustom.mutate);
+const mockAgentsList = vi.mocked(trpc.cyboflow.agents.list.query);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
 const mockCreatePanel = vi.mocked(panelApi.createPanel);
@@ -140,6 +167,8 @@ beforeEach(() => {
   mockUpdateSpec.mockResolvedValue({ ok: true });
   mockResetSpec.mockResolvedValue({ ok: true });
   mockCreateCustom.mockResolvedValue(structuredClone(NEW_CUSTOM_ROW));
+  // Default: no custom agents. Tests that need one override this per-case.
+  mockAgentsList.mockResolvedValue([]);
   mockRunStart.mockResolvedValue({
     runId: 'run-001',
     worktreePath: '/tmp/wt',
@@ -188,6 +217,25 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(screen.getByTestId('editor-step-node-context')).toBeInTheDocument();
     // The name input carries the loaded workflow name.
     expect(screen.getByTestId('editor-name-input')).toHaveValue('planner');
+  });
+
+  it("surfaces the project's CUSTOM agents in the step AGENT-tab picker", async () => {
+    mockAgentsList.mockResolvedValue([structuredClone(CUSTOM_AGENT)]);
+    await renderEditMode();
+
+    // The editor fetches the custom agent list scoped to the launch project.
+    expect(mockAgentsList).toHaveBeenCalledWith({ projectId: 1 });
+
+    // Switch the inspector to the AGENT tab; the custom key is a selectable option.
+    fireEvent.click(screen.getByTestId('inspector-tab-agent'));
+    await waitFor(() => {
+      const select = screen.getByTestId('inspector-agent-select') as HTMLSelectElement;
+      const values = Array.from(select.options).map((o) => o.value);
+      expect(values).toContain('my-helper');
+    });
+    const select = screen.getByTestId('inspector-agent-select') as HTMLSelectElement;
+    const customOption = Array.from(select.options).find((o) => o.value === 'my-helper');
+    expect(customOption?.textContent).toContain('(custom)');
   });
 
   it('Save is disabled until an edit makes the editor dirty', async () => {

@@ -23,6 +23,13 @@ export interface WorkflowStepInspectorProps {
   definition: WorkflowDefinition;
   selectedStepId: string | null;
   dispatch: React.Dispatch<WorkflowEditorAction>;
+  /**
+   * The editor project's CUSTOM agent keys (bare, e.g. `my-helper`), merged into
+   * the AGENT-tab <select> so a custom-flow step can bind one from the dropdown
+   * instead of free-typing the key. Optional — defaults to none (built-in flows
+   * use prose, not step bindings, so the list is only effective in custom flows).
+   */
+  customAgentKeys?: string[];
 }
 
 /** Locate the selected step and its containing phase within the definition. */
@@ -63,6 +70,7 @@ export function WorkflowStepInspector({
   definition,
   selectedStepId,
   dispatch,
+  customAgentKeys = [],
 }: WorkflowStepInspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('step');
   const found = findStep(definition, selectedStepId);
@@ -123,7 +131,12 @@ export function WorkflowStepInspector({
         ) : tab === 'step' ? (
           <StepTab phase={found.phase} step={found.step} dispatch={dispatch} />
         ) : tab === 'agent' ? (
-          <AgentTab phase={found.phase} step={found.step} dispatch={dispatch} />
+          <AgentTab
+            phase={found.phase}
+            step={found.step}
+            dispatch={dispatch}
+            customAgentKeys={customAgentKeys}
+          />
         ) : (
           <McpTab phase={found.phase} step={found.step} dispatch={dispatch} />
         )}
@@ -221,10 +234,25 @@ function StepTab({ phase, step, dispatch }: TabProps) {
 // AGENT tab
 // ---------------------------------------------------------------------------
 
-function AgentTab({ phase, step, dispatch }: TabProps) {
-  // Free-text agents: if the current agent isn't in the suggested list, surface
-  // it as an extra option so the <select> can still represent it.
-  const agentInList = (AGENT_OPTIONS as readonly string[]).includes(step.agent);
+function AgentTab({
+  phase,
+  step,
+  dispatch,
+  customAgentKeys,
+}: TabProps & { customAgentKeys: readonly string[] }) {
+  // Merge the static suggestion list with the project's CUSTOM agent keys so a
+  // custom-flow step can bind a project custom agent from the dropdown rather
+  // than free-typing its key. Built-ins come first, then any custom key not
+  // already present (deduped, order-preserving). Dispatch already accepts any
+  // agent string — the overlay writer emits a cyboflow-<key>.md for every
+  // effective custom — so this only widens what the picker can REPRESENT.
+  const builtinOptions = AGENT_OPTIONS as readonly string[];
+  const extraCustomKeys = customAgentKeys.filter((k) => !builtinOptions.includes(k));
+  const agentOptions = [...builtinOptions, ...extraCustomKeys];
+  const customKeySet = new Set(extraCustomKeys);
+  // Free-text agents: if the current agent isn't in the merged list, surface it
+  // as an extra option so the <select> can still represent it.
+  const agentInList = agentOptions.includes(step.agent);
   const samePhaseTargets = phase.steps.filter((s) => s.id !== step.id);
 
   return (
@@ -243,8 +271,10 @@ function AgentTab({ phase, step, dispatch }: TabProps) {
           {!agentInList && step.agent.length > 0 && (
             <option value={step.agent}>{step.agent} (custom)</option>
           )}
-          {AGENT_OPTIONS.map((a) => (
-            <option key={a} value={a}>{a}</option>
+          {agentOptions.map((a) => (
+            <option key={a} value={a}>
+              {customKeySet.has(a) ? `${a} (custom)` : a}
+            </option>
           ))}
         </select>
       </div>

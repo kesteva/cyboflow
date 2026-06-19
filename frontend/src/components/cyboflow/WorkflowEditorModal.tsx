@@ -146,6 +146,18 @@ export function WorkflowEditorModal({
   const [sourceProjectId, setSourceProjectId] = useState<number | null>(null);
 
   /**
+   * The project's CUSTOM agent keys (bare, e.g. `my-helper`), surfaced in the
+   * step inspector's agent picker so a custom-flow step can bind one without
+   * free-typing its key. Fetched independently of the definition seed; a fetch
+   * failure (or no customs) just yields an empty list — never a broken editor.
+   * Scoped to the editor's `projectId` so a chosen key always has a matching
+   * `cyboflow-<key>.md` overlay at runtime (a foreign-project key would
+   * dispatch-fail). Built-ins ignore step bindings (they dispatch via prose), so
+   * the list only takes effect in custom flows.
+   */
+  const [customAgentKeys, setCustomAgentKeys] = useState<string[]>([]);
+
+  /**
    * Save-scope dialog (edit mode): chooses "Save globally" (updateSpec on the
    * row) vs "Create a project-specific copy" (createCustom with a target
    * project). Opened by handleSave instead of saving immediately.
@@ -227,6 +239,27 @@ export function WorkflowEditorModal({
     };
     // Re-seed whenever the modal opens or its target changes.
   }, [isOpen, mode, workflowId, projectId, dispatch, initialDefinition, initialPermissionMode, initialName]);
+
+  // ── Custom agent keys for the step picker ───────────────────────────────────
+  // Independent of the definition seed: the picker can show custom options as
+  // soon as agents.list resolves, regardless of which seed path ran.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const entries = await trpc.cyboflow.agents.list.query({ projectId });
+        if (cancelled) return;
+        setCustomAgentKeys(entries.filter((e) => e.isCustom).map((e) => e.agentKey));
+      } catch {
+        // A picker without custom options is acceptable; never block the editor.
+        if (!cancelled) setCustomAgentKeys([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, projectId]);
 
   // ── Dirty tracking ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -598,6 +631,7 @@ export function WorkflowEditorModal({
                 definition={state.definition}
                 selectedStepId={state.selectedStepId}
                 dispatch={dispatch}
+                customAgentKeys={customAgentKeys}
               />
             </>
           )}
