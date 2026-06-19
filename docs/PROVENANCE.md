@@ -44,4 +44,4 @@ Cyboflow adds:
 
 ## Author
 
-Cyboflow is maintained by Krishna Esteva (github.com/kesteva).
+Cyboflow is maintained by Krishna Esteva ([@kesteva](https://github.com/kesteva)).
