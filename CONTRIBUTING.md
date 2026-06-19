@@ -9,10 +9,25 @@ Cyboflow is a self-contained macOS desktop app for running AI coding flows in pa
 
 > **Do not** apply patches, cherry-picks, or merges from the Nimbalyst repository (the renamed successor to Crystal). Reproduce any needed fix from first principles on the Cyboflow side — see [docs/PROVENANCE.md](docs/PROVENANCE.md).
 
-## Right to Contribute this Code
+## Developer Certificate of Origin (DCO)
 
-- You represent and warrant that You are legally entitled to contribute the code you contribute to Cyboflow.
-- You represent and warrant that each of Your Contributions is Your original creation, and that, to Your knowledge, none of Your Contributions infringe, violate, or misappropriate any third-party intellectual property or other proprietary rights.
+Cyboflow requires every commit to be signed off under the [Developer Certificate of Origin](DCO) (DCO 1.1). The sign-off is your certification that you wrote the patch (or otherwise have the right to submit it under the project's MIT license) — see the full text in the [DCO](DCO) file.
+
+Add a sign-off by committing with `-s`:
+
+```bash
+git commit -s -m "feat: add color-coded session status indicators"
+```
+
+This appends a trailer to your commit message using the name and email from your `git config`:
+
+```
+Signed-off-by: Jane Doe <jane@example.com>
+```
+
+The name and email must be real and must match the commit author. By signing off you agree to the terms in the [DCO](DCO).
+
+To sign off a commit you already made, use `git commit --amend -s` (or `git rebase --signoff <base>` for a range). PRs whose commits are missing a sign-off will be asked to amend before merge.
 
 ## Getting Started
 
@@ -80,6 +95,7 @@ cyboflow/
 - Use conventional-commit prefixes: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`.
 - Keep commits focused and atomic — one logical change per commit.
 - Reference issues when applicable (`#123`).
+- **Sign off every commit** with `git commit -s` to certify the [DCO](#developer-certificate-of-origin-dco).
 
 Example:
 ```
