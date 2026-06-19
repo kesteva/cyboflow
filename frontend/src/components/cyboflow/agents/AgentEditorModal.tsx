@@ -245,9 +245,11 @@ export function AgentEditorModal({
   }, [isBusy, dirty, onClose]);
 
   // ── Header title ──────────────────────────────────────────────────────────────
+  // Title shows the BARE agent key (not entry.name): the persisted `cyboflow-`
+  // prefix is load-bearing for dispatch but redundant in the editor chrome.
   const title = useMemo(
-    () => (mode === 'create' ? 'New agent' : `Edit agent · ${entry?.name ?? agentKey}`),
-    [mode, entry?.name, agentKey],
+    () => (mode === 'create' ? 'New agent' : `Edit agent · ${agentKey}`),
+    [mode, agentKey],
   );
 
   return (
@@ -365,7 +367,7 @@ export function AgentEditorModal({
       <FlowNameDialog
         isOpen={nameDialogOpen}
         title="Name for the duplicated agent"
-        defaultValue={entry?.name ? `${entry.name}-copy` : ''}
+        defaultValue={`${agentKey}-copy`}
         confirmLabel="Duplicate"
         onConfirm={(name) => void handleDuplicateConfirm(name)}
         onClose={() => setNameDialogOpen(false)}

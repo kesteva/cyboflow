@@ -41,8 +41,12 @@ export function AgentCard({ entry, onEdit }: AgentCardProps): React.JSX.Element 
       }}
     >
       <div className="flex items-center gap-2">
+        {/* Render the bare agent key (entry.id === agentKey), NOT entry.name:
+            the persisted `cyboflow-` prefix is load-bearing for session injection
+            / dispatch but redundant noise in this catalogue. Customs show their
+            kebab key (no separate display_name column). */}
         <span className="min-w-0 flex-1 truncate text-[13px] font-bold tracking-[-0.005em] text-text-primary">
-          {entry.name}
+          {entry.id}
         </span>
         {sourceBadge !== null && (
           <span

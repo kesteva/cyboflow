@@ -278,6 +278,15 @@ describe('GalleryStacked', () => {
 });
 
 describe('AgentCard', () => {
+  it('renders the bare agent key, not the cyboflow- prefixed name', () => {
+    // The store carries a prefixed `name` (e.g. cyboflow-context) but the card
+    // shows the bare key (entry.id) — the prefix is dispatch-only noise here.
+    render(<AgentCard entry={buildAgentEntry({ id: 'context', name: 'cyboflow-context' })} />);
+    const title = screen.getByTestId('agent-card-context');
+    expect(title).toHaveTextContent('context');
+    expect(title).not.toHaveTextContent('cyboflow-context');
+  });
+
   it('shows the read-only "inherits run model" chip and no model picker', () => {
     render(<AgentCard entry={buildAgentEntry()} />);
     expect(screen.getByTestId('agent-card-model-chip')).toHaveTextContent('inherits run model');
