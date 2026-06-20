@@ -33,6 +33,7 @@ import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
+import { ReviewQueueSupervisor } from './orchestrator/programmatic/supervisor';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
@@ -815,6 +816,12 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
+    // Supervisor (Stage 3): the monitor + triage + human-seam plane that runs
+    // alongside the host-driven walk. ReviewQueueSupervisor routes a required
+    // step's exhausted failure to the HUMAN review queue (escalate) instead of
+    // hard-failing the run — the policy realization of the human seam. The SDK
+    // monitor/chat agent is a drop-in for this factory behind SupervisorSession.
+    supervisorFactory: () => new ReviewQueueSupervisor(cyboflowLogger),
     logger: cyboflowLogger,
   });
 

@@ -21,11 +21,11 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { EventEmitter } from 'events';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from '../humanGate';
+import { ReviewQueueSupervisor } from '../supervisor';
 import type { StepReporter } from '../programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
 import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
@@ -110,9 +110,6 @@ function makeSpawner(): ClaudeSpawnerLike & { calls: ClaudeSpawnerOptions[] } {
   };
 }
 
-function runStatus(db: Database.Database, runId: string): string {
-  return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
-}
 function reviewRows(db: Database.Database, runId: string): Array<{ status: string; source: string; resolution: string | null }> {
   return db
     .prepare('SELECT status, source, resolution FROM review_items WHERE run_id = ? ORDER BY created_at ASC, id ASC')
@@ -204,6 +201,57 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
 
     // The run did not reach the refine phase (epics never spawned).
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
+  });
+
+  it('Stage 3: a failed step is escalated to the human review queue, approved (skipped), and the run continues', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    seedRun(db, 'run-esc');
+
+    // The 'context' agent FAILS; every other spawn succeeds.
+    let contextFailed = false;
+    const spawner: ClaudeSpawnerLike & { calls: ClaudeSpawnerOptions[] } = {
+      calls: [],
+      spawnCliProcess: vi.fn(async (o: ClaudeSpawnerOptions) => {
+        spawner.calls.push(o);
+        if (o.prompt.includes('`context`') && !contextFailed) {
+          contextFailed = true;
+          throw new Error('context step blew up');
+        }
+      }),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+
+    // The human approves every gate, INCLUDING the escalation gate for the failed
+    // context step (approve = accept the failure, skip the step, advance).
+    const approver = (payload: unknown): void => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action === 'created' && p.reviewItemId) {
+        const id = p.reviewItemId;
+        setTimeout(() => void mgr.resolveHumanGate('run-esc', id, 'user', 'approve'), 0);
+      }
+    };
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate,
+      supervisorFactory: () => new ReviewQueueSupervisor(),
+    });
+    await expect(runner.run(ctxFor('run-esc'))).resolves.toBeUndefined();
+
+    // The context agent was attempted and failed; the run still completed (the
+    // failure was escalated to the human queue and approved → skipped → advanced).
+    expect(contextFailed).toBe(true);
+    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // reached refine phase
+    const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-esc') as {
+      current_step_id: string | null;
+    };
+    expect(finalStep.current_step_id).toBe('decompose');
   });
 
   it('cancellation mid-gate settles the walk and leaves no reviewItemChangeEvents listener', async () => {

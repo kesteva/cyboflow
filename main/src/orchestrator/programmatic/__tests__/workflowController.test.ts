@@ -12,6 +12,8 @@ import type {
   HumanGateDecision,
   StepRunResult,
   StepRunner,
+  SupervisorEvent,
+  TriageDecision,
 } from '../types';
 import type {
   WorkflowDefinition,
@@ -306,6 +308,114 @@ describe('WorkflowController', () => {
 
   // ── the execution bound must NOT trip for a legitimate multi-loopback phase
   //    (fix #8) ────────────────────────────────────────────────────────────────
+  // ── Stage 3: triage seam + monitor feed ──────────────────────────────────────
+  describe('triage seam (Stage 3)', () => {
+    /** Host with a scripted triageFailure + a notify recorder. */
+    function makeTriageHost(
+      decision: TriageDecision | TriageDecision[],
+      gates: Record<string, HumanGateDecision[]> = {},
+    ): ControllerHost & { events: SupervisorEvent[]; gateCalls: string[] } {
+      const decisions = Array.isArray(decision) ? [...decision] : null;
+      const gateQ: Record<string, HumanGateDecision[]> = {};
+      for (const [k, v] of Object.entries(gates)) gateQ[k] = [...v];
+      const events: SupervisorEvent[] = [];
+      const gateCalls: string[] = [];
+      return {
+        events,
+        gateCalls,
+        reportStep() {},
+        async requestHumanGate(s) {
+          gateCalls.push(s.id);
+          return gateQ[s.id]?.shift() ?? 'approve';
+        },
+        notify(e) {
+          events.push(e);
+        },
+        async triageFailure() {
+          return decisions ? decisions.shift() ?? 'fail' : (decision as TriageDecision);
+        },
+      };
+    }
+
+    it("'fail' triage fails the run (and is the no-advisor default)", async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      const runner = makeRunner({ a: Array.from({ length: 5 }, () => ({ status: 'failed' as const })) });
+
+      const result = await new WorkflowController(runner, makeTriageHost('fail')).run('r', d);
+
+      expect(result.outcome).toBe('failed');
+      expect(result.failedStepId).toBe('a');
+    });
+
+    it("'retry' triage re-runs the failed step, then completes when it succeeds", async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      // First attempt fails (no retries budget) → triage 'retry' → second run ok.
+      const runner = makeRunner({ a: [{ status: 'failed' }] });
+
+      const result = await new WorkflowController(runner, makeTriageHost('retry')).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.map((c) => c.id)).toEqual(['a', 'a']); // re-run via triage
+    });
+
+    it("'retry' triage is bounded — gives up to 'failed' after the triage budget", async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      const runner = makeRunner({ a: Array.from({ length: 50 }, () => ({ status: 'failed' as const })) });
+
+      const result = await new WorkflowController(runner, makeTriageHost('retry')).run('r', d);
+
+      expect(result.outcome).toBe('failed');
+      // 1 initial + MAX_STEP_LOOPBACKS triage retries.
+      expect(runner.calls.filter((c) => c.id === 'a').length).toBe(MAX_STEP_LOOPBACKS + 1);
+    });
+
+    it("'escalate' triage opens a human gate; approve SKIPS the failed step and advances", async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed', error: 'boom' }] });
+      const host = makeTriageHost('escalate', { a: ['approve'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(host.gateCalls).toEqual(['a']); // failure escalated to the human gate
+      expect(runner.calls.some((c) => c.id === 'b')).toBe(true); // advanced past the skip
+    });
+
+    it("'escalate' → human reject fails the run", async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed' }] });
+      const host = makeTriageHost('escalate', { a: ['reject'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('failed');
+    });
+
+    it("'escalate' → human abort cancels the run", async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed' }] });
+      const host = makeTriageHost('escalate', { a: ['abort'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('canceled');
+    });
+
+    it('emits run-started / step-failed / run-finished monitor events', async () => {
+      const d = def([phase('p1', [step({ id: 'a' })])]);
+      const runner = makeRunner({ a: [{ status: 'failed' }] });
+      const host = makeTriageHost('fail');
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      const kinds = host.events.map((e) => e.kind);
+      expect(kinds[0]).toBe('run-started');
+      expect(kinds).toContain('step-failed');
+      expect(kinds[kinds.length - 1]).toBe('run-finished');
+      expect(host.events.find((e) => e.kind === 'run-finished')?.outcome).toBe('failed');
+    });
+  });
+
   it('does not falsely trip the execution bound when several steps loop back to an early step', async () => {
     // p1: a, b(→a), c(→a), d(→a). Each of b/c/d fails once then succeeds on rerun.
     const d = def([
