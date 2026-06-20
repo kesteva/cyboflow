@@ -18,7 +18,9 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 import { resolveSubstrate } from './substrateResolver';
+import { resolveExecutionModel } from './executionModelResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
 
@@ -50,6 +52,13 @@ export interface WorkflowConfigProvider {
    * manager. null (or absent) = no pin, resolve normally.
    */
   getForcedSubstrate?(): CliSubstrate | null;
+  /**
+   * Global default for the execution model (orchestrated vs programmatic),
+   * consulted by resolveExecutionModel below its env level. Optional + absent =>
+   * the resolver floors to 'orchestrated' (the zero-behavior-change default), so
+   * existing fixtures that construct a registry without config are unaffected.
+   */
+  getDefaultExecutionModel?(): ExecutionModel | null;
 }
 
 // The built-in workflow descriptors now live in-repo. See
@@ -625,7 +634,7 @@ export class WorkflowRegistry {
     sessionId?: string,
     requestedPermissionMode?: PermissionMode,
     opts?: { projectId?: number },
-  ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate } {
+  ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
@@ -689,6 +698,21 @@ export class WorkflowRegistry {
           env: process.env,
         });
 
+    // Resolve the execution model (orchestrated vs programmatic) — the sibling
+    // immutable stamp that decides WHO walks the run's DAG. The interactive
+    // substrate hard-pins 'orchestrated' inside the resolver; an SDK run floors
+    // to 'orchestrated' unless an override selects 'programmatic'. The
+    // requested/frontmatter/project-config rungs are not yet wired (they land
+    // with the programmatic consumer); resolution today uses the global default
+    // + env + the substrate hard-pin + floor. With no override every run resolves
+    // 'orchestrated' (zero-behavior-change). Like substrate, this is stamped ONCE
+    // at INSERT and is immutable for the run lifetime — there is no UPDATE path.
+    const executionModel = resolveExecutionModel({
+      substrate,
+      globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
+      env: process.env,
+    });
+
     // Freeze the workflow's CURRENT spec onto the run as a content address
     // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
     // is immutable for the run lifetime — there is no UPDATE path. It lets
@@ -697,12 +721,12 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(workflow.spec_json);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, session_id, spec_hash)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, session_id, spec_hash)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, sessionId ?? null, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, sessionId ?? null, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
@@ -714,7 +738,7 @@ export class WorkflowRegistry {
 
     createTx();
 
-    return { runId, permissionMode, substrate };
+    return { runId, permissionMode, substrate, executionModel };
   }
 
   /**
@@ -723,7 +747,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, outcome, base_branch, base_sha, steps_snapshot_json, substrate, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

@@ -103,6 +103,19 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT');
     batchIdAdded = true;
   };
+  // Migration 031 (execution model): getRunById projects execution_model right
+  // beside substrate, and createRun stamps it. Both read-model surfaces
+  // (includeSubstrate) and the row-level readers (includeWorkflowRunTaskColumns)
+  // therefore need the column — folded in idempotently exactly like batch_id so
+  // passing both flags never double-ALTERs. Additive — never widens GATE_SCHEMA.
+  let executionModelAdded = false;
+  const addExecutionModelColumnOnce = (): void => {
+    if (executionModelAdded) return;
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated' CHECK (execution_model IN ('orchestrated','programmatic'))",
+    );
+    executionModelAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -122,6 +135,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // batch_id (the swimlane-canvas switch keys off it). Same read-model
     // surface, same opt-in flag. Additive — never widens GATE_SCHEMA.
     addBatchIdColumnOnce();
+    // Migration 031: getRunById projects execution_model beside substrate.
+    addExecutionModelColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -155,6 +170,9 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
     // Migration 022 (sprint lanes): getRunById + cancelRunHandler project batch_id.
     addBatchIdColumnOnce();
+    // Migration 031: getRunById projects execution_model (sibling immutable stamp
+    // to substrate). Folded in so row-level readers resolve the column.
+    addExecutionModelColumnOnce();
   }
   return db;
 }
