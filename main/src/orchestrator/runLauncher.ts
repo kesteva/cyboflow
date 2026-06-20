@@ -22,6 +22,7 @@ import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { StreamEnvelope } from '../../../shared/types/claudeStream';
 import type { McpConfigWriter } from './mcpConfigWriter';
@@ -223,6 +224,13 @@ export class RunLauncher {
     // createRun falls back to workflow.project_id. A global workflow launched
     // WITHOUT this throws in createRun ("an explicit projectId is required").
     projectId?: number,
+    // The user's explicit per-run EXECUTION MODEL choice (orchestrated vs
+    // programmatic), threaded to the highest-precedence `requestedExecutionModel`
+    // rung of the execution-model resolver in WorkflowRegistry.createRun. OPTIONAL
+    // — when omitted the resolver falls through to global default → env → the
+    // 'orchestrated' floor (and the interactive substrate hard-pins 'orchestrated'
+    // regardless). DORMANT until a picker surfaces it.
+    requestedExecutionModel?: ExecutionModel,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -278,12 +286,22 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
+    // Pass the opts bag when EITHER an explicit project OR an explicit execution
+    // model is threaded; omit it entirely otherwise so the legacy fallback path
+    // (workflow.project_id + resolver floor) stays byte-identical.
+    const createOpts =
+      projectId !== undefined || requestedExecutionModel !== undefined
+        ? {
+            ...(projectId !== undefined ? { projectId } : {}),
+            ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
+          }
+        : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
       workflowId,
       substrate,
       sessionId,
       requestedPermissionMode,
-      projectId !== undefined ? { projectId } : undefined,
+      createOpts,
     );
 
     try {

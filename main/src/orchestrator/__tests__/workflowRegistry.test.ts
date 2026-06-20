@@ -886,6 +886,40 @@ describe('WorkflowRegistry', () => {
       }
     });
 
+    it("honors an explicit opts.requestedExecutionModel='programmatic' on an SDK run (highest rung)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'exec-requested.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, undefined, undefined, {
+          projectId: 1,
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(result.substrate).toBe('sdk');
+        expect(result.executionModel).toBe('programmatic');
+      });
+    });
+
+    it("ignores opts.requestedExecutionModel='programmatic' on an interactive run (hard-pin wins)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'exec-requested-interactive.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const result = registry.createRun(workflowId, 'interactive', undefined, undefined, {
+          projectId: 1,
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(result.substrate).toBe('interactive');
+        expect(result.executionModel).toBe('orchestrated');
+      });
+    });
+
     it('getRunById round-trips the stamped execution model', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'exec-readback.md', '---\n---\n');

@@ -1,7 +1,13 @@
 # SDK program-driven workflows (execution-model seam)
 
-Status: **Stage 0 landed** (the execution-model seam). Stages 1–3 are designed
-here but not yet implemented.
+Status: **Stage 0 + Stage 1 (engine + seam) landed.** The deterministic
+`WorkflowController`, its injected protocol, the guarded `RunExecutor` branch, and
+the `requestedExecutionModel` threading are in and unit-tested. The live SDK
+step-runner glue + the human/monitor seam are deferred to Stage 2 (where they can
+be exercised in a real Electron run) and are NOT yet wired into the production
+composition root — so `programmatic` runs currently fall through to orchestrated
+in production (a stamped-but-not-yet-activated model), keeping behavior
+byte-identical.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -135,13 +141,22 @@ through the router" rule. Only the *actor* differs.
 
 ### Staged plan
 
-- **Stage 1** — `WorkflowController` walks the DAG in programmatic mode with **no
-  monitor agent** (controller emits gates/questions directly). Add a facade /
-  executor branch on `run.execution_model`. Wire `requestedExecutionModel`
-  through `launch` → `createRun`. Validates the code engine + structured outputs
-  in isolation. Planner first (linear, human-gated).
-- **Stage 2** — add the monitor / human-seam agent as a streaming-input session
-  (event feed + chat), read-only (no triage authority).
+- **Stage 1 (engine + seam) — landed.** The deterministic `WorkflowController`
+  (`main/src/orchestrator/programmatic/`) walks the DAG via two injected
+  collaborators — `StepRunner` (the SDK boundary) and `ControllerHost` (step
+  reporting + human-gate decision) — owning ordering, the retries + intra-phase
+  loopback budget (`MAX_STEP_LOOPBACKS`), optional-skip, human gates, and terminal
+  outcomes. `RunExecutor.execute` branches on `run.execution_model` and delegates
+  to an injected `ProgrammaticRunner` (the orchestrated path is untouched).
+  `requestedExecutionModel` is threaded `launch` → `createRun`. All unit-tested.
+- **Stage 1b / Stage 2 — the live SDK glue + human seam (next).** Implement the
+  production `ProgrammaticRunner` + an SDK-backed `StepRunner` (a scoped agent
+  turn per step via the existing spawn surface) + a `ControllerHost` that bridges
+  to the review/questions surface for human gates, then wire it into the
+  composition root (`main/src/index.ts`). This is where the per-step SDK
+  invocation and gate suspend/resume get exercised in a real Electron run —
+  deferred out of Stage 1 because they cannot be verified headlessly. Add the
+  monitor / human-seam agent as a streaming-input session (event feed + chat).
 - **Stage 3** — enable triage (controller→agent requests, agent→controller
   verdicts) + subagent direct-to-review-queue routing; add an "awaiting triage"
   phase state with crash-safe resume.
@@ -168,3 +183,17 @@ through the router" rule. Only the *actor* differs.
 - `shared/types/workflows.ts` — `WorkflowRunRow.execution_model`.
 - Tests: `executionModelResolver.test.ts`, execution-model stamping cases in
   `workflowRegistry.test.ts`; fixture provisioning in `orchestratorTestDb.ts`.
+
+## File index (Stage 1)
+
+- `main/src/orchestrator/programmatic/types.ts` — `StepRunner` / `ControllerHost`
+  protocol + result types.
+- `main/src/orchestrator/programmatic/workflowController.ts` — the deterministic
+  DAG walker (`MAX_STEP_LOOPBACKS`).
+- `main/src/orchestrator/runExecutor.ts` — `ProgrammaticRunner` interface, the
+  guarded `execution_model` branch + `executeProgrammatic`, slot-13 injection.
+- `main/src/orchestrator/runLauncher.ts` + `workflowRegistry.ts` —
+  `requestedExecutionModel` threaded `launch` → `createRun` (opts bag).
+- Tests: `programmatic/__tests__/workflowController.test.ts`, the execution-model
+  branch cases in `runExecutor.test.ts`, the requested-rung cases in
+  `workflowRegistry.test.ts`.

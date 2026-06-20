@@ -140,6 +140,34 @@ export interface ClaudeSpawnerLike {
 }
 
 /**
+ * Context handed to a ProgrammaticRunner for one `programmatic`-model run.
+ * Mirrors the data RunExecutor already has in scope at the spawn seam.
+ */
+export interface ProgrammaticRunContext {
+  runId: string;
+  panelId: string;
+  sessionId: string;
+  worktreePath: string;
+  run: WorkflowRunRow;
+  workflow: WorkflowRow;
+}
+
+/**
+ * The collaborator that drives a `programmatic` run — the host-side
+ * WorkflowController plus its SDK step-runner. Injected (optional) so the
+ * orchestrated path is byte-identical when it is absent, and so the heavy /
+ * not-yet-live-verified SDK walk is isolated behind a fakeable seam.
+ *
+ * Its `run()` shares the spawn contract of `spawnCliProcess`: it RESOLVES when
+ * the walk completes (the run then rests in awaiting_review) and THROWS to fail
+ * the run — so RunExecutor's existing drained/failed lifecycle handling applies
+ * unchanged.
+ */
+export interface ProgrammaticRunner {
+  run(ctx: ProgrammaticRunContext): Promise<void>;
+}
+
+/**
  * Narrow interface for querying workflow and workflow_runs rows.
  * Avoids importing the concrete WorkflowRegistry class to preserve test ergonomics.
  */
@@ -337,6 +365,15 @@ export class RunExecutor {
      * (zero-behavior-change floor). Participates in NO stage derivation.
      */
     private readonly sprintLaneTaskIds?: SprintLaneTaskIdsLike,
+    /**
+     * Optional programmatic-run driver (execution-model seam, Stage 1). When
+     * injected AND a run's immutable `execution_model` stamp is 'programmatic',
+     * execute() delegates the whole run to this collaborator (host code walks the
+     * DAG) instead of spawning a single orchestrator turn. When absent — or for
+     * the default 'orchestrated' model — execute() takes the unchanged spawn path,
+     * so the orchestrated lifecycle is byte-identical (zero-behavior-change floor).
+     */
+    private readonly programmaticRunner?: ProgrammaticRunner,
   ) {}
 
   /**
@@ -387,6 +424,23 @@ export class RunExecutor {
 
     // Store the panelId so cancel() can look it up.
     this.activePanelIds.set(runId, panelId);
+
+    // Execution-model branch (Stage 1). A run whose immutable stamp is
+    // 'programmatic' is driven by host code (the WorkflowController) instead of a
+    // single orchestrator turn. Gated on BOTH the stamp AND an injected runner so
+    // the orchestrated path below stays byte-identical; if a programmatic run is
+    // somehow stamped with no runner wired, fall through to orchestrated (the
+    // agent can always read+walk the same DAG) rather than dead-ending the run.
+    if (run.execution_model === 'programmatic') {
+      if (this.programmaticRunner) {
+        await this.executeProgrammatic(runId, run, workflow, panelId, sessionId);
+        return;
+      }
+      this.logger.warn(
+        '[RunExecutor] run stamped execution_model=programmatic but no programmatic runner is injected; falling through to orchestrated',
+        { runId },
+      );
+    }
 
     try {
       const prompt = await this.getPrompt(runId, workflow);
@@ -458,6 +512,76 @@ export class RunExecutor {
         // Emit step 'done' on failure path as well — the step ended, regardless of outcome.
         this.emitStep(runId, 'done');
         // Re-throw so the caller's catch (in runLauncher.ts) can log it.
+        throw err;
+      }
+    } finally {
+      this.teardownRun(runId);
+    }
+  }
+
+  /**
+   * Drive a `programmatic`-model run (execution-model seam, Stage 1). Mirrors the
+   * orchestrated scaffolding in execute() — event bridge, pre_spawn transition,
+   * step 'running', then the SAME drained/failed lifecycle handling — but swaps
+   * the single orchestrator `spawnCliProcess` for the injected
+   * `programmaticRunner.run()` (host code walking the DAG). Kept as a separate
+   * method so the orchestrated path in execute() is untouched.
+   *
+   * Precondition: `this.programmaticRunner` is defined (checked by the caller).
+   * Skips `registerTurnEndRest` — programmatic implies the SDK substrate (the
+   * interactive substrate hard-pins 'orchestrated'), so there is no turn-end
+   * rest path. teardownRun runs in finally exactly like execute().
+   */
+  private async executeProgrammatic(
+    runId: string,
+    run: WorkflowRunRow,
+    workflow: WorkflowRow,
+    panelId: string,
+    sessionId: string,
+  ): Promise<void> {
+    const runner = this.programmaticRunner;
+    if (!runner) {
+      // Defensive: the caller already gated on this; never reached in practice.
+      throw new Error(`RunExecutor.executeProgrammatic: no programmatic runner for runId=${runId}`);
+    }
+    if (!run.worktree_path) {
+      throw new Error(`RunExecutor.executeProgrammatic: worktree_path is null for runId=${runId}`);
+    }
+
+    try {
+      const bridgeHandle = await this.bridgeEvents(runId, panelId);
+      if (bridgeHandle) {
+        this.bridges.set(runId, bridgeHandle);
+      }
+
+      await this.onLifecycleTransition(runId, 'pre_spawn');
+      this.emitStep(runId, 'running');
+
+      this.logger.info('[RunExecutor] driving programmatic workflow run', {
+        runId,
+        panelId,
+        worktreePath: run.worktree_path,
+      });
+
+      try {
+        await runner.run({
+          runId,
+          panelId,
+          sessionId,
+          worktreePath: run.worktree_path,
+          run,
+          workflow,
+        });
+        // The controller walk completed — the run RESTS in awaiting_review,
+        // identical to the orchestrated 'drained' arm. The executor never
+        // auto-completes a run.
+        await this.onLifecycleTransition(runId, 'drained');
+        this.emitStep(runId, 'done');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.pendingFailedMessage.set(runId, message);
+        await this.onLifecycleTransition(runId, 'failed');
+        this.emitStep(runId, 'done');
         throw err;
       }
     } finally {
