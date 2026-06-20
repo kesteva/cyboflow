@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
+import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
@@ -729,6 +730,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
       },
       ...this.composeHookOptions(options, effectiveMode),
     };
+
+    // Packaging fix: in a packaged app the SDK resolves its native `claude`
+    // binary via require.resolve() from inside the asar'd sdk.mjs, yielding an
+    // app.asar-INTERNAL path. fs.existsSync() passes (asar fs shim) but spawn()
+    // fails with ENOTDIR — the claude subprocess never starts and query() yields
+    // no output. Point the SDK at the asar-UNPACKED copy explicitly. Returns
+    // undefined in dev (SDK resolves correctly), leaving this unset.
+    const claudeExecutable = resolveClaudeExecutablePath();
+    if (claudeExecutable) {
+      sdkOptions.pathToClaudeCodeExecutable = claudeExecutable;
+      this.logger?.info(`[ClaudeCodeManager] Using packaged claude executable: ${claudeExecutable}`);
+    }
 
     // Native Claude auto-mode (model classifier owns gating). Set ONLY when the
     // resolved effective mode is 'auto' — the eligibility guard inside
