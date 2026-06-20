@@ -26,6 +26,14 @@ export interface HumanGateRequest {
   runId: string;
   projectId: number;
   step: WorkflowStep;
+  /**
+   * Fires when the run is canceled while parked at this gate. When it aborts, the
+   * resolver settles the awaiting Promise to 'abort' and removes its
+   * reviewItemChangeEvents listener — so a canceled run can never hang here and
+   * the listener can never leak. Already-aborted on entry short-circuits to
+   * 'abort' without opening a gate.
+   */
+  signal?: AbortSignal;
 }
 
 /** What the ControllerHost depends on to resolve a human gate. */
@@ -79,33 +87,58 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
   ) {}
 
   resolve(req: HumanGateRequest): Promise<HumanGateDecision> {
-    const { runId, projectId, step } = req;
+    const { runId, projectId, step, signal } = req;
     const channel = this.channelFor(projectId);
+
+    // Already canceled before we open anything — settle immediately, open nothing.
+    if (signal?.aborted) return Promise.resolve('abort');
 
     return new Promise<HumanGateDecision>((resolve, reject) => {
       // Subscribe BEFORE opening the gate so a fast resolution cannot slip
       // through the gap. The target id is set synchronously once openHumanGate
       // resolves; events for other items (or before the id is known) are ignored.
       let targetId: string | null = null;
+      let settled = false;
+      const cleanup = (): void => {
+        this.events.off(channel, onChange);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
       const onChange = (payload: unknown): void => {
-        if (targetId === null || !isReviewItemChangeLike(payload)) return;
+        if (settled || targetId === null || !isReviewItemChangeLike(payload)) return;
         if (payload.reviewItemId !== targetId) return;
         if (payload.action === 'resolved') {
-          this.events.off(channel, onChange);
+          settled = true;
+          cleanup();
           resolve(parseGateVerdict(payload.item?.resolution));
         } else if (payload.action === 'dismissed') {
           // A dismissed gate is treated as a rejection (the human declined it).
-          this.events.off(channel, onChange);
+          settled = true;
+          cleanup();
           resolve('reject');
         }
       };
+      // Cancel path: a canceled run aborts the awaiting Promise (settling to
+      // 'abort') and removes BOTH listeners, so the gate can never hang or leak.
+      const onAbort = signal
+        ? (): void => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            this.logger?.info('[ReviewQueueHumanGate] gate aborted (run canceled)', { runId, stepId: step.id });
+            resolve('abort');
+          }
+        : undefined;
+
       this.events.on(channel, onChange);
+      if (signal && onAbort) signal.addEventListener('abort', onAbort);
 
       this.opener
         .openHumanGate(runId, step.id, step.name)
         .then((id) => {
+          if (settled) return; // aborted while opening
           if (!id) {
-            this.events.off(channel, onChange);
+            settled = true;
+            cleanup();
             reject(new Error(`ReviewQueueHumanGate: could not open human gate for run ${runId} step '${step.id}'`));
             return;
           }
@@ -117,7 +150,9 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
           });
         })
         .catch((err) => {
-          this.events.off(channel, onChange);
+          if (settled) return;
+          settled = true;
+          cleanup();
           reject(err instanceof Error ? err : new Error(String(err)));
         });
     });

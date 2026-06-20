@@ -62,6 +62,16 @@ export interface CancelRunDeps {
    */
   clearPendingQuestionsForRun?: (runId: string) => void;
   /**
+   * Dismiss any pending programmatic human-gate decision items for the run AFTER
+   * the kill, so a canceled programmatic run doesn't strand an orphan "Human gate"
+   * decision row in the review queue. Backed by HumanStepManager.clearPendingForRun.
+   * Called AFTER stopLiveRun deliberately: stopLiveRun aborts the run's controller
+   * (settling the in-memory gate Promise to 'abort' synchronously), so this is pure
+   * DB/queue cleanup and cannot drive the gate decision. Optional + fail-soft —
+   * orchestrated runs and runs with no open gate are unaffected.
+   */
+  clearPendingHumanGatesForRun?: (runId: string) => void;
+  /**
    * Emit the project-wide run-status-changed signal AFTER the guarded UPDATE
    * succeeds, so the rail / action-bar reactivity (activeRunsStore) sees the
    * cancel. Backed by the SAME emitRunStatus closure the lifecycleTransitions
@@ -142,6 +152,7 @@ export async function cancelRunHandler(
     stopLiveRun,
     clearPendingApprovalsForRun,
     clearPendingQuestionsForRun,
+    clearPendingHumanGatesForRun,
     emitRunStatusChanged,
     markBatchTerminal,
     logger,
@@ -180,6 +191,18 @@ export async function cancelRunHandler(
     await stopLiveRun(runId);
   } catch (err: unknown) {
     logger?.error('[cancelRun] stopLiveRun rejected — proceeding to DB write', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Dismiss orphan human-gate decision rows AFTER the kill (stopLiveRun aborted
+  // the controller and settled the in-memory gate to 'abort' synchronously, so
+  // this is pure queue cleanup). Fail-soft: never block the cancel DB write.
+  try {
+    clearPendingHumanGatesForRun?.(runId);
+  } catch (err: unknown) {
+    logger?.error('[cancelRun] clearPendingHumanGatesForRun failed — proceeding', {
       runId,
       error: err instanceof Error ? err.message : String(err),
     });

@@ -38,7 +38,15 @@ function ctxFor(def: WorkflowDefinition): ProgrammaticRunContext {
     created_at: 'now',
     updated_at: 'now',
   };
-  return { runId: 'run-1', panelId: 'run-1', sessionId: 'run-1', worktreePath: '/wt', run, workflow };
+  return {
+    runId: 'run-1',
+    panelId: 'run-1',
+    sessionId: 'run-1',
+    worktreePath: '/wt',
+    run,
+    workflow,
+    signal: new AbortController().signal,
+  };
 }
 
 function oneStepDef(): WorkflowDefinition {

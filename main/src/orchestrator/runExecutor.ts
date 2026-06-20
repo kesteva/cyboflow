@@ -150,6 +150,15 @@ export interface ProgrammaticRunContext {
   worktreePath: string;
   run: WorkflowRunRow;
   workflow: WorkflowRow;
+  /**
+   * Fires when the run is canceled. The runner threads it into the
+   * WorkflowController (which checks it each step) and the human gate (which
+   * settles + cleans up on abort), so a canceled programmatic run stops promptly
+   * instead of continuing to spawn agent turns or hanging at a gate. Owned by
+   * RunExecutor (one AbortController per programmatic run, aborted by
+   * requestProgrammaticCancel / cancel).
+   */
+  signal: AbortSignal;
 }
 
 /**
@@ -261,6 +270,17 @@ export class RunExecutor {
    * Stored during execute() so cancel() can look up the panelId to abort.
    */
   private readonly activePanelIds: Map<string, string> = new Map();
+
+  /**
+   * Per-run AbortController for PROGRAMMATIC runs only, keyed by runId. Created in
+   * executeProgrammatic(); its signal is threaded into the WorkflowController +
+   * human gate so a cancel actually stops the host-driven DAG walk (aborting the
+   * spawner alone only kills the current step — the controller would keep
+   * spawning the next one, and a gate would hang forever). Aborted by
+   * requestProgrammaticCancel() (wired from the cancel path) and cancel(); removed
+   * by teardownRun(). Empty for orchestrated runs (one spawn == the whole run).
+   */
+  private readonly programmaticAborts: Map<string, AbortController> = new Map();
 
   /**
    * Per-run 'turn-end' listeners bound to the `source` EventEmitter, keyed by
@@ -531,6 +551,11 @@ export class RunExecutor {
    * Skips `registerTurnEndRest` — programmatic implies the SDK substrate (the
    * interactive substrate hard-pins 'orchestrated'), so there is no turn-end
    * rest path. teardownRun runs in finally exactly like execute().
+   *
+   * Unlike execute(), this does NOT drive the run-level stepEmitter (which
+   * resolves the workflow's INITIAL step id and would rewind the timeline on
+   * rest). The WorkflowController reports EVERY real step boundary itself (via the
+   * host's reporter), so the per-step timeline is already complete and accurate.
    */
   private async executeProgrammatic(
     runId: string,
@@ -548,6 +573,11 @@ export class RunExecutor {
       throw new Error(`RunExecutor.executeProgrammatic: worktree_path is null for runId=${runId}`);
     }
 
+    // Per-run AbortController so a cancel can stop the host-driven DAG walk and
+    // settle any open human gate (see requestProgrammaticCancel / cancel).
+    const abort = new AbortController();
+    this.programmaticAborts.set(runId, abort);
+
     try {
       const bridgeHandle = await this.bridgeEvents(runId, panelId);
       if (bridgeHandle) {
@@ -555,7 +585,6 @@ export class RunExecutor {
       }
 
       await this.onLifecycleTransition(runId, 'pre_spawn');
-      this.emitStep(runId, 'running');
 
       this.logger.info('[RunExecutor] driving programmatic workflow run', {
         runId,
@@ -571,22 +600,44 @@ export class RunExecutor {
           worktreePath: run.worktree_path,
           run,
           workflow,
+          signal: abort.signal,
         });
+        // If the run was canceled mid-walk, the cancel path owns the terminal DB
+        // transition ('canceled') — do NOT fire the 'drained' rest (it would race
+        // a non-terminal awaiting_review against the cancel write).
+        if (abort.signal.aborted) {
+          this.logger.info('[RunExecutor] programmatic run canceled; cancel path owns terminal', { runId });
+          return;
+        }
         // The controller walk completed — the run RESTS in awaiting_review,
         // identical to the orchestrated 'drained' arm. The executor never
-        // auto-completes a run.
+        // auto-completes a run. The controller already emitted the final step
+        // 'done', so no run-level emitStep here.
         await this.onLifecycleTransition(runId, 'drained');
-        this.emitStep(runId, 'done');
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
-        this.emitStep(runId, 'done');
         throw err;
       }
     } finally {
       this.teardownRun(runId);
     }
+  }
+
+  /**
+   * Request cancellation of a PROGRAMMATIC run mid-walk (execution-model seam).
+   * Wired into the cancel path (cancelRunHandler's stopLiveRun) so cancelling a
+   * programmatic run aborts the WorkflowController's walk and settles any open
+   * human gate — aborting the spawner alone only kills the current step. A no-op
+   * for orchestrated runs (no entry in the map) and idempotent (double-abort is
+   * safe). Returns true when a controller was actually signalled.
+   */
+  requestProgrammaticCancel(runId: string): boolean {
+    const abort = this.programmaticAborts.get(runId);
+    if (!abort) return false;
+    if (!abort.signal.aborted) abort.abort();
+    return true;
   }
 
   /**
@@ -653,6 +704,11 @@ export class RunExecutor {
       const panelId = this.activePanelIds.get(runId);
       if (!panelId) continue;
 
+      // Stop a programmatic run's host-driven walk FIRST (abort the controller +
+      // settle any open gate); aborting the spawner alone only kills the current
+      // step and would let the controller spawn the next one. No-op for
+      // orchestrated runs.
+      this.requestProgrammaticCancel(runId);
       await this.spawner.abort(panelId);
       await this.onLifecycleTransition(runId, 'canceled');
       // Emit step 'done' on canceled path — the step ended regardless of reason.
@@ -716,6 +772,7 @@ export class RunExecutor {
     }
     this.turnEndListeners.delete(runId);
     this.activePanelIds.delete(runId);
+    this.programmaticAborts.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
     this.pendingResume.delete(runId);

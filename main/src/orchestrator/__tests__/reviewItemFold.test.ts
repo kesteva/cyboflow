@@ -286,6 +286,27 @@ describe('HumanStepManager human gate (run-pause + aggregate-unblock)', () => {
     expect(reviewRows(db, 'run-h')).toHaveLength(1);
   });
 
+  it('clearPendingForRun dismisses orphan gate decision rows (cancel cleanup) and is bounded to the run', async () => {
+    const db = buildDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedRun(db, 'run-h');
+    seedRun(db, 'run-other');
+
+    const gateThis = await mgr.openHumanGate('run-h', 'plan-review', 'Plan review');
+    const gateOther = await mgr.openHumanGate('run-other', 'plan-review', 'Plan review');
+    expect(gateThis).not.toBeNull();
+    expect(gateOther).not.toBeNull();
+
+    const dismissed = mgr.clearPendingForRun('run-h');
+
+    expect(dismissed).toBe(1);
+    expect(reviewRows(db, 'run-h')[0].status).toBe('dismissed');
+    // The OTHER run's gate is untouched.
+    expect(reviewRows(db, 'run-other')[0].status).toBe('pending');
+    // Idempotent: a second clear finds nothing pending.
+    expect(mgr.clearPendingForRun('run-h')).toBe(0);
+  });
+
   it('resolveHumanGate auto-resumes the run when it is the only blocking item', async () => {
     const db = buildDb();
     const mgr = HumanStepManager.initialize(dbAdapter(db));
