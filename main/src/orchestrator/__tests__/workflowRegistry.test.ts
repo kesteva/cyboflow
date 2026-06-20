@@ -115,6 +115,10 @@ describe('WorkflowRegistry', () => {
     db.exec(
       "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
     );
+    // createRun also stamps workflow_runs.execution_model (migration 031), the
+    // sibling immutable stamp to substrate that getRunById now projects. The
+    // column is provided by the includeWorkflowRunTaskColumns block above (folded
+    // in alongside batch_id), so no manual ALTER is needed here.
     // createRun now also writes workflow_runs.session_id (session<->run
     // restructure, Phase 1 / migration 019); layer the additive ALTER on top.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
@@ -800,6 +804,100 @@ describe('WorkflowRegistry', () => {
         interface SubstrateRow { substrate: string }
         const row = db.prepare('SELECT substrate FROM workflow_runs WHERE id = ?').get(result.runId) as SubstrateRow;
         expect(row.substrate).toBe('sdk');
+      });
+    });
+
+    // ───── execution_model stamping (migration 031) ─────
+
+    it("stamps the default execution model 'orchestrated' when no override is set (zero-behavior-change)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'exec-default.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId);
+
+        // Returned value floors to 'orchestrated'.
+        expect(result.executionModel).toBe('orchestrated');
+
+        // And it is persisted on the row.
+        interface ExecRow { execution_model: string }
+        const row = db.prepare('SELECT execution_model FROM workflow_runs WHERE id = ?').get(result.runId) as ExecRow;
+        expect(row.execution_model).toBe('orchestrated');
+      });
+    });
+
+    it("stamps 'programmatic' on an SDK run when CYBOFLOW_EXECUTION_MODEL resolves it via the env override level", async () => {
+      const prev = process.env.CYBOFLOW_EXECUTION_MODEL;
+      process.env.CYBOFLOW_EXECUTION_MODEL = 'programmatic';
+      try {
+        await withTempDir('workflow-registry-test-', async (tmpDir) => {
+          const path = writeTempMd(tmpDir, 'exec-programmatic.md', '---\n---\n');
+          registry.seed(1, [{ name: 'planner', path }]);
+
+          interface IdRow { id: string }
+          const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+          // SDK substrate (default) — programmatic is available, so the env wins.
+          const result = registry.createRun(workflowId);
+
+          expect(result.substrate).toBe('sdk');
+          expect(result.executionModel).toBe('programmatic');
+
+          interface ExecRow { execution_model: string }
+          const row = db.prepare('SELECT execution_model FROM workflow_runs WHERE id = ?').get(result.runId) as ExecRow;
+          expect(row.execution_model).toBe('programmatic');
+        });
+      } finally {
+        if (prev === undefined) {
+          delete process.env.CYBOFLOW_EXECUTION_MODEL;
+        } else {
+          process.env.CYBOFLOW_EXECUTION_MODEL = prev;
+        }
+      }
+    });
+
+    it("hard-pins 'orchestrated' on an interactive run even when the env requests 'programmatic' (PTY stays orchestrator-driven)", async () => {
+      const prev = process.env.CYBOFLOW_EXECUTION_MODEL;
+      process.env.CYBOFLOW_EXECUTION_MODEL = 'programmatic';
+      try {
+        await withTempDir('workflow-registry-test-', async (tmpDir) => {
+          const path = writeTempMd(tmpDir, 'exec-interactive-pin.md', '---\n---\n');
+          registry.seed(1, [{ name: 'compound', path }]);
+
+          interface IdRow { id: string }
+          const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('compound') as IdRow;
+          // Explicit interactive substrate — the hard rule outranks the env override.
+          const result = registry.createRun(workflowId, 'interactive');
+
+          expect(result.substrate).toBe('interactive');
+          expect(result.executionModel).toBe('orchestrated');
+
+          interface ExecRow { execution_model: string }
+          const row = db.prepare('SELECT execution_model FROM workflow_runs WHERE id = ?').get(result.runId) as ExecRow;
+          expect(row.execution_model).toBe('orchestrated');
+        });
+      } finally {
+        if (prev === undefined) {
+          delete process.env.CYBOFLOW_EXECUTION_MODEL;
+        } else {
+          process.env.CYBOFLOW_EXECUTION_MODEL = prev;
+        }
+      }
+    });
+
+    it('getRunById round-trips the stamped execution model', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'exec-readback.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId, executionModel } = registry.createRun(workflowId);
+
+        const run = registry.getRunById(runId);
+        expect(run!.execution_model).toBe(executionModel);
+        expect(run!.execution_model).toBe('orchestrated');
       });
     });
 

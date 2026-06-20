@@ -7,6 +7,7 @@
  */
 
 import type { CliSubstrate } from './substrate';
+import type { ExecutionModel } from './executionModel';
 import type { WorkflowRunStatus } from './cyboflow';
 
 /**
@@ -111,6 +112,15 @@ export interface WorkflowRunRow {
   steps_snapshot_json?: string | null;
   /** CLI substrate stamped at launch ('sdk' | 'interactive'). Resolved once and immutable for the run. Reads back 'sdk' for every legacy row. IDEA-013 / TASK-806. */
   substrate?: CliSubstrate;
+  /**
+   * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
+   * sibling immutable stamp to `substrate` (migration 031). Decides WHO walks the
+   * run's DAG: the orchestrator agent ('orchestrated', today's behavior + the
+   * only model the interactive substrate can run) or host code ('programmatic',
+   * SDK only). Resolved once and immutable; reads back 'orchestrated' for every
+   * legacy row. Stamped-but-dormant until the programmatic consumer lands.
+   */
+  execution_model?: ExecutionModel;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;
