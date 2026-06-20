@@ -29,6 +29,10 @@
  *   R2_BUCKET              bucket name (default: cyboflow-updates)
  *   R2_ENDPOINT            full S3 endpoint override (default derived from account id)
  *   UPDATE_DRY_RUN=true    list what would upload, but don't upload
+ *   PUBLISH_ONLY=a,b,c     comma-separated basenames; restrict the upload to exactly
+ *                          these files (skips everything else in dist-electron). Needed
+ *                          when the dir holds a MIX of variants/arches/stale artifacts
+ *                          (e.g. per-arch builds done in separate electron-builder runs).
  */
 
 import { createReadStream, statSync, readdirSync } from 'node:fs';
@@ -83,14 +87,29 @@ try {
   fail(`No build output at ${DIST_DIR}. Run a build (e.g. pnpm build:mac) first.`);
 }
 
+// Optional explicit allowlist (basenames) so a dist-electron holding a mix of
+// variants/arches/stale files can be published selectively and correctly.
+const onlySet =
+  process.env.PUBLISH_ONLY && process.env.PUBLISH_ONLY.trim()
+    ? new Set(process.env.PUBLISH_ONLY.split(',').map((s) => s.trim()).filter(Boolean))
+    : null;
+
 // .zip.blockmap / .dmg.blockmap end in .blockmap; extname() returns '.blockmap'.
 const artifacts = entries
   .filter((e) => e.isFile())
   .map((e) => e.name)
-  .filter((name) => extname(name) in CONTENT_TYPES);
+  .filter((name) => extname(name) in CONTENT_TYPES)
+  .filter((name) => !onlySet || onlySet.has(name));
 
 if (artifacts.length === 0) {
   fail(`No publishable artifacts (.yml/.zip/.dmg/.blockmap) found in ${DIST_DIR}.`);
+}
+
+// If an allowlist was given, surface any names that did not match a real file so
+// a typo can't silently shrink a release.
+if (onlySet) {
+  const missing = [...onlySet].filter((n) => !artifacts.includes(n));
+  if (missing.length) fail(`PUBLISH_ONLY names not found in ${DIST_DIR}: ${missing.join(', ')}`);
 }
 
 console.log(`\nPublishing ${artifacts.length} ${VARIANT} artifact(s) → r2://${bucket}/${VARIANT}/ (${PUBLIC_BASE})`);
