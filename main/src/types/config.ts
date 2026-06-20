@@ -1,5 +1,6 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 
 export interface AppConfig {
   verbose?: boolean;
@@ -22,6 +23,11 @@ export interface AppConfig {
   interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
+  // The global-default rung of resolveExecutionModel; floors to 'orchestrated' when unset and is
+  // ignored on the interactive substrate (which hard-pins 'orchestrated'). NOT seeded into the
+  // constructor defaults, so existing config.json files stay byte-identical.
+  defaultExecutionModel?: ExecutionModel;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -75,6 +81,8 @@ export interface UpdateConfigRequest {
   interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
+  defaultExecutionModel?: ExecutionModel;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
