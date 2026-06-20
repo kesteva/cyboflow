@@ -146,7 +146,7 @@ Open Console.app, filter on the app process name `Cyboflow`. Confirm that in the
 Wait at least 30 seconds after step 7 with one session-creation interaction, then run:
 
 ```bash
-test -s ~/.cyboflow/cyboflow.db; echo $?
+test -s ~/.cyboflow/sessions.db; echo $?
 ```
 
 **Expected:** `0` (the DB file exists and is non-empty).
@@ -177,7 +177,7 @@ test -s ~/.cyboflow/cyboflow.db; echo $?
 
 ```
 <TODO: paste verbatim output of:
-  test -s ~/.cyboflow/cyboflow.db; echo $?
+  test -s ~/.cyboflow/sessions.db; echo $?
 >
 ```
 

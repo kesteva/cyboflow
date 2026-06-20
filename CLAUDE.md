@@ -42,7 +42,7 @@ pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Nod
 pnpm rebuild better-sqlite3   # Targeted reverse fix: `pnpm dev` postinstall rebuilds for Electron ABI (NMV 136); run this before `pnpm --filter main test` to restore host Node ABI (NMV 127)
 ```
 
-Platform packaging (`pnpm build:mac:arm64`, `pnpm build:linux`, etc.) — see `package.json` `scripts`.
+Platform packaging (`pnpm build:mac:arm64`, `pnpm build:mac:universal`, etc.) — see `package.json` `scripts`.
 
 Workspace `"test"` scripts that participate in a root multi-tier chain (e.g. `pnpm run test:unit`) MUST be one-shot — use `"vitest run"`, never bare `"vitest"`. Bare `vitest` defaults to watch mode in a TTY and hangs the chain locally (CI escapes only because stdout is not a TTY). Put watch mode on a separate `"test:watch"` key.
 

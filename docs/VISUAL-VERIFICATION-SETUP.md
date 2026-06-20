@@ -102,7 +102,9 @@ cyboflow is desktop-only. `verification.visual_mobile=false`.
 
 ## Manual Playwright E2E (independent of MCP)
 
-`pnpm test` drives the full Electron app via `playwright._electron.launch()`.
-This path is independent of the CDP attach and does not require `pnpm dev`
-to be running; the test runner manages the Electron lifecycle itself. Useful
-for headless CI flows where MCP isn't available.
+`pnpm test:e2e` runs Playwright against `http://localhost:4521`. As noted in
+`CLAUDE.md`, that renderer cannot bootstrap without the Electron `preload`-injected
+`electronTRPC`, so the headless E2E path currently hangs and is **not** a usable
+verification gate (the config has not yet been reworked to use `_electron.launch()`).
+For headless code-change validation use `pnpm test:unit`; for visual verification use
+`visual_macos` via Peekaboo against a running `pnpm dev` (see above).
