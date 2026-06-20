@@ -22,11 +22,19 @@ import { WorkflowController } from './workflowController';
 import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
+import { NoopSupervisor, type SupervisorSession } from './supervisor';
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
   reporter: StepReporter;
   gate: HumanGateResolver;
+  /**
+   * Per-run supervisor factory (Stage 3). Called once per run to build the
+   * monitor + triage + human-seam supervisor that runs ALONGSIDE the controller.
+   * Defaults to NoopSupervisor (byte-identical: triage 'fail', no monitoring) so
+   * an un-configured deployment behaves exactly as Stages 1-2.
+   */
+  supervisorFactory?: () => SupervisorSession;
   logger?: LoggerLike;
 }
 
@@ -54,15 +62,38 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       this.deps.logger,
     );
 
+    // Supervisor (Stage 3): monitor + triage + human seam, bracketing the walk.
+    const supervisor = (this.deps.supervisorFactory ?? (() => new NoopSupervisor()))();
+    await supervisor.start({
+      runId: ctx.runId,
+      projectId: ctx.run.project_id,
+      workflowName: ctx.workflow.name,
+    });
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
       projectId: ctx.run.project_id,
       reporter: this.deps.reporter,
       gate: this.deps.gate,
+      supervisor,
       logger: this.deps.logger,
     });
 
-    const result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal);
+    let result;
+    try {
+      result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal);
+    } finally {
+      // Always tear the supervisor down — fail-soft so a broken stop never masks
+      // the run outcome (or a thrown failure below).
+      try {
+        await supervisor.stop();
+      } catch (err) {
+        this.deps.logger?.warn('[ProgrammaticRunner] supervisor.stop failed (fail-soft)', {
+          runId: ctx.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     if (result.outcome === 'failed') {
       throw new Error(

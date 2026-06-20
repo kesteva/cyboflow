@@ -80,8 +80,47 @@ export interface StepRunner {
 }
 
 /**
- * The cyboflow-side effect surface the controller drives. Both methods are owned
- * by the host so the controller stays free of DB/IPC/Electron concerns.
+ * A triage decision for a required step that has exhausted its retry + loopback
+ * budget — the Stage 3 supervisory seam. Instead of the controller hard-failing,
+ * it can consult a supervisor:
+ *   - 'retry'    — re-run the step once more (bounded by a per-step triage budget).
+ *   - 'escalate' — open a human gate routing the failure to the review queue; the
+ *                  human then decides (approve = skip the step and advance, reject
+ *                  = fail the run, revise = retry, abort = cancel).
+ *   - 'fail'     — give up; the run fails (today's behavior; also the default when
+ *                  no triage advisor is wired, keeping the seam dormant-safe).
+ */
+export type TriageDecision = 'retry' | 'escalate' | 'fail';
+
+/** Kinds of run/step lifecycle event fed to the supervisor's monitor seam. */
+export type SupervisorEventKind =
+  | 'run-started'
+  | 'step-running'
+  | 'step-settled'
+  | 'step-failed'
+  | 'gate-opened'
+  | 'run-finished';
+
+/**
+ * A monitoring event the controller emits to the supervisor (Stage 3 monitor
+ * feed). Purely observational — the supervisor watches the host-driven walk; it
+ * does NOT sequence it. `outcome`/`error` are populated for settle/finish/fail.
+ */
+export interface SupervisorEvent {
+  kind: SupervisorEventKind;
+  runId: string;
+  phaseId?: string;
+  stepId?: string;
+  outcome?: string;
+  error?: string;
+}
+
+/**
+ * The cyboflow-side effect surface the controller drives. The first two methods
+ * are owned by the host so the controller stays free of DB/IPC/Electron concerns.
+ * The optional Stage 3 methods (notify / triageFailure) bridge the controller to
+ * the supervisor; when both are absent the controller behaves exactly as Stages
+ * 1-2 (monitor feed dropped, required-step failure escalates to a hard 'fail').
  */
 export interface ControllerHost {
   /**
@@ -99,6 +138,21 @@ export interface ControllerHost {
    * target (or, absent a target, re-presents the gate).
    */
   requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision>;
+
+  /**
+   * Optional monitor feed (Stage 3). The controller calls this at run/step
+   * boundaries so the supervisor can observe progress. Fail-soft (never throws);
+   * absent ⇒ no monitoring.
+   */
+  notify?(event: SupervisorEvent): void;
+
+  /**
+   * Optional triage seam (Stage 3). Consulted when a REQUIRED step has exhausted
+   * its retry + loopback budget, BEFORE the controller fails the run. Returns the
+   * triage decision (retry / escalate-to-human / fail). Absent ⇒ the controller
+   * fails the run exactly as in Stages 1-2.
+   */
+  triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;

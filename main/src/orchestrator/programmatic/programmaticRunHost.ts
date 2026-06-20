@@ -14,8 +14,9 @@
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
-import type { ControllerHost, ControllerStepContext, HumanGateDecision } from './types';
+import type { ControllerHost, ControllerStepContext, HumanGateDecision, SupervisorEvent, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
+import type { SupervisorSession } from './supervisor';
 
 /**
  * Drives a step boundary onto the live timeline (current_step_id + emit). In
@@ -30,6 +31,12 @@ export interface ProgrammaticRunHostArgs {
   projectId: number;
   reporter: StepReporter;
   gate: HumanGateResolver;
+  /**
+   * The supervisor (Stage 3). When present, the host forwards the monitor feed to
+   * `supervisor.notify` and routes triageFailure to `supervisor.triage`. Absent ⇒
+   * the controller never sees notify/triageFailure (Stages 1-2 behavior).
+   */
+  supervisor?: SupervisorSession;
   logger?: LoggerLike;
 }
 
@@ -57,6 +64,42 @@ export class ProgrammaticRunHost implements ControllerHost {
       step,
       signal: ctx.signal,
     });
+  }
+
+  /** Monitor feed → supervisor (Stage 3). Fail-soft — never abort the walk. */
+  notify(event: SupervisorEvent): void {
+    if (!this.args.supervisor) return;
+    try {
+      this.args.supervisor.notify(event);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] supervisor.notify failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Triage seam → supervisor (Stage 3). Returns 'fail' when no supervisor is wired
+   * (Stages 1-2 behavior) or when the supervisor's triage itself throws (fail-soft
+   * — a broken supervisor must never strand the run in a non-terminal state).
+   */
+  async triageFailure(
+    step: WorkflowStep,
+    _ctx: ControllerStepContext,
+    error: string | undefined,
+  ): Promise<TriageDecision> {
+    if (!this.args.supervisor) return 'fail';
+    try {
+      return await this.args.supervisor.triage({ step, error });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] supervisor.triage failed; defaulting to fail', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 'fail';
+    }
   }
 
   log(level: 'info' | 'warn', message: string): void {

@@ -28,9 +28,11 @@ import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
 import type {
   ControllerHost,
   ControllerResult,
+  ControllerStepContext,
   HumanGateDecision,
   StepReport,
   StepRunner,
+  SupervisorEvent,
 } from './types';
 
 /**
@@ -82,6 +84,11 @@ export class WorkflowController {
     // re-presentations consume this SAME budget (even when the gate has no jump
     // target) so an indecisive reviewer can never spin forever.
     const loopbacks = new Map<string, number>();
+    // Per-step-id triage-retry counters (Stage 3) — bounds 'retry' triage verdicts
+    // and escalation-gate 'revise' re-runs so a flapping step can never spin.
+    const triageRetries = new Map<string, number>();
+
+    this.emit({ kind: 'run-started', runId });
 
     for (const phase of def.phases) {
       const n = phase.steps.length;
@@ -99,7 +106,7 @@ export class WorkflowController {
       let i = 0;
       while (i < n) {
         if (signal?.aborted) {
-          return { outcome: 'canceled', steps, failedStepId: phase.steps[i]?.id };
+          return this.finish({ outcome: 'canceled', steps, failedStepId: phase.steps[i]?.id }, runId);
         }
         if (++executions > maxExecutions) {
           throw new Error(
@@ -113,9 +120,10 @@ export class WorkflowController {
 
         // ── Pure human gate (no agent work) ──────────────────────────────────
         if (isPureHumanGate(step)) {
+          this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
           const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt: 1 });
           const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i);
-          if (next.terminal) return next.result;
+          if (next.terminal) return this.finish(next.result, runId);
           i = next.i;
           continue;
         }
@@ -144,16 +152,17 @@ export class WorkflowController {
         if (aborted || signal?.aborted) {
           steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
           this.host.reportStep(step.id, 'done');
-          return { outcome: 'canceled', steps, failedStepId: step.id };
+          return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
         }
 
         if (ok) {
           // Agent succeeded. If the step ALSO carries a human checkpoint, open the
           // gate now (agent-then-gate); otherwise advance.
           if (hasTrailingGate(step)) {
+            this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
             const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt });
             const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i, attempt);
-            if (next.terminal) return next.result;
+            if (next.terminal) return this.finish(next.result, runId);
             i = next.i;
             continue;
           }
@@ -180,14 +189,103 @@ export class WorkflowController {
           continue;
         }
 
-        // Required step, no loopback budget left — escalate (terminal failure).
-        steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'failed', attempts: attempt, error: lastError });
-        this.host.reportStep(step.id, 'done');
-        return { outcome: 'failed', steps, failedStepId: step.id };
+        // Required step, no loopback budget left — consult the supervisor's triage
+        // seam (Stage 3) before failing. Absent ⇒ a hard 'fail' (Stages 1-2).
+        const triaged = await this.handleRequiredFailure(
+          step, phase, baseCtx, lastError, steps, i, attempt, triageRetries,
+        );
+        if (triaged.terminal) return this.finish(triaged.result, runId);
+        i = triaged.i;
+        continue;
       }
     }
 
-    return { outcome: 'completed', steps };
+    return this.finish({ outcome: 'completed', steps }, runId);
+  }
+
+  /** Fail-soft monitor-feed emit to the supervisor (Stage 3). */
+  private emit(event: SupervisorEvent): void {
+    try {
+      this.host.notify?.(event);
+    } catch {
+      // A broken monitor feed must never affect the walk.
+    }
+  }
+
+  /** Emit run-finished then return the result (single terminal seam). */
+  private finish(result: ControllerResult, runId: string): ControllerResult {
+    this.emit({ kind: 'run-finished', runId, outcome: result.outcome, stepId: result.failedStepId });
+    return result;
+  }
+
+  /**
+   * Handle a required step that exhausted its retry + loopback budget (Stage 3
+   * triage seam). Notifies the supervisor of the failure, then consults
+   * `host.triageFailure` (absent ⇒ 'fail'):
+   *   - 'retry'    — re-run the step (i unchanged), bounded by a per-step triage
+   *                  budget; budget-exhausted falls through to fail.
+   *   - 'escalate' — open a human gate routing the failure to the review queue:
+   *                    approve → skip the step and advance (the human accepts it),
+   *                    revise  → retry the step (bounded), abort → cancel,
+   *                    reject  → fail.
+   *   - 'fail'     — terminal failure (also the no-advisor default).
+   */
+  private async handleRequiredFailure(
+    step: WorkflowStep,
+    phase: WorkflowDefinition['phases'][number],
+    baseCtx: { runId: string; phaseId: string; stepIndex: number; signal?: AbortSignal },
+    lastError: string | undefined,
+    steps: StepReport[],
+    i: number,
+    attempt: number,
+    triageRetries: Map<string, number>,
+  ): Promise<{ terminal: true; result: ControllerResult } | { terminal: false; i: number }> {
+    this.emit({ kind: 'step-failed', runId: baseCtx.runId, phaseId: phase.id, stepId: step.id, error: lastError });
+
+    const ctx: ControllerStepContext = { ...baseCtx, attempt };
+    const decision = this.host.triageFailure ? await this.host.triageFailure(step, ctx, lastError) : 'fail';
+
+    const tryTriageRetry = (): { terminal: false; i: number } | null => {
+      const used = triageRetries.get(step.id) ?? 0;
+      if (used >= MAX_STEP_LOOPBACKS) return null;
+      triageRetries.set(step.id, used + 1);
+      this.host.reportStep(step.id, 'done');
+      return { terminal: false, i };
+    };
+
+    if (decision === 'retry') {
+      const retry = tryTriageRetry();
+      if (retry) {
+        this.host.log?.('warn', `triage: retrying failed step '${step.id}'`);
+        return retry;
+      }
+      // budget exhausted → fall through to terminal failure
+    } else if (decision === 'escalate') {
+      this.emit({ kind: 'gate-opened', runId: baseCtx.runId, phaseId: phase.id, stepId: step.id });
+      const verdict = await this.host.requestHumanGate(step, ctx);
+      if (verdict === 'approve') {
+        // The human accepts the failure — skip the step and advance.
+        steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
+        this.host.log?.('warn', `triage: human accepted failure of step '${step.id}'; skipping`);
+        this.host.reportStep(step.id, 'done');
+        return { terminal: false, i: i + 1 };
+      }
+      if (verdict === 'abort') {
+        steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
+        this.host.reportStep(step.id, 'done');
+        return { terminal: true, result: { outcome: 'canceled', steps, failedStepId: step.id } };
+      }
+      if (verdict === 'revise') {
+        const retry = tryTriageRetry();
+        if (retry) return retry;
+        // budget exhausted → fall through to terminal failure
+      }
+      // 'reject' (or revise-exhausted) → terminal failure
+    }
+
+    steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'failed', attempts: attempt, error: lastError });
+    this.host.reportStep(step.id, 'done');
+    return { terminal: true, result: { outcome: 'failed', steps, failedStepId: step.id } };
   }
 
   /**
