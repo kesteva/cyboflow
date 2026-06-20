@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import type { AppConfig } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -215,6 +216,20 @@ export class ConfigManager extends EventEmitter {
    */
   getDefaultAgentPermissionMode(): PermissionMode {
     return this.config.defaultAgentPermissionMode ?? 'default';
+  }
+
+  /**
+   * The global default execution model for new SDK workflow runs — the
+   * global-default rung of resolveExecutionModel (the WorkflowConfigProvider
+   * seam consumed by WorkflowRegistry.createRun). Returns null when unset so the
+   * resolver falls through to its env / hard-floor rungs rather than forcing a
+   * value; an explicit 'programmatic' here is honored only on the SDK substrate
+   * (the interactive substrate hard-pins 'orchestrated'). Like the other
+   * defaults, `defaultExecutionModel` is NOT seeded into the constructor defaults,
+   * so existing config.json files stay byte-identical.
+   */
+  getDefaultExecutionModel(): ExecutionModel | null {
+    return this.config.defaultExecutionModel ?? null;
   }
 
   getSessionCreationPreferences() {
