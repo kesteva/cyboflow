@@ -1,5 +1,8 @@
 # Cyboflow Workflows + Agents Pane — Final Implementation Plan
 
+> **ARCHIVED — shipped.** The Workflows + Agents pane (P0–P4 + custom-flow exec + global
+> scope) landed on `main`. This document is kept for historical context only.
+
 > Source: dynamic planning workflow (`plan-workflows-agents-pane`, 17 agents) grounded in and adversarially verified against the live tree. Verify phase produced 53 findings (5 blockers, 17 high), all folded in below. Recreates the design handoff `Cyboflow MVP (1).zip` (look/typography/layout authoritative; its SoloFlow data model discarded).
 
 ## 1. Summary

@@ -1,5 +1,8 @@
 # Agents/Workflows pane — 3 approved polish fixes (execute post-compact)
 
+> **ARCHIVED — shipped.** All three polish fixes landed on `main`. This document is kept
+> for historical context only.
+
 Branch `bajada-badlands` (HEAD `675cda30`, 22 commits ahead of local `main`, tree clean).
 Dev app running on this build at CDP `:9223`. All three plans APPROVED by the user 2026-06-19.
 Grounded by 1 dynamic workflow (`wf_10499199-2aa`) + 2 background investigation agents.
