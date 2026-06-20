@@ -328,11 +328,12 @@ a twin of `TaskChangeRouter` (per-project queue, atomic mutate + `entity_events`
 
 ### In-repo workflow prompt bodies (self-containment)
 
-The two user-facing flows (Planner + Sprint) and their prompt BODIES live in app source at
-`main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `builtInWorkflows.ts`). There is
-NO runtime read from `~/.claude/plugins/cache/soloflow/...`. Rules when touching workflows:
+The three user-facing flows (Planner + Sprint + Compound) and their prompt BODIES live in app
+source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `compound.md`,
+`builtInWorkflows.ts`). There is NO runtime read from `~/.claude/plugins/cache/soloflow/...`.
+Rules when touching workflows:
 
-- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint']`) in
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound']`) in
   `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over it, so adding/removing a flow
   there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
   (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*` names — NOT the historical

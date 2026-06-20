@@ -1,10 +1,11 @@
-# Compound flow (preserved prose — deferred cyboflow-native rebuild)
+# Compound flow (preserved prose — original SoloFlow source)
 
-> Preserved during the SoloFlow rip-out (P0). The `compound` workflow was
-> dropped from `WORKFLOW_DEFINITIONS` because cyboflow v1 ships only the two
-> user-facing flows (Planner + Sprint). This file keeps the original phase/step
-> shape so a future cyboflow-native compound flow can be rebuilt against the
-> DB-canonical entity model + `cyboflow_*` MCP tools (no `.soloflow/` files).
+> **Superseded — compound shipped natively.** This prose was preserved during the
+> SoloFlow rip-out (P0), when `compound` was temporarily dropped. It has since been
+> **rebuilt as a cyboflow-native flow** — see the live `main/src/orchestrator/workflows/compound.md`
+> (launched from the Insights view), which writes the DB-canonical entity model via the
+> `cyboflow_*` MCP tools. This file is kept only as the historical source the rebuild was
+> grounded in; `compound.md` is authoritative.
 
 ## Intent
 

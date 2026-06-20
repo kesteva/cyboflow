@@ -20,9 +20,9 @@ flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
 branding, IPC transport, and Crystal-specific features are being progressively replaced. See
-`docs/cyboflow_system_design.md` for the full product spec and cut decisions. The original
-`compound` / `prune` SoloFlow flows were dropped from the app; their prose is preserved under
-`docs/workflows-future/` for a future cyboflow-native rebuild.
+`docs/cyboflow_system_design.md` for the full product spec and cut decisions. `compound` was
+rebuilt natively (`compound.md`, launched from the Insights view); only the `prune` SoloFlow
+flow remains dropped, its prose preserved under `docs/workflows-future/` for a future rebuild.
 
 ## Entry Points
 
