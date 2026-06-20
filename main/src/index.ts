@@ -28,9 +28,11 @@ import { RunQueueRegistry } from './orchestrator/RunQueueRegistry';
 import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
-import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
+import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
+import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
+import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
@@ -793,6 +795,29 @@ async function initializeServices() {
     },
   };
 
+  // Programmatic-run driver (execution-model seam, Stage 2). When a run's
+  // immutable `execution_model` stamp is 'programmatic', RunExecutor delegates the
+  // whole run to this collaborator: host code (the WorkflowController) walks the
+  // run's DAG, running each step as a scoped agent turn via the SAME spawn surface
+  // (substrateFacade), driving the live timeline through buildStepTransitionEvent
+  // (the same path cyboflow_report_step uses), and resolving human gates by
+  // opening a blocking review item via HumanStepManager + awaiting its resolution
+  // on reviewItemChangeEvents. Default 'orchestrated' runs never touch this.
+  const programmaticRunner = new DefaultProgrammaticRunner({
+    spawner: substrateFacade,
+    reporter: {
+      report: (runId, stepId, status) =>
+        void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
+    },
+    gate: new ReviewQueueHumanGate(
+      HumanStepManager.getInstance(),
+      reviewItemChangeEvents,
+      reviewItemProjectChannel,
+      cyboflowLogger,
+    ),
+    logger: cyboflowLogger,
+  });
+
   runExecutor = new RunExecutor(
     substrateFacade,
     workflowRegistry,
@@ -812,6 +837,7 @@ async function initializeServices() {
       listLaneTaskIds: (batchId) => sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId),
       markBatchTerminal: (batchId, status) => sprintLaneStore.markBatchTerminal(batchId, status),
     },
+    programmaticRunner,
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
