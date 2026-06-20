@@ -1,13 +1,23 @@
 # SDK program-driven workflows (execution-model seam)
 
-Status: **Stage 0 + Stage 1 (engine + seam) landed.** The deterministic
-`WorkflowController`, its injected protocol, the guarded `RunExecutor` branch, and
-the `requestedExecutionModel` threading are in and unit-tested. The live SDK
-step-runner glue + the human/monitor seam are deferred to Stage 2 (where they can
-be exercised in a real Electron run) and are NOT yet wired into the production
-composition root — so `programmatic` runs currently fall through to orchestrated
-in production (a stamped-but-not-yet-activated model), keeping behavior
-byte-identical.
+Status: **Stage 0 + 1 + 2 landed and wired.** The deterministic
+`WorkflowController`, its protocol, the guarded `RunExecutor` branch, the
+`requestedExecutionModel` threading (Stage 0/1), AND the production glue — the
+SDK-backed `SpawnStepRunner`, the `ProgrammaticRunHost`, the review-queue human
+gate, and `DefaultProgrammaticRunner` — are in, unit-tested, and **wired into the
+composition root** (`main/src/index.ts`). Default `orchestrated` runs are
+byte-identical; an opt-in `programmatic` run now activates the real host-driven
+path.
+
+> ⚠️ **Not yet live-verified.** The per-step SDK invocation, the multi-spawn
+> event-bridge interplay, and the human-gate open/await/resume cycle cannot be
+> exercised headlessly (no Electron / live SDK). Everything is unit-tested against
+> fakes and typechecks, but a real `pnpm dev` run against a `programmatic`-stamped
+> workflow is required before relying on the live path. The seam is strictly
+> opt-in (default `orchestrated`), so this risk is contained to explicit opt-ins.
+
+Stage 3 (the monitor/triage agent + structured phase outputs + crash-safe resume)
+is still designed-only below.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -149,17 +159,26 @@ through the router" rule. Only the *actor* differs.
   outcomes. `RunExecutor.execute` branches on `run.execution_model` and delegates
   to an injected `ProgrammaticRunner` (the orchestrated path is untouched).
   `requestedExecutionModel` is threaded `launch` → `createRun`. All unit-tested.
-- **Stage 1b / Stage 2 — the live SDK glue + human seam (next).** Implement the
-  production `ProgrammaticRunner` + an SDK-backed `StepRunner` (a scoped agent
-  turn per step via the existing spawn surface) + a `ControllerHost` that bridges
-  to the review/questions surface for human gates, then wire it into the
-  composition root (`main/src/index.ts`). This is where the per-step SDK
-  invocation and gate suspend/resume get exercised in a real Electron run —
-  deferred out of Stage 1 because they cannot be verified headlessly. Add the
-  monitor / human-seam agent as a streaming-input session (event feed + chat).
-- **Stage 3** — enable triage (controller→agent requests, agent→controller
-  verdicts) + subagent direct-to-review-queue routing; add an "awaiting triage"
-  phase state with crash-safe resume.
+- **Stage 2 — the live SDK glue + human gate — landed (unverified).**
+  `DefaultProgrammaticRunner` assembles the per-run engine: `SpawnStepRunner`
+  runs each step as a scoped agent turn via the existing spawn surface (so MCP /
+  agent-overlay / worktree / permission-mode setup is reused; only the prompt is
+  narrowed to one step — `composeStepPrompt`); `ProgrammaticRunHost` drives the
+  timeline through `buildStepTransitionEvent` (the `cyboflow_report_step` path)
+  and resolves human gates via `ReviewQueueHumanGate`, which opens a blocking
+  decision review item through `HumanStepManager.openHumanGate` (parking the run
+  in `awaiting_review`) and awaits its resolution on `reviewItemChangeEvents`,
+  mapping the free-text resolution to approve/reject/revise (`parseGateVerdict` —
+  resolving the gate defaults to approve unless the note says reject/revise).
+  Outcome mapping: completed/rejected → rest in `awaiting_review`, failed → throw.
+  Wired in `main/src/index.ts`. **Needs a real run to verify** (see banner above).
+- **Stage 3 (designed-only)** — add the monitor / human-seam agent as a
+  long-lived streaming-input session (event feed + chat); enable triage
+  (controller→agent requests, agent→controller verdicts) + subagent
+  direct-to-review-queue routing; replace per-step pass/fail with structured
+  `outputFormat` phase outputs + host-side writes via the routers; add an
+  "awaiting triage" phase state with crash-safe resume (the gate open/await is
+  currently in-process only — a mid-gate restart strands the run).
 
 ## Tradeoffs (decide before Stage 2)
 
@@ -197,3 +216,15 @@ through the router" rule. Only the *actor* differs.
 - Tests: `programmatic/__tests__/workflowController.test.ts`, the execution-model
   branch cases in `runExecutor.test.ts`, the requested-rung cases in
   `workflowRegistry.test.ts`.
+
+## File index (Stage 2)
+
+- `programmatic/stepPrompt.ts` — pure scoped single-step prompt composer.
+- `programmatic/spawnStepRunner.ts` — `StepRunner` over `spawnCliProcess`.
+- `programmatic/humanGate.ts` — `HumanGateResolver` + `parseGateVerdict` +
+  `ReviewQueueHumanGate` (open via `HumanStepManager`, await `reviewItemChangeEvents`).
+- `programmatic/programmaticRunHost.ts` — `ControllerHost` + `StepReporter`.
+- `programmatic/defaultProgrammaticRunner.ts` — assembles the per-run engine +
+  outcome mapping (the `ProgrammaticRunner` RunExecutor delegates to).
+- `main/src/index.ts` — composition-root wiring (slot-13 of `new RunExecutor`).
+- Tests: one suite per module under `programmatic/__tests__/`.
