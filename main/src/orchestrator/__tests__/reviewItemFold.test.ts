@@ -297,14 +297,34 @@ describe('HumanStepManager human gate (run-pause + aggregate-unblock)', () => {
     expect(gateThis).not.toBeNull();
     expect(gateOther).not.toBeNull();
 
-    const dismissed = mgr.clearPendingForRun('run-h');
+    const dismissed = await mgr.clearPendingForRun('run-h');
 
     expect(dismissed).toBe(1);
     expect(reviewRows(db, 'run-h')[0].status).toBe('dismissed');
     // The OTHER run's gate is untouched.
     expect(reviewRows(db, 'run-other')[0].status).toBe('pending');
     // Idempotent: a second clear finds nothing pending.
-    expect(mgr.clearPendingForRun('run-h')).toBe(0);
+    expect(await mgr.clearPendingForRun('run-h')).toBe(0);
+  });
+
+  it('openHumanGate opens a back-to-back gate while the run is still awaiting_review (resume-lag)', async () => {
+    const db = buildDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedRun(db, 'run-h');
+
+    // Gate 1 opens → run parked awaiting_review.
+    const gate1 = await mgr.openHumanGate('run-h', 'approve-plan', 'Approve plan');
+    expect(gate1).not.toBeNull();
+    expect(runStatus(db, 'run-h')).toBe('awaiting_review');
+
+    // The controller advances to the NEXT gate BEFORE maybeResumeRun has flipped
+    // the run back to 'running' — the run is momentarily still awaiting_review.
+    // openHumanGate must still open (different step), not return null.
+    const gate2 = await mgr.openHumanGate('run-h', 'decompose', 'Decompose');
+    expect(gate2).not.toBeNull();
+    expect(gate2).not.toBe(gate1);
+    // Both gates are pending; the run stays awaiting_review.
+    expect(reviewRows(db, 'run-h').filter((r) => r.status === 'pending')).toHaveLength(2);
   });
 
   it('resolveHumanGate auto-resumes the run when it is the only blocking item', async () => {

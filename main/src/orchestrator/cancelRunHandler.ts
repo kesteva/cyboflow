@@ -68,9 +68,11 @@ export interface CancelRunDeps {
    * Called AFTER stopLiveRun deliberately: stopLiveRun aborts the run's controller
    * (settling the in-memory gate Promise to 'abort' synchronously), so this is pure
    * DB/queue cleanup and cannot drive the gate decision. Optional + fail-soft —
-   * orchestrated runs and runs with no open gate are unaffected.
+   * orchestrated runs and runs with no open gate are unaffected. Awaited: it
+   * serializes on HumanStepManager's per-run queue (after any in-flight
+   * openHumanGate), closing the race where a mid-open cancel could orphan the row.
    */
-  clearPendingHumanGatesForRun?: (runId: string) => void;
+  clearPendingHumanGatesForRun?: (runId: string) => void | Promise<unknown>;
   /**
    * Emit the project-wide run-status-changed signal AFTER the guarded UPDATE
    * succeeds, so the rail / action-bar reactivity (activeRunsStore) sees the
@@ -198,9 +200,10 @@ export async function cancelRunHandler(
 
   // Dismiss orphan human-gate decision rows AFTER the kill (stopLiveRun aborted
   // the controller and settled the in-memory gate to 'abort' synchronously, so
-  // this is pure queue cleanup). Fail-soft: never block the cancel DB write.
+  // this is pure queue cleanup). Awaited so it serializes after any in-flight
+  // openHumanGate. Fail-soft: never block the cancel DB write.
   try {
-    clearPendingHumanGatesForRun?.(runId);
+    await clearPendingHumanGatesForRun?.(runId);
   } catch (err: unknown) {
     logger?.error('[cancelRun] clearPendingHumanGatesForRun failed — proceeding', {
       runId,

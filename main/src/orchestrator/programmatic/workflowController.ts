@@ -94,13 +94,15 @@ export class WorkflowController {
       const n = phase.steps.length;
       // Defensive termination bound on step VISITS within this phase (one per
       // while-iteration; in-place retries live INSIDE an iteration and do not
-      // count). Worst case: at most MAX_STEP_LOOPBACKS jumps PER step id (n step
-      // ids ⇒ ≤ MAX_STEP_LOOPBACKS*n jumps), and each jump can re-walk up to n
-      // steps before the next jump ⇒ ≤ (MAX_STEP_LOOPBACKS*n + 1)*n visits. The
-      // prior formula was linear in n and tripped FALSELY when several steps each
-      // looped back to an early step (super-linear re-traversal). Exceeding this
-      // corrected bound means a real logic bug — fail loud rather than hang.
-      const maxExecutions = (MAX_STEP_LOOPBACKS * n + 1) * n + n + 1;
+      // count). Each step id has TWO independent non-advancing budgets, both
+      // capped at MAX_STEP_LOOPBACKS: `loopbacks` (loopback jumps + pure/agent-gate
+      // revises) and `triageRetries` (Stage 3 triage 'retry' + escalate-gate
+      // 'revise'). So a step can be re-visited up to 2*MAX_STEP_LOOPBACKS times,
+      // and each re-visit can re-walk up to n steps before the next ⇒
+      // ≤ (2*MAX_STEP_LOOPBACKS*n + 1)*n visits. The bound MUST include BOTH
+      // budgets or a step that both loops back AND triage-retries trips this
+      // defensive throw falsely. Exceeding it means a real logic bug — fail loud.
+      const maxExecutions = (2 * MAX_STEP_LOOPBACKS * n + 1) * n + n + 1;
       let executions = 0;
 
       let i = 0;
@@ -109,6 +111,9 @@ export class WorkflowController {
           return this.finish({ outcome: 'canceled', steps, failedStepId: phase.steps[i]?.id }, runId);
         }
         if (++executions > maxExecutions) {
+          // Emit the terminal monitor event before the loud throw so the
+          // supervisor feed stays consistent on EVERY terminal path.
+          this.emit({ kind: 'run-finished', runId, outcome: 'failed', stepId: phase.steps[i]?.id });
           throw new Error(
             `WorkflowController: phase '${phase.id}' exceeded the execution bound (${maxExecutions}) — possible loopback cycle`,
           );
