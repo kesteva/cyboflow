@@ -1164,11 +1164,20 @@ app.whenReady().then(async () => {
     const cancelRunDepsBag = {
       db,
       runQueues,
-      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      // stopLiveRun also aborts a PROGRAMMATIC run's host-driven WorkflowController
+      // (requestProgrammaticCancel) — substrateFacade.abort alone only kills the
+      // current step, leaving the controller to spawn the next one / a gate to hang.
+      // requestProgrammaticCancel is synchronous + a no-op for orchestrated runs.
+      stopLiveRun: async (runId: string) => {
+        runExecutor.requestProgrammaticCancel(runId);
+        await substrateFacade.abort(runId);
+      },
       clearPendingApprovalsForRun: (runId: string) =>
         ApprovalRouter.getInstance().clearPendingForRun(runId),
       clearPendingQuestionsForRun: (runId: string) =>
         QuestionRouter.getInstance().clearPendingForRun(runId),
+      clearPendingHumanGatesForRun: (runId: string) =>
+        HumanStepManager.getInstance().clearPendingForRun(runId),
       emitRunStatusChanged: (runId: string, status: 'canceled') =>
         runStatusEvents.emit('changed', { runId, status }),
       // Batch close-out (single-run parallel sprint): cancelling a sprint batch

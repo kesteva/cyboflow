@@ -189,7 +189,7 @@ describe('WorkflowController', () => {
   });
 
   it('ends the run as rejected when a human gate is rejected', async () => {
-    const d = def([phase('p1', [step({ id: 'gate', human: true }), step({ id: 'a' })])]);
+    const d = def([phase('p1', [step({ id: 'gate', agent: 'human', human: true }), step({ id: 'a' })])]);
     const host = makeHost({ gate: ['reject'] });
 
     const result = await new WorkflowController(makeRunner(), host).run('r', d);
@@ -201,7 +201,7 @@ describe('WorkflowController', () => {
   it("loops back on a human gate 'revise' decision, then completes on approve", async () => {
     // p1: work, gate(loopback→work). gate revises once → rerun work → gate approves.
     const d = def([
-      phase('p1', [step({ id: 'work' }), step({ id: 'gate', human: true, loopback: 'work' })]),
+      phase('p1', [step({ id: 'work' }), step({ id: 'gate', agent: 'human', human: true, loopback: 'work' })]),
     ]);
     const runner = makeRunner();
     const host = makeHost({ gate: ['revise', 'approve'] });
@@ -211,5 +211,119 @@ describe('WorkflowController', () => {
     expect(result.outcome).toBe('completed');
     expect(runner.calls.map((c) => c.id)).toEqual(['work', 'work']); // work ran twice
     expect(host.gateCalls).toEqual(['gate', 'gate']); // gate presented twice
+  });
+
+  // ── agent-then-gate: a step with a REAL agent AND human:true (e.g. planner
+  //    'context') runs its agent FIRST, then opens the gate (fix #7) ──────────
+  describe('agent step with a trailing human checkpoint (agent + human:true)', () => {
+    it('runs the agent, THEN opens the gate, and advances on approve', async () => {
+      const d = def([phase('p1', [step({ id: 'context', agent: 'context', human: true }), step({ id: 'a' })])]);
+      const runner = makeRunner();
+      const host = makeHost({ context: ['approve'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // The agent DID run for the context step (the prior bug skipped it).
+      expect(runner.calls.map((c) => c.id)).toEqual(['context', 'a']);
+      expect(host.gateCalls).toEqual(['context']);
+    });
+
+    it('does NOT open the gate when the agent step fails (gate is only reached on success)', async () => {
+      const d = def([phase('p1', [step({ id: 'context', agent: 'context', human: true })])]);
+      const runner = makeRunner({ context: [{ status: 'failed', error: 'boom' }] });
+      const host = makeHost({ context: ['approve'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('failed');
+      expect(host.gateCalls).toEqual([]); // gate never opened — agent failed first
+    });
+
+    it("re-runs the agent on a 'revise' verdict (no loopback target = re-do this step)", async () => {
+      const d = def([phase('p1', [step({ id: 'context', agent: 'context', human: true })])]);
+      const runner = makeRunner();
+      const host = makeHost({ context: ['revise', 'approve'] });
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.map((c) => c.id)).toEqual(['context', 'context']); // agent ran twice
+      expect(host.gateCalls).toEqual(['context', 'context']);
+    });
+  });
+
+  // ── cancellation via AbortSignal (fix #3/#10/#11/#14) ────────────────────────
+  describe('cancellation', () => {
+    it('returns canceled without running any step when the signal is already aborted', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner();
+      const ac = new AbortController();
+      ac.abort();
+
+      const result = await new WorkflowController(runner, makeHost()).run('r', d, ac.signal);
+
+      expect(result.outcome).toBe('canceled');
+      expect(runner.calls).toEqual([]);
+    });
+
+    it('stops the walk when a runStep reports aborted (SDK abort read as clean)', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner({ a: [{ status: 'aborted' }] });
+
+      const result = await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(result.outcome).toBe('canceled');
+      expect(result.failedStepId).toBe('a');
+      expect(runner.calls.some((c) => c.id === 'b')).toBe(false); // never advanced
+    });
+
+    it("ends canceled when a human gate returns 'abort'", async () => {
+      const d = def([phase('p1', [step({ id: 'gate', agent: 'human', human: true }), step({ id: 'a' })])]);
+      const host = makeHost({ gate: ['abort'] });
+
+      const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(result.outcome).toBe('canceled');
+      expect(result.failedStepId).toBe('gate');
+    });
+  });
+
+  // ── revise-budget exhaustion is graceful, not a thrown invariant (fix #9/#16) ─
+  it('ends a repeatedly-revised no-loopback gate as rejected (graceful, not a throw)', async () => {
+    const d = def([phase('p1', [step({ id: 'gate', agent: 'human', human: true })])]);
+    // Always 'revise' — with no loopback target this consumes the per-step budget
+    // and must end GRACEFULLY as rejected rather than tripping the execution bound.
+    const host = makeHost({ gate: Array.from({ length: 50 }, () => 'revise' as HumanGateDecision) });
+
+    const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+    expect(result.outcome).toBe('rejected');
+    expect(result.failedStepId).toBe('gate');
+    // Bounded: MAX_STEP_LOOPBACKS re-presents + the final budget-exhausted one.
+    expect(host.gateCalls.length).toBe(MAX_STEP_LOOPBACKS + 1);
+  });
+
+  // ── the execution bound must NOT trip for a legitimate multi-loopback phase
+  //    (fix #8) ────────────────────────────────────────────────────────────────
+  it('does not falsely trip the execution bound when several steps loop back to an early step', async () => {
+    // p1: a, b(→a), c(→a), d(→a). Each of b/c/d fails once then succeeds on rerun.
+    const d = def([
+      phase('p1', [
+        step({ id: 'a' }),
+        step({ id: 'b', loopback: 'a' }),
+        step({ id: 'c', loopback: 'a' }),
+        step({ id: 'dd', loopback: 'a' }),
+      ]),
+    ]);
+    const runner = makeRunner({
+      b: [{ status: 'failed' }],
+      c: [{ status: 'failed' }],
+      dd: [{ status: 'failed' }],
+    });
+
+    const result = await new WorkflowController(runner, makeHost()).run('r', d);
+
+    expect(result.outcome).toBe('completed'); // no false "execution bound exceeded" throw
   });
 });

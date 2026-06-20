@@ -62,13 +62,16 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       logger: this.deps.logger,
     });
 
-    const result = await new WorkflowController(runner, host).run(ctx.runId, def);
+    const result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal);
 
     if (result.outcome === 'failed') {
       throw new Error(
         `DefaultProgrammaticRunner: run ${ctx.runId} failed at step '${result.failedStepId ?? '?'}'`,
       );
     }
+    // 'canceled' resolves (NOT throws) — the cancel path owns the terminal DB
+    // transition; RunExecutor.executeProgrammatic skips its 'drained' rest when
+    // the signal aborted. 'completed' / 'rejected' also rest for the user.
 
     this.deps.logger?.info('[ProgrammaticRunner] programmatic run finished', {
       runId: ctx.runId,

@@ -50,8 +50,13 @@ export class ProgrammaticRunHost implements ControllerHost {
     }
   }
 
-  async requestHumanGate(step: WorkflowStep, _ctx: ControllerStepContext): Promise<HumanGateDecision> {
-    return this.args.gate.resolve({ runId: this.args.runId, projectId: this.args.projectId, step });
+  async requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision> {
+    return this.args.gate.resolve({
+      runId: this.args.runId,
+      projectId: this.args.projectId,
+      step,
+      signal: ctx.signal,
+    });
   }
 
   log(level: 'info' | 'warn', message: string): void {

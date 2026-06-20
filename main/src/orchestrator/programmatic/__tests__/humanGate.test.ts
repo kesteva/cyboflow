@@ -67,4 +67,35 @@ describe('ReviewQueueHumanGate', () => {
     await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).rejects.toThrow('could not open human gate');
     expect(events.listenerCount('review-project-1')).toBe(0);
   });
+
+  // ── cancellation: a canceled run must settle the gate to 'abort' and remove
+  //    the listener (no hang, no leak) — fix #1/#4/#12/#15 ─────────────────────
+  it("settles to 'abort' and removes its listener when the signal aborts while awaiting", async () => {
+    const events = new EventEmitter();
+    const gate = new ReviewQueueHumanGate(makeOpener('ri-3'), events, channelFor);
+    const ac = new AbortController();
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }), signal: ac.signal });
+    await Promise.resolve(); // let openHumanGate resolve + register the id
+    expect(events.listenerCount('review-project-1')).toBe(1);
+
+    ac.abort();
+
+    await expect(pending).resolves.toBe('abort');
+    expect(events.listenerCount('review-project-1')).toBe(0); // listener removed
+  });
+
+  it("short-circuits to 'abort' without opening a gate when already aborted", async () => {
+    const events = new EventEmitter();
+    const opener = makeOpener('ri-4');
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }), signal: ac.signal }),
+    ).resolves.toBe('abort');
+    expect(opener.openHumanGate).not.toHaveBeenCalled();
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
 });

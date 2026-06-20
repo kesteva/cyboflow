@@ -61,4 +61,46 @@ describe('SpawnStepRunner', () => {
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.agentPermissionMode).toBeUndefined();
   });
+
+  // ── cancellation: SDK abort resolves the spawn cleanly, so a resolved spawn
+  //    under an aborted signal must map to 'aborted', NOT 'ok' (fix #5/#3/#14) ──
+  it('returns aborted (not ok) when the signal fired during a cleanly-resolving spawn', async () => {
+    const ac = new AbortController();
+    // The spawn "resolves cleanly" (SDK treats a canceled turn as a clean drain),
+    // but the signal aborted meanwhile.
+    const spawner = makeSpawner(() => {
+      ac.abort();
+      return Promise.resolve();
+    });
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), { ...ctx, signal: ac.signal });
+
+    expect(result.status).toBe('aborted');
+  });
+
+  it('short-circuits to aborted without spawning when the signal is already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), { ...ctx, signal: ac.signal });
+
+    expect(result.status).toBe('aborted');
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
+  it('maps a rejection under an aborted signal to aborted (not failed)', async () => {
+    const ac = new AbortController();
+    const spawner = makeSpawner(() => {
+      ac.abort();
+      return Promise.reject(new Error('killed'));
+    });
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), { ...ctx, signal: ac.signal });
+
+    expect(result.status).toBe('aborted');
+  });
 });

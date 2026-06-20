@@ -3,11 +3,20 @@
  * step as a scoped agent turn via the existing spawn surface
  * (`ClaudeSpawnerLike.spawnCliProcess`, in production the SubstrateDispatchFacade
  * → ClaudeCodeManager). `spawnCliProcess` resolves when the agent's turn drains
- * cleanly (⇒ step ok) and rejects when the turn errors/aborts (⇒ step failed),
- * so the run mapping is a thin try/catch. Reusing the existing spawn path means
- * the run's MCP servers, agent overlay, worktree, and permission mode are all set
- * up exactly as for an orchestrated turn — only the prompt is narrowed to one
- * step (see composeStepPrompt).
+ * cleanly (⇒ step ok) and rejects when the turn errors (⇒ step failed), so the
+ * run mapping is a thin try/catch. Reusing the existing spawn path means the
+ * run's MCP servers, agent overlay, worktree, and permission mode are all set up
+ * exactly as for an orchestrated turn — only the prompt is narrowed to one step
+ * (see composeStepPrompt).
+ *
+ * CANCELLATION: the SDK substrate treats an aborted query() as a CLEAN exit, so a
+ * canceled turn RESOLVES spawnCliProcess (it does NOT reject). Inferring success
+ * purely from a resolved promise would therefore misread a cancel as 'ok' and let
+ * the controller keep walking. So after the spawn settles we consult the injected
+ * AbortSignal: if it fired, the result is 'aborted' (the controller ends the walk
+ * with a 'canceled' outcome) — distinct from a genuine 'failed' turn that retries
+ * / loops back. A signal already aborted BEFORE the spawn short-circuits to
+ * 'aborted' without spawning.
  *
  * Constructed per-run by DefaultProgrammaticRunner with the run's panel/session/
  * worktree bound, then invoked once per step by the WorkflowController.
@@ -37,6 +46,9 @@ export class SpawnStepRunner implements StepRunner {
   ) {}
 
   async runStep(step: WorkflowStep, ctx: ControllerStepContext): Promise<StepRunResult> {
+    // Already canceled before we even spawn — short-circuit.
+    if (ctx.signal?.aborted) return { status: 'aborted' };
+
     const prompt = composeStepPrompt({ step, workflowName: this.opts.workflowName, attempt: ctx.attempt });
     try {
       await this.spawner.spawnCliProcess({
@@ -47,8 +59,13 @@ export class SpawnStepRunner implements StepRunner {
         prompt,
         ...(this.opts.agentPermissionMode ? { agentPermissionMode: this.opts.agentPermissionMode } : {}),
       });
+      // The SDK treats an aborted turn as a clean drain, so a resolved spawn after
+      // a cancel is NOT a real success — consult the signal to tell them apart.
+      if (ctx.signal?.aborted) return { status: 'aborted' };
       return { status: 'ok' };
     } catch (err) {
+      // A rejection during/after a cancel is the cancel, not a genuine failure.
+      if (ctx.signal?.aborted) return { status: 'aborted' };
       const error = err instanceof Error ? err.message : String(err);
       this.logger?.warn(`[SpawnStepRunner] step '${step.id}' attempt ${ctx.attempt} failed`, {
         runId: this.opts.runId,

@@ -235,6 +235,44 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
     await expect(executor.execute(run.id)).rejects.toThrow('phase boom');
   });
 
+  it('requestProgrammaticCancel aborts the in-flight controller signal and is a no-op for unknown/orchestrated runs', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    let captured: AbortSignal | undefined;
+    let release: (() => void) | undefined;
+    const runner: ProgrammaticRunner = {
+      run: vi.fn((ctx: ProgrammaticRunContext) => {
+        captured = ctx.signal;
+        return new Promise<void>((r) => {
+          release = r;
+        });
+      }),
+    };
+    const executor = makeExecutor(makeSpawner(), registry, runner);
+
+    // Unknown run before any execute → false.
+    expect(executor.requestProgrammaticCancel('nope')).toBe(false);
+
+    const p = executor.execute(run.id);
+    // executeProgrammatic awaits bridgeEvents + pre_spawn before runner.run — flush
+    // the queue until the runner has been invoked (bounded spin).
+    for (let i = 0; i < 20 && captured === undefined; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(captured?.aborted).toBe(false);
+
+    expect(executor.requestProgrammaticCancel(run.id)).toBe(true);
+    expect(captured?.aborted).toBe(true);
+
+    release?.();
+    await p;
+
+    // After teardown the controller is gone → no-op again.
+    expect(executor.requestProgrammaticCancel(run.id)).toBe(false);
+  });
+
   it('falls through to the orchestrated spawn when stamped programmatic but no runner is injected', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });

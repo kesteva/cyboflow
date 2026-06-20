@@ -243,6 +243,52 @@ export class HumanStepManager {
   }
 
   /**
+   * Dismiss any PENDING human-gate decision items for a run — the symmetric
+   * twin of ApprovalRouter.clearPendingForRun / QuestionRouter.clearPendingForRun,
+   * called from the cancel path so a canceled run does not strand an orphan
+   * "Human gate" decision row in the review queue.
+   *
+   * Marks each pending `decision` row with our gate provenance as 'dismissed'
+   * (resolved_by 'system', resolution 'canceled') and emits a 'dismissed' delta
+   * so the queue/landing subscriptions update. It does NOT resume the run (cancel
+   * owns the terminal transition) and is fail-soft on a missing table. NOTE: the
+   * IN-MEMORY gate Promise (ReviewQueueHumanGate) is settled separately and
+   * synchronously by the run's AbortSignal (RunExecutor.requestProgrammaticCancel)
+   * BEFORE this runs, so the 'dismissed' event here is purely DB/queue cleanup and
+   * cannot drive the gate decision (the resolver already settled to 'abort').
+   *
+   * @returns the number of decision rows dismissed.
+   */
+  clearPendingForRun(runId: string): number {
+    if (!hasReviewItemsTable(this.db)) return 0;
+    const now = new Date().toISOString();
+    const pending = this.db
+      .prepare(
+        `SELECT id FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'pending'
+            AND source LIKE ?`,
+      )
+      .all(runId, `${HUMAN_GATE_SOURCE}:%`) as Array<{ id: string }>;
+    if (pending.length === 0) return 0;
+
+    let dismissed = 0;
+    for (const { id } of pending) {
+      const info = this.db
+        .prepare(
+          `UPDATE review_items
+              SET status = 'dismissed', resolved_by = 'system', resolution = 'canceled', updated_at = ?
+            WHERE id = ? AND status = 'pending'`,
+        )
+        .run(now, id) as { changes: number };
+      if (info.changes > 0) {
+        dismissed += 1;
+        emitReviewItemChangedById(this.db, id, 'dismissed');
+      }
+    }
+    return dismissed;
+  }
+
+  /**
    * Stable per-step source string so the idempotency probe and the gate row use
    * the SAME provenance. e.g. 'gate:human-step:plan-review'.
    */

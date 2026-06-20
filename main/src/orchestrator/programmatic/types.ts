@@ -23,8 +23,17 @@
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 
-/** Terminal status of a single step-agent invocation. */
-export type StepRunStatus = 'ok' | 'failed';
+/**
+ * Terminal status of a single step-agent invocation.
+ *   - 'ok'      — the agent turn drained cleanly.
+ *   - 'failed'  — the agent turn errored (retryable / loopback-able / escalates).
+ *   - 'aborted' — the run was CANCELED mid-turn (the injected AbortSignal fired).
+ *                 Distinct from 'failed' so the controller stops the walk instead
+ *                 of retrying/looping back a step the user deliberately canceled.
+ *                 (FIND: SDK abort resolves spawnCliProcess cleanly, so the runner
+ *                 must consult the signal to tell cancel apart from success.)
+ */
+export type StepRunStatus = 'ok' | 'failed' | 'aborted';
 
 /** Result returned by a StepRunner for one step invocation. */
 export interface StepRunResult {
@@ -35,19 +44,29 @@ export interface StepRunResult {
   error?: string;
 }
 
-/** A human-gate decision returned by ControllerHost.requestHumanGate. */
-export type HumanGateDecision = 'approve' | 'reject' | 'revise';
+/**
+ * A human-gate decision returned by ControllerHost.requestHumanGate.
+ *   - 'approve' / 'reject' / 'revise' — the human's verdict (revise loops back).
+ *   - 'abort' — the run was CANCELED while parked at the gate (the AbortSignal
+ *               fired). The controller ends the walk with a 'canceled' outcome.
+ *               Never produced by parseGateVerdict — it comes only from the
+ *               cancel/abort path, not from a resolution string.
+ */
+export type HumanGateDecision = 'approve' | 'reject' | 'revise' | 'abort';
 
 /**
  * Context passed to a StepRunner / human gate for one attempt. `attempt` is
  * 1-based (the first try is attempt 1). `phaseId` + `stepIndex` locate the step
- * within the DAG for logging and lane/progress mapping.
+ * within the DAG for logging and lane/progress mapping. `signal` (when present)
+ * fires when the run is canceled — the StepRunner and the human gate both consult
+ * it so a canceled run stops promptly instead of completing or retrying.
  */
 export interface ControllerStepContext {
   runId: string;
   phaseId: string;
   stepIndex: number;
   attempt: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -86,13 +105,13 @@ export interface ControllerHost {
 }
 
 /** Outcome of a whole controller run over a WorkflowDefinition. */
-export type ControllerOutcome = 'completed' | 'failed' | 'rejected';
+export type ControllerOutcome = 'completed' | 'failed' | 'rejected' | 'canceled';
 
 /** Per-step record accumulated during the walk (ordered as executed). */
 export interface StepReport {
   stepId: string;
   phaseId: string;
-  outcome: 'done' | 'skipped' | 'failed' | 'rejected';
+  outcome: 'done' | 'skipped' | 'failed' | 'rejected' | 'canceled';
   /** Total agent invocations / gate presentations for this step. */
   attempts: number;
   error?: string;
@@ -102,8 +121,11 @@ export interface StepReport {
  * The controller's terminal result. `outcome`:
  *   - 'completed' — every required step settled (done or optional-skip).
  *   - 'failed'    — a required non-human step exhausted its retry/loopback budget.
- *   - 'rejected'  — a human gate was rejected.
- * `failedStepId` is set for 'failed' and 'rejected'.
+ *   - 'rejected'  — a human gate was rejected (or a no-target gate's revise budget
+ *                   was exhausted — a graceful terminal, not an internal throw).
+ *   - 'canceled'  — the run was canceled mid-walk (the AbortSignal fired) — NOT a
+ *                   failure; the cancel path owns the terminal DB transition.
+ * `failedStepId` is set for 'failed', 'rejected', and 'canceled'.
  */
 export interface ControllerResult {
   outcome: ControllerOutcome;
