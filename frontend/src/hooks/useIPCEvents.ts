@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import { useErrorStore } from '../stores/errorStore';
+import { usePanelStore } from '../stores/panelStore';
 import { API } from '../utils/api';
 import type { Session, SessionOutput, GitStatus } from '../types/session';
+import type { ToolPanel } from '../../../shared/types/panels';
 
 interface SessionEventData {
   sessionId: string;
@@ -212,6 +214,23 @@ export function useIPCEvents() {
       });
     });
     unsubscribeFunctions.push(unsubscribeSessionsLoaded);
+
+    // Listen for panel state updates — keep the panel store in sync with backend
+    // customState changes (e.g. the SDK context-% meter, refreshed per completed
+    // turn via updateClaudePanelCustomState → panel:updated). Without this, the
+    // panel:updated IPC event has NO renderer consumer, so ClaudePanel only
+    // re-reads panel.state.customState on a panel re-open and the live context
+    // meter never ticks. updatePanelState replaces the panel by id and is a
+    // no-op when that session's panels are not loaded in the store, so this is
+    // safe for background sessions.
+    const unsubscribePanelUpdated = window.electronAPI.events.onPanelUpdated((panel: ToolPanel) => {
+      if (!panel || !panel.id || !panel.sessionId) {
+        console.warn('[useIPCEvents] panel:updated event missing id/sessionId:', panel);
+        return;
+      }
+      usePanelStore.getState().updatePanelState(panel);
+    });
+    unsubscribeFunctions.push(unsubscribePanelUpdated);
 
     const unsubscribeSessionOutput = window.electronAPI.events.onSessionOutput((output: SessionOutput) => {
       // Validate event has required session context
