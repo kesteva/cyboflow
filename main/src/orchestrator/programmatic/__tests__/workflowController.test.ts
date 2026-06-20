@@ -401,6 +401,20 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('canceled');
     });
 
+    it('does not trip the execution bound when a single self-loopback step ALSO triage-retries', async () => {
+      // A 1-step phase whose step loops back to itself AND the supervisor triages
+      // 'retry' — exercising BOTH per-step budgets. The bound must absorb both
+      // (2*MAX_STEP_LOOPBACKS re-visits) without a false "execution bound" throw.
+      const d = def([phase('p1', [step({ id: 'a', loopback: 'a' })])]);
+      const runner = makeRunner({ a: Array.from({ length: 100 }, () => ({ status: 'failed' as const })) });
+
+      // No throw: the run ends as a graceful 'failed' once both budgets drain.
+      const result = await new WorkflowController(runner, makeTriageHost('retry')).run('r', d);
+
+      expect(result.outcome).toBe('failed');
+      expect(result.failedStepId).toBe('a');
+    });
+
     it('emits run-started / step-failed / run-finished monitor events', async () => {
       const d = def([phase('p1', [step({ id: 'a' })])]);
       const runner = makeRunner({ a: [{ status: 'failed' }] });

@@ -119,14 +119,24 @@ export class HumanStepManager {
       let gateOpened = false;
 
       const txn = this.db.transaction(() => {
+        // Accept BOTH 'running' and 'awaiting_review' for the gate-open transition.
+        // 'awaiting_review' covers the resume-lag window for BACK-TO-BACK gates:
+        // the UI resolve path (reviewItems.resolve) emits 'resolved' and only THEN
+        // calls maybeResumeRun, so the programmatic controller can open the NEXT
+        // gate while the run is momentarily still awaiting_review. Opening from
+        // awaiting_review re-parks it there (no-op on status) and the new blocking
+        // decision item keeps the prior gate's maybeResumeRun from resuming — which
+        // is correct (the run IS still gated). Terminal states (completed/failed/
+        // canceled) are still refused (→ null). The per-step idempotency guard
+        // above prevents a duplicate gate for the SAME step.
         const info = this.db
           .prepare(
             `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
-              WHERE id = ? AND status = 'running'`,
+              WHERE id = ? AND status IN ('running', 'awaiting_review')`,
           )
           .run(now, runId) as { changes: number };
         if (info.changes === 0) {
-          // Run not in 'running' — already paused / terminal. Do NOT open a gate.
+          // Run terminal (or row gone) — do NOT open a gate.
           return;
         }
         gateOpened = true;
@@ -257,35 +267,42 @@ export class HumanStepManager {
    * BEFORE this runs, so the 'dismissed' event here is purely DB/queue cleanup and
    * cannot drive the gate decision (the resolver already settled to 'abort').
    *
+   * Serialized on the SAME per-run queue as openHumanGate/resolveHumanGate, so it
+   * runs AFTER any in-flight openHumanGate transaction has committed — closing the
+   * cross-queue race where a cancel that lands mid-open could SELECT zero pending
+   * rows (the gate row not yet committed) and leave it orphaned.
+   *
    * @returns the number of decision rows dismissed.
    */
-  clearPendingForRun(runId: string): number {
+  async clearPendingForRun(runId: string): Promise<number> {
     if (!hasReviewItemsTable(this.db)) return 0;
-    const now = new Date().toISOString();
-    const pending = this.db
-      .prepare(
-        `SELECT id FROM review_items
-          WHERE run_id = ? AND kind = 'decision' AND status = 'pending'
-            AND source LIKE ?`,
-      )
-      .all(runId, `${HUMAN_GATE_SOURCE}:%`) as Array<{ id: string }>;
-    if (pending.length === 0) return 0;
-
-    let dismissed = 0;
-    for (const { id } of pending) {
-      const info = this.db
+    return (await this.getQueue(runId).add(() => {
+      const now = new Date().toISOString();
+      const pending = this.db
         .prepare(
-          `UPDATE review_items
-              SET status = 'dismissed', resolved_by = 'system', resolution = 'canceled', updated_at = ?
-            WHERE id = ? AND status = 'pending'`,
+          `SELECT id FROM review_items
+            WHERE run_id = ? AND kind = 'decision' AND status = 'pending'
+              AND source LIKE ?`,
         )
-        .run(now, id) as { changes: number };
-      if (info.changes > 0) {
-        dismissed += 1;
-        emitReviewItemChangedById(this.db, id, 'dismissed');
+        .all(runId, `${HUMAN_GATE_SOURCE}:%`) as Array<{ id: string }>;
+      if (pending.length === 0) return 0;
+
+      let dismissed = 0;
+      for (const { id } of pending) {
+        const info = this.db
+          .prepare(
+            `UPDATE review_items
+                SET status = 'dismissed', resolved_by = 'system', resolution = 'canceled', updated_at = ?
+              WHERE id = ? AND status = 'pending'`,
+          )
+          .run(now, id) as { changes: number };
+        if (info.changes > 0) {
+          dismissed += 1;
+          emitReviewItemChangedById(this.db, id, 'dismissed');
+        }
       }
-    }
-    return dismissed;
+      return dismissed;
+    })) as number;
   }
 
   /**
