@@ -633,7 +633,7 @@ export class WorkflowRegistry {
     requestedSubstrate?: CliSubstrate,
     sessionId?: string,
     requestedPermissionMode?: PermissionMode,
-    opts?: { projectId?: number },
+    opts?: { projectId?: number; requestedExecutionModel?: ExecutionModel },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -701,14 +701,16 @@ export class WorkflowRegistry {
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive
     // substrate hard-pins 'orchestrated' inside the resolver; an SDK run floors
-    // to 'orchestrated' unless an override selects 'programmatic'. The
-    // requested/frontmatter/project-config rungs are not yet wired (they land
-    // with the programmatic consumer); resolution today uses the global default
-    // + env + the substrate hard-pin + floor. With no override every run resolves
+    // to 'orchestrated' unless an override selects 'programmatic'. The explicit
+    // per-run request (opts.requestedExecutionModel, from RunLauncher.launch) is
+    // the highest override rung; frontmatter/project-config rungs are not yet
+    // wired and resolution otherwise uses the global default + env + the
+    // substrate hard-pin + floor. With no override every run resolves
     // 'orchestrated' (zero-behavior-change). Like substrate, this is stamped ONCE
     // at INSERT and is immutable for the run lifetime — there is no UPDATE path.
     const executionModel = resolveExecutionModel({
       substrate,
+      requestedExecutionModel: opts?.requestedExecutionModel,
       globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
       env: process.env,
     });

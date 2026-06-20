@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunExecutor } from '../runExecutor';
-import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike } from '../runExecutor';
+import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
 import type {
@@ -163,6 +163,109 @@ describe('RunExecutor.execute — missing rows', () => {
     const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger());
 
     await expect(executor.execute(run.id)).rejects.toThrow('worktree_path is null');
+  });
+});
+
+describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
+  function makeRunner(): ProgrammaticRunner & { run: ReturnType<typeof vi.fn> } {
+    return { run: vi.fn<(ctx: ProgrammaticRunContext) => Promise<void>>().mockResolvedValue(undefined) };
+  }
+
+  /** Construct a TestableRunExecutor with the programmatic runner in slot 13. */
+  function makeExecutor(
+    spawner: ClaudeSpawnerLike,
+    registry: WorkflowRegistryLike,
+    runner?: ProgrammaticRunner,
+  ): TestableRunExecutor {
+    return new TestableRunExecutor(
+      spawner,
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      undefined, // lifecycleTransitions
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      runner, // programmaticRunner (slot 13)
+    );
+  }
+
+  it('delegates a programmatic run to the injected runner and does NOT spawn an orchestrator turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const runner = makeRunner();
+    const executor = makeExecutor(spawner, registry, runner);
+
+    await executor.execute(run.id);
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    const ctx = runner.run.mock.calls[0][0] as ProgrammaticRunContext;
+    expect(ctx).toMatchObject({
+      runId: run.id,
+      panelId: run.id,
+      sessionId: run.id,
+      worktreePath: '/wt',
+    });
+    expect(ctx.run).toBe(run);
+    expect(ctx.workflow).toBe(workflow);
+    // The orchestrated spawn path is NOT taken.
+    expect(spawner.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
+  it('re-throws when the programmatic runner fails (drives the failed lifecycle arm)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const runner = makeRunner();
+    runner.run.mockRejectedValueOnce(new Error('phase boom'));
+    const executor = makeExecutor(makeSpawner(), registry, runner);
+
+    await expect(executor.execute(run.id)).rejects.toThrow('phase boom');
+  });
+
+  it('falls through to the orchestrated spawn when stamped programmatic but no runner is injected', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = makeExecutor(spawner, registry, undefined); // no runner
+
+    await executor.execute(run.id);
+
+    // Liveness preserved: the agent walks the same DAG via the orchestrated spawn.
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+  });
+
+  it('takes the orchestrated spawn path (NOT the runner) for an orchestrated run even when a runner is injected', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'orchestrated' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const runner = makeRunner();
+    const executor = makeExecutor(spawner, registry, runner);
+
+    await executor.execute(run.id);
+
+    expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(runner.run).not.toHaveBeenCalled();
   });
 });
 
