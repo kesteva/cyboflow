@@ -1,23 +1,37 @@
 # SDK program-driven workflows (execution-model seam)
 
-Status: **Stage 0 + 1 + 2 landed and wired.** The deterministic
-`WorkflowController`, its protocol, the guarded `RunExecutor` branch, the
-`requestedExecutionModel` threading (Stage 0/1), AND the production glue — the
-SDK-backed `SpawnStepRunner`, the `ProgrammaticRunHost`, the review-queue human
-gate, and `DefaultProgrammaticRunner` — are in, unit-tested, and **wired into the
-composition root** (`main/src/index.ts`). Default `orchestrated` runs are
-byte-identical; an opt-in `programmatic` run now activates the real host-driven
-path.
+Status: **Stages 0–3 landed and wired**, after an adversarial review of Stages
+0–2 (16 confirmed findings, all fixed) + a headless integration smoke + a live
+boot smoke. The deterministic `WorkflowController`, its protocol, the guarded
+`RunExecutor` branch, the SDK-backed `SpawnStepRunner`, `ProgrammaticRunHost`, the
+review-queue human gate, `DefaultProgrammaticRunner`, AND the Stage 3 supervisory
+plane (monitor + triage + human-seam seam, `SupervisorSession` +
+`ReviewQueueSupervisor`) are in, unit-tested, and **wired into the composition
+root** (`main/src/index.ts`). Default `orchestrated` runs are byte-identical; an
+opt-in `programmatic` run activates the host-driven path.
 
-> ⚠️ **Not yet live-verified.** The per-step SDK invocation, the multi-spawn
-> event-bridge interplay, and the human-gate open/await/resume cycle cannot be
-> exercised headlessly (no Electron / live SDK). Everything is unit-tested against
-> fakes and typechecks, but a real `pnpm dev` run against a `programmatic`-stamped
-> workflow is required before relying on the live path. The seam is strictly
-> opt-in (default `orchestrated`), so this risk is contained to explicit opt-ins.
+**Review-fix highlights (commit `3a7e7176`)** — the cancellation spine (an
+`AbortSignal` threaded through runner → controller → step-runner → human gate, so
+a cancel actually stops the host walk and settles/cleans up an open gate; SDK
+abort is read as `aborted`, not a clean `ok`), the agent-then-gate fix (a step
+with a real agent AND `human:true` like planner `context` runs its agent THEN
+opens the gate), a corrected per-phase execution bound, graceful revise-budget
+exhaustion, and dropping the run-level timeline rewind. See the review-fixes
+section below.
 
-Stage 3 (the monitor/triage agent + structured phase outputs + crash-safe resume)
-is still designed-only below.
+> ⚠️ **Live verification status.** A headless **integration smoke**
+> (`programmaticIntegration.test.ts`) drives the REAL runner/controller/gate/host
+> over the REAL planner DAG + DB with only the SDK spawn faked, and a **boot
+> smoke** confirmed a clean `pnpm dev` boot + migration 031 in the live DB + the
+> full composition-root wiring. NOT covered headlessly: a real-Claude per-step
+> turn and the renderer gate-approval UI — exercise those in a `pnpm dev` run
+> against a `programmatic`-stamped workflow before relying on the live SDK path.
+> The seam is strictly opt-in (default `orchestrated`), so the risk is contained.
+
+The Stage 3 supervisory **policy** plane (`ReviewQueueSupervisor` → escalate
+failures to the human queue) is live; the full SDK **monitor/chat agent**
+(long-lived streaming-input session the user converses with) is the remaining
+designed-only slice — a drop-in for the `SupervisorSession` factory.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -172,13 +186,52 @@ through the router" rule. Only the *actor* differs.
   resolving the gate defaults to approve unless the note says reject/revise).
   Outcome mapping: completed/rejected → rest in `awaiting_review`, failed → throw.
   Wired in `main/src/index.ts`. **Needs a real run to verify** (see banner above).
-- **Stage 3 (designed-only)** — add the monitor / human-seam agent as a
-  long-lived streaming-input session (event feed + chat); enable triage
-  (controller→agent requests, agent→controller verdicts) + subagent
-  direct-to-review-queue routing; replace per-step pass/fail with structured
-  `outputFormat` phase outputs + host-side writes via the routers; add an
-  "awaiting triage" phase state with crash-safe resume (the gate open/await is
-  currently in-process only — a mid-gate restart strands the run).
+- **Stage 3 (supervisory plane) — landed (policy supervisor live; SDK agent
+  designed-only).** The controller now exposes two optional `ControllerHost` hooks
+  — `notify(event)` (monitor feed: run-started / step-failed / gate-opened /
+  run-finished) and `triageFailure(step)` (consulted when a REQUIRED step exhausts
+  its retry+loopback budget). Triage verdicts: `retry` (bounded re-run), `escalate`
+  (open a human gate → approve=skip&advance / revise=retry / reject=fail /
+  abort=cancel), `fail` (terminal; the no-advisor default). A `SupervisorSession`
+  (`start`/`notify`/`triage`/`stop`) backs the hooks via `ProgrammaticRunHost`;
+  `DefaultProgrammaticRunner` brackets the walk with `start`/`stop`. Two policy
+  impls ship: `NoopSupervisor` (default elsewhere — byte-identical `fail`) and
+  `ReviewQueueSupervisor` (wired as the programmatic default — escalates failures
+  to the human review queue). **Still designed-only:** the full SDK monitor/chat
+  agent (a long-lived streaming-input session the user converses with, emitting
+  triage verdicts via structured `outputFormat`) as a drop-in `SupervisorSession`;
+  per-step structured `outputFormat` + host-side router writes (per-step writes
+  still go through the agent's `cyboflow_*` MCP); subagent direct-to-review-queue
+  routing; and an "awaiting triage" phase state with crash-safe resume (the gate
+  open/await is in-process only — a mid-gate restart still strands the run).
+
+## Adversarial review of Stages 0–2 — fixes landed (`3a7e7176` / `98ef086e`)
+
+A 24-agent adversarial-review workflow over Stages 0–2 confirmed 16 defects (no
+false positives). Clusters and resolutions:
+
+- **Cancellation (CRITICAL/HIGH).** The programmatic plane had no abort path, and
+  the SDK treats an aborted `query()` as a clean drain — so a cancel kept the
+  controller walking and a run parked at a gate hung forever, leaking a
+  `reviewItemChangeEvents` listener. Fix: a per-run `AbortController` in
+  `RunExecutor` (`requestProgrammaticCancel`, wired into `cancelRunHandler`'s
+  `stopLiveRun`), threaded as `signal` through `ProgrammaticRunContext` →
+  `WorkflowController.run` (checked each step → `canceled`), `SpawnStepRunner`
+  (resolved-under-abort → `aborted`, distinct from `failed`), and
+  `ReviewQueueHumanGate` (settles to `abort` + removes its listener).
+  `HumanStepManager.clearPendingForRun` dismisses orphan gate decision rows.
+- **Agent-then-gate (HIGH).** A step with a real agent AND `human:true` (planner
+  `context`) was treated as a pure gate, silently skipping its agent. `isPureHumanGate`
+  now keys on `agent === HUMAN_GATE_AGENT`; such steps run the agent THEN gate.
+- **Controller bounds (HIGH/MED).** The per-phase execution bound was linear and
+  tripped falsely for multi-loopback phases (corrected to `(MAX*n+1)*n+n+1`); a
+  repeatedly-`revise`d no-loopback gate now ends gracefully as `rejected` instead
+  of tripping the defensive throw.
+- **Timeline (HIGH).** `executeProgrammatic` no longer drives the run-level
+  `stepEmitter` (which rewound the timeline to the initial step on rest).
+- **Config rung (LOW).** `ConfigManager.getDefaultExecutionModel` + an
+  `AppConfig.defaultExecutionModel` field make the global-default resolver rung
+  live (`98ef086e`).
 
 ## Tradeoffs (decide before Stage 2)
 
@@ -228,3 +281,25 @@ through the router" rule. Only the *actor* differs.
   outcome mapping (the `ProgrammaticRunner` RunExecutor delegates to).
 - `main/src/index.ts` — composition-root wiring (slot-13 of `new RunExecutor`).
 - Tests: one suite per module under `programmatic/__tests__/`.
+
+## File index (Stage 3 + review fixes)
+
+- `programmatic/supervisor.ts` — `SupervisorSession` interface + `NoopSupervisor`
+  (default) + `ReviewQueueSupervisor` (programmatic default — escalate to human).
+- `programmatic/types.ts` — `TriageDecision`, `SupervisorEvent`, the optional
+  `ControllerHost.notify` / `triageFailure` hooks; plus the cancellation additions
+  (`StepRunStatus 'aborted'`, `HumanGateDecision 'abort'`, `ControllerOutcome
+  'canceled'`, `ControllerStepContext.signal`).
+- `programmatic/workflowController.ts` — triage seam (`handleRequiredFailure`),
+  monitor `emit`/`finish`, agent-then-gate, corrected bound, graceful revise.
+- `programmatic/programmaticRunHost.ts` — `notify`/`triageFailure` → supervisor.
+- `programmatic/defaultProgrammaticRunner.ts` — `supervisorFactory` + start/stop.
+- `programmatic/spawnStepRunner.ts`, `humanGate.ts` — signal/abort handling.
+- `main/src/orchestrator/runExecutor.ts` — `programmaticAborts` +
+  `requestProgrammaticCancel` + abort-aware `executeProgrammatic`.
+- `main/src/orchestrator/{cancelRunHandler,humanStepManager}.ts` — cancel wiring +
+  `clearPendingForRun`. `main/src/services/configManager.ts` +
+  `main/src/types/config.ts` — `defaultExecutionModel` rung.
+- Tests: `programmatic/__tests__/{supervisor,programmaticIntegration}.test.ts` +
+  triage/abort cases across the existing suites; `clearPendingForRun` in
+  `reviewItemFold.test.ts`.
