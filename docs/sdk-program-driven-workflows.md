@@ -28,13 +28,17 @@ section below.
 > against a `programmatic`-stamped workflow before relying on the live SDK path.
 > The seam is strictly opt-in (default `orchestrated`), so the risk is contained.
 
-The Stage 3 supervisory plane is live in two forms: the **policy** supervisor
-(`ReviewQueueSupervisor` → escalate failures to the human queue, the default) and
-the **SDK triage brain** (`SdkSupervisorSession` → an agent triages each failure
-retry/escalate/fail, opt-in via `programmaticSupervisor: 'sdk'`; live SDK call
-unverified). The remaining designed-only slice is the persistent **monitor/chat
-agent** (a long-lived streaming-input session the user converses with — needs a
-renderer chat surface) — a drop-in for the `SupervisorSession` factory.
+The Stage 3 supervisory plane is live in three forms: the **policy** supervisor
+(`ReviewQueueSupervisor` → escalate failures to the human queue, the default), the
+**SDK triage brain** (`SdkSupervisorSession` → an agent triages each failure
+retry/escalate/fail), and the **persistent monitor/chat session**
+(`SupervisorChatSession` → a long-lived agent the user converses with while it
+observes the run, with a `SupervisorChatPanel`/`SupervisorChatDock` UI + the
+`cyboflow.supervisorChat` tRPC contract). The latter two are opt-in via
+`programmaticSupervisor: 'sdk'`; their live SDK sessions are not headlessly
+verified (boot-smoked + unit-tested behind fakeable boundaries). Remaining
+designed-only: per-step structured `outputFormat` + host-side router writes,
+subagent direct-to-review-queue routing, and crash-safe "awaiting triage" resume.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -211,12 +215,22 @@ through the router" rule. Only the *actor* differs.
   `StructuredQueryFn` (a one-shot `query()` with native `outputFormat`, the sole
   SDK importer `sdkStructuredQuery.ts`); the brain + prompt + parse are pure /
   fakeable, fail-soft to `escalate`. Opt-in (`programmaticSupervisor: 'sdk'`).
-  **Still designed-only:** the persistent streaming CHAT / human-seam session (the
-  user converses with a long-lived supervisor — needs a renderer chat surface);
-  per-step structured `outputFormat` + host-side router writes (per-step writes
-  still go through the agent's `cyboflow_*` MCP); subagent direct-to-review-queue
-  routing; and an "awaiting triage" phase state with crash-safe resume (the gate
-  open/await is in-process only — a mid-gate restart still strands the run).
+- **Persistent monitor/chat session — landed (opt-in, live session unverified).**
+  `SupervisorChatSession` (supervisorChat.ts) is a long-lived conversational
+  supervisor: it OBSERVES the monitor feed (system notes) and the USER converses
+  with it (the human seam). The live session is a streaming-input `query()` behind
+  `StreamingChatBackend` (sole chat SDK importer `supervisorChatBackend.ts`,
+  read-only tools); the transcript / registry / merge logic are pure + unit-tested.
+  Exposed via the `cyboflow.supervisorChat` tRPC router (isActive / getTranscript /
+  send / onMessage) and a `SupervisorChatPanel` + self-hiding `SupervisorChatDock`
+  (fixed overlay at CyboflowRoot, gated on `isActive`). Started/stopped per run by
+  DefaultProgrammaticRunner when a `chatSessionFactory` is wired (only for
+  `programmaticSupervisor: 'sdk'`). Visual placement/polish needs a `pnpm dev` pass.
+  **Still designed-only:** per-step structured `outputFormat` + host-side router
+  writes (per-step writes still go through the agent's `cyboflow_*` MCP); subagent
+  direct-to-review-queue routing; and an "awaiting triage" phase state with
+  crash-safe resume (the gate open/await is in-process only — a mid-gate restart
+  still strands the run).
 
 ## Adversarial review of Stages 0–2 — fixes landed (`3a7e7176` / `98ef086e`)
 
