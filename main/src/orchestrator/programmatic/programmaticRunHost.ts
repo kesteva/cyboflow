@@ -1,23 +1,36 @@
 /**
  * ProgrammaticRunHost — the `ControllerHost` implementation for a programmatic
- * run (Stage 2). It adapts the controller's two side-effect needs onto cyboflow
- * surfaces via narrow injected collaborators (both fakeable in tests):
+ * run. It adapts the controller's side-effect needs onto cyboflow surfaces via
+ * narrow injected collaborators (all fakeable in tests):
  *
  *   - reportStep      → `StepReporter.report(runId, stepId, status)`, which in
  *                       production drives `current_step_id` + the live timeline
  *                       through the same `buildStepTransitionEvent` path the
  *                       agent's `cyboflow_report_step` tool uses. Fail-soft.
  *   - requestHumanGate→ `HumanGateResolver.resolve(...)` (see humanGate.ts).
+ *   - triageFailure   → the optional ON-DEMAND `MonitorSession` (the monitor-unify
+ *                       refactor; supersedes the Stage 3 supervisor + supervisor-chat
+ *                       planes). When a monitor is wired the host asks it to triage a
+ *                       required step that exhausted its budget and INJECTS the
+ *                       monitor's rationale into the run's unified Chat pane as an
+ *                       assistant turn (via `injectEvent`). When NO monitor is wired
+ *                       the host returns 'escalate' — every exhausted required failure
+ *                       routes to the human review queue (the default, behavior-
+ *                       identical to the old ReviewQueueSupervisor).
+ *
+ * There is NO continuous monitor feed: routine step progress stays in the stepper
+ * (the reporter path), and the chat carries CONVERSATION + NOTABLE events only.
  *
  * Bound to one run (runId + projectId) when constructed by
  * DefaultProgrammaticRunner.
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
-import type { ControllerHost, ControllerStepContext, HumanGateDecision, StepReport, SupervisorEvent, TriageDecision } from './types';
+import type { ControllerHost, ControllerStepContext, HumanGateDecision, StepReport, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
-import type { SupervisorSession } from './supervisor';
-import type { SupervisorChatSession } from './supervisorChat';
+import type { MonitorSession } from './monitor';
+import { buildAssistantTextEvent } from './syntheticEvents';
 
 /**
  * Drives a step boundary onto the live timeline (current_step_id + emit). In
@@ -33,21 +46,24 @@ export interface ProgrammaticRunHostArgs {
   reporter: StepReporter;
   gate: HumanGateResolver;
   /**
-   * The supervisor (Stage 3). When present, the host forwards the monitor feed to
-   * `supervisor.notify` and routes triageFailure to `supervisor.triage`. Absent ⇒
-   * the controller never sees notify/triageFailure (Stages 1-2 behavior).
+   * The ON-DEMAND monitor (the monitor-unify refactor). When present, the host
+   * routes `triageFailure` to `monitor.triage` (which reads the WHOLE run history
+   * fresh + may inspect the worktree) and injects its rationale into the run's Chat
+   * pane. Absent ⇒ `triageFailure` returns 'escalate' (the default review-queue
+   * routing). The monitor is opt-in via config `programmaticSupervisor: 'sdk'`.
    */
-  supervisor?: SupervisorSession;
+  monitor?: MonitorSession;
   /**
-   * The supervisor CHAT session (Stage 3 human seam). When present, the host also
-   * forwards the monitor feed to `chat.observe` so the conversational supervisor
-   * stays aware of the run. Independent of `supervisor` (triage).
+   * Inject a synthetic event into the run's unified stream (monitor-unify seam).
+   * Used to render the monitor's triage rationale as an assistant turn in the Chat
+   * pane. Threaded from the run context (Slice B); a no-op when no persisting bridge
+   * was wired, so the host can call it unconditionally.
    */
-  chat?: SupervisorChatSession;
+  injectEvent?: (event: ClaudeStreamEvent) => void;
   /**
-   * Per-step result sink (Stage 3, migration 032). When present, the host persists
-   * each settled step's StepReport (in production via StepResultStore.record) —
-   * backing queryable per-step results + crash-safe resume. Absent ⇒ not recorded.
+   * Per-step result sink (migration 032). When present, the host persists each
+   * settled step's StepReport (in production via StepResultStore.record) — backing
+   * queryable per-step results + crash-safe resume. Absent ⇒ not recorded.
    */
   recordStepResult?: (runId: string, report: StepReport) => void;
   logger?: LoggerLike;
@@ -79,54 +95,53 @@ export class ProgrammaticRunHost implements ControllerHost {
     });
   }
 
-  /** Monitor feed → supervisor + chat (Stage 3). Fail-soft — never abort the walk. */
-  notify(event: SupervisorEvent): void {
-    if (this.args.supervisor) {
-      try {
-        this.args.supervisor.notify(event);
-      } catch (err) {
-        this.args.logger?.warn('[ProgrammaticRunHost] supervisor.notify failed (fail-soft)', {
-          runId: this.args.runId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-    if (this.args.chat) {
-      try {
-        this.args.chat.observe(event);
-      } catch (err) {
-        this.args.logger?.warn('[ProgrammaticRunHost] chat.observe failed (fail-soft)', {
-          runId: this.args.runId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
-
   /**
-   * Triage seam → supervisor (Stage 3). Returns 'fail' when no supervisor is wired
-   * (Stages 1-2 behavior) or when the supervisor's triage itself throws (fail-soft
-   * — a broken supervisor must never strand the run in a non-terminal state).
+   * Triage seam → the ON-DEMAND monitor (the monitor-unify refactor). Consulted
+   * when a REQUIRED step has exhausted its retry/loopback budget, BEFORE the
+   * controller fails the run:
+   *   - monitor present ⇒ ask `monitor.triage` (reads the whole history, may inspect
+   *     the worktree), INJECT its rationale into the Chat pane as an assistant turn,
+   *     and return the decision.
+   *   - monitor absent  ⇒ return 'escalate' (route to the human review queue — the
+   *     default, behavior-identical to the old ReviewQueueSupervisor).
+   * Fail-soft: a throwing monitor/inject must never strand the run — default to
+   * 'escalate' (DefaultMonitorSession itself already fails-soft to 'escalate', so
+   * this catch is a belt-and-braces guard).
    */
   async triageFailure(
     step: WorkflowStep,
-    _ctx: ControllerStepContext,
+    ctx: ControllerStepContext,
     error: string | undefined,
   ): Promise<TriageDecision> {
-    if (!this.args.supervisor) return 'fail';
+    if (!this.args.monitor) return 'escalate';
     try {
-      return await this.args.supervisor.triage({ step, error });
+      const { decision, rationale } = await this.args.monitor.triage(step, error, ctx.signal);
+      this.injectMonitorTurn(`Triage — ${step.name}: ${decision}. ${rationale}`);
+      return decision;
     } catch (err) {
-      this.args.logger?.warn('[ProgrammaticRunHost] supervisor.triage failed; defaulting to fail', {
+      this.args.logger?.warn('[ProgrammaticRunHost] monitor.triage failed; escalating to human', {
         runId: this.args.runId,
         stepId: step.id,
         error: err instanceof Error ? err.message : String(err),
       });
-      return 'fail';
+      return 'escalate';
     }
   }
 
-  /** Per-step result sink (Stage 3). Fail-soft — recording must not abort the walk. */
+  /** Render a monitor turn into the run's Chat pane. Fail-soft — never abort the walk. */
+  private injectMonitorTurn(text: string): void {
+    if (!this.args.injectEvent) return;
+    try {
+      this.args.injectEvent(buildAssistantTextEvent(text));
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] monitor turn inject failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Per-step result sink (migration 032). Fail-soft — recording must not abort the walk. */
   recordStepResult(report: StepReport): void {
     if (!this.args.recordStepResult) return;
     try {

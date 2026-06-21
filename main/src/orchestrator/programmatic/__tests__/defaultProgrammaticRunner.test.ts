@@ -1,7 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
 import type { StepReporter } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
+import { MonitorRegistry, type MonitorContext, type MonitorSession } from '../monitor';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 
@@ -46,6 +47,7 @@ function ctxFor(def: WorkflowDefinition): ProgrammaticRunContext {
     run,
     workflow,
     signal: new AbortController().signal,
+    injectEvent: () => {},
   };
 }
 
@@ -57,18 +59,35 @@ function gateDef(): WorkflowDefinition {
 }
 
 describe('DefaultProgrammaticRunner', () => {
+  afterEach(() => {
+    MonitorRegistry._resetForTesting();
+  });
+
   it('resolves (rests the run) when the controller completes', async () => {
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
   });
 
-  it('throws when a required step fails (so RunExecutor marks the run failed)', async () => {
+  it('throws when a required step fails and the escalation is rejected (so RunExecutor marks the run failed)', async () => {
+    // No monitor ⇒ the host's default triage 'escalate's the exhausted failure to a
+    // human gate; a REJECT verdict makes it a terminal failure → the runner throws.
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(() => Promise.reject(new Error('boom'))),
+      reporter,
+      gate: gateOf('reject'),
+    });
+    await expect(runner.run(ctxFor(oneStepDef()))).rejects.toThrow("failed at step 'a'");
+  });
+
+  it('resolves (skips the step + advances) when a required step fails and the escalation is approved', async () => {
+    // No monitor ⇒ default 'escalate'; an APPROVE verdict accepts the failure, skips
+    // the step, and the (single-step) run completes → the runner resolves.
     const runner = new DefaultProgrammaticRunner({
       spawner: makeSpawner(() => Promise.reject(new Error('boom'))),
       reporter,
       gate: gateOf('approve'),
     });
-    await expect(runner.run(ctxFor(oneStepDef()))).rejects.toThrow("failed at step 'a'");
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
   });
 
   it('resolves (does NOT throw) when a human gate is rejected — a terminal human decision, not a failure', async () => {
@@ -84,5 +103,55 @@ describe('DefaultProgrammaticRunner', () => {
     };
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
     await expect(runner.run(badCtx)).rejects.toThrow('no resolvable workflow definition');
+  });
+
+  it('builds the monitor from the factory, registers it for the run, and unregisters on finish', async () => {
+    let observed: MonitorContext | undefined;
+    let registeredDuringRun = false;
+    const monitor: MonitorSession = {
+      triage: vi.fn().mockResolvedValue({ decision: 'escalate', rationale: '' }),
+      answer: vi.fn().mockResolvedValue(''),
+    };
+    const monitorFactory = (ctx: MonitorContext): MonitorSession => {
+      observed = ctx;
+      return monitor;
+    };
+    // A spawner that observes the monitor is registered WHILE the run is executing
+    // (the runner registers it before driving the controller, unregisters after).
+    const spawner = makeSpawner(async () => {
+      registeredDuringRun = MonitorRegistry.getInstance().get('run-1') === monitor;
+    });
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate: gateOf('approve'), monitorFactory });
+
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+
+    // The factory was handed the run's MonitorContext.
+    expect(observed).toEqual({ runId: 'run-1', projectId: 1, workflowName: 'custom', worktreePath: '/wt' });
+    // It was registered during the walk and unregistered after the run settles.
+    expect(registeredDuringRun).toBe(true);
+    expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
+  });
+
+  it('unregisters the monitor even when the run throws (no leaked registry entry)', async () => {
+    const monitor: MonitorSession = {
+      triage: vi.fn().mockResolvedValue({ decision: 'fail', rationale: '' }),
+      answer: vi.fn().mockResolvedValue(''),
+    };
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(() => Promise.reject(new Error('boom'))),
+      reporter,
+      gate: gateOf('approve'),
+      monitorFactory: () => monitor,
+    });
+
+    // The monitor triages 'fail' → the controller fails the run → the runner throws.
+    await expect(runner.run(ctxFor(oneStepDef()))).rejects.toThrow("failed at step 'a'");
+    expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
+  });
+
+  it('does NOT register a monitor when no factory is provided (default review-queue path)', async () => {
+    const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+    expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
   });
 });

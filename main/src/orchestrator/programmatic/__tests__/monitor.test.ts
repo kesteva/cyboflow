@@ -203,6 +203,90 @@ describe('DefaultMonitorSession.answer', () => {
   });
 });
 
+describe('DefaultMonitorSession.converse', () => {
+  it('injects the user turn, answers, then injects the reply (in that order)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('the monitor reply');
+    const injected: Array<{ role: string; text: string }> = [];
+    const injectEvent = (event: unknown): void => {
+      // Narrow the synthetic event to its role + first text block (no `any`).
+      const e = event as {
+        type: string;
+        message: { role: string; content: Array<{ type: string; text?: string }> };
+      };
+      const text = e.message.content.find((b) => b.type === 'text')?.text ?? '';
+      injected.push({ role: e.message.role, text });
+    };
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery: vi.fn(),
+      textQuery,
+      injectEvent,
+    });
+
+    const reply = await session.converse('why did step 2 fail?');
+
+    expect(reply).toBe('the monitor reply');
+    // user turn injected BEFORE the assistant reply.
+    expect(injected).toEqual([
+      { role: 'user', text: 'why did step 2 fail?' },
+      { role: 'assistant', text: 'the monitor reply' },
+    ]);
+  });
+
+  it('still answers (no render) when no injectEvent is wired', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('bare reply');
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery: vi.fn(), textQuery });
+
+    const reply = await session.converse('q');
+
+    expect(reply).toBe('bare reply');
+  });
+
+  it('fails-soft: a throwing injectEvent does not throw out of converse', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('reply');
+    const injectEvent = (): void => {
+      throw new Error('bridge gone');
+    };
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery: vi.fn(),
+      textQuery,
+      injectEvent,
+    });
+
+    await expect(session.converse('q')).resolves.toBe('reply');
+  });
+
+  it('injects an apologetic assistant turn when the answer query fails (fail-soft)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
+    const injected: string[] = [];
+    const injectEvent = (event: unknown): void => {
+      const e = event as { message: { role: string; content: Array<{ type: string; text?: string }> } };
+      if (e.message.role === 'assistant') {
+        injected.push(e.message.content.find((b) => b.type === 'text')?.text ?? '');
+      }
+    };
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery: vi.fn(),
+      textQuery,
+      injectEvent,
+    });
+
+    const reply = await session.converse('q');
+
+    expect(reply.toLowerCase()).toContain('sorry');
+    expect(injected[0]?.toLowerCase()).toContain('sorry');
+  });
+});
+
 describe('MonitorRegistry', () => {
   it('registers, gets, and unregisters a session by runId', () => {
     MonitorRegistry._resetForTesting();

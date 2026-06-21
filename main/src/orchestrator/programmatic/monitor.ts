@@ -24,11 +24,13 @@
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { TriageDecision } from './types';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
+import { buildUserTextEvent, buildAssistantTextEvent } from './syntheticEvents';
 
 // ---------------------------------------------------------------------------
 // Context + history reader
@@ -250,6 +252,24 @@ export interface MonitorSession {
    * returns the assistant's reply. Fail-soft: any error → a short apology string.
    */
   answer(question: string, signal?: AbortSignal): Promise<string>;
+
+  /**
+   * Conduct one full chat exchange in the run's unified Chat pane (the human seam
+   * the tRPC `cyboflow.monitor.send` mutation drives — see Slice E). Owns the
+   * inject→answer→inject orchestration so the router stays thin:
+   *   1. INJECT the human's turn (so it renders + becomes part of the history the
+   *      monitor reads next).
+   *   2. ANSWER it (`answer` reads the WHOLE history fresh — including the just-
+   *      injected user turn, since the raw_events INSERT behind `injectEvent` is
+   *      synchronous, so ordering holds).
+   *   3. INJECT the monitor's reply as an assistant turn.
+   * Returns the assistant's reply text. Fail-soft on every path (a thrown inject /
+   * answer must never escape). OPTIONAL on the interface: faked test sessions and
+   * the brain's own callers may omit it; only the production `DefaultMonitorSession`
+   * (built with an `injectEvent`) implements it. When the session has NO
+   * `injectEvent` wired, `converse` falls back to `answer` (no rendering).
+   */
+  converse?(text: string, signal?: AbortSignal): Promise<string>;
 }
 
 /** Dependencies of the default monitor brain (all fakeable). */
@@ -259,6 +279,15 @@ export interface DefaultMonitorSessionDeps {
   structuredQuery: StructuredQueryFn;
   textQuery: TextQueryFn;
   model?: string;
+  /**
+   * Inject a synthetic event into the run's unified stream (monitor-unify seam,
+   * threaded from the run context — Slice B `injectEvent`). When present, `converse`
+   * renders the human turn + the monitor's reply into the run's Chat pane; when
+   * absent (e.g. tests, or a session built without a persisting bridge) `converse`
+   * falls back to `answer` with no rendering. Triage rationale is injected by the
+   * host (it owns its own `injectEvent`), so the brain only needs this for `converse`.
+   */
+  injectEvent?: (event: ClaudeStreamEvent) => void;
   logger?: LoggerLike;
 }
 
@@ -276,6 +305,7 @@ export class DefaultMonitorSession implements MonitorSession {
   private readonly structuredQuery: StructuredQueryFn;
   private readonly textQuery: TextQueryFn;
   private readonly model?: string;
+  private readonly injectEvent?: (event: ClaudeStreamEvent) => void;
   private readonly logger?: LoggerLike;
 
   constructor(deps: DefaultMonitorSessionDeps) {
@@ -284,6 +314,7 @@ export class DefaultMonitorSession implements MonitorSession {
     this.structuredQuery = deps.structuredQuery;
     this.textQuery = deps.textQuery;
     this.model = deps.model;
+    this.injectEvent = deps.injectEvent;
     this.logger = deps.logger;
   }
 
@@ -338,6 +369,34 @@ export class DefaultMonitorSession implements MonitorSession {
         error: err instanceof Error ? err.message : String(err),
       });
       return ANSWER_FAILED;
+    }
+  }
+
+  /**
+   * One full chat exchange in the run's Chat pane: inject the human turn → answer
+   * (reads the whole history, now including that turn) → inject the reply. Owns the
+   * orchestration so the tRPC router stays thin. The inject + the answer call are
+   * each fail-soft (a thrown inject is swallowed; `answer` already fails-soft to an
+   * apology), so `converse` never throws — `send` resolves cleanly either way. When
+   * no `injectEvent` is wired the turns are not rendered (fallback to a bare answer).
+   */
+  async converse(text: string, signal?: AbortSignal): Promise<string> {
+    this.tryInject(buildUserTextEvent(text));
+    const reply = await this.answer(text, signal);
+    this.tryInject(buildAssistantTextEvent(reply));
+    return reply;
+  }
+
+  /** Inject a synthetic turn into the Chat pane, fail-soft (no-op when unwired). */
+  private tryInject(event: ClaudeStreamEvent): void {
+    if (!this.injectEvent) return;
+    try {
+      this.injectEvent(event);
+    } catch (err) {
+      this.logger?.warn('[Monitor] converse inject failed (fail-soft)', {
+        runId: this.ctx.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

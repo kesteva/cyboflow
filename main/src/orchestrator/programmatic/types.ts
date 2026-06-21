@@ -81,18 +81,20 @@ export interface StepRunner {
 
 /**
  * A triage decision for a required step that has exhausted its retry + loopback
- * budget — the Stage 3 supervisory seam. Instead of the controller hard-failing,
- * it can consult a supervisor:
+ * budget — the monitor-unify triage seam. Instead of the controller hard-failing,
+ * it can consult the ON-DEMAND monitor (or, absent a monitor, the host defaults to
+ * 'escalate' — routing every exhausted required failure to the human review queue):
  *   - 'retry'    — re-run the step once more (bounded by a per-step triage budget).
  *   - 'escalate' — open a human gate routing the failure to the review queue; the
  *                  human then decides (approve = skip the step and advance, reject
- *                  = fail the run, revise = retry, abort = cancel).
- *   - 'fail'     — give up; the run fails (today's behavior; also the default when
- *                  no triage advisor is wired, keeping the seam dormant-safe).
+ *                  = fail the run, revise = retry, abort = cancel). The host's
+ *                  default when no monitor is wired.
+ *   - 'fail'     — give up; the run fails. Only produced by an active monitor that
+ *                  judges the failure definitive; never the host's default.
  */
 export type TriageDecision = 'retry' | 'escalate' | 'fail';
 
-/** Kinds of run/step lifecycle event fed to the supervisor's monitor seam. */
+/** Kinds of run/step lifecycle event the controller can emit on its monitor feed. */
 export type SupervisorEventKind =
   | 'run-started'
   | 'step-running'
@@ -102,9 +104,12 @@ export type SupervisorEventKind =
   | 'run-finished';
 
 /**
- * A monitoring event the controller emits to the supervisor (Stage 3 monitor
- * feed). Purely observational — the supervisor watches the host-driven walk; it
- * does NOT sequence it. `outcome`/`error` are populated for settle/finish/fail.
+ * A monitoring event the controller emits on its optional monitor feed (`host.notify`).
+ * Purely observational — it does NOT sequence the walk. `outcome`/`error` are
+ * populated for settle/finish/fail. After the monitor-unify refactor the production
+ * host no longer consumes this feed (routine progress lives in the stepper, not the
+ * chat); the feed is retained as a no-op-safe optional seam so the controller stays
+ * unchanged.
  */
 export interface SupervisorEvent {
   kind: SupervisorEventKind;
@@ -116,11 +121,13 @@ export interface SupervisorEvent {
 }
 
 /**
- * The cyboflow-side effect surface the controller drives. The first two methods
- * are owned by the host so the controller stays free of DB/IPC/Electron concerns.
- * The optional Stage 3 methods (notify / triageFailure) bridge the controller to
- * the supervisor; when both are absent the controller behaves exactly as Stages
- * 1-2 (monitor feed dropped, required-step failure escalates to a hard 'fail').
+ * The cyboflow-side effect surface the controller drives. `reportStep` +
+ * `requestHumanGate` are owned by the host so the controller stays free of
+ * DB/IPC/Electron concerns. The optional `triageFailure` seam consults the
+ * ON-DEMAND monitor (or, absent one, the host returns 'escalate' — the default
+ * review-queue routing). `notify` is the optional monitor feed; the production host
+ * no longer implements it (no continuous chat feed), so the controller's
+ * `host.notify?.(...)` calls are a safe no-op.
  */
 export interface ControllerHost {
   /**
@@ -140,17 +147,18 @@ export interface ControllerHost {
   requestHumanGate(step: WorkflowStep, ctx: ControllerStepContext): Promise<HumanGateDecision>;
 
   /**
-   * Optional monitor feed (Stage 3). The controller calls this at run/step
-   * boundaries so the supervisor can observe progress. Fail-soft (never throws);
-   * absent ⇒ no monitoring.
+   * Optional monitor feed. The controller calls this at run/step boundaries.
+   * Fail-soft (never throws); the production host no longer implements it (no
+   * continuous chat feed), so absent ⇒ the feed is dropped.
    */
   notify?(event: SupervisorEvent): void;
 
   /**
-   * Optional triage seam (Stage 3). Consulted when a REQUIRED step has exhausted
-   * its retry + loopback budget, BEFORE the controller fails the run. Returns the
-   * triage decision (retry / escalate-to-human / fail). Absent ⇒ the controller
-   * fails the run exactly as in Stages 1-2.
+   * Optional triage seam. Consulted when a REQUIRED step has exhausted its retry +
+   * loopback budget, BEFORE the controller fails the run. Returns the triage
+   * decision (retry / escalate-to-human / fail). Absent ⇒ the controller fails the
+   * run. The production host always implements it (escalate by default, or the
+   * monitor's verdict when one is wired).
    */
   triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
 

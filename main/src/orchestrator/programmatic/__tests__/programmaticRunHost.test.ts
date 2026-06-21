@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ProgrammaticRunHost, type StepReporter } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
-import type { SupervisorSession } from '../supervisor';
+import type { MonitorSession } from '../monitor';
+import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
-import type { ControllerStepContext, SupervisorEvent } from '../types';
+import type { ControllerStepContext } from '../types';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'human', mcps: [], retries: 0, ...p };
@@ -15,6 +16,17 @@ function makeReporter(): StepReporter & { report: ReturnType<typeof vi.fn> } {
 }
 function makeGate(decision: 'approve' | 'reject' | 'revise'): HumanGateResolver & { resolve: ReturnType<typeof vi.fn> } {
   return { resolve: vi.fn().mockResolvedValue(decision) };
+}
+
+/** A fake ON-DEMAND monitor: triage returns a canned verdict; answer is unused here. */
+function makeMonitor(
+  decision: 'retry' | 'escalate' | 'fail',
+  rationale = 'because',
+): MonitorSession & { triage: ReturnType<typeof vi.fn> } {
+  return {
+    triage: vi.fn().mockResolvedValue({ decision, rationale }),
+    answer: vi.fn().mockResolvedValue(''),
+  };
 }
 
 describe('ProgrammaticRunHost', () => {
@@ -53,40 +65,79 @@ describe('ProgrammaticRunHost', () => {
     });
   });
 
-  // ── Stage 3: supervisor forwarding ──────────────────────────────────────────
-  function makeSupervisor(decision: 'retry' | 'escalate' | 'fail'): SupervisorSession & {
-    events: SupervisorEvent[];
-    triage: ReturnType<typeof vi.fn>;
-  } {
-    const events: SupervisorEvent[] = [];
-    return {
-      events,
-      start: vi.fn().mockResolvedValue(undefined),
-      notify: vi.fn((e: SupervisorEvent) => events.push(e)),
-      triage: vi.fn().mockResolvedValue(decision),
-      stop: vi.fn().mockResolvedValue(undefined),
-    };
-  }
-
-  it('forwards notify to the supervisor and routes triageFailure to supervisor.triage', async () => {
-    const supervisor = makeSupervisor('escalate');
-    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), supervisor });
-
-    host.notify({ kind: 'step-failed', runId: 'r', stepId: 'a', error: 'boom' });
-    expect(supervisor.events).toHaveLength(1);
+  // ── Triage seam: ON-DEMAND monitor (monitor-unify) ──────────────────────────
+  it('routes triageFailure to monitor.triage and returns its decision', async () => {
+    const monitor = makeMonitor('retry');
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });
 
     const decision = await host.triageFailure(step({ id: 'a' }), ctx, 'boom');
-    expect(decision).toBe('escalate');
-    expect(supervisor.triage).toHaveBeenCalledWith({ step: expect.objectContaining({ id: 'a' }), error: 'boom' });
+
+    expect(decision).toBe('retry');
+    expect(monitor.triage).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'boom', ctx.signal);
   });
 
-  it("defaults triageFailure to 'fail' when no supervisor is wired (Stages 1-2 behavior)", async () => {
+  it('injects the monitor rationale into the run stream as an assistant turn on triage', async () => {
+    const monitor = makeMonitor('escalate', 'looks ambiguous; a human should decide');
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    await host.triageFailure(step({ id: 'a', name: 'Build epics' }), ctx, 'boom');
+
+    expect(injected).toHaveLength(1);
+    const ev = injected[0];
+    expect('type' in ev && ev.type === 'assistant').toBe(true);
+    // The injected assistant turn carries the triage decision + rationale text.
+    const text =
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content
+            .map((b) => (b.type === 'text' ? b.text : ''))
+            .join('')
+        : '';
+    expect(text).toContain('Build epics');
+    expect(text).toContain('escalate');
+    expect(text).toContain('looks ambiguous');
+  });
+
+  it("defaults triageFailure to 'escalate' when no monitor is wired (review-queue default)", async () => {
     const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
-    expect(await host.triageFailure(step({ id: 'a' }), ctx, undefined)).toBe('fail');
-    expect(() => host.notify({ kind: 'run-started', runId: 'r' })).not.toThrow();
+    expect(await host.triageFailure(step({ id: 'a' }), ctx, undefined)).toBe('escalate');
   });
 
-  it('forwards recordStepResult to the recorder with the bound runId (Stage 3 migration 032)', () => {
+  it("is fail-soft — a throwing monitor.triage defaults to 'escalate' and does not abort the walk", async () => {
+    const monitor: MonitorSession = {
+      triage: vi.fn().mockRejectedValue(new Error('triage boom')),
+      answer: vi.fn().mockResolvedValue(''),
+    };
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor });
+
+    expect(await host.triageFailure(step({ id: 'a' }), ctx, undefined)).toBe('escalate');
+  });
+
+  it('is fail-soft when injectEvent throws on a triage turn (a broken stream must not abort the walk)', async () => {
+    const monitor = makeMonitor('retry');
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      injectEvent: () => {
+        throw new Error('inject boom');
+      },
+    });
+
+    // The inject throw is swallowed; the monitor's decision still returns.
+    await expect(host.triageFailure(step({ id: 'a' }), ctx, 'boom')).resolves.toBe('retry');
+  });
+
+  it('forwards recordStepResult to the recorder with the bound runId (migration 032)', () => {
     const recordStepResult = vi.fn();
     const host = new ProgrammaticRunHost({ runId: 'run-9', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), recordStepResult });
 
@@ -104,20 +155,5 @@ describe('ProgrammaticRunHost', () => {
 
     const none = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
     expect(() => none.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'done', attempts: 1 })).not.toThrow();
-  });
-
-  it("is fail-soft — a throwing supervisor.triage defaults to 'fail', a throwing notify is swallowed", async () => {
-    const supervisor: SupervisorSession = {
-      start: vi.fn().mockResolvedValue(undefined),
-      notify: vi.fn(() => {
-        throw new Error('notify boom');
-      }),
-      triage: vi.fn().mockRejectedValue(new Error('triage boom')),
-      stop: vi.fn().mockResolvedValue(undefined),
-    };
-    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), supervisor });
-
-    expect(() => host.notify({ kind: 'run-started', runId: 'r' })).not.toThrow();
-    expect(await host.triageFailure(step({ id: 'a' }), ctx, undefined)).toBe('fail');
   });
 });

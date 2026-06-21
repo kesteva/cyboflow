@@ -25,8 +25,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from '../humanGate';
-import { ReviewQueueSupervisor } from '../supervisor';
-import { SdkSupervisorSession } from '../sdkSupervisor';
+import { MonitorRegistry, type MonitorSession } from '../monitor';
 import type { StepReporter } from '../programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
 import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
@@ -97,6 +96,7 @@ function ctxFor(runId: string): ProgrammaticRunContext {
     run,
     workflow,
     signal: new AbortController().signal,
+    injectEvent: () => {},
   };
 }
 
@@ -120,6 +120,7 @@ function reviewRows(db: Database.Database, runId: string): Array<{ status: strin
 afterEach(() => {
   HumanStepManager._resetForTesting();
   reviewItemChangeEvents.removeAllListeners();
+  MonitorRegistry._resetForTesting();
 });
 
 describe('programmatic integration — real runner + controller + gate + DB', () => {
@@ -204,7 +205,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
   });
 
-  it('Stage 3: a failed step is escalated to the human review queue, approved (skipped), and the run continues', async () => {
+  it('default (no monitor): a failed step is escalated to the human review queue, approved (skipped), and the run continues', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const mgr = HumanStepManager.initialize(adapter);
@@ -237,12 +238,10 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     };
     reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
 
-    const runner = new DefaultProgrammaticRunner({
-      spawner,
-      reporter,
-      gate,
-      supervisorFactory: () => new ReviewQueueSupervisor(),
-    });
+    // No monitorFactory ⇒ the host's default triage routes exhausted required
+    // failures to the human review queue ('escalate'), exactly as the old
+    // ReviewQueueSupervisor did.
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate });
     await expect(runner.run(ctxFor('run-esc'))).resolves.toBeUndefined();
 
     // The context agent was attempted and failed; the run still completed (the
@@ -255,7 +254,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(finalStep.current_step_id).toBe('decompose');
   });
 
-  it("Stage 3 SDK supervisor: a 'retry' triage verdict recovers a transiently-failing step", async () => {
+  it("monitor: a 'retry' triage verdict recovers a transiently-failing step", async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const mgr = HumanStepManager.initialize(adapter);
@@ -285,19 +284,22 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     };
     reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
 
-    // SDK supervisor with a FAKE advisor (the SDK boundary) → triages 'retry'.
-    const advisor = { advise: vi.fn().mockResolvedValue({ decision: 'retry', rationale: 'transient' }) };
+    // ON-DEMAND monitor with a FAKE brain (the SDK boundary is faked) → triages 'retry'.
+    const monitor: MonitorSession = {
+      triage: vi.fn().mockResolvedValue({ decision: 'retry', rationale: 'transient blip' }),
+      answer: vi.fn().mockResolvedValue(''),
+    };
     const runner = new DefaultProgrammaticRunner({
       spawner,
       reporter,
       gate,
-      supervisorFactory: () => new SdkSupervisorSession(advisor),
+      monitorFactory: () => monitor,
     });
     await expect(runner.run(ctxFor('run-sdk'))).resolves.toBeUndefined();
 
-    // The supervisor was consulted for the epics failure and chose retry → the run
+    // The monitor was consulted for the epics failure and chose retry → the run
     // completed (epics ran twice) rather than failing or escalating.
-    expect(advisor.advise).toHaveBeenCalledTimes(1);
+    expect(monitor.triage).toHaveBeenCalledTimes(1);
     expect(spawner.calls.filter((c) => c.prompt.includes('`epics`')).length).toBe(2);
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-sdk') as {
       current_step_id: string | null;
