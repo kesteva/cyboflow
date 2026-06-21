@@ -113,13 +113,13 @@ vi.mock('../../../trpc/client', () => ({
         onQuestionCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         onQuestionAnswered: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
-      // Stage 3 supervisor chat — the SupervisorChatDock mounts for an active run
-      // and probes isActive (returns inactive here → the dock renders nothing).
-      supervisorChat: {
+      // On-demand monitor — the run-chat composer (ChatInput) probes isActive for
+      // an SDK run to decide whether to enable the composer. Inactive here, so the
+      // composer stays in its default (disabled) state.
+      monitor: {
         isActive: { query: vi.fn().mockResolvedValue({ active: false }) },
-        getTranscript: { query: vi.fn().mockResolvedValue([]) },
         send: { mutate: vi.fn().mockResolvedValue({ delivered: false }) },
-        onMessage: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        stepResults: { query: vi.fn().mockResolvedValue([]) },
       },
     },
   },

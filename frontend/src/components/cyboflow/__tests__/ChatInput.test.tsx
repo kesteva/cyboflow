@@ -44,6 +44,15 @@ vi.mock('../../../trpc/client', () => ({
         relayInput: { mutate: vi.fn(async () => ({ success: true })) },
         relayResize: { mutate: vi.fn(async () => ({ success: true })) },
       },
+      // On-demand monitor (monitor-unify) — ChatInput probes isActive for an SDK
+      // run and routes Send to monitor.send. Default inactive so the existing
+      // workflow-idle/paused tests keep their disabled behavior; the
+      // monitor-composer describe overrides isActive → active per-test.
+      monitor: {
+        isActive: { query: vi.fn(async () => ({ active: false })) },
+        send: { mutate: vi.fn(async () => ({ delivered: true })) },
+        stepResults: { query: vi.fn(async () => []) },
+      },
       questions: {
         listPending: { query: vi.fn(async () => []) },
         onQuestionCreated: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
@@ -107,6 +116,14 @@ beforeEach(() => {
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
+
+  // On-demand monitor: default inactive so the existing SDK tests keep their
+  // workflow-idle/paused (disabled) behavior; the monitor-composer describe
+  // overrides isActive → active.
+  vi.mocked(trpc.cyboflow.monitor.isActive.query).mockClear();
+  vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: false });
+  vi.mocked(trpc.cyboflow.monitor.send.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.monitor.send.mutate).mockResolvedValue({ delivered: true });
 
   // Default: sendInput succeeds
   mockSendInput.mockResolvedValue({ success: true });
@@ -492,6 +509,161 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     // Reveal the ⌃G-hidden composer; the revealed input is disabled (idle).
     fireEvent.click(screen.getByTestId('unified-composer-reveal'));
     expect(screen.getByRole('textbox')).toBeDisabled();
+  });
+});
+
+describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
+  const RUN_ID = 'run-monitor-001';
+  const PROJECT_ID = 13;
+
+  function makeSdkRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-mon',
+      project_id: PROJECT_ID,
+      status: 'running',
+      substrate: 'sdk',
+      worktree_path: '/Users/me/worktrees/mon',
+      branch_name: 'planner/mon',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  const activate = (overrides: Partial<ActiveRunRow> = {}) => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeSdkRow(overrides)] } });
+    });
+  };
+
+  it('probes monitor.isActive with the runId for an SDK run', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).toHaveBeenCalledWith({ runId: RUN_ID });
+    });
+  });
+
+  it('ENABLES the composer with the monitor placeholder once isActive resolves active', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    // SDK input is always visible; the probe flips the mode to workflow-monitor,
+    // enabling the (already-rendered) composer — re-query inside waitFor.
+    await waitFor(() => {
+      expect(screen.getByRole('textbox')).not.toBeDisabled();
+    });
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+      'Ask the monitor about this run…',
+    );
+  });
+
+  it('Send calls monitor.send.mutate and clears the textarea on delivery (no optimistic insert)', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'what failed in step 3?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'what failed in step 3?',
+      });
+    });
+    // The user's turn + reply arrive via the unified stream — the composer only
+    // clears on confirmed delivery; it does not insert the turn locally.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+    // The nudge path must NOT be reached for a monitored run.
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an error and keeps the text when the monitor is no longer active', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    vi.mocked(trpc.cyboflow.monitor.send.mutate).mockResolvedValue({ delivered: false });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'still there?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('The monitor is no longer active for this run.');
+    });
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('still there?');
+  });
+
+  it('does NOT enable the monitor composer when isActive resolves inactive (stays disabled idle)', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: false });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    // Probe still fires for the SDK run, but the composer stays in disabled idle.
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).toHaveBeenCalledWith({ runId: RUN_ID });
+    });
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('re-probes monitor.isActive when the run status changes (catches a late registration)', async () => {
+    // The monitor registers only once the controller starts walking. A run selected
+    // while still 'starting' must NOT be left with a permanently-disabled composer:
+    // the probe re-fires on the status change and enables it once the monitor is up.
+    vi.mocked(trpc.cyboflow.monitor.isActive.query)
+      .mockResolvedValueOnce({ active: false })
+      .mockResolvedValue({ active: true });
+    activate({ status: 'starting' });
+    render(<ChatInput runId={RUN_ID} />);
+
+    // First probe (status 'starting') saw no monitor → composer stays disabled.
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).toHaveBeenCalledWith({ runId: RUN_ID });
+    });
+    expect(screen.getByRole('textbox')).toBeDisabled();
+    const callsAfterMount = vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length;
+
+    // Run advances to 'running' → the status dep changes → re-probe → active → enabled.
+    activate({ status: 'running' });
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length).toBeGreaterThan(callsAfterMount);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('textbox')).not.toBeDisabled();
+    });
+  });
+
+  it('does NOT probe the monitor for an interactive run (the live-PTY relay path is untouched)', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeSdkRow({ substrate: 'interactive', status: 'running' })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    // The interactive relay composer is hidden behind ⌃G; reveal it to reach the
+    // textarea. The monitor must never be probed for an interactive run.
+    fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe('Message the running session — relayed safely…');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).not.toHaveBeenCalled();
   });
 });
 

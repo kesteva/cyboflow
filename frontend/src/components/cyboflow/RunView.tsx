@@ -153,6 +153,16 @@ function UserEventRow({ event }: { event: Extract<StreamEvent, { type: 'user' }>
       <span className="font-semibold text-text-primary">user</span>
       <div className="mt-1">
         {content.map((block, i) => {
+          // Slice A widened UserEvent.message.content to (ToolResultBlock | TextBlock)[].
+          // A bare text block (the on-demand monitor's injected user turn) renders as
+          // plain text; tool_result blocks keep the id + error chrome below.
+          if (block.type === 'text') {
+            return (
+              <div key={i} className="mt-1">
+                <span className="text-text-primary">{block.text}</span>
+              </div>
+            );
+          }
           const shortId = block.tool_use_id.slice(0, 8);
           const bodyText = typeof block.content === 'string'
             ? block.content
