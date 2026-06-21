@@ -302,6 +302,15 @@ export class RunExecutor {
   private readonly progSources: Map<string, EventEmitter> = new Map();
 
   /**
+   * Per-run handle for the programmatic INJECT bridge (the persisting bridge over
+   * `progSources`). Kept SEPARATE from `bridges` (which holds the shared-facade
+   * live-publish bridge) because a programmatic run wires BOTH: the facade bridge
+   * publishes the agent's per-step output, and this one persists+publishes injected
+   * monitor turns. Both are disposed by teardownRun(). Empty for orchestrated runs.
+   */
+  private readonly progBridges: Map<string, RunEventBridge> = new Map();
+
+  /**
    * Per-run panelId mapping, keyed by runId.
    * Stored during execute() so cancel() can look up the panelId to abort.
    */
@@ -631,21 +640,31 @@ export class RunExecutor {
     this.programmaticAborts.set(runId, abort);
 
     try {
-      // Programmatic runs own a PER-RUN PERSISTING bridge over a dedicated
-      // EventEmitter (monitor-unify seam). The base bridgeEvents() uses the shared
-      // `source` with skipPersistence:true — correct for the orchestrated/CCM path
-      // (the CCM pipeline owns raw_events persistence), but WRONG for a programmatic
-      // run where nothing else persists the injected conversation turns. Here we
-      // wire a dedicated source with skipPersistence:false so synthetic 'output'
-      // events injected via the run context's injectEvent are persisted to
-      // raw_events AND published to the renderer. Gated on publisher && db (tests
-      // construct RunExecutor without them) — when absent, no bridge is wired and
-      // injectEvent becomes a no-op for the run (mirrors the base method's guard).
+      // (a) LIVE-PUBLISH the agent's per-step output: bridge the SHARED facade
+      // `source` (skipPersistence:true — the CCM pipeline owns raw_events
+      // persistence for agent turns), exactly as the orchestrated path and the
+      // pre-refactor programmatic path did. Each step spawn emits 'output' with
+      // panelId===runId onto the facade, so without this bridge the agent's
+      // conversation turns persist (CCM sink) but never reach the renderer live and
+      // the Chat pane goes STALE mid-walk (review: prog-step-output-not-published-live).
+      const facadeBridge = await this.bridgeEvents(runId, panelId);
+      if (facadeBridge) {
+        this.bridges.set(runId, facadeBridge);
+      }
+
+      // (b) PERSIST+PUBLISH injected monitor turns: a PER-RUN bridge over a
+      // dedicated EventEmitter (monitor-unify seam). These synthetic 'output'
+      // events (triage rationale, chat exchanges) are produced by NOTHING else, so
+      // this bridge runs with skipPersistence:false to own their raw_events
+      // persistence AND render them live. Kept on a separate source/handle from the
+      // facade bridge so the two streams never collide. Gated on publisher && db
+      // (tests construct RunExecutor without them) — when absent, injectEvent is a
+      // no-op for the run (mirrors the base method's guard).
       let injectEvent: (event: ClaudeStreamEvent) => void = () => {};
       if (this.publisher && this.db) {
         const progSource = new EventEmitter();
         this.progSources.set(runId, progSource);
-        const bridgeHandle = bridgeEventsImpl({
+        const progBridge = bridgeEventsImpl({
           runId,
           source: progSource,
           publisher: this.publisher,
@@ -653,7 +672,7 @@ export class RunExecutor {
           logger: this.logger,
           skipPersistence: false,
         });
-        this.bridges.set(runId, bridgeHandle);
+        this.progBridges.set(runId, progBridge);
         injectEvent = (event: ClaudeStreamEvent): void => {
           progSource.emit('output', {
             panelId: runId,
@@ -867,10 +886,17 @@ export class RunExecutor {
       bridge.dispose();
       this.bridges.delete(runId);
     }
-    // Dispose the per-run PROGRAMMATIC source (monitor-unify seam). The bridge
-    // handle's dispose() above already removed its own 'output' listener; here we
-    // strip any remaining listeners and drop the map entry so a re-init does not
-    // leak emitters. Empty for orchestrated runs (no entry).
+    // Dispose the per-run PROGRAMMATIC inject bridge (monitor-unify seam) — the
+    // second bridge a programmatic run wires (over progSources). Disposed here
+    // alongside the facade `bridges` handle above. Empty for orchestrated runs.
+    const progBridge = this.progBridges.get(runId);
+    if (progBridge) {
+      progBridge.dispose();
+      this.progBridges.delete(runId);
+    }
+    // Strip any remaining listeners on the per-run PROGRAMMATIC source and drop the
+    // map entry so a re-init does not leak emitters. (progBridge.dispose() above
+    // already removed its own 'output' listener.) Empty for orchestrated runs.
     const progSource = this.progSources.get(runId);
     if (progSource) {
       progSource.removeAllListeners();
