@@ -1,5 +1,10 @@
 # Crystal Database Documentation
 
+> **HISTORICAL — Crystal-era schema.** Describes the original Crystal tables, not cyboflow's
+> current schema (cyboflow adds the entity model, review_items, workflow_runs, etc. through
+> migrations up to `030`). For the authoritative, current data model see `docs/ARCHITECTURE.md`
+> → "Data Model" and `main/src/database/migrations/`.
+
 This document provides a comprehensive overview of all SQLite database tables and local storage mechanisms used in the Crystal application.
 
 ## Overview

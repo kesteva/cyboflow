@@ -1,5 +1,9 @@
 # Crystal Architecture Documentation
 
+> **HISTORICAL — upstream Crystal architecture.** Preserved for reference to the fork baseline.
+> For cyboflow's current architecture (orchestrator, entity model, review queue, dual-substrate
+> seam) see `docs/ARCHITECTURE.md`, which is the source of truth.
+
 ## Overview
 
 Crystal is an Electron desktop application that manages multiple Claude Code instances using git worktrees. This document visualizes the architecture using Mermaid diagrams.

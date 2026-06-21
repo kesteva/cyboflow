@@ -1,5 +1,11 @@
 # Implementing New CLI Agents in Crystal
 
+> **HISTORICAL — Crystal-era guide.** Kept because the `AbstractCliManager` extension surface
+> it teaches is still live and intentional in cyboflow (see `CLAUDE.md` → "Preserved Extension
+> Points"). Caveat: the **Codex** panel referenced throughout (`'codex'` in `supportedTools` /
+> `ToolPanelType`, `main/src/services/panels/codex/`, `codexPanelManager.ts`) was **removed** —
+> those paths no longer exist; read them as Aider-style placeholders, not live code.
+
 This guide provides step-by-step instructions for adding support for new CLI agent tools (like Aider, Continue, Cursor, etc.) to Crystal's architecture.
 
 ## Table of Contents
