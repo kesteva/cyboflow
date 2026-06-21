@@ -4,11 +4,12 @@ Status: **Stages 0–3 landed and wired**, after an adversarial review of Stages
 0–2 (16 confirmed findings, all fixed) + a headless integration smoke + a live
 boot smoke. The deterministic `WorkflowController`, its protocol, the guarded
 `RunExecutor` branch, the SDK-backed `SpawnStepRunner`, `ProgrammaticRunHost`, the
-review-queue human gate, `DefaultProgrammaticRunner`, AND the Stage 3 supervisory
-plane (monitor + triage + human-seam seam, `SupervisorSession` +
-`ReviewQueueSupervisor`) are in, unit-tested, and **wired into the composition
-root** (`main/src/index.ts`). Default `orchestrated` runs are byte-identical; an
-opt-in `programmatic` run activates the host-driven path.
+review-queue human gate, `DefaultProgrammaticRunner`, AND the unified **on-demand
+monitor** (`MonitorSession` + `MonitorRegistry`, the monitor-unify refactor that
+superseded the original Stage 3 supervisor + supervisor-chat planes) are in,
+unit-tested, and **wired into the composition root** (`main/src/index.ts`). Default
+`orchestrated` runs are byte-identical; an opt-in `programmatic` run activates the
+host-driven path.
 
 **Review-fix highlights (commit `3a7e7176`)** — the cancellation spine (an
 `AbortSignal` threaded through runner → controller → step-runner → human gate, so
@@ -28,17 +29,27 @@ section below.
 > against a `programmatic`-stamped workflow before relying on the live SDK path.
 > The seam is strictly opt-in (default `orchestrated`), so the risk is contained.
 
-The Stage 3 supervisory plane is live in three forms: the **policy** supervisor
-(`ReviewQueueSupervisor` → escalate failures to the human queue, the default), the
-**SDK triage brain** (`SdkSupervisorSession` → an agent triages each failure
-retry/escalate/fail), and the **persistent monitor/chat session**
-(`SupervisorChatSession` → a long-lived agent the user converses with while it
-observes the run, with a `SupervisorChatPanel`/`SupervisorChatDock` UI + the
-`cyboflow.supervisorChat` tRPC contract). The latter two are opt-in via
-`programmaticSupervisor: 'sdk'`; their live SDK sessions are not headlessly
-verified (boot-smoked + unit-tested behind fakeable boundaries). Remaining
-designed-only: per-step structured `outputFormat` + host-side router writes,
-subagent direct-to-review-queue routing, and crash-safe "awaiting triage" resume.
+The supervisory plane is now a single **on-demand monitor** that renders into the
+run's EXISTING unified Chat pane (no separate dock or transcript store). It is
+TOKEN-FRUGAL: idle/zero-token during routine step progress, it reads the WHOLE run
+history (the `raw_events` transcript via `selectRunUnifiedMessages` + the
+`step_results` timeline) ONLY when it must act — (a) a required step exhausts its
+retries → **triage** (retry/escalate/fail, with its rationale injected into the
+Chat pane), or (b) a human types a chat turn → **answer**. There is no continuous
+feed. Default (`programmaticSupervisor !== 'sdk'`): NO monitor is wired — every
+exhausted required failure `escalate`s to the human review queue (behavior-identical
+to the old `ReviewQueueSupervisor`) and the Chat composer stays disabled. Opt-in
+`programmaticSupervisor: 'sdk'` wires a `DefaultMonitorSession` over two fakeable
+query fns (`monitorQuery.ts`, the SOLE `@anthropic-ai/claude-agent-sdk` importer in
+the programmatic plane); its live SDK calls are not headlessly verified (unit-tested
+behind fakeable boundaries). The tRPC contract is `cyboflow.monitor`
+(`isActive` / `send` / `stepResults`); `send` delegates to `MonitorSession.converse`
+(inject the human turn → answer over the whole history → inject the reply), and the
+turns surface via the run's normal stream → `raw_events` → `runs.listUnifiedMessages`
+live-refresh. Remaining designed-only: per-step structured `outputFormat` +
+host-side router writes, subagent direct-to-review-queue routing, crash-safe
+"awaiting triage" resume, and chat with the monitor AFTER the run rests in
+`awaiting_review` (today the monitor is registered only while the walk runs).
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -193,44 +204,51 @@ through the router" rule. Only the *actor* differs.
   resolving the gate defaults to approve unless the note says reject/revise).
   Outcome mapping: completed/rejected → rest in `awaiting_review`, failed → throw.
   Wired in `main/src/index.ts`. **Needs a real run to verify** (see banner above).
-- **Stage 3 (supervisory plane) — landed (policy supervisor live; SDK agent
-  designed-only).** The controller now exposes two optional `ControllerHost` hooks
-  — `notify(event)` (monitor feed: run-started / step-failed / gate-opened /
-  run-finished) and `triageFailure(step)` (consulted when a REQUIRED step exhausts
-  its retry+loopback budget). Triage verdicts: `retry` (bounded re-run), `escalate`
-  (open a human gate → approve=skip&advance / revise=retry / reject=fail /
-  abort=cancel), `fail` (terminal; the no-advisor default). A `SupervisorSession`
-  (`start`/`notify`/`triage`/`stop`) backs the hooks via `ProgrammaticRunHost`;
-  `DefaultProgrammaticRunner` brackets the walk with `start`/`stop`. Three impls
-  ship: `NoopSupervisor` (default elsewhere — byte-identical `fail`),
-  `ReviewQueueSupervisor` (the programmatic default — escalates failures to the
-  human review queue), and `SdkSupervisorSession` (the triage brain — below).
-  `ConfigManager.getProgrammaticSupervisor()` (`'review-queue'` default | `'sdk'`)
-  selects the factory in `index.ts`.
-- **SDK supervisor / triage brain — landed (opt-in, live SDK unverified).**
-  `SdkSupervisorSession` accumulates the monitor feed in a bounded ring buffer and,
-  on a required-step failure, asks an agent to TRIAGE it (retry/escalate/fail) with
-  run context — the "triage issues between agents" role, vs. the always-escalate
-  policy. The SDK call is isolated behind `SupervisorAdvisor.advise` →
-  `StructuredQueryFn` (a one-shot `query()` with native `outputFormat`, the sole
-  SDK importer `sdkStructuredQuery.ts`); the brain + prompt + parse are pure /
-  fakeable, fail-soft to `escalate`. Opt-in (`programmaticSupervisor: 'sdk'`).
-- **Persistent monitor/chat session — landed (opt-in, live session unverified).**
-  `SupervisorChatSession` (supervisorChat.ts) is a long-lived conversational
-  supervisor: it OBSERVES the monitor feed (system notes) and the USER converses
-  with it (the human seam). The live session is a streaming-input `query()` behind
-  `StreamingChatBackend` (sole chat SDK importer `supervisorChatBackend.ts`,
-  read-only tools); the transcript / registry / merge logic are pure + unit-tested.
-  Exposed via the `cyboflow.supervisorChat` tRPC router (isActive / getTranscript /
-  send / onMessage) and a `SupervisorChatPanel` + self-hiding `SupervisorChatDock`
-  (fixed overlay at CyboflowRoot, gated on `isActive`). Started/stopped per run by
-  DefaultProgrammaticRunner when a `chatSessionFactory` is wired (only for
-  `programmaticSupervisor: 'sdk'`). Visual placement/polish needs a `pnpm dev` pass.
-  **Still designed-only:** per-step structured `outputFormat` + host-side router
-  writes (per-step writes still go through the agent's `cyboflow_*` MCP); subagent
-  direct-to-review-queue routing; and an "awaiting triage" phase state with
-  crash-safe resume (the gate open/await is in-process only — a mid-gate restart
-  still strands the run).
+- **Supervisory plane — the unified on-demand monitor (monitor-unify refactor;
+  supersedes the original three-impl Stage 3 plane).** The controller exposes one
+  optional `ControllerHost` hook that matters here — `triageFailure(step, ctx,
+  error)`, consulted when a REQUIRED step exhausts its retry+loopback budget. Triage
+  verdicts: `retry` (bounded re-run), `escalate` (open a human gate → approve=skip&
+  advance / revise=retry / reject=fail / abort=cancel), `fail` (terminal).
+  `ProgrammaticRunHost.triageFailure` routes to an OPTIONAL `MonitorSession` when one
+  is wired, else returns `escalate` (the default — behavior-identical to the old
+  `ReviewQueueSupervisor`). There is NO continuous monitor feed: routine step
+  progress stays in the stepper; the chat carries conversation + the monitor's triage
+  rationale (injected as an assistant turn). `ConfigManager.getProgrammaticSupervisor()`
+  (`'review-queue'` default | `'sdk'`) selects whether a monitor factory is wired in
+  `index.ts`.
+- **On-demand monitor brain — landed (opt-in, live SDK unverified).** A single
+  `DefaultMonitorSession` (`monitor.ts`) is BOTH the triage brain and the chat human
+  seam. It holds no accumulated feed: each act reads the WHOLE run history fresh — the
+  `raw_events` transcript (`selectRunUnifiedMessages`) + the `step_results` timeline
+  (`StepResultStore`) via a fakeable `HistoryReader` — so it costs zero tokens during
+  routine progress. `triage(step, error)` runs a structured `query()` (verdict +
+  rationale); `answer(question)` runs a text `query()`; `converse(text)` is the
+  serialized chat exchange (inject the human turn → answer over the whole history →
+  inject the reply). Both SDK calls sit behind `StructuredQueryFn` / `TextQueryFn`
+  (`monitorQuery.ts`, the SOLE `@anthropic-ai/claude-agent-sdk` importer in the
+  programmatic plane); the brain + prompts + parse are pure / fakeable, fail-soft
+  (triage → `escalate`, answer → an apology, empty answer → a placeholder turn).
+  `MonitorRegistry` holds the per-run session (registered by `DefaultProgrammaticRunner`
+  while the walk runs). Opt-in (`programmaticSupervisor: 'sdk'`).
+- **Chat surface — the run's EXISTING unified Chat pane (no dock).** Monitor and user
+  turns are injected as synthetic `ClaudeStreamEvent`s through a per-run persisting
+  event bridge (`runExecutor.executeProgrammatic` → `injectEvent`), so they persist to
+  `raw_events` and render via `runs.listUnifiedMessages` + the streamEvents live-
+  refresh — the same pipe that renders the agent's per-step output. `MessageProjection`
+  was extended to render user-text turns (the `UserEvent.content` union was widened to
+  include `TextBlock`). The tRPC contract is `cyboflow.monitor` (`isActive` / `send` /
+  `stepResults`); `send` delegates to `MonitorSession.converse`. The frontend Chat
+  composer enables for an SDK run with an active monitor (re-probed on run status), and
+  Send → `cyboflow.monitor.send` with no optimistic insert. The old `SupervisorChatPanel`
+  / `SupervisorChatDock` / `supervisorChatTranscript` / `cyboflow.supervisorChat` are
+  deleted.
+  **Still designed-only:** per-step structured `outputFormat` + host-side router writes
+  (per-step writes still go through the agent's `cyboflow_*` MCP); subagent
+  direct-to-review-queue routing; an "awaiting triage" phase state with crash-safe
+  resume (the gate open/await is in-process only — a mid-gate restart still strands the
+  run); and chat with the monitor AFTER the run rests in `awaiting_review` (the monitor
+  is currently registered only while the walk runs, so the composer disables at rest).
 
 ## Adversarial review of Stages 0–2 — fixes landed (`3a7e7176` / `98ef086e`)
 
@@ -309,24 +327,43 @@ false positives). Clusters and resolutions:
 - `main/src/index.ts` — composition-root wiring (slot-13 of `new RunExecutor`).
 - Tests: one suite per module under `programmatic/__tests__/`.
 
-## File index (Stage 3 + review fixes)
+## File index (Stage 3 + monitor-unify + review fixes)
 
-- `programmatic/supervisor.ts` — `SupervisorSession` interface + `NoopSupervisor`
-  (default) + `ReviewQueueSupervisor` (programmatic default — escalate to human).
-- `programmatic/types.ts` — `TriageDecision`, `SupervisorEvent`, the optional
-  `ControllerHost.notify` / `triageFailure` hooks; plus the cancellation additions
-  (`StepRunStatus 'aborted'`, `HumanGateDecision 'abort'`, `ControllerOutcome
-  'canceled'`, `ControllerStepContext.signal`).
+- `programmatic/monitor.ts` — `MonitorSession` + `DefaultMonitorSession` (triage /
+  answer / serialized `converse`, whole-history-per-act), `HistoryReader` +
+  `DefaultHistoryReader`, the triage schema + `parseTriageAdvice`, prompt builders,
+  and `MonitorRegistry`.
+- `programmatic/monitorQuery.ts` — `StructuredQueryFn` + `TextQueryFn` (the SOLE
+  `@anthropic-ai/claude-agent-sdk` importer in the programmatic plane).
+- `programmatic/syntheticEvents.ts` — `buildUserTextEvent` / `buildAssistantTextEvent`
+  (synthetic `ClaudeStreamEvent`s the inject seam emits).
+- `main/src/services/streamParser/messageProjection.ts` + `shared/types/claudeStream.ts`
+  + `streamParser/schemas.ts` — render user-text turns (`UserEvent.content` widened to
+  `Array<ToolResultBlock | TextBlock>`, with the Zod parity twin).
+- `programmatic/types.ts` — `TriageDecision`, the optional `ControllerHost.triageFailure`
+  hook; plus the cancellation additions (`StepRunStatus 'aborted'`, `HumanGateDecision
+  'abort'`, `ControllerOutcome 'canceled'`, `ControllerStepContext.signal`).
 - `programmatic/workflowController.ts` — triage seam (`handleRequiredFailure`),
-  monitor `emit`/`finish`, agent-then-gate, corrected bound, graceful revise.
-- `programmatic/programmaticRunHost.ts` — `notify`/`triageFailure` → supervisor.
-- `programmatic/defaultProgrammaticRunner.ts` — `supervisorFactory` + start/stop.
-- `programmatic/spawnStepRunner.ts`, `humanGate.ts` — signal/abort handling.
-- `main/src/orchestrator/runExecutor.ts` — `programmaticAborts` +
-  `requestProgrammaticCancel` + abort-aware `executeProgrammatic`.
+  agent-then-gate, corrected bound, graceful revise.
+- `programmatic/programmaticRunHost.ts` — `triageFailure` → monitor (+ inject rationale)
+  or `escalate`.
+- `programmatic/defaultProgrammaticRunner.ts` — `monitorFactory` + `MonitorRegistry`
+  register/unregister.
+- `main/src/orchestrator/runExecutor.ts` — facade bridge (live agent output) + per-run
+  persisting inject bridge (`progBridges`/`progSources` + `injectEvent`);
+  `programmaticAborts` + `requestProgrammaticCancel` + abort-aware `executeProgrammatic`.
+- `main/src/orchestrator/trpc/routers/monitor.ts` + `router.ts` — the `cyboflow.monitor`
+  contract (`isActive` / `send` / `stepResults`).
+- `frontend/.../ChatInput.tsx` — the `workflow-monitor` composer mode (re-probes
+  `monitor.isActive` on run status); `CyboflowRoot.tsx` — the dock mount removed.
 - `main/src/orchestrator/{cancelRunHandler,humanStepManager}.ts` — cancel wiring +
   `clearPendingForRun`. `main/src/services/configManager.ts` +
-  `main/src/types/config.ts` — `defaultExecutionModel` rung.
-- Tests: `programmatic/__tests__/{supervisor,programmaticIntegration}.test.ts` +
-  triage/abort cases across the existing suites; `clearPendingForRun` in
-  `reviewItemFold.test.ts`.
+  `main/src/types/config.ts` — `defaultExecutionModel` + `programmaticSupervisor` rungs.
+- **Deleted by the monitor-unify refactor:** `programmatic/{supervisor,sdkSupervisor,
+  supervisorChat,supervisorChatBackend,sdkStructuredQuery}.ts`, the
+  `cyboflow.supervisorChat` router, and the frontend
+  `SupervisorChatPanel`/`SupervisorChatDock`/`supervisorChatTranscript`.
+- Tests: `programmatic/__tests__/{monitor,programmaticIntegration}.test.ts`,
+  `trpc/routers/__tests__/monitor.test.ts`, the inject case in `runExecutor.test.ts`,
+  user-text projection in `messageProjection.test.ts` + `syntheticEvents.test.ts`,
+  triage/abort cases across the suites, and `clearPendingForRun` in `reviewItemFold.test.ts`.
