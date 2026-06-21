@@ -154,9 +154,9 @@ command below and `APPLE_APP_SPECIFIC_PASSWORD` in the build environment.
 ### Step 4 — Create the notarytool keychain profile
 
 Store the Apple ID, Team ID, and app-specific password in the login keychain
-under the profile name `AC_PASSWORD`. This profile name is used by the build
-pipeline (future `afterSign.js` hook) to authenticate without exposing secrets
-in environment variables or shell history.
+under the profile name `AC_PASSWORD`. This profile name is used by
+electron-builder's built-in notarization hook to authenticate without exposing
+secrets in environment variables or shell history.
 
 ```bash
 xcrun notarytool store-credentials AC_PASSWORD \
@@ -191,8 +191,8 @@ If it exits with a non-zero status or prints an authentication error, check:
 ## Verify Your Setup
 
 Run all four commands after completing the provisioning steps. Every command
-must succeed (exit 0) before downstream signing tasks (TASK-052 through
-TASK-056) can produce a signed build.
+must succeed (exit 0) for the signing/notarization pipeline (now shipped) to
+produce a signed build.
 
 ### Check 1 — Xcode Command Line Tools present
 
@@ -389,10 +389,11 @@ source and is never rewritten.
 `configure-build.js`, leaving the signed/unsigned posture determined by whatever
 is committed in `package.json` rather than by the env vars in your shell.
 
-> TASK-052 flips the `hardenedRuntime` and `notarize` defaults in
-> `package.json`. TASK-053 creates `build/entitlements.mac.plist`. TASK-054
-> replaces `build/afterSign.js` with the actual `notarytool` submission call.
-> TASK-051 (this task) is the prerequisite for all of them.
+> **Shipped:** TASK-051..056 have all landed. `package.json` sets `build.mac.hardenedRuntime`
+> and `build.mac.notarize: true`; `build/entitlements.mac.plist` exists. Note that
+> `build/afterSign.js` does **not** submit to `notarytool` itself — notarization is delegated to
+> electron-builder's built-in hook (driven by `build.mac.notarize`); `afterSign.js` only strips
+> JAR files from the bundled `@anthropic-ai/claude-code/vendor/` so Gatekeeper isn't blocked.
 
 ---
 
