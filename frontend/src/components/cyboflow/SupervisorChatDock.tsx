@@ -53,12 +53,12 @@ export function SupervisorChatDock({ runId }: SupervisorChatDockProps): ReactEle
 
   return (
     <div
-      className="fixed bottom-4 right-4 z-40 flex flex-col overflow-hidden rounded border border-[var(--color-border)] bg-[var(--color-bg)] shadow-lg"
+      className="fixed bottom-4 right-4 z-40 flex flex-col overflow-hidden rounded border border-[var(--color-border-primary)] bg-[var(--color-bg-primary)] shadow-lg"
       style={{ width: 360, height: open ? 420 : 36 }}
       data-testid="supervisor-chat-dock"
     >
       <button
-        className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]"
+        className="flex items-center justify-between border-b border-[var(--color-border-primary)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]"
         onClick={() => setOpen((o) => !o)}
       >
         <span>Supervisor</span>

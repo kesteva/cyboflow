@@ -77,10 +77,7 @@ export function SupervisorChatPanel({ runId }: SupervisorChatPanelProps): ReactE
 
   return (
     <div className="flex h-full flex-col" data-testid="supervisor-chat-panel">
-      <div className="border-b border-[var(--color-border)] px-3 py-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
-        Supervisor
-      </div>
-
+      {/* No header here — the dock's collapse bar labels the panel. */}
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-3 py-2 text-sm">
         {transcript.length === 0 ? (
           <div className="text-[var(--color-text-secondary)]">
@@ -91,9 +88,9 @@ export function SupervisorChatPanel({ runId }: SupervisorChatPanelProps): ReactE
         )}
       </div>
 
-      <div className="border-t border-[var(--color-border)] p-2">
+      <div className="border-t border-[var(--color-border-primary)] p-2">
         <textarea
-          className="w-full resize-none rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-sm focus:outline-none"
+          className="w-full resize-none rounded border border-[var(--color-border-primary)] bg-[var(--color-bg-primary)] px-2 py-1 text-sm focus:outline-none"
           rows={2}
           placeholder="Ask the supervisor…"
           value={input}
@@ -108,7 +105,7 @@ export function SupervisorChatPanel({ runId }: SupervisorChatPanelProps): ReactE
         <div className="mt-1 flex items-center justify-between">
           <span className="text-[10px] text-[var(--color-text-secondary)]">⌘↵ to send</span>
           <button
-            className="rounded bg-[var(--color-phase-execute)] px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+            className="rounded bg-[var(--color-interactive)] px-3 py-1 text-xs font-medium text-[var(--color-text-on-interactive)] disabled:opacity-50"
             disabled={sending || input.trim().length === 0}
             onClick={() => void handleSend()}
           >
@@ -131,8 +128,8 @@ function ChatRow({ msg }: { msg: ChatMessage }): ReactElement {
         className={
           'inline-block max-w-[85%] whitespace-pre-wrap rounded px-2 py-1 text-left ' +
           (isUser
-            ? 'bg-[var(--color-phase-execute)] text-white'
-            : 'bg-[var(--color-bg-secondary)] text-[var(--color-text)]')
+            ? 'bg-[var(--color-interactive)] text-[var(--color-text-on-interactive)]'
+            : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]')
         }
       >
         {msg.text}
