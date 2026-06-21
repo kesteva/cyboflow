@@ -12,3 +12,4 @@ not treat them as current. For live architecture and patterns, see `docs/ARCHITE
 | `custom-flow-execution-plan.md` | Custom-flow execution (injected `spec_json` graph) | yes |
 | `global-workflow-scope-plan.md` | Global workflow scope (migration `030`) | yes |
 | `sdk-migration-smoke-results.md` | One-time SDK-migration smoke-test report | n/a (record) |
+| `CHANGELOG-crystal.md` | Upstream Crystal's changelog through `0.3.5` (the fork point) | n/a (record) |
