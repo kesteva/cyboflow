@@ -86,6 +86,26 @@ describe('ProgrammaticRunHost', () => {
     expect(() => host.notify({ kind: 'run-started', runId: 'r' })).not.toThrow();
   });
 
+  it('forwards recordStepResult to the recorder with the bound runId (Stage 3 migration 032)', () => {
+    const recordStepResult = vi.fn();
+    const host = new ProgrammaticRunHost({ runId: 'run-9', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), recordStepResult });
+
+    host.recordStepResult({ stepId: 'epics', phaseId: 'refine', outcome: 'done', attempts: 2 });
+
+    expect(recordStepResult).toHaveBeenCalledWith('run-9', expect.objectContaining({ stepId: 'epics', outcome: 'done', attempts: 2 }));
+  });
+
+  it('recordStepResult is fail-soft (a throwing recorder does not abort the walk) and a no-op when unset', () => {
+    const throwing = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      recordStepResult: () => { throw new Error('db down'); },
+    });
+    expect(() => throwing.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'failed', attempts: 1 })).not.toThrow();
+
+    const none = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
+    expect(() => none.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'done', attempts: 1 })).not.toThrow();
+  });
+
   it("is fail-soft — a throwing supervisor.triage defaults to 'fail', a throwing notify is swallowed", async () => {
     const supervisor: SupervisorSession = {
       start: vi.fn().mockResolvedValue(undefined),

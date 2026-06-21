@@ -165,6 +165,12 @@ export interface ProgrammaticRunContext {
    * re-driven on boot. Absent on a fresh run (walk starts from the beginning).
    */
   resumeFromStepId?: string;
+  /**
+   * Crash-safe resume (optional, migration 032): step ids that INDIVIDUALLY
+   * completed before the restart (persisted done/skipped). The controller skips
+   * these without re-running — finer than `resumeFromStepId` alone.
+   */
+  completedStepIds?: ReadonlySet<string>;
 }
 
 /**
@@ -295,6 +301,14 @@ export class RunExecutor {
    * current_step_id; cleared by teardownRun(). Empty for fresh runs.
    */
   private readonly pendingResumeStep: Map<string, string> = new Map();
+
+  /**
+   * Per-run set of already-completed step ids for crash-safe resume (migration
+   * 032), keyed by runId. Set by setPendingCompletedSteps() before boot recovery
+   * re-drives a stranded run; read by executeProgrammatic() so the controller
+   * skips individually-completed steps; cleared by teardownRun().
+   */
+  private readonly pendingCompletedSteps: Map<string, ReadonlySet<string>> = new Map();
 
   /**
    * Per-run 'turn-end' listeners bound to the `source` EventEmitter, keyed by
@@ -608,6 +622,7 @@ export class RunExecutor {
 
       try {
         const resumeFromStepId = this.pendingResumeStep.get(runId);
+        const completedStepIds = this.pendingCompletedSteps.get(runId);
         await runner.run({
           runId,
           panelId,
@@ -617,6 +632,7 @@ export class RunExecutor {
           workflow,
           signal: abort.signal,
           ...(resumeFromStepId ? { resumeFromStepId } : {}),
+          ...(completedStepIds ? { completedStepIds } : {}),
         });
         // If the run was canceled mid-walk, the cancel path owns the terminal DB
         // transition ('canceled') — do NOT fire the 'drained' rest (it would race
@@ -665,6 +681,16 @@ export class RunExecutor {
    */
   setPendingResumeStep(runId: string, stepId: string): void {
     this.pendingResumeStep.set(runId, stepId);
+  }
+
+  /**
+   * Mark already-completed step ids for crash-safe RESUME (migration 032). Set by
+   * boot recovery (from the persisted step_results) before re-driving execute();
+   * executeProgrammatic threads them so the controller skips those steps. Cleared
+   * by teardownRun().
+   */
+  setPendingCompletedSteps(runId: string, stepIds: readonly string[]): void {
+    this.pendingCompletedSteps.set(runId, new Set(stepIds));
   }
 
   /**
@@ -801,6 +827,7 @@ export class RunExecutor {
     this.activePanelIds.delete(runId);
     this.programmaticAborts.delete(runId);
     this.pendingResumeStep.delete(runId);
+    this.pendingCompletedSteps.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
     this.pendingResume.delete(runId);

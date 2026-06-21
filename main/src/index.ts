@@ -38,6 +38,7 @@ import { SdkSupervisorSession, SdkSupervisorAdvisor } from './orchestrator/progr
 import { makeSdkStructuredQuery } from './orchestrator/programmatic/sdkStructuredQuery';
 import { DefaultSupervisorChatSession, type SupervisorChatSession } from './orchestrator/programmatic/supervisorChat';
 import { makeSdkStreamingChatBackend } from './orchestrator/programmatic/supervisorChatBackend';
+import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
@@ -606,6 +607,9 @@ async function initializeServices() {
   // per-project; emits AgentChangedEvent post-commit on the per-project channel.
   AgentOverrideRouter.initialize(cyboflowDb);
   HumanStepManager.initialize(cyboflowDb);
+  // Per-step result store (Stage 3, migration 032): the programmatic step recorder
+  // + crash-safe resume + the supervisorChat.stepResults tRPC query reach it here.
+  StepResultStore.initialize(cyboflowDb);
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via
@@ -834,6 +838,17 @@ async function initializeServices() {
       }
       return () => new ReviewQueueSupervisor(cyboflowLogger);
     })(),
+    // Per-step result sink (Stage 3, migration 032): persist each settled step so
+    // results are queryable + crash-safe resume can skip individually-completed steps.
+    stepResultRecorder: (runId, report) =>
+      StepResultStore.tryGetInstance()?.record({
+        runId,
+        stepId: report.stepId,
+        phaseId: report.phaseId,
+        outcome: report.outcome,
+        attempts: report.attempts,
+        ...(report.error !== undefined ? { error: report.error } : {}),
+      }),
     // Supervisor CHAT (Stage 3 human seam): a long-lived conversational session the
     // user converses with while the run executes. Only when the SDK supervisor is
     // opted in (it needs the live SDK); the default review-queue mode has no chat.
@@ -1150,8 +1165,9 @@ app.whenReady().then(async () => {
     // per-run try/catch, mirroring runLauncher.
     if (orphanRecovery.programmaticToResume.length > 0) {
       console.log(`[Main] Resuming ${orphanRecovery.programmaticToResume.length} programmatic run(s) after restart`);
-      for (const { id, currentStepId } of orphanRecovery.programmaticToResume) {
+      for (const { id, currentStepId, completedStepIds } of orphanRecovery.programmaticToResume) {
         if (currentStepId) runExecutor.setPendingResumeStep(id, currentStepId);
+        if (completedStepIds.length > 0) runExecutor.setPendingCompletedSteps(id, completedStepIds);
         const queue = runQueues.getOrCreate(id);
         void queue.add(async () => {
           try {
