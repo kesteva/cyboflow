@@ -28,10 +28,13 @@ section below.
 > against a `programmatic`-stamped workflow before relying on the live SDK path.
 > The seam is strictly opt-in (default `orchestrated`), so the risk is contained.
 
-The Stage 3 supervisory **policy** plane (`ReviewQueueSupervisor` → escalate
-failures to the human queue) is live; the full SDK **monitor/chat agent**
-(long-lived streaming-input session the user converses with) is the remaining
-designed-only slice — a drop-in for the `SupervisorSession` factory.
+The Stage 3 supervisory plane is live in two forms: the **policy** supervisor
+(`ReviewQueueSupervisor` → escalate failures to the human queue, the default) and
+the **SDK triage brain** (`SdkSupervisorSession` → an agent triages each failure
+retry/escalate/fail, opt-in via `programmaticSupervisor: 'sdk'`; live SDK call
+unverified). The remaining designed-only slice is the persistent **monitor/chat
+agent** (a long-lived streaming-input session the user converses with — needs a
+renderer chat surface) — a drop-in for the `SupervisorSession` factory.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -194,12 +197,22 @@ through the router" rule. Only the *actor* differs.
   (open a human gate → approve=skip&advance / revise=retry / reject=fail /
   abort=cancel), `fail` (terminal; the no-advisor default). A `SupervisorSession`
   (`start`/`notify`/`triage`/`stop`) backs the hooks via `ProgrammaticRunHost`;
-  `DefaultProgrammaticRunner` brackets the walk with `start`/`stop`. Two policy
-  impls ship: `NoopSupervisor` (default elsewhere — byte-identical `fail`) and
-  `ReviewQueueSupervisor` (wired as the programmatic default — escalates failures
-  to the human review queue). **Still designed-only:** the full SDK monitor/chat
-  agent (a long-lived streaming-input session the user converses with, emitting
-  triage verdicts via structured `outputFormat`) as a drop-in `SupervisorSession`;
+  `DefaultProgrammaticRunner` brackets the walk with `start`/`stop`. Three impls
+  ship: `NoopSupervisor` (default elsewhere — byte-identical `fail`),
+  `ReviewQueueSupervisor` (the programmatic default — escalates failures to the
+  human review queue), and `SdkSupervisorSession` (the triage brain — below).
+  `ConfigManager.getProgrammaticSupervisor()` (`'review-queue'` default | `'sdk'`)
+  selects the factory in `index.ts`.
+- **SDK supervisor / triage brain — landed (opt-in, live SDK unverified).**
+  `SdkSupervisorSession` accumulates the monitor feed in a bounded ring buffer and,
+  on a required-step failure, asks an agent to TRIAGE it (retry/escalate/fail) with
+  run context — the "triage issues between agents" role, vs. the always-escalate
+  policy. The SDK call is isolated behind `SupervisorAdvisor.advise` →
+  `StructuredQueryFn` (a one-shot `query()` with native `outputFormat`, the sole
+  SDK importer `sdkStructuredQuery.ts`); the brain + prompt + parse are pure /
+  fakeable, fail-soft to `escalate`. Opt-in (`programmaticSupervisor: 'sdk'`).
+  **Still designed-only:** the persistent streaming CHAT / human-seam session (the
+  user converses with a long-lived supervisor — needs a renderer chat surface);
   per-step structured `outputFormat` + host-side router writes (per-step writes
   still go through the agent's `cyboflow_*` MCP); subagent direct-to-review-queue
   routing; and an "awaiting triage" phase state with crash-safe resume (the gate
